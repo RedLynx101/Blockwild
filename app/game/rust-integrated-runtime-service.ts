@@ -43,12 +43,15 @@ export const RUST_INTEGRATED_RUNTIME_COMMAND_P95_BUDGET_MS = 50;
 export const RUST_INTEGRATED_RUNTIME_STEP_P95_BUDGET_MS = 8;
 export const RUST_INTEGRATED_RUNTIME_EXTRACT_P95_BUDGET_MS = 8;
 
-const REQUIRED_CAPABILITIES = Object.freeze([
+const REQUIRED_BASE_CAPABILITIES = Object.freeze([
   "integrated-runtime-v1",
   "awaited-receipts-v1",
-  "fixed-step-input-v1",
-  "bounded-extraction-v1",
 ]);
+
+const FIXED_STEP_INPUT_CAPABILITY = "fixed-step-input-v1";
+const BOUNDED_EXTRACTION_CAPABILITY = "bounded-extraction-v1";
+const BOUNDED_ENTITY_EXTRACTION_CAPABILITY = "bounded-entity-extraction-v1";
+const BOUNDED_EXTRACTION_BLOCKERS_CAPABILITY = "bounded-extraction-blockers-v1";
 
 export type RustIntegratedRuntimeServiceStateV1 = "idle" | "starting" | "ready" | "failed" | "recovering" | "stopping" | "stopped";
 
@@ -113,6 +116,11 @@ export type RustIntegratedRuntimeServiceDiagnosticsV1 = Readonly<{
   lastError: Readonly<{ code: string; message: string }> | null;
   contentReady: boolean;
   contentManifestHash: string | null;
+  fixedStepInputReady: boolean;
+  boundedExtractionAvailable: boolean;
+  boundedExtractionReady: boolean;
+  liveAuthorityReady: boolean;
+  capabilities: readonly string[];
 }>;
 
 function percentile(values: readonly number[], fraction: number) {
@@ -415,6 +423,10 @@ export class RustIntegratedRuntimeServiceV1 {
 
   step(monotonicTimeUs: number, budgetUs: number, inputs: readonly RustIntegratedRuntimeInputFrameV1[]) {
     this.requireReady();
+    this.requireCapability(
+      FIXED_STEP_INPUT_CAPABILITY,
+      "fixed-step input remains unavailable until the live browser cutover gate is complete",
+    );
     validateInputs(inputs);
     return this.enqueue(async () => {
       const started = this.now();
@@ -445,6 +457,7 @@ export class RustIntegratedRuntimeServiceV1 {
 
   extract(afterRevision: number, maxBytes = RUST_INTEGRATED_RUNTIME_MAX_EXTRACTION_BYTES): Promise<RustIntegratedRuntimeExtractionV1> {
     this.requireReady();
+    this.requireBoundedExtractionAvailable();
     return this.enqueue(async () => {
       const started = this.now();
       try {
@@ -842,6 +855,8 @@ export class RustIntegratedRuntimeServiceV1 {
     const commandP95Ms = percentile(this.metrics.command, 0.95);
     const stepP95Ms = percentile(this.metrics.step, 0.95);
     const extractP95Ms = percentile(this.metrics.extract, 0.95);
+    const fixedStepInputReady = this.verifiedCapabilities.has(FIXED_STEP_INPUT_CAPABILITY);
+    const boundedExtractionReady = this.verifiedCapabilities.has(BOUNDED_EXTRACTION_CAPABILITY);
     return Object.freeze({
       state: this.state,
       authoritative: this.authoritative,
@@ -864,6 +879,11 @@ export class RustIntegratedRuntimeServiceV1 {
       lastError: this.lastError,
       contentReady: this.contentAttestation?.status === "installed",
       contentManifestHash: this.contentAttestation?.manifestHash ?? null,
+      fixedStepInputReady,
+      boundedExtractionAvailable: this.hasBoundedExtractionAvailable(),
+      boundedExtractionReady,
+      liveAuthorityReady: this.authoritative && fixedStepInputReady && boundedExtractionReady,
+      capabilities: Object.freeze([...this.verifiedCapabilities].sort()),
     });
   }
 
@@ -873,7 +893,7 @@ export class RustIntegratedRuntimeServiceV1 {
 
   private verifyAttestation(response: Extract<RustIntegratedRuntimeResponseV1, { type: "runtime-ready-v1" | "runtime-restored-v1" }>) {
     if (response.runtimeHandle < 1) throw new RustIntegratedRuntimeServiceError("invalid-response", "runtime did not provide a live generational handle");
-    for (const capability of REQUIRED_CAPABILITIES) {
+    for (const capability of REQUIRED_BASE_CAPABILITIES) {
       if (!response.capabilities.includes(capability)) throw new RustIntegratedRuntimeServiceError("invalid-response", `runtime artifact lacks ${capability}`);
     }
     this.verifiedCapabilities = new Set(response.capabilities);
@@ -1038,6 +1058,27 @@ export class RustIntegratedRuntimeServiceV1 {
       throw new RustIntegratedRuntimeServiceError(
         "not-authoritative",
         "native save hydration remains pending until every registered durable domain has a canonical Rust record",
+      );
+    }
+  }
+
+  private requireCapability(capability: string, message: string) {
+    if (!this.verifiedCapabilities.has(capability)) {
+      throw new RustIntegratedRuntimeServiceError("not-authoritative", message);
+    }
+  }
+
+  private hasBoundedExtractionAvailable() {
+    return this.verifiedCapabilities.has(BOUNDED_EXTRACTION_CAPABILITY)
+      || this.verifiedCapabilities.has(BOUNDED_ENTITY_EXTRACTION_CAPABILITY)
+        && this.verifiedCapabilities.has(BOUNDED_EXTRACTION_BLOCKERS_CAPABILITY);
+  }
+
+  private requireBoundedExtractionAvailable() {
+    if (!this.hasBoundedExtractionAvailable()) {
+      throw new RustIntegratedRuntimeServiceError(
+        "not-authoritative",
+        "runtime artifact exposes neither complete extraction nor the bounded shadow extraction contract",
       );
     }
   }
