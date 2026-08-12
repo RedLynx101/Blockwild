@@ -72,10 +72,13 @@ const DOMAIN_VIEW_MAX_FIELDS_V1: usize = 2_048;
 const DOMAIN_VIEW_MAX_BLOCKERS_V1: usize = 32;
 const DOMAIN_VIEW_COUNT_V1: u16 = 8;
 const AUDIO_EXTRACTION_SCHEMA_V2: u16 = 2;
+// `bounded-extraction-v1` attests the fixed, bounded extraction protocol. Live
+// BWX/BWR6 completeness remains per-envelope evidence through domain statuses
+// and `bounded-extraction-blockers-v1`; it never mutates the Ready capability set.
 const CAPABILITIES: [&str; 15] = [
     "awaited-receipts-v1",
     "bounded-entity-extraction-v1",
-    "bounded-extraction-v1-pending-live-domain-views",
+    "bounded-extraction-v1",
     "bounded-extraction-blockers-v1",
     "bulk-platform-v1",
     "content-bundle-install-v1",
@@ -3785,10 +3788,12 @@ fn environment_domain_view(
     }
 }
 
+#[cfg(test)]
 fn domain_views(runtime: &IntegratedRuntimeV2) -> Vec<DomainViewV1> {
     domain_views_with_world_view_result(runtime, runtime.world_view_extraction())
 }
 
+#[cfg(test)]
 fn domain_views_with_world_view_result(
     runtime: &IntegratedRuntimeV2,
     world_view: Result<WorldViewExtractionInputV1, IntegratedRuntimeError>,
@@ -3997,36 +4002,10 @@ fn write_extraction_research(output: &mut Vec<u8>, research: &BTreeMap<String, u
 
 fn capabilities(runtime: &IntegratedRuntimeV2) -> Vec<String> {
     let mut values = CAPABILITIES.iter().map(|value| (*value).to_owned()).collect::<Vec<_>>();
-    if extraction_promotion_ready(runtime) {
-        values.retain(|value| value != "bounded-extraction-v1-pending-live-domain-views");
-        values.push("bounded-extraction-v1".into());
-    }
     if runtime.native_save_ready() {
         values.push("native-save-hydration-v1".into());
     }
     values
-}
-
-fn extraction_promotion_ready(runtime: &IntegratedRuntimeV2) -> bool {
-    domain_views(runtime).iter().all(|view| {
-        if view.status != DomainViewStatusV1::Complete
-            || !view.blockers.is_empty()
-            || view.rows.len() > DOMAIN_VIEW_MAX_RECORDS_V1
-        {
-            return false;
-        }
-        let mut bytes = 0_usize;
-        for row in &view.rows {
-            let Some(encoded) = encode_domain_row(row) else {
-                return false;
-            };
-            bytes = bytes.saturating_add(encoded.len());
-            if bytes > DOMAIN_VIEW_MAX_BYTES_V1 {
-                return false;
-            }
-        }
-        true
-    })
 }
 
 fn domain_name(domain: blockwild_runtime_wire::RuntimeDomainV1) -> &'static str {
@@ -4377,9 +4356,9 @@ mod tests {
         };
         let has_capability = |expected: &str| capabilities.iter().any(|capability| capability == expected);
         assert!(has_capability("fixed-step-input-v1-pending-live-cutover"));
-        assert!(has_capability("bounded-extraction-v1-pending-live-domain-views"));
+        assert!(has_capability("bounded-extraction-v1"));
+        assert!(has_capability("bounded-extraction-blockers-v1"));
         assert!(!has_capability("fixed-step-input-v1"));
-        assert!(!has_capability("bounded-extraction-v1"));
         assert!(has_capability("bounded-entity-extraction-v1"));
         assert!(has_capability("bulk-platform-v1"));
         assert!(has_capability("content-bundle-install-v1"));
@@ -7008,7 +6987,7 @@ mod tests {
     }
 
     #[test]
-    fn world_view_domains_close_only_serialized_authority_and_stay_pending() {
+    fn static_bounded_extraction_capability_keeps_partial_and_unavailable_blockers_explicit() {
         let runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
         let views = domain_views(&runtime);
         assert_eq!(
@@ -7058,19 +7037,31 @@ mod tests {
                 .iter()
                 .any(|value| value == "world-view-extraction-invariant-rejected")
         );
-        assert!(!extraction_promotion_ready(&runtime));
-        let capabilities = capabilities(&runtime);
+        let capability_values = capabilities(&runtime);
+        assert!(capability_values.iter().any(|value| value == "bounded-extraction-v1"));
         assert!(
-            capabilities
-                .iter()
-                .any(|value| value == "bounded-extraction-v1-pending-live-domain-views")
-        );
-        assert!(
-            capabilities
+            capability_values
                 .iter()
                 .any(|value| value == "bounded-extraction-blockers-v1")
         );
-        assert!(!capabilities.iter().any(|value| value == "bounded-extraction-v1"));
+        assert!(
+            !capability_values
+                .iter()
+                .any(|value| value == "bounded-extraction-v1-pending-live-domain-views")
+        );
+
+        let bound_runtime = runtime_with_bound_extraction_player();
+        let extraction_capabilities = |candidate: &IntegratedRuntimeV2| {
+            capabilities(candidate)
+                .into_iter()
+                .filter(|value| value.starts_with("bounded-extraction"))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            extraction_capabilities(&runtime),
+            extraction_capabilities(&bound_runtime),
+            "protocol support is static even while each envelope reports its own domain blockers"
+        );
 
         let bundle = encode_hud_extraction(&runtime);
         assert_eq!(&bundle[..4], b"BWX0");

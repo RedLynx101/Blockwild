@@ -1214,11 +1214,13 @@ test("engine source orders the exact player gate before composer and suppresses 
   assert.match(animate, /if \(!rustLivePlayerAuthority\) \{\s*\n\s*this\.updateRangedWeapon\(dt\);\s*\n\s*this\.updateFastTravelChannel\(\);\s*\n\s*this\.updateMapDiscovery\(dt\)/u);
 });
 
-test("the checked-in Wasm advertises pending input/extraction cutovers, never promoted capabilities", async () => {
+test("the checked-in Wasm advertises a pending input cutover and static bounded extraction support", async () => {
   const source = await readFile(new URL("../engine/crates/blockwild-wasm/src/integrated_runtime.rs", import.meta.url), "utf8");
   const capabilities = source.slice(source.indexOf("const CAPABILITIES"), source.indexOf("];", source.indexOf("const CAPABILITIES")) + 2);
   assert.match(capabilities, /fixed-step-input-v1-pending-live-cutover/u);
   assert.doesNotMatch(capabilities, /"fixed-step-input-v1"/u);
-  assert.match(capabilities, /bounded-extraction-v1-pending-live-domain-views/u);
-  assert.doesNotMatch(capabilities, /"bounded-extraction-v1"/u);
+  assert.match(capabilities, /"bounded-extraction-v1"/u);
+  assert.match(capabilities, /bounded-extraction-blockers-v1/u);
+  assert.doesNotMatch(capabilities, /bounded-extraction-v1-pending-live-domain-views/u);
+  assert.doesNotMatch(source, /fn extraction_promotion_ready/u);
 });

@@ -81,13 +81,13 @@ function service(capabilities: readonly string[]) {
   });
 }
 
-test("pending live capabilities initialize base authority but keep fixed-step cutover closed", async () => {
+test("static bounded extraction support initializes independently while fixed-step cutover stays closed", async () => {
   const runtime = service([
     "integrated-runtime-v1",
     "awaited-receipts-v1",
     "bounded-entity-extraction-v1",
+    "bounded-extraction-v1",
     "bounded-extraction-blockers-v1",
-    "bounded-extraction-v1-pending-live-domain-views",
     "fixed-step-input-v1-pending-live-cutover",
   ]);
   await runtime.start(config);
@@ -96,13 +96,13 @@ test("pending live capabilities initialize base authority but keep fixed-step cu
   assert.equal(diagnostics.authoritative, true, "base command authority is separately attested");
   assert.equal(diagnostics.fixedStepInputReady, false);
   assert.equal(diagnostics.boundedExtractionAvailable, true);
-  assert.equal(diagnostics.boundedExtractionReady, false);
+  assert.equal(diagnostics.boundedExtractionReady, true, "this flag attests protocol support, not a blocker-free envelope");
   assert.equal(diagnostics.liveAuthorityReady, false);
   assert.throws(
     () => runtime.step(50_000, 8_000, []),
     (error: unknown) => error instanceof RustIntegratedRuntimeServiceError && error.code === "not-authoritative",
   );
-  assert.equal((await runtime.extract(0)).extractionRevision, 1, "bounded blocker-bearing extraction remains available for shadow evidence");
+  assert.equal((await runtime.extract(0)).extractionRevision, 1, "dynamic BWX/BWR6 blockers remain envelope evidence, not capability mutation");
   await runtime.shutdown();
 });
 
