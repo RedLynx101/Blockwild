@@ -18,7 +18,12 @@ pub const MAX_BLOCK_LOOT_THRESHOLD_BONUSES: usize = 16;
 pub const MAX_BLOCK_PLANTING_RULES: usize = 512;
 pub const MAX_BLOCK_ACTION_INTENTS: usize = 32;
 pub const MAX_BLOCK_AUTHORITY_BLOCKERS: usize = 32;
+pub const MAX_RENDER_PRESENTATION_PROFILES: usize = 4_096;
+pub const MAX_MISSING_RENDER_PRESENTATION_PROFILES: usize = 4_096;
+pub const MAX_RENDER_PRESENTATION_REFS: usize = 4_096;
+pub const MAX_RENDER_PRESENTATION_SOURCE_IDS: usize = 4_096;
 pub const BLOCK_ACTION_CATALOG_ID: &str = "block-actions";
+pub const RENDER_PRESENTATION_CATALOG_ID: &str = "render-presentations";
 pub const CONTENT_ACTION_FIXED_SCALE: u64 = 1_000_000;
 
 pub const BLOCK_TOPOLOGY_DIRECTIONAL: u16 = 1 << 0;
@@ -115,6 +120,7 @@ pub enum ContentSchema {
     WheatMillProcess,
     MachineProfileV1,
     MachineProfileV2,
+    RenderPresentationCatalog,
     SpellDefinition,
     CreatureMove,
     CreatureStatus,
@@ -156,6 +162,7 @@ impl ContentSchema {
             Self::WheatMillProcess => "wheat-mill-process@1",
             Self::MachineProfileV1 => "machine-profile@1",
             Self::MachineProfileV2 => "machine-profile@2",
+            Self::RenderPresentationCatalog => "render-presentation-catalog@1",
             Self::SpellDefinition => "spell-definition@1",
             Self::CreatureMove => "creature-move@1",
             Self::CreatureStatus => "creature-status@1",
@@ -668,6 +675,59 @@ pub struct ContentMachineProfileRecord {
     pub capacity_fields: BTreeMap<String, u64>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentRenderPresentationRole {
+    DroppedItem,
+    HeldItem,
+    Machine,
+    Projectile,
+    Summon,
+    Vehicle,
+    WorldProp,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentRenderPresentationModel {
+    pub model_id: String,
+    pub label: String,
+    pub category: u8,
+    pub ground_y_bits: Option<u32>,
+    pub node_count: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentRenderPresentationProfile {
+    pub id: String,
+    pub role: ContentRenderPresentationRole,
+    pub model: ContentRenderPresentationModel,
+    pub content_refs: Vec<ContentReference>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentMissingRenderPresentationProfile {
+    pub id: String,
+    pub role: ContentRenderPresentationRole,
+    pub source_presentation_ids: Vec<String>,
+    pub content_refs: Vec<ContentReference>,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentRenderPresentationCatalogRecord {
+    pub core: ContentRecordCore,
+    pub catalog_schema: u16,
+    pub catalog_revision: u32,
+    pub catalog_sha256: String,
+    pub catalog_canonical_hash: String,
+    pub catalog_byte_length: u32,
+    pub catalog_model_count: u32,
+    pub catalog_node_count: u32,
+    pub catalog_source: String,
+    pub profiles: BTreeMap<String, ContentRenderPresentationProfile>,
+    pub missing_profiles: BTreeMap<String, ContentMissingRenderPresentationProfile>,
+    pub integration_blockers: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContentAbilityRecord {
     pub core: ContentRecordCore,
@@ -715,6 +775,7 @@ pub struct ContentRuntimeRegistry {
     pub crafting_recipes: BTreeMap<String, ContentRecipeRecord>,
     pub machine_recipes: BTreeMap<String, ContentRecipeRecord>,
     pub machine_profiles: BTreeMap<String, ContentMachineProfileRecord>,
+    pub render_presentation_catalogs: BTreeMap<String, ContentRenderPresentationCatalogRecord>,
     pub abilities_spells: BTreeMap<String, ContentAbilityRecord>,
     pub creature_profiles: BTreeMap<String, ContentCreatureRecord>,
     pub player_render_profiles: BTreeMap<String, ContentPlayerRenderRecord>,
@@ -737,6 +798,7 @@ impl Default for ContentRuntimeRegistry {
             crafting_recipes: BTreeMap::new(),
             machine_recipes: BTreeMap::new(),
             machine_profiles: BTreeMap::new(),
+            render_presentation_catalogs: BTreeMap::new(),
             abilities_spells: BTreeMap::new(),
             creature_profiles: BTreeMap::new(),
             player_render_profiles: BTreeMap::new(),
@@ -758,6 +820,7 @@ impl ContentRuntimeRegistry {
             + self.crafting_recipes.len()
             + self.machine_recipes.len()
             + self.machine_profiles.len()
+            + self.render_presentation_catalogs.len()
             + self.abilities_spells.len()
             + self.creature_profiles.len()
             + self.player_render_profiles.len()
@@ -793,7 +856,11 @@ impl ContentRuntimeRegistry {
                 .or_else(|| self.block_action_catalogs.get(id).map(|record| &record.core)),
             ContentDomain::CraftingRecipe => self.crafting_recipes.get(id).map(|record| &record.core),
             ContentDomain::MachineRecipe => self.machine_recipes.get(id).map(|record| &record.core),
-            ContentDomain::MachineProfile => self.machine_profiles.get(id).map(|record| &record.core),
+            ContentDomain::MachineProfile => self
+                .machine_profiles
+                .get(id)
+                .map(|record| &record.core)
+                .or_else(|| self.render_presentation_catalogs.get(id).map(|record| &record.core)),
             ContentDomain::AbilitySpell => self.abilities_spells.get(id).map(|record| &record.core),
             ContentDomain::CreatureProfile => self
                 .creature_profiles
@@ -864,6 +931,7 @@ struct RecordFacts {
     natural_types: Vec<String>,
     move_ids: Vec<String>,
     player_render: Option<PlayerRenderFacts>,
+    render_presentation: Option<RenderPresentationFacts>,
 }
 
 #[derive(Clone, Debug)]
@@ -882,6 +950,21 @@ struct PlayerRenderFacts {
     model_category: u8,
     model_ground_y_bits: u64,
     model_node_count: u32,
+}
+
+#[derive(Clone, Debug)]
+struct RenderPresentationFacts {
+    catalog_schema: u16,
+    catalog_revision: u32,
+    catalog_sha256: String,
+    catalog_canonical_hash: String,
+    catalog_byte_length: u32,
+    catalog_model_count: u32,
+    catalog_node_count: u32,
+    catalog_source: String,
+    profiles: BTreeMap<String, ContentRenderPresentationProfile>,
+    missing_profiles: BTreeMap<String, ContentMissingRenderPresentationProfile>,
+    integration_blockers: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1697,6 +1780,7 @@ fn resolve_schema(
         (ContentDomain::MachineRecipe, "wheat-mill-process", 1) => ContentSchema::WheatMillProcess,
         (ContentDomain::MachineProfile, "machine-profile", 1) => ContentSchema::MachineProfileV1,
         (ContentDomain::MachineProfile, "machine-profile", 2) => ContentSchema::MachineProfileV2,
+        (ContentDomain::MachineProfile, "render-presentation-catalog", 1) => ContentSchema::RenderPresentationCatalog,
         (ContentDomain::AbilitySpell, "spell-definition", 1) => ContentSchema::SpellDefinition,
         (ContentDomain::AbilitySpell, "creature-move", 1) => ContentSchema::CreatureMove,
         (ContentDomain::AbilitySpell, "creature-status", 1) => ContentSchema::CreatureStatus,
@@ -1763,6 +1847,9 @@ fn validate_record(record: &DecodedRecord, blockers: &mut Vec<ContentRuntimeBloc
         ContentSchema::WheatMillProcess => validate_mill(record, object, &mut facts, blockers),
         ContentSchema::MachineProfileV1 | ContentSchema::MachineProfileV2 => {
             validate_machine_profile(record, object, &mut facts, blockers);
+        }
+        ContentSchema::RenderPresentationCatalog => {
+            validate_render_presentation_catalog(record, object, &mut facts, blockers);
         }
         ContentSchema::SpellDefinition => validate_spell(record, object, &mut facts, blockers),
         ContentSchema::CreatureMove => validate_creature_move(record, object, &mut facts, blockers),
@@ -2995,6 +3082,437 @@ fn validate_player_render_profile(
     }
 }
 
+fn parse_render_presentation_role(
+    record: &DecodedRecord,
+    path: &str,
+    value: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentRenderPresentationRole> {
+    let role = match value {
+        "dropped-item" => ContentRenderPresentationRole::DroppedItem,
+        "held-item" => ContentRenderPresentationRole::HeldItem,
+        "machine" => ContentRenderPresentationRole::Machine,
+        "projectile" => ContentRenderPresentationRole::Projectile,
+        "summon" => ContentRenderPresentationRole::Summon,
+        "vehicle" => ContentRenderPresentationRole::Vehicle,
+        "world-prop" => ContentRenderPresentationRole::WorldProp,
+        _ => {
+            enum_value(
+                record,
+                path,
+                value,
+                &[
+                    "dropped-item",
+                    "held-item",
+                    "machine",
+                    "projectile",
+                    "summon",
+                    "vehicle",
+                    "world-prop",
+                ],
+                blockers,
+            );
+            return None;
+        }
+    };
+    Some(role)
+}
+
+fn parse_render_presentation_domain(
+    record: &DecodedRecord,
+    path: &str,
+    value: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentDomain> {
+    let domain = match value {
+        "ability-spell" => ContentDomain::AbilitySpell,
+        "creature-profile" => ContentDomain::CreatureProfile,
+        "item" => ContentDomain::Item,
+        "machine-profile" => ContentDomain::MachineProfile,
+        _ => {
+            enum_value(
+                record,
+                path,
+                value,
+                &["ability-spell", "creature-profile", "item", "machine-profile"],
+                blockers,
+            );
+            return None;
+        }
+    };
+    Some(domain)
+}
+
+fn parse_render_presentation_refs(
+    record: &DecodedRecord,
+    values: &[CanonicalJson],
+    base: &str,
+    facts: &mut RecordFacts,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Vec<ContentReference> {
+    if values.len() > MAX_RENDER_PRESENTATION_REFS {
+        invalid_value(
+            record,
+            base,
+            &format!("at most {MAX_RENDER_PRESENTATION_REFS} content refs"),
+            &values.len().to_string(),
+            blockers,
+        );
+    }
+    let mut output = Vec::new();
+    let mut previous = None::<String>;
+    for (index, value) in values.iter().take(MAX_RENDER_PRESENTATION_REFS).enumerate() {
+        let path = format!("{base}[{index}]");
+        let Some(reference) = value.as_object() else {
+            invalid_type(record, &path, "content reference object", value, blockers);
+            continue;
+        };
+        let domain_value = required_nonempty_string_at(record, reference, "domain", &path, blockers);
+        let id = required_nonempty_string_at(record, reference, "id", &path, blockers);
+        let (Some(domain_value), Some(id)) = (domain_value, id) else {
+            continue;
+        };
+        let Some(domain) = parse_render_presentation_domain(record, &format!("{path}.domain"), domain_value, blockers)
+        else {
+            continue;
+        };
+        let key = format!("{}:{id}", domain.as_id());
+        if previous.as_ref().is_some_and(|previous| previous >= &key) {
+            invalid_value(
+                record,
+                &path,
+                "strictly sorted unique domain:id reference",
+                &key,
+                blockers,
+            );
+        }
+        previous = Some(key);
+        let typed = ContentReference {
+            domain,
+            id: id.to_owned(),
+            path: path.clone(),
+        };
+        facts.references.push(typed.clone());
+        output.push(typed);
+    }
+    output
+}
+
+fn parse_render_model(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    catalog_node_count: Option<u32>,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentRenderPresentationModel> {
+    let model_id = required_nonempty_string_at(record, object, "id", base, blockers);
+    let label = required_nonempty_string_at(record, object, "label", base, blockers);
+    let category = required_u32_at(record, object, "category", base, 0, 8, blockers);
+    let ground_path = field_path(base, "groundYBits");
+    let ground_y_bits = match object.get("groundYBits") {
+        Some(CanonicalJson::Null) => Some(None),
+        Some(value) => match json_u32(value, 0, u32::MAX) {
+            Some(bits) => Some(Some(bits)),
+            None => {
+                invalid_type(record, &ground_path, "u32 float bits or null", value, blockers);
+                None
+            }
+        },
+        None => {
+            missing_field(record, &ground_path, "u32 float bits or null", blockers);
+            None
+        }
+    };
+    let node_count = required_u32_at(record, object, "nodeCount", base, 1, 16_384, blockers);
+    if let (Some(model_nodes), Some(catalog_nodes)) = (node_count, catalog_node_count)
+        && model_nodes > catalog_nodes
+    {
+        invalid_value(
+            record,
+            &field_path(base, "nodeCount"),
+            "no greater than catalog.nodeCount",
+            &model_nodes.to_string(),
+            blockers,
+        );
+    }
+    Some(ContentRenderPresentationModel {
+        model_id: model_id?.to_owned(),
+        label: label?.to_owned(),
+        category: u8::try_from(category?).expect("model category is bounded"),
+        ground_y_bits: ground_y_bits?,
+        node_count: node_count?,
+    })
+}
+
+fn validate_render_presentation_catalog(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    facts: &mut RecordFacts,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) {
+    required_u32(record, object, "schema", 1, 1, blockers);
+    if record.id != RENDER_PRESENTATION_CATALOG_ID {
+        invalid_value(record, "$.id", RENDER_PRESENTATION_CATALOG_ID, &record.id, blockers);
+    }
+    let Some(catalog) = required_object(record, object, "catalog", blockers) else {
+        return;
+    };
+    let catalog_schema = required_u32_at(record, catalog, "schema", "$.catalog", 2, 2, blockers);
+    required_exact_string_at(
+        record,
+        catalog,
+        "format",
+        "$.catalog",
+        "blockwild-compiled-model-catalog-v2",
+        blockers,
+    );
+    let catalog_revision = required_u32_at(record, catalog, "revision", "$.catalog", 1, u32::MAX, blockers);
+    let catalog_sha256 = required_lowercase_hex_at(record, catalog, "sha256", "$.catalog", 64, blockers);
+    let catalog_canonical_hash = required_lowercase_hex_at(record, catalog, "canonicalHash", "$.catalog", 32, blockers);
+    let catalog_byte_length = required_u32_at(record, catalog, "byteLength", "$.catalog", 1, 64 * 1_048_576, blockers);
+    let catalog_model_count = required_u32_at(record, catalog, "modelCount", "$.catalog", 1, 4_096, blockers);
+    let catalog_node_count = required_u32_at(record, catalog, "nodeCount", "$.catalog", 1, u32::MAX, blockers);
+    let catalog_source = required_nonempty_string_at(record, catalog, "source", "$.catalog", blockers);
+
+    let Some(profile_values) = required_array(record, object, "profiles", blockers) else {
+        return;
+    };
+    if profile_values.is_empty() || profile_values.len() > MAX_RENDER_PRESENTATION_PROFILES {
+        invalid_value(
+            record,
+            "$.profiles",
+            &format!("1..={MAX_RENDER_PRESENTATION_PROFILES} profiles"),
+            &profile_values.len().to_string(),
+            blockers,
+        );
+    }
+    let mut profiles = BTreeMap::new();
+    let mut previous_profile_id = None::<String>;
+    let mut role_refs = BTreeSet::new();
+    for (index, value) in profile_values.iter().take(MAX_RENDER_PRESENTATION_PROFILES).enumerate() {
+        let base = format!("$.profiles[{index}]");
+        let Some(profile_object) = value.as_object() else {
+            invalid_type(record, &base, "presentation profile object", value, blockers);
+            continue;
+        };
+        let id = required_nonempty_string_at(record, profile_object, "id", &base, blockers);
+        let role_value = required_nonempty_string_at(record, profile_object, "role", &base, blockers);
+        let role =
+            role_value.and_then(|role| parse_render_presentation_role(record, &format!("{base}.role"), role, blockers));
+        let model = required_object_at(record, profile_object, "model", &base, blockers).and_then(|model| {
+            parse_render_model(record, model, &format!("{base}.model"), catalog_node_count, blockers)
+        });
+        let content_refs = required_array_at(record, profile_object, "contentRefs", &base, blockers).map(|values| {
+            parse_render_presentation_refs(record, values, &format!("{base}.contentRefs"), facts, blockers)
+        });
+        if content_refs.as_ref().is_some_and(Vec::is_empty) {
+            invalid_value(
+                record,
+                &format!("{base}.contentRefs"),
+                "at least one content ref",
+                "empty",
+                blockers,
+            );
+        }
+        let (Some(id), Some(role), Some(model), Some(content_refs)) = (id, role, model, content_refs) else {
+            continue;
+        };
+        if previous_profile_id
+            .as_ref()
+            .is_some_and(|previous| previous.as_str() >= id)
+        {
+            invalid_value(
+                record,
+                &format!("{base}.id"),
+                "strictly sorted unique profile id",
+                id,
+                blockers,
+            );
+        }
+        previous_profile_id = Some(id.to_owned());
+        for reference in &content_refs {
+            if !role_refs.insert((role, reference.domain, reference.id.clone())) {
+                invalid_value(
+                    record,
+                    &reference.path,
+                    "one model per presentation role and content ref",
+                    &format!("{}:{}", reference.domain.as_id(), reference.id),
+                    blockers,
+                );
+            }
+        }
+        if profiles
+            .insert(
+                id.to_owned(),
+                ContentRenderPresentationProfile {
+                    id: id.to_owned(),
+                    role,
+                    model,
+                    content_refs,
+                },
+            )
+            .is_some()
+        {
+            invalid_value(record, &format!("{base}.id"), "unique profile id", id, blockers);
+        }
+    }
+
+    let Some(missing_values) = required_array(record, object, "missingProfiles", blockers) else {
+        return;
+    };
+    if missing_values.len() > MAX_MISSING_RENDER_PRESENTATION_PROFILES {
+        invalid_value(
+            record,
+            "$.missingProfiles",
+            &format!("at most {MAX_MISSING_RENDER_PRESENTATION_PROFILES} blockers"),
+            &missing_values.len().to_string(),
+            blockers,
+        );
+    }
+    let mut missing_profiles = BTreeMap::new();
+    let mut previous_missing_id = None::<String>;
+    for (index, value) in missing_values
+        .iter()
+        .take(MAX_MISSING_RENDER_PRESENTATION_PROFILES)
+        .enumerate()
+    {
+        let base = format!("$.missingProfiles[{index}]");
+        let Some(missing_object) = value.as_object() else {
+            invalid_type(record, &base, "missing presentation profile object", value, blockers);
+            continue;
+        };
+        let id = required_nonempty_string_at(record, missing_object, "id", &base, blockers);
+        let role_value = required_nonempty_string_at(record, missing_object, "role", &base, blockers);
+        let role =
+            role_value.and_then(|role| parse_render_presentation_role(record, &format!("{base}.role"), role, blockers));
+        let source_values = required_array_at(record, missing_object, "sourcePresentationIds", &base, blockers);
+        let source_presentation_ids = parse_string_array(
+            record,
+            source_values,
+            &format!("{base}.sourcePresentationIds"),
+            blockers,
+        );
+        if source_presentation_ids.is_empty() || source_presentation_ids.len() > MAX_RENDER_PRESENTATION_SOURCE_IDS {
+            invalid_value(
+                record,
+                &format!("{base}.sourcePresentationIds"),
+                &format!("1..={MAX_RENDER_PRESENTATION_SOURCE_IDS} source ids"),
+                &source_presentation_ids.len().to_string(),
+                blockers,
+            );
+        }
+        if !source_presentation_ids.windows(2).all(|pair| pair[0] < pair[1]) {
+            invalid_value(
+                record,
+                &format!("{base}.sourcePresentationIds"),
+                "strictly sorted unique source ids",
+                "non-canonical",
+                blockers,
+            );
+        }
+        let content_refs = required_array_at(record, missing_object, "contentRefs", &base, blockers).map(|values| {
+            parse_render_presentation_refs(record, values, &format!("{base}.contentRefs"), facts, blockers)
+        });
+        let reason = required_nonempty_string_at(record, missing_object, "reason", &base, blockers);
+        let (Some(id), Some(role), Some(content_refs), Some(reason)) = (id, role, content_refs, reason) else {
+            continue;
+        };
+        if previous_missing_id
+            .as_ref()
+            .is_some_and(|previous| previous.as_str() >= id)
+        {
+            invalid_value(
+                record,
+                &format!("{base}.id"),
+                "strictly sorted unique blocker id",
+                id,
+                blockers,
+            );
+        }
+        previous_missing_id = Some(id.to_owned());
+        for reference in &content_refs {
+            if !role_refs.insert((role, reference.domain, reference.id.clone())) {
+                invalid_value(
+                    record,
+                    &reference.path,
+                    "one mapped or missing presentation per role and content ref",
+                    &format!("{}:{}", reference.domain.as_id(), reference.id),
+                    blockers,
+                );
+            }
+        }
+        if missing_profiles
+            .insert(
+                id.to_owned(),
+                ContentMissingRenderPresentationProfile {
+                    id: id.to_owned(),
+                    role,
+                    source_presentation_ids,
+                    content_refs,
+                    reason: reason.to_owned(),
+                },
+            )
+            .is_some()
+        {
+            invalid_value(record, &format!("{base}.id"), "unique blocker id", id, blockers);
+        }
+    }
+
+    let integration_blockers = required_string_array(record, object, "integrationBlockers", blockers);
+    if integration_blockers.is_empty() || integration_blockers.len() > MAX_BLOCK_AUTHORITY_BLOCKERS {
+        invalid_value(
+            record,
+            "$.integrationBlockers",
+            &format!("1..={MAX_BLOCK_AUTHORITY_BLOCKERS} blockers"),
+            &integration_blockers.len().to_string(),
+            blockers,
+        );
+    }
+    if !integration_blockers.windows(2).all(|pair| pair[0] < pair[1]) {
+        invalid_value(
+            record,
+            "$.integrationBlockers",
+            "strictly sorted unique blockers",
+            "non-canonical",
+            blockers,
+        );
+    }
+
+    if let (
+        Some(catalog_schema),
+        Some(catalog_revision),
+        Some(catalog_sha256),
+        Some(catalog_canonical_hash),
+        Some(catalog_byte_length),
+        Some(catalog_model_count),
+        Some(catalog_node_count),
+        Some(catalog_source),
+    ) = (
+        catalog_schema,
+        catalog_revision,
+        catalog_sha256,
+        catalog_canonical_hash,
+        catalog_byte_length,
+        catalog_model_count,
+        catalog_node_count,
+        catalog_source,
+    ) {
+        facts.render_presentation = Some(RenderPresentationFacts {
+            catalog_schema: u16::try_from(catalog_schema).expect("catalog schema is bounded"),
+            catalog_revision,
+            catalog_sha256: catalog_sha256.to_owned(),
+            catalog_canonical_hash: catalog_canonical_hash.to_owned(),
+            catalog_byte_length,
+            catalog_model_count,
+            catalog_node_count,
+            catalog_source: catalog_source.to_owned(),
+            profiles,
+            missing_profiles,
+            integration_blockers,
+        });
+    }
+}
+
 fn validate_creature_type(
     record: &DecodedRecord,
     object: &BTreeMap<String, CanonicalJson>,
@@ -3472,13 +3990,36 @@ fn insert_record(registry: &mut ContentRuntimeRegistry, record: DecodedRecord, f
             registry.machine_recipes.insert(id, ContentRecipeRecord { core });
         }
         ContentDomain::MachineProfile => {
-            registry.machine_profiles.insert(
-                id,
-                ContentMachineProfileRecord {
-                    core,
-                    capacity_fields: facts.capacity_fields,
-                },
-            );
+            if record.schema == ContentSchema::RenderPresentationCatalog {
+                let render = facts
+                    .render_presentation
+                    .expect("validated render presentation catalog has typed facts");
+                registry.render_presentation_catalogs.insert(
+                    id,
+                    ContentRenderPresentationCatalogRecord {
+                        core,
+                        catalog_schema: render.catalog_schema,
+                        catalog_revision: render.catalog_revision,
+                        catalog_sha256: render.catalog_sha256,
+                        catalog_canonical_hash: render.catalog_canonical_hash,
+                        catalog_byte_length: render.catalog_byte_length,
+                        catalog_model_count: render.catalog_model_count,
+                        catalog_node_count: render.catalog_node_count,
+                        catalog_source: render.catalog_source,
+                        profiles: render.profiles,
+                        missing_profiles: render.missing_profiles,
+                        integration_blockers: render.integration_blockers,
+                    },
+                );
+            } else {
+                registry.machine_profiles.insert(
+                    id,
+                    ContentMachineProfileRecord {
+                        core,
+                        capacity_fields: facts.capacity_fields,
+                    },
+                );
+            }
         }
         ContentDomain::AbilitySpell => {
             registry.abilities_spells.insert(
@@ -3580,7 +4121,21 @@ fn records_for_domain(registry: &ContentRuntimeRegistry, domain: ContentDomain) 
         }
         ContentDomain::CraftingRecipe => registry.crafting_recipes.values().map(|record| &record.core).collect(),
         ContentDomain::MachineRecipe => registry.machine_recipes.values().map(|record| &record.core).collect(),
-        ContentDomain::MachineProfile => registry.machine_profiles.values().map(|record| &record.core).collect(),
+        ContentDomain::MachineProfile => {
+            let mut records = registry
+                .machine_profiles
+                .values()
+                .map(|record| &record.core)
+                .chain(
+                    registry
+                        .render_presentation_catalogs
+                        .values()
+                        .map(|record| &record.core),
+                )
+                .collect::<Vec<_>>();
+            records.sort_by(|left, right| left.id.cmp(&right.id));
+            records
+        }
         ContentDomain::AbilitySpell => registry.abilities_spells.values().map(|record| &record.core).collect(),
         ContentDomain::CreatureProfile => {
             let mut records = registry
@@ -5872,6 +6427,20 @@ mod tests {
         ]
     }
 
+    fn render_presentation_fixture() -> Vec<ContentArtifact> {
+        let mut artifacts = reference_fixture();
+        let mut catalog = artifact(
+            ContentDomain::MachineProfile,
+            RENDER_PRESENTATION_CATALOG_ID,
+            "render-presentation-catalog",
+            1,
+            r#"{"catalog":{"byteLength":785824,"canonicalHash":"52fd4aebb0c457f3c83af79af6b83c93","format":"blockwild-compiled-model-catalog-v2","modelCount":252,"nodeCount":13121,"revision":1,"schema":2,"sha256":"12c522f880e94c1ae527de701ae3e710fee13701d66fbb0a4ad24895557011b4","source":"renderer-neutral model specs and offline production captures"},"integrationBlockers":["dropped-item-r6-model-binding-runtime","machine-world-view-presentation-binding-runtime"],"missingProfiles":[{"contentRefs":[{"domain":"item","id":"2"}],"id":"missing:world-prop:board","reason":"No exact BWM2 identity is authored for this fixture item.","role":"world-prop","sourcePresentationIds":["fixture:board"]}],"profiles":[{"contentRefs":[{"domain":"item","id":"1"}],"id":"held:survey-pick","model":{"category":0,"groundYBits":null,"id":"held-pickaxe","label":"Stone Pickaxe","nodeCount":5},"role":"held-item"},{"contentRefs":[{"domain":"machine-profile","id":"furnace"}],"id":"machine:furnace","model":{"category":3,"groundYBits":null,"id":"stone-block","label":"Stone Block","nodeCount":1},"role":"machine"},{"contentRefs":[{"domain":"ability-spell","id":"move:gust"},{"domain":"creature-profile","id":"fox"}],"id":"summon:fox","model":{"category":1,"groundYBits":0,"id":"fox","label":"Fox","nodeCount":16},"role":"summon"}],"schema":1}"#,
+        );
+        catalog.unknown_extension_bytes = vec![0, 0x80, 0xff, 13];
+        artifacts.push(catalog);
+        artifacts
+    }
+
     fn action_fixture() -> Vec<ContentArtifact> {
         let item = artifact(
             ContentDomain::Item,
@@ -6293,6 +6862,106 @@ mod tests {
         assert_eq!(report.installed_entries, 1);
         assert_eq!(registry.player_render_profiles["player:standing"].model_node_count, 25);
         assert!(registry.creature_profiles.is_empty());
+    }
+
+    #[test]
+    fn render_presentation_profiles_materialize_distinctly_and_preserve_extensions() {
+        let (manifest, store) = installed(render_presentation_fixture());
+        let (registry, report) = materialize_content_runtime(&manifest, &store).expect("presentations materialize");
+        assert_eq!(report.installed_entries, 15);
+        assert_eq!(registry.machine_profiles.len(), 1);
+        assert_eq!(registry.render_presentation_catalogs.len(), 1);
+        let catalog = &registry.render_presentation_catalogs[RENDER_PRESENTATION_CATALOG_ID];
+        assert_eq!(catalog.core.schema, ContentSchema::RenderPresentationCatalog);
+        assert_eq!(catalog.core.unknown_extension_bytes, [0, 0x80, 0xff, 13]);
+        assert_eq!(catalog.catalog_schema, 2);
+        assert_eq!(catalog.catalog_revision, 1);
+        assert_eq!(
+            catalog.catalog_sha256,
+            "12c522f880e94c1ae527de701ae3e710fee13701d66fbb0a4ad24895557011b4"
+        );
+        assert_eq!(catalog.catalog_canonical_hash, "52fd4aebb0c457f3c83af79af6b83c93");
+        assert_eq!(catalog.catalog_byte_length, 785_824);
+        assert_eq!(catalog.catalog_model_count, 252);
+        assert_eq!(catalog.catalog_node_count, 13_121);
+        assert_eq!(catalog.profiles.len(), 3);
+        assert_eq!(catalog.missing_profiles.len(), 1);
+        assert_eq!(catalog.integration_blockers.len(), 2);
+        let held = &catalog.profiles["held:survey-pick"];
+        assert_eq!(held.role, ContentRenderPresentationRole::HeldItem);
+        assert_eq!(held.model.model_id, "held-pickaxe");
+        assert_eq!(held.model.label, "Stone Pickaxe");
+        assert_eq!(held.model.category, 0);
+        assert_eq!(held.model.ground_y_bits, None);
+        assert_eq!(held.model.node_count, 5);
+        assert_eq!(held.content_refs[0].domain, ContentDomain::Item);
+        assert_eq!(held.content_refs[0].id, "1");
+        let summon = &catalog.profiles["summon:fox"];
+        assert_eq!(summon.role, ContentRenderPresentationRole::Summon);
+        assert_eq!(summon.model.ground_y_bits, Some(0));
+        assert_eq!(summon.content_refs.len(), 2);
+        assert_eq!(
+            catalog.missing_profiles["missing:world-prop:board"].content_refs[0].id,
+            "2"
+        );
+        assert!(!registry.creature_profiles.contains_key(RENDER_PRESENTATION_CATALOG_ID));
+        assert!(
+            !registry
+                .player_render_profiles
+                .contains_key(RENDER_PRESENTATION_CATALOG_ID)
+        );
+        assert!(!registry.machine_profiles.contains_key(RENDER_PRESENTATION_CATALOG_ID));
+    }
+
+    #[test]
+    fn render_presentation_drift_and_ambiguous_role_refs_fail_atomically() {
+        let (manifest, store) = installed(render_presentation_fixture());
+        let mut registry = ContentRuntimeRegistry::default();
+        registry
+            .install(&manifest, &store)
+            .expect("initial presentation install");
+        let original = registry.clone();
+
+        let mut invalid = render_presentation_fixture();
+        let catalog = invalid
+            .iter_mut()
+            .find(|artifact| artifact.schema_id == "render-presentation-catalog")
+            .expect("presentation fixture");
+        catalog.canonical_bytes = String::from_utf8(catalog.canonical_bytes.clone())
+            .expect("fixture UTF-8")
+            .replace(
+                r#"{"domain":"machine-profile","id":"furnace"}],"id":"machine:furnace"#,
+                r#"{"domain":"item","id":"1"}],"id":"machine:furnace"#,
+            )
+            .replace(r#""role":"machine"#, r#""role":"held-item"#)
+            .into_bytes();
+        let (bad_manifest, bad_store) = installed(invalid);
+        let blockers = registry
+            .install(&bad_manifest, &bad_store)
+            .expect_err("ambiguous role binding rejected");
+        assert!(blockers.iter().any(|blocker| {
+            blocker.code == ContentRuntimeBlockerCode::InvalidEnum
+                || (blocker.code == ContentRuntimeBlockerCode::Range && blocker.path.contains("contentRefs"))
+        }));
+        assert_eq!(registry, original);
+
+        let mut missing = render_presentation_fixture();
+        let catalog = missing
+            .iter_mut()
+            .find(|artifact| artifact.schema_id == "render-presentation-catalog")
+            .expect("presentation fixture");
+        catalog.canonical_bytes = String::from_utf8(catalog.canonical_bytes.clone())
+            .expect("fixture UTF-8")
+            .replace(r#"{"domain":"item","id":"2"}"#, r#"{"domain":"item","id":"999"}"#)
+            .into_bytes();
+        let (bad_manifest, bad_store) = installed(missing);
+        let blockers = registry
+            .install(&bad_manifest, &bad_store)
+            .expect_err("missing presentation content ref rejected");
+        assert!(blockers.iter().any(|blocker| {
+            blocker.code == ContentRuntimeBlockerCode::MissingDependency && blocker.path.contains("missingProfiles")
+        }));
+        assert_eq!(registry, original);
     }
 
     #[test]

@@ -44,6 +44,12 @@ import {
   PLAYER_RENDER_PROFILE_SCHEMA_ID_V1,
   PLAYER_RENDER_PROFILE_SCHEMA_V1,
 } from "./rust-player-render-profile.ts";
+import {
+  BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1,
+  RENDER_PRESENTATION_CATALOG_ID_V1,
+  RENDER_PRESENTATION_CATALOG_SCHEMA_ID_V1,
+  RENDER_PRESENTATION_CATALOG_SCHEMA_V1,
+} from "./rust-render-presentation-profile.ts";
 
 export const RUST_CONTENT_MANIFEST_SCHEMA = 1 as const;
 export const RUST_METADATA_STORE_SCHEMA = 1 as const;
@@ -902,6 +908,15 @@ export function blockwildProductionContentSources(): readonly RustContentSourceE
   entries.push(source("machine-profile", "aquarium", "machine-profile", 1, { maxBlocks: AQUARIUM_MAX_BLOCKS, breedSeconds: AQUARIUM_BREED_SECONDS }));
   entries.push(source("machine-profile", "butterfly-exhibit", "machine-profile", 1, { maxBlocks: MAX_EXHIBIT_BLOCKS, breedSeconds: EXHIBIT_BREEDING_CYCLE_SECONDS }));
   entries.push(source("machine-profile", "golem-forge", "machine-profile", 1, { recipeIds: Object.keys(GOLEM_RECIPES).sort() }));
+  entries.push({
+    domain: "machine-profile",
+    id: RENDER_PRESENTATION_CATALOG_ID_V1,
+    schemaId: RENDER_PRESENTATION_CATALOG_SCHEMA_ID_V1,
+    schemaVersion: RENDER_PRESENTATION_CATALOG_SCHEMA_V1,
+    contentVersion: 1,
+    value: BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1,
+    aliases: Object.freeze(["render-presentation-catalog:production"]),
+  });
   for (const spell of SPELLS) entries.push(source("ability-spell", `spell:${spell.id}`, "spell-definition", 1, spell));
   for (const [id, move] of objectEntries(CREATURE_MOVES)) entries.push(source("ability-spell", `move:${id}`, "creature-move", 1, move));
   for (const [id, status] of objectEntries(CREATURE_STATUSES)) entries.push(source("ability-spell", `status:${id}`, "creature-status", 1, status));
