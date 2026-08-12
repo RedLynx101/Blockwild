@@ -15,15 +15,19 @@ use blockwild_engine::{
     ENTITY_COMPATIBILITY_EXPORT_TYPE_V1, ENTITY_COMPATIBILITY_IMPORT_TYPE_V1, ENTITY_COMPATIBILITY_RECORD_TYPE_V1,
     INTEGRATED_RUNTIME_LEGACY_MIGRATION_SCHEMA_V1, IntegratedRuntimeBatchV2, IntegratedRuntimeConfigV2,
     IntegratedRuntimeError, IntegratedRuntimeIdentityV2, IntegratedRuntimeLegacyMigrationV1,
-    IntegratedRuntimeReceiptV2, IntegratedRuntimeV2, RuntimeCommandCacheLookupV1, TERRAIN_RESIDENCY_BATCH_TYPE_V1,
-    TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, WorldViewExtractionInputV1, decode_content_install_page_v1,
-    decode_entity_authority_export_v1, decode_entity_authority_import_v2, decode_entity_command_batch_v1,
-    decode_entity_compatibility_export_v1, decode_entity_compatibility_import_v1, decode_gameplay_actor_grant_v1,
-    decode_gameplay_batch_v1, decode_network_agent_grant_v1, decode_network_command_release_v1,
-    decode_network_delta_build_request_v1, decode_network_peer_grant_v1, decode_network_peer_release_v1,
-    decode_network_reconnect_request_v1, decode_network_replication_record_v1, decode_runtime_persistence_dispatch_v1,
+    IntegratedRuntimeReceiptV2, IntegratedRuntimeV2, PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+    PLAYER_BOOTSTRAP_STATUS_TYPE_V1, PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1, PLAYER_INVENTORY_IMPORT_TYPE_V1,
+    RuntimeCommandCacheLookupV1, SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3, SIMULATION_PLAYER_BIND_TYPE_V3,
+    TERRAIN_RESIDENCY_BATCH_TYPE_V1, TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, WorldViewExtractionInputV1,
+    decode_content_install_page_v1, decode_entity_authority_export_v1, decode_entity_authority_import_v2,
+    decode_entity_command_batch_v1, decode_entity_compatibility_export_v1, decode_entity_compatibility_import_v1,
+    decode_gameplay_actor_grant_v1, decode_gameplay_batch_v1, decode_network_agent_grant_v1,
+    decode_network_command_release_v1, decode_network_delta_build_request_v1, decode_network_peer_grant_v1,
+    decode_network_peer_release_v1, decode_network_reconnect_request_v1, decode_network_replication_record_v1,
+    decode_player_bootstrap_status_query_v1, decode_player_inventory_import_v1, decode_runtime_persistence_dispatch_v1,
     decode_runtime_player_binding_v1, decode_terrain_residency_batch_v1, encode_content_install_receipt_v1,
     encode_entity_authority_import_receipt_v1, encode_entity_event_batch_v1, encode_gameplay_receipt_v1,
+    encode_player_bootstrap_status_v1, encode_player_inventory_import_receipt_v1,
     encode_runtime_persistence_dispatch_receipt_v1, encode_terrain_residency_receipt_v1,
     integrated_runtime_checkpoint_hash_v1,
 };
@@ -1071,13 +1075,17 @@ fn dispatch_command(
 ) -> Result<(IntegratedRuntimeV2, Vec<RuntimeDomainOperationV1>), (String, String)> {
     let mut candidate = runtime.clone();
     let mut receipts = Vec::with_capacity(batch.operations.len());
+    let mut deferred_final_bind_receipts = Vec::<(usize, WireHash)>::new();
     for (index, operation) in batch.operations.iter().enumerate() {
-        let expected_schema =
-            if operation.domain == RuntimeDomainV1::Simulation && operation.type_id == SIMULATION_PLAYER_BIND_TYPE_V2 {
-                2
-            } else {
-                1
-            };
+        let expected_schema = if operation.domain == RuntimeDomainV1::Simulation {
+            match operation.type_id.as_str() {
+                SIMULATION_PLAYER_BIND_TYPE_V2 => 2,
+                SIMULATION_PLAYER_BIND_TYPE_V3 => 3,
+                _ => 1,
+            }
+        } else {
+            1
+        };
         if operation.schema != expected_schema {
             return Err((
                 "unsupported-domain-schema".into(),
@@ -1114,6 +1122,32 @@ fn dispatch_command(
                     SIMULATION_PLAYER_BIND_RECEIPT_TYPE_V2,
                     2,
                     domain_ack(*b"BWB6", operation, &candidate),
+                )
+            }
+            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V3) => {
+                let binding = decode_runtime_player_binding_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                candidate
+                    .bind_player(binding)
+                    .map_err(|error| (error.code, error.message))?;
+                deferred_final_bind_receipts.push((receipts.len(), operation.payload_hash));
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3,
+                    3,
+                    final_bind_ack(operation.payload_hash, &candidate),
+                )
+            }
+            (RuntimeDomainV1::Simulation, PLAYER_BOOTSTRAP_STATUS_TYPE_V1) => {
+                let query = decode_player_bootstrap_status_query_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let status = candidate
+                    .player_bootstrap_status(&query, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Simulation,
+                    PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+                    encode_player_bootstrap_status_v1(&status).map_err(|error| (error.code.into(), error.message))?,
                 )
             }
             (RuntimeDomainV1::Entities, ENTITY_AUTHORITY_EXPORT_TYPE_V1) => {
@@ -1207,6 +1241,19 @@ fn dispatch_command(
                     RuntimeDomainV1::Gameplay,
                     CONTENT_INSTALL_RECEIPT_TYPE_V1,
                     encode_content_install_receipt_v1(&receipt).map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Gameplay, PLAYER_INVENTORY_IMPORT_TYPE_V1) => {
+                let command = decode_player_inventory_import_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let receipt = candidate
+                    .import_player_inventory(command, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1,
+                    encode_player_inventory_import_receipt_v1(&receipt)
+                        .map_err(|error| (error.code.into(), error.message))?,
                 )
             }
             (RuntimeDomainV1::Gameplay, GAMEPLAY_COMMAND_TYPE_V1) => {
@@ -1375,6 +1422,14 @@ fn dispatch_command(
         };
         receipts.push(response);
     }
+    for (receipt_index, request_hash) in deferred_final_bind_receipts {
+        receipts[receipt_index] = domain_operation_with_schema(
+            RuntimeDomainV1::Simulation,
+            SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3,
+            3,
+            final_bind_ack(request_hash, &candidate),
+        );
+    }
     Ok((candidate, receipts))
 }
 
@@ -1403,6 +1458,15 @@ fn domain_ack(magic: [u8; 4], operation: &RuntimeDomainOperationV1, runtime: &In
     payload.extend_from_slice(&magic);
     payload.extend_from_slice(&1_u16.to_le_bytes());
     payload.extend_from_slice(&operation.payload_hash.0);
+    payload.extend_from_slice(runtime.state_hash().as_bytes());
+    payload
+}
+
+fn final_bind_ack(request_hash: WireHash, runtime: &IntegratedRuntimeV2) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(38);
+    payload.extend_from_slice(b"BWF6");
+    payload.extend_from_slice(&1_u16.to_le_bytes());
+    payload.extend_from_slice(&request_hash.0);
     payload.extend_from_slice(runtime.state_hash().as_bytes());
     payload
 }
@@ -3407,11 +3471,14 @@ mod tests {
         encode_compatibility_save_binary_v1,
     };
     use blockwild_engine::{
-        EntityAuthorityExportWireV1, EntityAuthorityImportWireV2, EntityCompatibilityExportWireV1,
-        EntityCompatibilityImportWireV1, LEGACY_STATE_PLAYER_V1, RuntimePersistenceDispatchWireV1,
+        ContainerKey, EntityAuthorityExportWireV1, EntityAuthorityImportWireV2, EntityCompatibilityExportWireV1,
+        EntityCompatibilityImportWireV1, ImportPlayerInventoryV1, ItemStack, LEGACY_STATE_PLAYER_V1,
+        PlayerBootstrapStatusQueryWireV1, PlayerInventoryImportWireV1, RuntimePersistenceDispatchWireV1,
         RuntimePlayerBindingWireV1, decode_entity_authority_import_receipt_v1, decode_entity_event_batch_v1,
+        decode_player_bootstrap_status_v1, decode_player_inventory_import_receipt_v1,
         encode_entity_authority_export_v1, encode_entity_authority_import_v2, encode_entity_command_batch_v1,
         encode_entity_compatibility_export_v1, encode_entity_compatibility_import_v1,
+        encode_player_bootstrap_status_query_v1, encode_player_inventory_import_v1,
         encode_runtime_persistence_dispatch_v1, encode_runtime_player_binding_v1,
     };
     use blockwild_entity::{
@@ -3601,6 +3668,164 @@ mod tests {
         ))
         .unwrap();
         assert!(matches!(missing, RuntimeResponseV1::Error { .. }));
+    }
+
+    #[test]
+    fn bootstrap_status_and_three_operation_player_install_are_atomic_with_terminal_bind_receipt() {
+        let RuntimeRequestV1::Create { config, .. } = create_request(901) else {
+            unreachable!("fixture is a create request")
+        };
+        let runtime = create_runtime(config).unwrap();
+        let initial = runtime.identity();
+        let query = PlayerBootstrapStatusQueryWireV1 {
+            external_entity_id: "player:\u{6c34}".into(),
+            actor_id: "actor:\u{6c34}".into(),
+            player_id: blockwild_types::PlayerId::new(0x89ab_cdef, 0xfedc_ba98),
+        };
+        let status_payload = encode_player_bootstrap_status_query_v1(&query).unwrap();
+        let status_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "bootstrap-status-pristine".into(),
+            idempotency_key: "bootstrap-status-pristine".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&initial),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Simulation,
+                PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
+                status_payload,
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (unchanged, status_receipts) = dispatch_command(&runtime, &status_batch).unwrap();
+        assert_eq!(unchanged.identity(), initial);
+        let status = decode_player_bootstrap_status_v1(&status_receipts[0].payload).unwrap();
+        assert_eq!(status.next_sequence, Some(1));
+        assert_eq!(status.next_input_sequence, Some(1));
+        assert!(status.queued_inputs_empty);
+
+        let mut record = EntityCompatibilityRecord::new("player:\u{6c34}", "specimen:\u{6c34}", "player");
+        record.class = EntityClass::Player;
+        record.position = EntityVec3::new(8.0, 64.0, 8.0);
+        record.health = 20.0;
+        record.maximum_health = 20.0;
+        let entity_payload = encode_entity_compatibility_import_v1(&EntityCompatibilityImportWireV1 {
+            sequence: 1,
+            expected_revision: 0,
+            tick: 0,
+            desired_id: None,
+            residency: EntityResidency::Hot,
+            record,
+        })
+        .unwrap();
+        let binding_payload = encode_runtime_player_binding_v1(&RuntimePlayerBindingWireV1 {
+            external_entity_id: query.external_entity_id.clone(),
+            actor_id: query.actor_id.clone(),
+            player_id: query.player_id,
+            creative_mode: true,
+            radius: 0.35,
+            standing_height: 1.8,
+            crouching_height: 1.35,
+            mass: 80.0,
+            walk_speed: 4.3,
+            sprint_speed: 6.2,
+            creative_flight_speed: 8.0,
+            maximum_oxygen_seconds: 15.0,
+        })
+        .unwrap();
+        let inventory_payload = encode_player_inventory_import_v1(&PlayerInventoryImportWireV1 {
+            import: ImportPlayerInventoryV1 {
+                inventory: ContainerKey::player(query.actor_id.clone()),
+                expected_revision: 0,
+                slots: vec![None; 9],
+                metadata: Vec::new(),
+            },
+            selected_slot: 6,
+        })
+        .unwrap();
+        let operations = vec![
+            domain_operation(
+                RuntimeDomainV1::Entities,
+                ENTITY_COMPATIBILITY_IMPORT_TYPE_V1,
+                entity_payload.clone(),
+            ),
+            domain_operation_with_schema(
+                RuntimeDomainV1::Simulation,
+                SIMULATION_PLAYER_BIND_TYPE_V3,
+                3,
+                binding_payload.clone(),
+            ),
+            domain_operation(
+                RuntimeDomainV1::Gameplay,
+                PLAYER_INVENTORY_IMPORT_TYPE_V1,
+                inventory_payload,
+            ),
+        ];
+        let install_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "bootstrap-install".into(),
+            idempotency_key: "bootstrap-install".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&initial),
+            operations,
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (installed, receipts) = dispatch_command(&runtime, &install_batch).unwrap();
+        assert_eq!(receipts.len(), 3);
+        assert_eq!(receipts[0].type_id, ENTITY_RECEIPT_TYPE_V1);
+        assert_eq!(receipts[1].type_id, SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3);
+        assert_eq!(receipts[1].schema, 3);
+        assert_eq!(&receipts[1].payload[..4], b"BWF6");
+        assert_eq!(&receipts[1].payload[6..22], &wire_checksum_v1(&binding_payload));
+        assert_eq!(&receipts[1].payload[22..38], installed.state_hash().as_bytes());
+        let inventory_receipt = decode_player_inventory_import_receipt_v1(&receipts[2].payload).unwrap();
+        assert_eq!(inventory_receipt.inventory_revision, 1);
+        assert_eq!(inventory_receipt.selected_slot, 6);
+        let installed_status = installed
+            .player_bootstrap_status(&query, CanonicalHash([0x85; 16]))
+            .unwrap();
+        assert_eq!(installed_status.world_view_binding.unwrap().selected_slot, 6);
+        assert_eq!(installed_status.custody.unwrap().inventory_revision, 1);
+
+        let mut invalid_slots = vec![None; 9];
+        invalid_slots[0] = Some(ItemStack::simple(999, 1));
+        let invalid_inventory = encode_player_inventory_import_v1(&PlayerInventoryImportWireV1 {
+            import: ImportPlayerInventoryV1 {
+                inventory: ContainerKey::player(query.actor_id.clone()),
+                expected_revision: 0,
+                slots: invalid_slots,
+                metadata: Vec::new(),
+            },
+            selected_slot: 0,
+        })
+        .unwrap();
+        let rollback_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "bootstrap-rollback".into(),
+            idempotency_key: "bootstrap-rollback".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&initial),
+            operations: vec![
+                domain_operation(
+                    RuntimeDomainV1::Entities,
+                    ENTITY_COMPATIBILITY_IMPORT_TYPE_V1,
+                    entity_payload,
+                ),
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_PLAYER_BIND_TYPE_V3,
+                    3,
+                    binding_payload,
+                ),
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    PLAYER_INVENTORY_IMPORT_TYPE_V1,
+                    invalid_inventory,
+                ),
+            ],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        assert!(dispatch_command(&runtime, &rollback_batch).is_err());
+        assert_eq!(runtime.identity(), initial);
     }
 
     #[test]

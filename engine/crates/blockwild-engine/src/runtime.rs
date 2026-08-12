@@ -28,10 +28,10 @@ use blockwild_gameplay::{
     ActorGrant, ActorRole, CombatCommand, ContainerKey, ContainerKind, ContentArtifact, ContentDomain,
     ContentDomainDigest, CreatePlayerCustodyCommand, ExpectedStack, FixedVec3, FixedWorldVec3V1, GameplayActor,
     GameplayAuthority, GameplayBatch, GameplayCommand, GameplayReceipt, GameplayScheduleAdvanceV1, GameplayState,
-    InventoryCommand, MetadataBlobStore, PlayerDropStageRequestV1, PlayerInventoryBindingV1, RotationMicroturnsV1,
-    WorldKey, WorldViewAcceptedReceiptV1, WorldViewAuthorityV1, WorldViewBatchV1, WorldViewCommandV1,
-    WorldViewReceiptV1, compile_content_bundle, decode_gameplay_authority_snapshot, install_content_bundle,
-    stage_player_drop_v1,
+    InventoryCommand, ItemDefinition, ItemInstanceMetadataV1, MetadataBlobStore, PlayerDropStageRequestV1,
+    PlayerInventoryBindingV1, RotationMicroturnsV1, WorldKey, WorldViewAcceptedReceiptV1, WorldViewAuthorityV1,
+    WorldViewBatchV1, WorldViewCommandV1, WorldViewReceiptV1, compile_content_bundle,
+    decode_gameplay_authority_snapshot, install_content_bundle, materialize_content_runtime, stage_player_drop_v1,
 };
 use blockwild_generation::{
     Block as GeneratedBlock, ChunkPayloadV2, GENERATOR_VERSION, GenerateChunkRequestV2, GenerationDiagnostics,
@@ -78,10 +78,13 @@ use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, PlayerId, seed_s
 use crate::{
     ContentInstallPageWireV1, ContentInstallReceiptStatusV1, ContentInstallReceiptWireV1,
     EntityAuthorityImportReceiptWireV1, EntityCompatibilityImportWireV1, PlayerBindingStageRequestV1,
-    RuntimePersistenceDispatchReceiptWireV1, RuntimePersistenceDispatchWireV1, RuntimePlayerBindingWireV1,
-    WorldViewExtractionInputV1, collect_world_view_extraction_v1, decode_world_view_native_record_v1,
-    encode_world_view_native_record_v1, initialize_world_view_authority_v1, stage_player_binding_v1,
-    stage_world_view_batches_v1, validate_world_view_runtime_links_v1,
+    PlayerBootstrapCustodyWireV1, PlayerBootstrapEntityWireV1, PlayerBootstrapRuntimePlayerWireV1,
+    PlayerBootstrapStatusQueryWireV1, PlayerBootstrapStatusWireV1, PlayerInventoryImportReceiptWireV1,
+    PlayerInventoryImportWireV1, RuntimePersistenceDispatchReceiptWireV1, RuntimePersistenceDispatchWireV1,
+    RuntimePlayerBindingWireV1, WorldViewExtractionInputV1, collect_world_view_extraction_v1,
+    decode_world_view_native_record_v1, encode_world_view_native_record_v1, initialize_world_view_authority_v1,
+    player_inventory_result_hash_v1, stage_player_binding_v1, stage_world_view_batches_v1,
+    validate_world_view_runtime_links_v1,
 };
 
 pub const INTEGRATED_RUNTIME_SCHEMA_V2: u16 = 2;
@@ -1497,6 +1500,23 @@ impl IntegratedRuntimeV2 {
         let mut candidate_store = self.gameplay_content_store.clone();
         let report = install_content_bundle(&compiled, &mut candidate_store)
             .map_err(|blockers| content_blocker_error(&blockers))?;
+        let (runtime_registry, runtime_report) = materialize_content_runtime(&compiled.manifest, &candidate_store)
+            .map_err(|blockers| content_runtime_blocker_error(&blockers))?;
+        if runtime_report.manifest_hash != report.manifest_hash
+            || runtime_report.installed_entries != report.installed_entries
+            || runtime_report
+                .executable_bytes
+                .checked_add(runtime_report.opaque_extension_bytes)
+                != Some(report.installed_bytes)
+        {
+            return Err(IntegratedRuntimeError::new(
+                "content-runtime-drift",
+                "typed content materialization disagrees with the installed metadata bundle",
+            ));
+        }
+        let item_definitions = item_definitions_from_runtime_registry(&runtime_registry)?;
+        let mut candidate_gameplay = self.gameplay.clone();
+        install_content_item_definitions(&mut candidate_gameplay, &item_definitions)?;
         let candidate_index = compiled
             .manifest
             .entries
@@ -1520,6 +1540,7 @@ impl IntegratedRuntimeV2 {
         };
         self.gameplay_content_store = candidate_store;
         self.gameplay_content_index = candidate_index;
+        self.gameplay = candidate_gameplay;
         self.content_stage = None;
         self.content_attestation = Some(attestation);
         self.gameplay_authority_revision = self.gameplay_authority_revision.saturating_add(1);
@@ -1738,7 +1759,14 @@ impl IntegratedRuntimeV2 {
             decode_world_view_native_record_v1(world_view_record, &decoded_gameplay.authority.state, &entities)
                 .map_err(|error| IntegratedRuntimeError::new("recovery-native-world-view", error.to_string()))?;
         let content = decode_runtime_content_snapshot_v1(content_record)?;
-        let (content_store, content_index) = install_runtime_content_snapshot_v1(&self.config, &content)?;
+        let (content_store, content_index, content_item_definitions) =
+            install_runtime_content_snapshot_v1(&self.config, &content)?;
+        if decoded_gameplay.authority.state.inventory.items != content_item_definitions {
+            return Err(IntegratedRuntimeError::new(
+                "recovery-content-item-definitions",
+                "restored gameplay item definitions do not exactly match the typed installed content registry",
+            ));
+        }
 
         let mut candidate = self.clone();
         candidate.world = decoded_world.authority;
@@ -3236,6 +3264,376 @@ impl IntegratedRuntimeV2 {
             },
         );
         Ok(())
+    }
+
+    pub fn player_bootstrap_status(
+        &self,
+        query: &PlayerBootstrapStatusQueryWireV1,
+        request_payload_hash: CanonicalHash,
+    ) -> Result<PlayerBootstrapStatusWireV1, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        let mut matching_entities = Vec::new();
+        for (entity_id, entity) in self.entities.hot() {
+            if entity.record.external_entity_id == query.external_entity_id {
+                matching_entities.push(PlayerBootstrapEntityWireV1 {
+                    entity_id: *entity_id,
+                    entity_revision: entity.entity_revision,
+                    residency: EntityResidency::Hot,
+                    record: entity.record.clone(),
+                });
+            }
+        }
+        for (entity_id, entity) in self.entities.cold() {
+            if entity.record.external_entity_id == query.external_entity_id {
+                matching_entities.push(PlayerBootstrapEntityWireV1 {
+                    entity_id: *entity_id,
+                    entity_revision: entity.entity_revision,
+                    residency: EntityResidency::Cold,
+                    record: entity.record.clone(),
+                });
+            }
+        }
+        if matching_entities.len() > 1 {
+            return Err(IntegratedRuntimeError::new(
+                "player-bootstrap-duplicate-entity",
+                "multiple authoritative entities use the requested external player identity",
+            ));
+        }
+        let entity = matching_entities.pop();
+        if entity
+            .as_ref()
+            .is_some_and(|entity| entity.record.class != EntityClass::Player)
+        {
+            return Err(IntegratedRuntimeError::new(
+                "player-bootstrap-entity-class",
+                "requested external player identity belongs to a non-player entity",
+            ));
+        }
+        let target_entity_id = entity.as_ref().map(|entity| entity.entity_id);
+
+        let runtime_player = match &self.player {
+            Some(player) => {
+                let touches_target = player.binding.external_entity_id == query.external_entity_id
+                    || player.binding.actor_id == query.actor_id
+                    || player.binding.player_id == query.player_id
+                    || target_entity_id == Some(player.entity_id);
+                if !touches_target {
+                    return Err(IntegratedRuntimeError::new(
+                        "player-bootstrap-runtime-conflict",
+                        "runtime already owns a different complete player binding",
+                    ));
+                }
+                if player.binding.external_entity_id != query.external_entity_id
+                    || player.binding.actor_id != query.actor_id
+                    || player.binding.player_id != query.player_id
+                    || target_entity_id != Some(player.entity_id)
+                {
+                    return Err(IntegratedRuntimeError::new(
+                        "player-bootstrap-runtime-partial",
+                        "runtime player identity only partially matches the requested target",
+                    ));
+                }
+                Some(PlayerBootstrapRuntimePlayerWireV1 {
+                    entity_id: player.entity_id,
+                    binding: player.binding.clone(),
+                })
+            }
+            None => None,
+        };
+
+        let mut world_view_matches = self
+            .world_view
+            .state
+            .player_bindings
+            .values()
+            .filter(|binding| {
+                binding.player_id == query.player_id
+                    || binding.actor_id == query.actor_id
+                    || target_entity_id == Some(binding.entity_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if world_view_matches.len() > 1 {
+            return Err(IntegratedRuntimeError::new(
+                "player-bootstrap-duplicate-binding",
+                "multiple world-view player bindings match the requested player, actor, or entity",
+            ));
+        }
+        let world_view_binding = world_view_matches.pop();
+        if let Some(binding) = &world_view_binding
+            && (binding.player_id != query.player_id
+                || binding.actor_id != query.actor_id
+                || target_entity_id != Some(binding.entity_id))
+        {
+            return Err(IntegratedRuntimeError::new(
+                "player-bootstrap-world-view-partial",
+                "world-view binding only partially matches the requested target",
+            ));
+        }
+
+        let expected_inventory = ContainerKey::player(query.actor_id.clone());
+        let expected_equipment = ContainerKey {
+            kind: ContainerKind::Equipment,
+            id: format!("{}:equipment", query.actor_id),
+            owner_id: Some(query.actor_id.clone()),
+        };
+        let actor_custodies = self
+            .gameplay
+            .state
+            .inventory
+            .containers
+            .values()
+            .filter(|container| {
+                container.key.owner_id.as_deref() == Some(query.actor_id.as_str())
+                    && matches!(container.key.kind, ContainerKind::Player | ContainerKind::Equipment)
+            })
+            .collect::<Vec<_>>();
+        let custody = if let Some(binding) = &world_view_binding {
+            if binding.inventory_container != expected_inventory
+                || binding.equipment_container != expected_equipment
+                || binding.selected_slot >= 9
+                || binding.back_slot != Some(7)
+                || actor_custodies.len() != 2
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "player-bootstrap-custody-partial",
+                    "world-view player binding contradicts the canonical player custody layout",
+                ));
+            }
+            let inventory = self
+                .gameplay
+                .state
+                .inventory
+                .containers
+                .get(&binding.inventory_container)
+                .ok_or_else(|| {
+                    IntegratedRuntimeError::new(
+                        "player-bootstrap-custody-partial",
+                        "bound player inventory container is absent",
+                    )
+                })?;
+            let equipment = self
+                .gameplay
+                .state
+                .inventory
+                .containers
+                .get(&binding.equipment_container)
+                .ok_or_else(|| {
+                    IntegratedRuntimeError::new(
+                        "player-bootstrap-custody-partial",
+                        "bound player equipment container is absent",
+                    )
+                })?;
+            if inventory.slots.len() != 9 || equipment.slots.len() != 8 {
+                return Err(IntegratedRuntimeError::new(
+                    "player-bootstrap-custody-slots",
+                    "bound player custody does not have the exact nine/eight slot layout",
+                ));
+            }
+            let referenced_metadata = referenced_inventory_metadata(&self.gameplay.state, &inventory.slots)?;
+            Some(PlayerBootstrapCustodyWireV1 {
+                inventory_container: inventory.key.clone(),
+                inventory_revision: inventory.revision,
+                inventory_slots: inventory.slots.clone(),
+                equipment_container: equipment.key.clone(),
+                equipment_revision: equipment.revision,
+                equipment_slots: equipment.slots.clone(),
+                referenced_metadata,
+            })
+        } else {
+            if !actor_custodies.is_empty() {
+                return Err(IntegratedRuntimeError::new(
+                    "player-bootstrap-custody-partial",
+                    "player custody exists without its world-view binding",
+                ));
+            }
+            None
+        };
+        let bound = runtime_player.is_some();
+        if bound != world_view_binding.is_some() || bound != custody.is_some() || (bound && entity.is_none()) {
+            return Err(IntegratedRuntimeError::new(
+                "player-bootstrap-partial",
+                "runtime, entity, world-view, and custody player authority are only partially installed",
+            ));
+        }
+        if let (Some(player), Some(binding)) = (&self.player, &world_view_binding)
+            && (u16::from(player.selected_slot) != binding.selected_slot
+                || player.last_input_sequence != self.last_applied_input.map_or(0, |input| input.sequence))
+        {
+            return Err(IntegratedRuntimeError::new(
+                "player-bootstrap-runtime-continuity",
+                "runtime player continuation contradicts world-view or last-applied input state",
+            ));
+        }
+        if self.queued_inputs.is_empty()
+            && self.last_input_sequence != self.last_applied_input.map(|input| input.sequence)
+        {
+            return Err(IntegratedRuntimeError::new(
+                "player-bootstrap-input-continuity",
+                "accepted input cursor contradicts the last-applied frame",
+            ));
+        }
+        if self.next_action_sequence == 0 {
+            return Err(IntegratedRuntimeError::new(
+                "player-bootstrap-action-continuity",
+                "action receipt sequence cursor uses the reserved zero value",
+            ));
+        }
+        let next_input_sequence = match self.last_input_sequence {
+            Some(sequence) => sequence.checked_add(1),
+            None => Some(1),
+        };
+        let last_action_sequence = self.next_action_sequence.checked_sub(1).filter(|value| *value != 0);
+        let authoritative_flags = self.player.as_ref().map_or(0, |player| player.flags);
+        if authoritative_flags & !RUNTIME_INPUT_FLAG_MASK_V1 != 0 {
+            return Err(IntegratedRuntimeError::new(
+                "player-bootstrap-flags",
+                "runtime player contains unregistered authoritative flags",
+            ));
+        }
+        Ok(PlayerBootstrapStatusWireV1 {
+            request_payload_hash,
+            world_authority_revision: self.world.revision(),
+            entity_authority_revision: self.entities.revision(),
+            next_sequence: self.entity_command_sequence.checked_add(1),
+            tick: self.tick,
+            last_monotonic_time_us: self.last_monotonic_time_us,
+            last_input_sequence: self.last_input_sequence,
+            next_input_sequence,
+            last_action_sequence,
+            next_action_sequence: Some(self.next_action_sequence),
+            authoritative_flags,
+            last_applied_input: self.last_applied_input,
+            queued_inputs_empty: self.queued_inputs.is_empty(),
+            entity,
+            runtime_player,
+            world_view_binding,
+            custody,
+        })
+    }
+
+    pub fn import_player_inventory(
+        &mut self,
+        request: PlayerInventoryImportWireV1,
+        request_payload_hash: CanonicalHash,
+    ) -> Result<PlayerInventoryImportReceiptWireV1, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        let player = self.player.as_ref().ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "player-inventory-import-binding",
+                "player inventory import requires a complete runtime player binding",
+            )
+        })?;
+        let binding = self
+            .world_view
+            .state
+            .player_binding(player.binding.player_id)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "player-inventory-import-binding",
+                    "player inventory import requires a world-view player binding",
+                )
+            })?
+            .clone();
+        if binding.actor_id != player.binding.actor_id
+            || binding.entity_id != player.entity_id
+            || binding.inventory_container != request.import.inventory
+            || usize::from(request.selected_slot) >= request.import.slots.len()
+        {
+            return Err(IntegratedRuntimeError::new(
+                "player-inventory-import-binding",
+                "inventory import target or selected slot contradicts the bound authoritative player",
+            ));
+        }
+        let gameplay_system_actor = GameplayActor {
+            actor_id: GAMEPLAY_SCHEDULER_ACTOR_ID_V1.into(),
+            player_id: None,
+            entity_id: None,
+            role: ActorRole::System,
+        };
+        let key = request_payload_hash.to_hex();
+        let gameplay_batch = GameplayBatch::new(
+            format!("player-inventory-import:{key}"),
+            format!("player-inventory-import:{key}"),
+            gameplay_system_actor,
+            self.gameplay.state.identity(),
+            vec![GameplayCommand::Inventory(InventoryCommand::ImportPlayerInventoryV1(
+                request.import.clone(),
+            ))],
+        );
+        let mut candidate = self.clone();
+        let accepted = match candidate.gameplay.apply_batch(&gameplay_batch) {
+            GameplayReceipt::Accepted(receipt) => receipt,
+            GameplayReceipt::Rejected { rejection, .. } => {
+                return Err(IntegratedRuntimeError::new(
+                    "player-inventory-import-rejected",
+                    format!("{:?}: {}", rejection.code, rejection.message),
+                ));
+            }
+        };
+        let world_view_batch = WorldViewBatchV1::new(
+            format!("player-inventory-select:{key}"),
+            format!("player-inventory-select:{key}"),
+            GameplayActor {
+                actor_id: "system".into(),
+                player_id: None,
+                entity_id: None,
+                role: ActorRole::System,
+            },
+            candidate.world_view.state.identity(),
+            vec![WorldViewCommandV1::SelectPlayerSlot {
+                player_id: player.binding.player_id,
+                expected_revision: binding.revision,
+                selected_slot: request.selected_slot,
+            }],
+        );
+        let staged_world_view = stage_world_view_batches_v1(
+            &candidate.world_view,
+            &candidate.gameplay.state,
+            &candidate.entities,
+            &[world_view_batch],
+        )
+        .map_err(|error| IntegratedRuntimeError::new("player-inventory-import-world-view", error.to_string()))?;
+        candidate.world_view = staged_world_view.authority;
+        candidate
+            .player
+            .as_mut()
+            .expect("validated player remains present in cloned candidate")
+            .selected_slot = request.selected_slot as u8;
+        candidate.simulation_revision = candidate.simulation_revision.checked_add(1).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "player-inventory-import-revision",
+                "simulation revision is exhausted while selecting the imported slot",
+            )
+        })?;
+        validate_world_view_runtime_links_v1(
+            &candidate.world_view.state,
+            &candidate.gameplay.state,
+            &candidate.entities,
+        )
+        .map_err(|error| IntegratedRuntimeError::new("player-inventory-import-links", error.to_string()))?;
+        let inventory = candidate
+            .gameplay
+            .state
+            .inventory
+            .containers
+            .get(&request.import.inventory)
+            .expect("accepted inventory import retains its target");
+        let referenced_metadata = referenced_inventory_metadata(&candidate.gameplay.state, &inventory.slots)?;
+        let inventory_result_hash = player_inventory_result_hash_v1(inventory, &referenced_metadata)
+            .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+        let receipt = PlayerInventoryImportReceiptWireV1 {
+            request_payload_hash,
+            before: accepted.before,
+            after: accepted.after,
+            accepted_receipt_hash: accepted.receipt_hash,
+            inventory_revision: inventory.revision,
+            selected_slot: request.selected_slot,
+            inventory_result_hash,
+        };
+        candidate.invalidate_state_hash();
+        *self = candidate;
+        Ok(receipt)
     }
 
     pub fn bind_player(&mut self, binding: RuntimePlayerBindingWireV1) -> Result<(), IntegratedRuntimeError> {
@@ -5260,6 +5658,109 @@ fn content_blocker_error(blockers: &[blockwild_gameplay::ContentBlocker]) -> Int
         },
     );
     IntegratedRuntimeError::new("content-bundle-rejected", message)
+}
+
+fn content_runtime_blocker_error(blockers: &[blockwild_gameplay::ContentRuntimeBlocker]) -> IntegratedRuntimeError {
+    let message = blockers.first().map_or_else(
+        || "typed content materialization failed without a structured blocker".to_owned(),
+        |blocker| {
+            format!(
+                "content runtime blocker {:?} stage={:?} domain={:?} id={:?} path={} expected={:?} actual={:?}",
+                blocker.code, blocker.stage, blocker.domain, blocker.id, blocker.path, blocker.expected, blocker.actual
+            )
+        },
+    );
+    IntegratedRuntimeError::new("content-runtime-rejected", message)
+}
+
+fn item_definitions_from_runtime_registry(
+    registry: &blockwild_gameplay::ContentRuntimeRegistry,
+) -> Result<BTreeMap<u32, ItemDefinition>, IntegratedRuntimeError> {
+    let mut definitions = BTreeMap::new();
+    for record in registry.items.values() {
+        let definition = ItemDefinition {
+            code: record.item_code,
+            content_id: record.core.id.clone(),
+            max_stack: record.max_stack,
+            tags: BTreeSet::new(),
+        };
+        definition
+            .validate()
+            .map_err(|error| IntegratedRuntimeError::new("content-item-definition", error.message))?;
+        if definitions.insert(definition.code, definition).is_some() {
+            return Err(IntegratedRuntimeError::new(
+                "content-item-definition",
+                "typed content registry repeats an inventory item code",
+            ));
+        }
+    }
+    Ok(definitions)
+}
+
+fn install_content_item_definitions(
+    gameplay: &mut GameplayAuthority,
+    definitions: &BTreeMap<u32, ItemDefinition>,
+) -> Result<(), IntegratedRuntimeError> {
+    if gameplay.state.inventory.items == *definitions {
+        return Ok(());
+    }
+    if !gameplay.state.inventory.items.is_empty() {
+        return Err(IntegratedRuntimeError::new(
+            "content-item-definition-conflict",
+            "gameplay authority already owns item definitions that differ from installed content",
+        ));
+    }
+    let next_sequence = gameplay.state.revision.sequence.checked_add(1).ok_or_else(|| {
+        IntegratedRuntimeError::new(
+            "content-item-definition-revision",
+            "gameplay sequence is exhausted while installing content item definitions",
+        )
+    })?;
+    let next_inventory = gameplay.state.revision.inventory.checked_add(1).ok_or_else(|| {
+        IntegratedRuntimeError::new(
+            "content-item-definition-revision",
+            "gameplay inventory revision is exhausted while installing content item definitions",
+        )
+    })?;
+    for definition in definitions.values().cloned() {
+        gameplay
+            .state
+            .inventory
+            .register_item(definition)
+            .map_err(|error| IntegratedRuntimeError::new("content-item-definition", error.message))?;
+    }
+    if !definitions.is_empty() {
+        gameplay.state.revision.sequence = next_sequence;
+        gameplay.state.revision.inventory = next_inventory;
+    }
+    Ok(())
+}
+
+fn referenced_inventory_metadata(
+    gameplay: &GameplayState,
+    slots: &[Option<blockwild_gameplay::ItemStack>],
+) -> Result<Vec<ItemInstanceMetadataV1>, IntegratedRuntimeError> {
+    let hashes = slots
+        .iter()
+        .flatten()
+        .filter_map(|stack| (stack.metadata_hash != CanonicalHash::default()).then_some(stack.metadata_hash))
+        .collect::<BTreeSet<_>>();
+    hashes
+        .into_iter()
+        .map(|hash| {
+            gameplay
+                .inventory
+                .item_instance_metadata
+                .get(&hash)
+                .cloned()
+                .ok_or_else(|| {
+                    IntegratedRuntimeError::new(
+                        "player-inventory-metadata",
+                        "inventory stack references metadata absent from the canonical gameplay store",
+                    )
+                })
+        })
+        .collect()
 }
 
 fn write_content_domain_digests(hasher: &mut CanonicalHasher, domains: &BTreeMap<ContentDomain, ContentDomainDigest>) {
@@ -7405,7 +7906,7 @@ fn decode_runtime_content_snapshot_v1(
 fn install_runtime_content_snapshot_v1(
     config: &IntegratedRuntimeConfigV2,
     content: &IntegratedRuntimeContentSnapshotV1,
-) -> Result<(MetadataBlobStore, RuntimeContentIndexV1), IntegratedRuntimeError> {
+) -> Result<(MetadataBlobStore, RuntimeContentIndexV1, BTreeMap<u32, ItemDefinition>), IntegratedRuntimeError> {
     let Some(attestation) = &content.attestation else {
         if !content.artifacts.is_empty() {
             return Err(IntegratedRuntimeError::new(
@@ -7413,7 +7914,7 @@ fn install_runtime_content_snapshot_v1(
                 "unattested native content cannot be installed",
             ));
         }
-        return Ok((MetadataBlobStore::default(), BTreeMap::new()));
+        return Ok((MetadataBlobStore::default(), BTreeMap::new(), BTreeMap::new()));
     };
     if attestation.manifest_hash != config.content_hash {
         return Err(IntegratedRuntimeError::new(
@@ -7446,10 +7947,25 @@ fn install_runtime_content_snapshot_v1(
     let index = compiled
         .manifest
         .entries
-        .into_iter()
-        .map(|entry| ((entry.domain, entry.id), entry.blob_hash))
+        .iter()
+        .map(|entry| ((entry.domain, entry.id.clone()), entry.blob_hash))
         .collect::<BTreeMap<_, _>>();
-    Ok((store, index))
+    let (registry, runtime_report) = materialize_content_runtime(&compiled.manifest, &store)
+        .map_err(|blockers| content_runtime_blocker_error(&blockers))?;
+    if runtime_report.manifest_hash != report.manifest_hash
+        || runtime_report.installed_entries != report.installed_entries
+        || runtime_report
+            .executable_bytes
+            .checked_add(runtime_report.opaque_extension_bytes)
+            != Some(report.installed_bytes)
+    {
+        return Err(IntegratedRuntimeError::new(
+            "native-content-runtime-drift",
+            "restored typed content registry disagrees with its installed metadata bundle",
+        ));
+    }
+    let item_definitions = item_definitions_from_runtime_registry(&registry)?;
+    Ok((store, index, item_definitions))
 }
 
 #[cfg(test)]
@@ -7545,8 +8061,176 @@ mod tests {
         runtime
     }
 
-    fn runtime_with_bound_player_item(count: u32) -> IntegratedRuntimeV2 {
+    fn player_one_bootstrap_query() -> PlayerBootstrapStatusQueryWireV1 {
+        PlayerBootstrapStatusQueryWireV1 {
+            external_entity_id: "player:one".into(),
+            actor_id: "player:one".into(),
+            player_id: PlayerId::new(1, 1),
+        }
+    }
+
+    #[test]
+    fn player_bootstrap_status_is_identity_neutral_pristine_bound_restored_and_exhausted() {
+        let mut pristine = runtime_with_section();
+        let high_byte_query = PlayerBootstrapStatusQueryWireV1 {
+            external_entity_id: "player:\u{6c34}".into(),
+            actor_id: "actor:\u{6c34}".into(),
+            player_id: PlayerId::new(0x89ab_cdef, 0xfedc_ba98),
+        };
+        let before = pristine.identity();
+        let status = pristine
+            .player_bootstrap_status(&high_byte_query, CanonicalHash([0x80; 16]))
+            .unwrap();
+        assert_eq!(pristine.identity(), before);
+        assert_eq!(status.request_payload_hash, CanonicalHash([0x80; 16]));
+        assert_eq!(status.next_sequence, Some(1));
+        assert_eq!(status.last_input_sequence, None);
+        assert_eq!(status.next_input_sequence, Some(1));
+        assert_eq!(status.last_action_sequence, None);
+        assert_eq!(status.next_action_sequence, Some(1));
+        assert!(status.queued_inputs_empty);
+        assert!(status.entity.is_none());
+        assert!(status.runtime_player.is_none());
+        assert!(status.world_view_binding.is_none());
+        assert!(status.custody.is_none());
+
+        pristine.entity_command_sequence = u64::MAX;
+        assert_eq!(
+            pristine
+                .player_bootstrap_status(&high_byte_query, CanonicalHash([0x81; 16]))
+                .unwrap()
+                .next_sequence,
+            None
+        );
+
+        let mut bound = runtime_with_bound_player();
+        let before = bound.identity();
+        let expected = bound
+            .player_bootstrap_status(&player_one_bootstrap_query(), CanonicalHash([0x82; 16]))
+            .unwrap();
+        assert_eq!(bound.identity(), before);
+        assert_eq!(expected.next_sequence, Some(2));
+        assert_eq!(
+            expected.runtime_player.as_ref().unwrap().entity_id,
+            expected.entity.as_ref().unwrap().entity_id
+        );
+        assert_eq!(expected.world_view_binding.as_ref().unwrap().selected_slot, 0);
+        assert_eq!(expected.custody.as_ref().unwrap().inventory_slots.len(), 9);
+        assert_eq!(expected.custody.as_ref().unwrap().equipment_slots.len(), 8);
+        assert_eq!(expected.world_authority_revision, bound.world.revision());
+
+        bound
+            .accept_inputs(&[RuntimeInputFrameV1 {
+                sequence: u64::MAX,
+                target_tick: 0,
+                selected_slot: 0,
+                ..RuntimeInputFrameV1::default()
+            }])
+            .unwrap();
+        let queued = bound
+            .player_bootstrap_status(&player_one_bootstrap_query(), CanonicalHash([0x83; 16]))
+            .unwrap();
+        assert_eq!(queued.last_input_sequence, Some(u64::MAX));
+        assert_eq!(queued.next_input_sequence, None);
+        assert!(!queued.queued_inputs_empty);
+        assert!(queued.last_applied_input.is_none());
+        bound.step(1_000_000, 8_000).unwrap();
+        bound.step(1_050_000, 8_000).unwrap();
+        let applied = bound
+            .player_bootstrap_status(&player_one_bootstrap_query(), CanonicalHash([0x84; 16]))
+            .unwrap();
+        assert_eq!(applied.last_monotonic_time_us, 1_050_000);
+        assert_eq!(applied.last_applied_input.unwrap().sequence, u64::MAX);
+        assert!(applied.queued_inputs_empty);
+
+        let checkpoint = bound.export_runtime_checkpoint().unwrap();
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint),
+        )
+        .unwrap();
+        assert_eq!(
+            restored
+                .player_bootstrap_status(&player_one_bootstrap_query(), CanonicalHash([0x84; 16]))
+                .unwrap(),
+            applied
+        );
+    }
+
+    #[test]
+    fn dedicated_player_inventory_import_is_atomic_and_attests_selected_slot() {
         let mut runtime = runtime_with_bound_player();
+        let inventory = ContainerKey::player("player:one");
+        let request = PlayerInventoryImportWireV1 {
+            import: blockwild_gameplay::ImportPlayerInventoryV1 {
+                inventory: inventory.clone(),
+                expected_revision: 0,
+                slots: vec![None; 9],
+                metadata: Vec::new(),
+            },
+            selected_slot: 8,
+        };
+        let receipt = runtime
+            .import_player_inventory(request.clone(), CanonicalHash([0x93; 16]))
+            .unwrap();
+        assert_eq!(receipt.request_payload_hash, CanonicalHash([0x93; 16]));
+        assert_eq!(receipt.inventory_revision, 1);
+        assert_eq!(receipt.selected_slot, 8);
+        assert_ne!(receipt.before, receipt.after);
+        assert_eq!(
+            runtime
+                .world_view
+                .state
+                .player_binding(PlayerId::new(1, 1))
+                .unwrap()
+                .selected_slot,
+            8
+        );
+        assert_eq!(runtime.player().unwrap().selected_slot, 8);
+        let after = runtime.identity();
+        assert_eq!(
+            runtime
+                .import_player_inventory(request, CanonicalHash([0x94; 16]))
+                .unwrap_err()
+                .code,
+            "player-inventory-import-rejected"
+        );
+        assert_eq!(runtime.identity(), after);
+    }
+
+    fn runtime_with_bound_player_item(count: u32) -> IntegratedRuntimeV2 {
+        let artifact = ContentArtifact {
+            domain: ContentDomain::Item,
+            id: "42".into(),
+            schema_id: "item-definition".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["item:42".into()],
+            canonical_bytes: br#"{"id":42,"maxStack":64,"name":"Test Drop"}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let bundle = compile_content_bundle("test-drop-content-v1", vec![artifact.clone()]).unwrap();
+        let mut runtime = runtime_with_bound_player_config(IntegratedRuntimeConfigV2 {
+            content_hash: bundle.manifest.manifest_hash,
+            ..IntegratedRuntimeConfigV2::default()
+        });
+        let page = ContentInstallPageWireV1 {
+            install_id: "test-drop-content-install".into(),
+            manifest_schema: bundle.manifest.schema_version,
+            source_revision: bundle.manifest.source_revision,
+            manifest_hash: bundle.manifest.manifest_hash,
+            domains: bundle.manifest.domains,
+            page_index: 0,
+            page_count: 1,
+            artifacts: vec![artifact],
+        };
+        let page_bytes = crate::encode_content_install_page_v1(&page).unwrap();
+        runtime
+            .install_content_page(
+                page,
+                CanonicalHash(blockwild_runtime_wire::wire_checksum_v1(&page_bytes)),
+            )
+            .unwrap();
         let player_id = runtime.player().unwrap().binding.player_id;
         let player_entity_id = runtime.player().unwrap().entity_id;
         let actor_id = runtime.player().unwrap().binding.actor_id.clone();
@@ -7558,15 +8242,6 @@ mod tests {
             .inventory_container
             .clone();
         let mut state = runtime.gameplay().state.clone();
-        state
-            .inventory
-            .register_item(ItemDefinition {
-                code: 42,
-                content_id: "item.blockwild.test-drop".into(),
-                max_stack: 64,
-                tags: BTreeSet::new(),
-            })
-            .unwrap();
         state.inventory.containers.get_mut(&inventory_key).unwrap().slots[0] = Some(ItemStack::simple(42, count));
         state.revision.sequence = state.revision.sequence.saturating_add(1);
         state.revision.inventory = state.revision.inventory.saturating_add(1);
@@ -9555,8 +10230,10 @@ mod tests {
                 schema_id: "tcg-pack".into(),
                 schema_version: 1,
                 content_version: 7,
-                aliases: vec!["cardforge-pack:\u{6c34}-wilds".into()],
-                canonical_bytes: b"{\"cards\":[1,2]}".to_vec(),
+                aliases: vec!["cardforge-pack:pack:\u{6c34}-wilds".into()],
+                canonical_bytes: "{\"id\":\"\u{6c34}-wilds\",\"name\":\"Water Wilds\",\"retailPrice\":4,\"setIds\":[]}"
+                    .as_bytes()
+                    .to_vec(),
                 unknown_extension_bytes: vec![0x80, 0xff],
             },
             ContentArtifact {
@@ -9566,7 +10243,9 @@ mod tests {
                 schema_version: 1,
                 content_version: 3,
                 aliases: vec!["item:603".into()],
-                canonical_bytes: "{\"name\":\"Mizu \u{6c34}\"}".as_bytes().to_vec(),
+                canonical_bytes: "{\"id\":603,\"maxStack\":64,\"name\":\"Mizu \u{6c34}\"}"
+                    .as_bytes()
+                    .to_vec(),
                 unknown_extension_bytes: vec![0, 0x80, 0xff, 7],
             },
         ];
@@ -9629,9 +10308,18 @@ mod tests {
         assert!(runtime.native_save_ready());
         assert_eq!(runtime.gameplay_content_registry_len(), 2);
         assert_eq!(
+            runtime.gameplay.state.inventory.items.get(&603),
+            Some(&ItemDefinition {
+                code: 603,
+                content_id: "603".into(),
+                max_stack: 64,
+                tags: BTreeSet::new(),
+            })
+        );
+        assert_eq!(
             runtime
                 .gameplay_content_store()
-                .get_by_alias("cardforge-pack:\u{6c34}-wilds")
+                .get_by_alias("cardforge-pack:pack:\u{6c34}-wilds")
                 .unwrap()
                 .exact_bytes()
                 .1,
@@ -9650,14 +10338,37 @@ mod tests {
         assert!(restored.content_ready());
         assert_eq!(restored.gameplay_content_registry_len(), 2);
         assert_eq!(
+            restored.gameplay.state.inventory.items,
+            runtime.gameplay.state.inventory.items
+        );
+        assert_eq!(
             restored
                 .gameplay_content_store()
-                .get_by_alias("cardforge-pack:\u{6c34}-wilds")
+                .get_by_alias("cardforge-pack:pack:\u{6c34}-wilds")
                 .unwrap()
                 .exact_bytes()
                 .1,
             [0x80, 0xff]
         );
+        let mut contradictory = runtime.clone();
+        contradictory
+            .gameplay
+            .state
+            .inventory
+            .items
+            .get_mut(&603)
+            .unwrap()
+            .max_stack = 63;
+        contradictory.invalidate_state_hash();
+        let contradictory_checkpoint = contradictory.export_runtime_checkpoint().unwrap();
+        let contradictory_error = match IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &contradictory_checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&contradictory_checkpoint),
+        ) {
+            Ok(_) => panic!("contradictory gameplay/content restore must reject"),
+            Err(error) => error,
+        };
+        assert_eq!(contradictory_error.code, "recovery-content-item-definitions");
 
         let mut reordered_runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2 {
             content_hash: bundle.manifest.manifest_hash,
@@ -9689,19 +10400,84 @@ mod tests {
     }
 
     #[test]
-    fn installed_creature_profile_resolves_renderer_model_identity() {
+    fn final_content_materialization_failure_is_atomic() {
         let artifact = ContentArtifact {
-            domain: ContentDomain::CreatureProfile,
-            id: "model:asterjaw".into(),
-            schema_id: "creature-profile".into(),
+            domain: ContentDomain::Item,
+            id: "77".into(),
+            schema_id: "item-definition".into(),
             schema_version: 1,
-            content_version: 42,
-            aliases: vec!["creature:asterjaw".into()],
-            canonical_bytes: b"{\"model\":\"asterjaw\"}".to_vec(),
+            content_version: 1,
+            aliases: vec!["item:77".into()],
+            // Bundle compilation authenticates opaque bytes; typed install must
+            // reject the missing id/maxStack without leaking the final page.
+            canonical_bytes: br#"{"name":"Incomplete"}"#.to_vec(),
             unknown_extension_bytes: vec![0x80, 0xff],
         };
-        let bundle = compile_content_bundle("models-42", vec![artifact.clone()]).unwrap();
-        let expected_hash = bundle.manifest.entries[0].blob_hash;
+        let bundle = compile_content_bundle("invalid-typed-content", vec![artifact.clone()]).unwrap();
+        let mut runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2 {
+            content_hash: bundle.manifest.manifest_hash,
+            ..IntegratedRuntimeConfigV2::default()
+        })
+        .unwrap();
+        let page = ContentInstallPageWireV1 {
+            install_id: "invalid-typed-content-install".into(),
+            manifest_schema: bundle.manifest.schema_version,
+            source_revision: bundle.manifest.source_revision,
+            manifest_hash: bundle.manifest.manifest_hash,
+            domains: bundle.manifest.domains,
+            page_index: 0,
+            page_count: 1,
+            artifacts: vec![artifact],
+        };
+        let page_bytes = crate::encode_content_install_page_v1(&page).unwrap();
+        let before = runtime.identity();
+        assert_eq!(
+            runtime
+                .install_content_page(
+                    page,
+                    CanonicalHash(blockwild_runtime_wire::wire_checksum_v1(&page_bytes)),
+                )
+                .unwrap_err()
+                .code,
+            "content-runtime-rejected"
+        );
+        assert_eq!(runtime.identity(), before);
+        assert!(!runtime.content_ready());
+        assert!(runtime.gameplay.state.inventory.items.is_empty());
+    }
+
+    #[test]
+    fn installed_creature_profile_resolves_renderer_model_identity() {
+        let artifacts = vec![
+            ContentArtifact {
+                domain: ContentDomain::CreatureProfile,
+                id: "model:asterjaw".into(),
+                schema_id: "creature-profile".into(),
+                schema_version: 1,
+                content_version: 42,
+                aliases: vec!["creature-profile:model:asterjaw".into()],
+                canonical_bytes: br#"{"captureProfile":"gentle","kind":"model:asterjaw","moves":{"unlocks":[]},"naturalTypes":["wild"],"stats":{"maximumLevel":50}}"#.to_vec(),
+                unknown_extension_bytes: vec![0x80, 0xff],
+            },
+            ContentArtifact {
+                domain: ContentDomain::CreatureTypeChart,
+                id: "type:wild".into(),
+                schema_id: "creature-type".into(),
+                schema_version: 1,
+                content_version: 1,
+                aliases: vec!["creature-type-chart:type:wild".into()],
+                canonical_bytes: br##"{"color":"#5a9d55","glyph":"W","id":"wild","name":"Wild"}"##.to_vec(),
+                unknown_extension_bytes: Vec::new(),
+            },
+        ];
+        let bundle = compile_content_bundle("models-42", artifacts.clone()).unwrap();
+        let expected_hash = bundle
+            .manifest
+            .entries
+            .iter()
+            .find(|entry| entry.domain == ContentDomain::CreatureProfile)
+            .unwrap()
+            .blob_hash;
         let mut runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2 {
             content_hash: bundle.manifest.manifest_hash,
             ..IntegratedRuntimeConfigV2::default()
@@ -9719,7 +10495,7 @@ mod tests {
             domains: bundle.manifest.domains,
             page_index: 0,
             page_count: 1,
-            artifacts: vec![artifact],
+            artifacts: bundle.artifacts,
         };
         let page_bytes = crate::encode_content_install_page_v1(&page).unwrap();
         runtime

@@ -15,24 +15,24 @@ use blockwild_entity::{
 };
 use blockwild_gameplay::{
     ALL_CONTENT_DOMAINS, AcceptedReceipt, ActivityLease, ActorGrant, ActorRole, AuthorityIdentity, BattleAction,
-    CardforgeCommand, CombatCommand, ContainerKey, ContainerKind, ContentArtifact, ContentDomain, ContentDomainDigest,
-    CraftCommand, CreateDropCustodyCommand, CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3,
-    FurnaceAdvanceCommand, GAMEPLAY_COMMAND_ADVANCE_SCHEDULE_TAG_V1, GameplayActor, GameplayBatch, GameplayCommand,
-    GameplayEvent, GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1,
-    INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG, ImportPlayerInventoryV1, Ingredient, InventoryCommand,
-    ItemInstanceMetadataV1, ItemStack, MAX_ITEM_INSTANCE_METADATA_BYTES_V1,
+    CardforgeCommand, CombatCommand, ContainerKind, ContentArtifact, ContentDomain, ContentDomainDigest, CraftCommand,
+    CreateDropCustodyCommand, CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3, FurnaceAdvanceCommand,
+    GAMEPLAY_COMMAND_ADVANCE_SCHEDULE_TAG_V1, GameplayActor, GameplayBatch, GameplayCommand, GameplayEvent,
+    GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1, INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG, Ingredient,
+    InventoryCommand, ItemInstanceMetadataV1, MAX_ITEM_INSTANCE_METADATA_BYTES_V1,
     MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1, MachineCommand, MachineOperation, OpaquePayload,
-    PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1, PacifyMethod, PrintingKey, ProgressionAction, ProgressionCommand, Rejection,
-    RejectionCode, RemoveEmptyDropCustodyCommand, ResourceDelta, ResourceEndpoint, ResourceKey, ResourceKind, Scope,
-    SlotRef, StatDelta, TransferCommand, WorldKey,
+    PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1, PacifyMethod, PlayerInventoryBindingV1, PrintingKey, ProgressionAction,
+    ProgressionCommand, Rejection, RejectionCode, RemoveEmptyDropCustodyCommand, ResourceDelta, ResourceEndpoint,
+    ResourceKey, ResourceKind, Scope, SlotRef, StatDelta, TransferCommand, WorldKey,
 };
+pub use blockwild_gameplay::{ContainerKey, ImportPlayerInventoryV1, ItemStack};
 use blockwild_network::{
     AgentCapabilityGrantV1, AgentCapabilityV1, AgentLifecycleStatusV1, InterestDeltaBuildSourceV1,
     NetworkAuthorityIdentityV1, NetworkAuthorityRevisionV1, NetworkCapabilityV1, NetworkDeltaRecordKindV1,
     NetworkDeltaRecordV1, NetworkInterestChunkV1, NetworkInterestSetV1, NetworkPeerGrantV1, NetworkPeerKindV1,
     NetworkPeerRoleV1, ReplicationScopeV1, ScopedDeltaRecordV1, WorldAddressV1 as NetworkWorldAddressV1,
 };
-use blockwild_runtime_wire::{MAX_DOMAIN_PAYLOAD_BYTES, WireError, wire_checksum_v1};
+use blockwild_runtime_wire::{MAX_DOMAIN_PAYLOAD_BYTES, RuntimeInputFrameV1, WireError, wire_checksum_v1};
 use blockwild_types::{CanonicalHash, EntityId, LocationId, PlayerId};
 
 use crate::{
@@ -73,6 +73,10 @@ const ENTITY_COMPATIBILITY_EXPORT_MAGIC: [u8; 4] = *b"BWQ5";
 const ENTITY_COMPATIBILITY_IMPORT_MAGIC: [u8; 4] = *b"BWI5";
 const TERRAIN_RESIDENCY_BATCH_MAGIC: [u8; 4] = *b"BWT4";
 const TERRAIN_RESIDENCY_RECEIPT_MAGIC: [u8; 4] = *b"BWU4";
+const PLAYER_BOOTSTRAP_STATUS_QUERY_MAGIC: [u8; 4] = *b"BWS5";
+const PLAYER_BOOTSTRAP_STATUS_RECEIPT_MAGIC: [u8; 4] = *b"BWO5";
+const PLAYER_INVENTORY_IMPORT_MAGIC: [u8; 4] = *b"BWP7";
+const PLAYER_INVENTORY_IMPORT_RECEIPT_MAGIC: [u8; 4] = *b"BWI7";
 
 pub const CONTENT_INSTALL_PAGE_TYPE_V1: &str = "blockwild.gameplay.content-install-page.v1";
 pub const CONTENT_INSTALL_RECEIPT_TYPE_V1: &str = "blockwild.gameplay.content-install-receipt.v1";
@@ -87,6 +91,12 @@ pub const ENTITY_COMPATIBILITY_RECORD_TYPE_V1: &str = "blockwild.entities.compat
 pub const ENTITY_COMPATIBILITY_IMPORT_TYPE_V1: &str = "blockwild.entities.compatibility-import.r6.v1";
 pub const TERRAIN_RESIDENCY_BATCH_TYPE_V1: &str = "blockwild.world.terrain-residency.ensure.r4.v1";
 pub const TERRAIN_RESIDENCY_RECEIPT_TYPE_V1: &str = "blockwild.world.terrain-residency-receipt.r4.v1";
+pub const PLAYER_BOOTSTRAP_STATUS_TYPE_V1: &str = "blockwild.simulation.player-bootstrap-status.r5.v1";
+pub const PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1: &str = "blockwild.simulation.player-bootstrap-status-receipt.r5.v1";
+pub const PLAYER_INVENTORY_IMPORT_TYPE_V1: &str = "blockwild.gameplay.player-inventory-import.r7.v1";
+pub const PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1: &str = "blockwild.gameplay.player-inventory-import-receipt.r7.v1";
+pub const SIMULATION_PLAYER_BIND_TYPE_V3: &str = "blockwild.simulation.player-bind.r5.v3";
+pub const SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3: &str = "blockwild.simulation.player-bind-final-receipt.r5.v3";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EntityAuthorityExportWireV1 {
@@ -121,6 +131,78 @@ pub struct EntityCompatibilityImportWireV1 {
     pub desired_id: Option<EntityId>,
     pub residency: EntityResidency,
     pub record: EntityCompatibilityRecord,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerBootstrapStatusQueryWireV1 {
+    pub external_entity_id: String,
+    pub actor_id: String,
+    pub player_id: PlayerId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerBootstrapEntityWireV1 {
+    pub entity_id: EntityId,
+    pub entity_revision: u64,
+    pub residency: EntityResidency,
+    pub record: EntityCompatibilityRecord,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerBootstrapRuntimePlayerWireV1 {
+    pub entity_id: EntityId,
+    pub binding: RuntimePlayerBindingWireV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerBootstrapCustodyWireV1 {
+    pub inventory_container: ContainerKey,
+    pub inventory_revision: u64,
+    pub inventory_slots: Vec<Option<ItemStack>>,
+    pub equipment_container: ContainerKey,
+    pub equipment_revision: u64,
+    pub equipment_slots: Vec<Option<ItemStack>>,
+    /// Exact metadata records referenced by non-zero hashes in `inventory_slots`,
+    /// sorted by hash and including canonical and unknown-extension bytes.
+    pub referenced_metadata: Vec<ItemInstanceMetadataV1>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerBootstrapStatusWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub world_authority_revision: WorldAuthorityRevisionV1,
+    pub entity_authority_revision: u64,
+    pub next_sequence: Option<u64>,
+    pub tick: u64,
+    pub last_monotonic_time_us: u64,
+    pub last_input_sequence: Option<u64>,
+    pub next_input_sequence: Option<u64>,
+    pub last_action_sequence: Option<u64>,
+    pub next_action_sequence: Option<u64>,
+    pub authoritative_flags: u8,
+    pub last_applied_input: Option<RuntimeInputFrameV1>,
+    pub queued_inputs_empty: bool,
+    pub entity: Option<PlayerBootstrapEntityWireV1>,
+    pub runtime_player: Option<PlayerBootstrapRuntimePlayerWireV1>,
+    pub world_view_binding: Option<PlayerInventoryBindingV1>,
+    pub custody: Option<PlayerBootstrapCustodyWireV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerInventoryImportWireV1 {
+    pub import: ImportPlayerInventoryV1,
+    pub selected_slot: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerInventoryImportReceiptWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub before: AuthorityIdentity,
+    pub after: AuthorityIdentity,
+    pub accepted_receipt_hash: CanonicalHash,
+    pub inventory_revision: u64,
+    pub selected_slot: u16,
+    pub inventory_result_hash: CanonicalHash,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -328,6 +410,234 @@ pub fn decode_runtime_player_binding_v1(bytes: &[u8]) -> Result<RuntimePlayerBin
     };
     reader.finish()?;
     value.validate()?;
+    Ok(value)
+}
+
+pub fn encode_player_bootstrap_status_query_v1(value: &PlayerBootstrapStatusQueryWireV1) -> Result<Vec<u8>, WireError> {
+    validate_player_bootstrap_target(value)?;
+    let mut writer = Writer::default();
+    writer.string(&value.external_entity_id)?;
+    writer.string(&value.actor_id)?;
+    writer.u64(value.player_id.packed());
+    wrap(PLAYER_BOOTSTRAP_STATUS_QUERY_MAGIC, writer.finish())
+}
+
+pub fn decode_player_bootstrap_status_query_v1(bytes: &[u8]) -> Result<PlayerBootstrapStatusQueryWireV1, WireError> {
+    let mut reader = Reader::new(unwrap(PLAYER_BOOTSTRAP_STATUS_QUERY_MAGIC, bytes)?);
+    let value = PlayerBootstrapStatusQueryWireV1 {
+        external_entity_id: reader.string()?,
+        actor_id: reader.string()?,
+        player_id: {
+            let packed = reader.u64()?;
+            PlayerId::new(packed as u32, (packed >> 32) as u32)
+        },
+    };
+    reader.finish()?;
+    validate_player_bootstrap_target(&value)?;
+    Ok(value)
+}
+
+fn validate_player_bootstrap_target(value: &PlayerBootstrapStatusQueryWireV1) -> Result<(), WireError> {
+    if value.player_id.packed() == 0 {
+        return Err(WireError::new("player-bootstrap-target", "zero player id is reserved"));
+    }
+    let mut writer = Writer::default();
+    writer.string(&value.external_entity_id)?;
+    writer.string(&value.actor_id)?;
+    Ok(())
+}
+
+pub fn encode_player_bootstrap_status_v1(value: &PlayerBootstrapStatusWireV1) -> Result<Vec<u8>, WireError> {
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    writer.u64(value.world_authority_revision.epoch);
+    writer.u64(value.world_authority_revision.mutation);
+    writer.u64(value.world_authority_revision.residency);
+    writer.u64(value.entity_authority_revision);
+    writer.option_u64(value.next_sequence);
+    writer.u64(value.tick);
+    writer.u64(value.last_monotonic_time_us);
+    writer.option_u64(value.last_input_sequence);
+    writer.option_u64(value.next_input_sequence);
+    writer.option_u64(value.last_action_sequence);
+    writer.option_u64(value.next_action_sequence);
+    writer.u8(value.authoritative_flags);
+    writer.flag(value.last_applied_input.is_some());
+    if let Some(input) = value.last_applied_input {
+        write_runtime_input_frame(&mut writer, input);
+    }
+    writer.flag(value.queued_inputs_empty);
+    writer.flag(value.entity.is_some());
+    if let Some(entity) = &value.entity {
+        writer.u64(entity.entity_id.packed());
+        writer.u64(entity.entity_revision);
+        writer.u8(entity.residency as u8);
+        let record = encode_compatibility_record(&entity.record)
+            .map_err(|error| WireError::new("player-bootstrap-entity", error.to_string()))?;
+        writer.bytes(
+            &record,
+            blockwild_entity::MAX_ENTITY_AUTHORITY_SNAPSHOT_BYTES,
+            "player bootstrap compatibility record",
+        )?;
+    }
+    writer.flag(value.runtime_player.is_some());
+    if let Some(player) = &value.runtime_player {
+        writer.u64(player.entity_id.packed());
+        let binding = encode_runtime_player_binding_v1(&player.binding)?;
+        writer.bytes(&binding, MAX_DOMAIN_PAYLOAD_BYTES, "player bootstrap runtime binding")?;
+    }
+    writer.flag(value.world_view_binding.is_some());
+    if let Some(binding) = &value.world_view_binding {
+        write_player_inventory_binding(&mut writer, binding)?;
+    }
+    writer.flag(value.custody.is_some());
+    if let Some(custody) = &value.custody {
+        write_player_bootstrap_custody(&mut writer, custody)?;
+    }
+    wrap(PLAYER_BOOTSTRAP_STATUS_RECEIPT_MAGIC, writer.finish())
+}
+
+pub fn decode_player_bootstrap_status_v1(bytes: &[u8]) -> Result<PlayerBootstrapStatusWireV1, WireError> {
+    let mut reader = Reader::new(unwrap(PLAYER_BOOTSTRAP_STATUS_RECEIPT_MAGIC, bytes)?);
+    let request_payload_hash = reader.hash()?;
+    let world_authority_revision = WorldAuthorityRevisionV1 {
+        epoch: reader.u64()?,
+        mutation: reader.u64()?,
+        residency: reader.u64()?,
+    };
+    let entity_authority_revision = reader.u64()?;
+    let next_sequence = reader.option_u64()?;
+    let tick = reader.u64()?;
+    let last_monotonic_time_us = reader.u64()?;
+    let last_input_sequence = reader.option_u64()?;
+    let next_input_sequence = reader.option_u64()?;
+    let last_action_sequence = reader.option_u64()?;
+    let next_action_sequence = reader.option_u64()?;
+    let authoritative_flags = reader.u8()?;
+    let last_applied_input = if reader.flag()? {
+        Some(read_runtime_input_frame(&mut reader)?)
+    } else {
+        None
+    };
+    let queued_inputs_empty = reader.flag()?;
+    let entity = if reader.flag()? {
+        let entity_id = unpack_entity_id(reader.u64()?)?;
+        let entity_revision = reader.u64()?;
+        let residency = read_residency(&mut reader)?;
+        let record = decode_compatibility_record(&reader.bytes(
+            blockwild_entity::MAX_ENTITY_AUTHORITY_SNAPSHOT_BYTES,
+            "player bootstrap compatibility record",
+        )?)
+        .map_err(|error| WireError::new("player-bootstrap-entity", error.to_string()))?;
+        Some(PlayerBootstrapEntityWireV1 {
+            entity_id,
+            entity_revision,
+            residency,
+            record,
+        })
+    } else {
+        None
+    };
+    let runtime_player = if reader.flag()? {
+        let entity_id = unpack_entity_id(reader.u64()?)?;
+        let binding = decode_runtime_player_binding_v1(
+            &reader.bytes(MAX_DOMAIN_PAYLOAD_BYTES, "player bootstrap runtime binding")?,
+        )?;
+        Some(PlayerBootstrapRuntimePlayerWireV1 { entity_id, binding })
+    } else {
+        None
+    };
+    let world_view_binding = if reader.flag()? {
+        Some(read_player_inventory_binding(&mut reader)?)
+    } else {
+        None
+    };
+    let custody = if reader.flag()? {
+        Some(read_player_bootstrap_custody(&mut reader)?)
+    } else {
+        None
+    };
+    reader.finish()?;
+    Ok(PlayerBootstrapStatusWireV1 {
+        request_payload_hash,
+        world_authority_revision,
+        entity_authority_revision,
+        next_sequence,
+        tick,
+        last_monotonic_time_us,
+        last_input_sequence,
+        next_input_sequence,
+        last_action_sequence,
+        next_action_sequence,
+        authoritative_flags,
+        last_applied_input,
+        queued_inputs_empty,
+        entity,
+        runtime_player,
+        world_view_binding,
+        custody,
+    })
+}
+
+pub fn encode_player_inventory_import_v1(value: &PlayerInventoryImportWireV1) -> Result<Vec<u8>, WireError> {
+    if value.selected_slot >= PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1 as u16 {
+        return Err(WireError::new(
+            "player-inventory-import",
+            "selected slot is outside the imported inventory",
+        ));
+    }
+    let mut writer = Writer::default();
+    write_container_key(&mut writer, &value.import.inventory)?;
+    writer.u64(value.import.expected_revision);
+    writer.u16(value.selected_slot);
+    write_player_inventory_import_contents(&mut writer, &value.import)?;
+    wrap(PLAYER_INVENTORY_IMPORT_MAGIC, writer.finish())
+}
+
+pub fn decode_player_inventory_import_v1(bytes: &[u8]) -> Result<PlayerInventoryImportWireV1, WireError> {
+    let mut reader = Reader::new(unwrap(PLAYER_INVENTORY_IMPORT_MAGIC, bytes)?);
+    let inventory = read_container_key(&mut reader)?;
+    let expected_revision = reader.u64()?;
+    let selected_slot = reader.u16()?;
+    let import = read_player_inventory_import_contents(&mut reader, inventory, expected_revision)?;
+    reader.finish()?;
+    if selected_slot >= PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1 as u16 {
+        return Err(WireError::new(
+            "player-inventory-import",
+            "selected slot is outside the imported inventory",
+        ));
+    }
+    Ok(PlayerInventoryImportWireV1 { import, selected_slot })
+}
+
+pub fn encode_player_inventory_import_receipt_v1(
+    value: &PlayerInventoryImportReceiptWireV1,
+) -> Result<Vec<u8>, WireError> {
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    write_gameplay_identity(&mut writer, &value.before)?;
+    write_gameplay_identity(&mut writer, &value.after)?;
+    writer.hash(value.accepted_receipt_hash);
+    writer.u64(value.inventory_revision);
+    writer.u16(value.selected_slot);
+    writer.hash(value.inventory_result_hash);
+    wrap(PLAYER_INVENTORY_IMPORT_RECEIPT_MAGIC, writer.finish())
+}
+
+pub fn decode_player_inventory_import_receipt_v1(
+    bytes: &[u8],
+) -> Result<PlayerInventoryImportReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap(PLAYER_INVENTORY_IMPORT_RECEIPT_MAGIC, bytes)?);
+    let value = PlayerInventoryImportReceiptWireV1 {
+        request_payload_hash: reader.hash()?,
+        before: read_gameplay_identity(&mut reader)?,
+        after: read_gameplay_identity(&mut reader)?,
+        accepted_receipt_hash: reader.hash()?,
+        inventory_revision: reader.u64()?,
+        selected_slot: reader.u16()?,
+        inventory_result_hash: reader.hash()?,
+    };
+    reader.finish()?;
     Ok(value)
 }
 
@@ -1528,44 +1838,7 @@ fn write_inventory_command(writer: &mut Writer, value: &InventoryCommand) -> Res
         }
         InventoryCommand::ImportPlayerInventoryV1(value) => {
             writer.u8(INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG as u8);
-            write_container_key(writer, &value.inventory)?;
-            writer.u64(value.expected_revision);
-            writer.count(
-                value.slots.len(),
-                PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
-                "player inventory import slot count",
-            )?;
-            for slot in &value.slots {
-                writer.flag(slot.is_some());
-                if let Some(stack) = slot {
-                    writer.u32(stack.item_code);
-                    writer.u32(stack.count);
-                    writer.option_u32(stack.durability_millionths);
-                    writer.hash(stack.metadata_hash);
-                }
-            }
-            writer.count(
-                value.metadata.len(),
-                PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
-                "player inventory import metadata count",
-            )?;
-            for metadata in &value.metadata {
-                writer.hash(metadata.hash);
-                writer.string(&metadata.type_id)?;
-                writer.string(&metadata.schema_id)?;
-                writer.u16(metadata.schema_version);
-                writer.u32(metadata.content_version);
-                writer.bytes(
-                    &metadata.canonical_json_bytes,
-                    MAX_ITEM_INSTANCE_METADATA_BYTES_V1,
-                    "item instance metadata JSON",
-                )?;
-                writer.bytes(
-                    &metadata.unknown_extension_bytes,
-                    MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1,
-                    "item instance metadata extension",
-                )?;
-            }
+            write_player_inventory_import(writer, value)?;
         }
     }
     Ok(())
@@ -1634,55 +1907,131 @@ fn read_inventory_command(reader: &mut Reader<'_>) -> Result<InventoryCommand, W
             },
             request_hash: reader.hash()?,
         })),
-        tag if u16::from(tag) == INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG => {
-            let inventory = read_container_key(reader)?;
-            let expected_revision = reader.u64()?;
-            let slot_count = reader.count(
-                PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
-                "player inventory import slot count",
-            )?;
-            let mut slots = Vec::with_capacity(slot_count);
-            for _ in 0..slot_count {
-                slots.push(if reader.flag()? {
-                    Some(ItemStack {
-                        item_code: reader.u32()?,
-                        count: reader.u32()?,
-                        durability_millionths: reader.option_u32()?,
-                        metadata_hash: reader.hash()?,
-                    })
-                } else {
-                    None
-                });
-            }
-            let metadata_count = reader.count(
-                PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
-                "player inventory import metadata count",
-            )?;
-            let mut metadata = Vec::with_capacity(metadata_count);
-            for _ in 0..metadata_count {
-                metadata.push(ItemInstanceMetadataV1 {
-                    hash: reader.hash()?,
-                    type_id: reader.string()?,
-                    schema_id: reader.string()?,
-                    schema_version: reader.u16()?,
-                    content_version: reader.u32()?,
-                    canonical_json_bytes: reader
-                        .bytes(MAX_ITEM_INSTANCE_METADATA_BYTES_V1, "item instance metadata JSON")?,
-                    unknown_extension_bytes: reader.bytes(
-                        MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1,
-                        "item instance metadata extension",
-                    )?,
-                });
-            }
-            Ok(InventoryCommand::ImportPlayerInventoryV1(ImportPlayerInventoryV1 {
-                inventory,
-                expected_revision,
-                slots,
-                metadata,
-            }))
-        }
+        tag if u16::from(tag) == INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG => Ok(
+            InventoryCommand::ImportPlayerInventoryV1(read_player_inventory_import(reader)?),
+        ),
         _ => Err(WireError::new("inventory-command", "unknown inventory command tag")),
     }
+}
+
+fn write_player_inventory_import(writer: &mut Writer, value: &ImportPlayerInventoryV1) -> Result<(), WireError> {
+    write_container_key(writer, &value.inventory)?;
+    writer.u64(value.expected_revision);
+    write_player_inventory_import_contents(writer, value)
+}
+
+fn write_player_inventory_import_contents(
+    writer: &mut Writer,
+    value: &ImportPlayerInventoryV1,
+) -> Result<(), WireError> {
+    writer.count(
+        value.slots.len(),
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "player inventory import slot count",
+    )?;
+    for slot in &value.slots {
+        write_optional_item_stack(writer, slot);
+    }
+    writer.count(
+        value.metadata.len(),
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "player inventory import metadata count",
+    )?;
+    for metadata in &value.metadata {
+        write_item_instance_metadata(writer, metadata)?;
+    }
+    Ok(())
+}
+
+fn read_player_inventory_import(reader: &mut Reader<'_>) -> Result<ImportPlayerInventoryV1, WireError> {
+    let inventory = read_container_key(reader)?;
+    let expected_revision = reader.u64()?;
+    read_player_inventory_import_contents(reader, inventory, expected_revision)
+}
+
+fn read_player_inventory_import_contents(
+    reader: &mut Reader<'_>,
+    inventory: ContainerKey,
+    expected_revision: u64,
+) -> Result<ImportPlayerInventoryV1, WireError> {
+    let slot_count = reader.count(
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "player inventory import slot count",
+    )?;
+    let mut slots = Vec::with_capacity(slot_count);
+    for _ in 0..slot_count {
+        slots.push(read_optional_item_stack(reader)?);
+    }
+    let metadata_count = reader.count(
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "player inventory import metadata count",
+    )?;
+    let mut metadata = Vec::with_capacity(metadata_count);
+    for _ in 0..metadata_count {
+        metadata.push(read_item_instance_metadata(reader)?);
+    }
+    Ok(ImportPlayerInventoryV1 {
+        inventory,
+        expected_revision,
+        slots,
+        metadata,
+    })
+}
+
+fn write_optional_item_stack(writer: &mut Writer, value: &Option<ItemStack>) {
+    writer.flag(value.is_some());
+    if let Some(stack) = value {
+        writer.u32(stack.item_code);
+        writer.u32(stack.count);
+        writer.option_u32(stack.durability_millionths);
+        writer.hash(stack.metadata_hash);
+    }
+}
+
+fn read_optional_item_stack(reader: &mut Reader<'_>) -> Result<Option<ItemStack>, WireError> {
+    Ok(if reader.flag()? {
+        Some(ItemStack {
+            item_code: reader.u32()?,
+            count: reader.u32()?,
+            durability_millionths: reader.option_u32()?,
+            metadata_hash: reader.hash()?,
+        })
+    } else {
+        None
+    })
+}
+
+fn write_item_instance_metadata(writer: &mut Writer, value: &ItemInstanceMetadataV1) -> Result<(), WireError> {
+    writer.hash(value.hash);
+    writer.string(&value.type_id)?;
+    writer.string(&value.schema_id)?;
+    writer.u16(value.schema_version);
+    writer.u32(value.content_version);
+    writer.bytes(
+        &value.canonical_json_bytes,
+        MAX_ITEM_INSTANCE_METADATA_BYTES_V1,
+        "item instance metadata JSON",
+    )?;
+    writer.bytes(
+        &value.unknown_extension_bytes,
+        MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1,
+        "item instance metadata extension",
+    )
+}
+
+fn read_item_instance_metadata(reader: &mut Reader<'_>) -> Result<ItemInstanceMetadataV1, WireError> {
+    Ok(ItemInstanceMetadataV1 {
+        hash: reader.hash()?,
+        type_id: reader.string()?,
+        schema_id: reader.string()?,
+        schema_version: reader.u16()?,
+        content_version: reader.u32()?,
+        canonical_json_bytes: reader.bytes(MAX_ITEM_INSTANCE_METADATA_BYTES_V1, "item instance metadata JSON")?,
+        unknown_extension_bytes: reader.bytes(
+            MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1,
+            "item instance metadata extension",
+        )?,
+    })
 }
 
 fn write_container_key(writer: &mut Writer, value: &ContainerKey) -> Result<(), WireError> {
@@ -1697,6 +2046,219 @@ fn read_container_key(reader: &mut Reader<'_>) -> Result<ContainerKey, WireError
         id: reader.string()?,
         owner_id: reader.option_string()?,
     })
+}
+
+fn write_player_inventory_binding(writer: &mut Writer, value: &PlayerInventoryBindingV1) -> Result<(), WireError> {
+    writer.u64(value.player_id.packed());
+    writer.u64(value.revision);
+    writer.string(&value.actor_id)?;
+    writer.u64(value.entity_id.packed());
+    write_container_key(writer, &value.inventory_container)?;
+    write_container_key(writer, &value.equipment_container)?;
+    writer.u16(value.selected_slot);
+    writer.option_u16(value.back_slot);
+    Ok(())
+}
+
+fn read_player_inventory_binding(reader: &mut Reader<'_>) -> Result<PlayerInventoryBindingV1, WireError> {
+    let player_packed = reader.u64()?;
+    let player_id = PlayerId::new(player_packed as u32, (player_packed >> 32) as u32);
+    if player_id.packed() == 0 {
+        return Err(WireError::new("player-bootstrap-binding", "zero player id is reserved"));
+    }
+    Ok(PlayerInventoryBindingV1 {
+        player_id,
+        revision: reader.u64()?,
+        actor_id: reader.string()?,
+        entity_id: unpack_entity_id(reader.u64()?)?,
+        inventory_container: read_container_key(reader)?,
+        equipment_container: read_container_key(reader)?,
+        selected_slot: reader.u16()?,
+        back_slot: reader.option_u16()?,
+    })
+}
+
+fn write_player_bootstrap_custody(writer: &mut Writer, value: &PlayerBootstrapCustodyWireV1) -> Result<(), WireError> {
+    validate_player_bootstrap_custody(value)?;
+    write_container_key(writer, &value.inventory_container)?;
+    writer.u64(value.inventory_revision);
+    writer.count(
+        value.inventory_slots.len(),
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "player bootstrap inventory slots",
+    )?;
+    for slot in &value.inventory_slots {
+        write_optional_item_stack(writer, slot);
+    }
+    write_container_key(writer, &value.equipment_container)?;
+    writer.u64(value.equipment_revision);
+    writer.count(value.equipment_slots.len(), 8, "player bootstrap equipment slots")?;
+    for slot in &value.equipment_slots {
+        write_optional_item_stack(writer, slot);
+    }
+    writer.count(
+        value.referenced_metadata.len(),
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "player bootstrap referenced metadata",
+    )?;
+    for metadata in &value.referenced_metadata {
+        write_item_instance_metadata(writer, metadata)?;
+    }
+    Ok(())
+}
+
+fn read_player_bootstrap_custody(reader: &mut Reader<'_>) -> Result<PlayerBootstrapCustodyWireV1, WireError> {
+    let inventory_container = read_container_key(reader)?;
+    let inventory_revision = reader.u64()?;
+    let inventory_count = reader.count(
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "player bootstrap inventory slots",
+    )?;
+    let mut inventory_slots = Vec::with_capacity(inventory_count);
+    for _ in 0..inventory_count {
+        inventory_slots.push(read_optional_item_stack(reader)?);
+    }
+    let equipment_container = read_container_key(reader)?;
+    let equipment_revision = reader.u64()?;
+    let equipment_count = reader.count(8, "player bootstrap equipment slots")?;
+    let mut equipment_slots = Vec::with_capacity(equipment_count);
+    for _ in 0..equipment_count {
+        equipment_slots.push(read_optional_item_stack(reader)?);
+    }
+    let metadata_count = reader.count(
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "player bootstrap referenced metadata",
+    )?;
+    let mut referenced_metadata = Vec::with_capacity(metadata_count);
+    for _ in 0..metadata_count {
+        referenced_metadata.push(read_item_instance_metadata(reader)?);
+    }
+    let value = PlayerBootstrapCustodyWireV1 {
+        inventory_container,
+        inventory_revision,
+        inventory_slots,
+        equipment_container,
+        equipment_revision,
+        equipment_slots,
+        referenced_metadata,
+    };
+    validate_player_bootstrap_custody(&value)?;
+    Ok(value)
+}
+
+fn validate_player_bootstrap_custody(value: &PlayerBootstrapCustodyWireV1) -> Result<(), WireError> {
+    if value.inventory_slots.len() != PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1 || value.equipment_slots.len() != 8 {
+        return Err(WireError::new(
+            "player-bootstrap-custody",
+            "player custody must contain the exact nine inventory and eight equipment slots",
+        ));
+    }
+    let referenced = value
+        .inventory_slots
+        .iter()
+        .flatten()
+        .filter_map(|stack| (stack.metadata_hash != CanonicalHash::default()).then_some(stack.metadata_hash))
+        .collect::<BTreeSet<_>>();
+    let metadata_hashes = value
+        .referenced_metadata
+        .iter()
+        .map(|metadata| metadata.hash)
+        .collect::<Vec<_>>();
+    if !metadata_hashes.windows(2).all(|pair| pair[0] < pair[1])
+        || referenced.iter().copied().collect::<Vec<_>>() != metadata_hashes
+    {
+        return Err(WireError::new(
+            "player-bootstrap-metadata",
+            "player custody metadata must exactly and canonically cover referenced inventory hashes",
+        ));
+    }
+    for metadata in &value.referenced_metadata {
+        if metadata.hash != metadata.calculate_hash() {
+            return Err(WireError::new(
+                "player-bootstrap-metadata",
+                "player custody metadata hash does not match its canonical bytes",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn write_runtime_input_frame(writer: &mut Writer, value: RuntimeInputFrameV1) {
+    writer.u64(value.sequence);
+    writer.u64(value.target_tick);
+    writer.i16(value.move_x);
+    writer.i16(value.move_z);
+    writer.i16(value.look_yaw);
+    writer.i16(value.look_pitch);
+    writer.u32(value.buttons);
+    writer.u8(value.selected_slot);
+    writer.u8(value.flags);
+    writer.u16(0);
+}
+
+fn read_runtime_input_frame(reader: &mut Reader<'_>) -> Result<RuntimeInputFrameV1, WireError> {
+    let value = RuntimeInputFrameV1 {
+        sequence: reader.u64()?,
+        target_tick: reader.u64()?,
+        move_x: reader.i16()?,
+        move_z: reader.i16()?,
+        look_yaw: reader.i16()?,
+        look_pitch: reader.i16()?,
+        buttons: reader.u32()?,
+        selected_slot: reader.u8()?,
+        flags: reader.u8()?,
+    };
+    if reader.u16()? != 0 {
+        return Err(WireError::new(
+            "player-bootstrap-input",
+            "input frame reserved bits are not zero",
+        ));
+    }
+    Ok(value)
+}
+
+/// TS-verifiable checksum of the exact resulting imported inventory state.
+/// The selected slot is a world-view field and is attested separately in BWI7.
+pub fn player_inventory_result_hash_v1(
+    container: &blockwild_gameplay::Container,
+    referenced_metadata: &[ItemInstanceMetadataV1],
+) -> Result<CanonicalHash, WireError> {
+    let custody = PlayerBootstrapCustodyWireV1 {
+        inventory_container: container.key.clone(),
+        inventory_revision: container.revision,
+        inventory_slots: container.slots.clone(),
+        equipment_container: ContainerKey {
+            kind: ContainerKind::Equipment,
+            id: "hash-placeholder:equipment".into(),
+            owner_id: Some("hash-placeholder".into()),
+        },
+        equipment_revision: 0,
+        equipment_slots: vec![None; 8],
+        referenced_metadata: referenced_metadata.to_vec(),
+    };
+    validate_player_bootstrap_custody(&custody)?;
+    let mut writer = Writer::default();
+    writer.bytes.extend_from_slice(b"BIR7");
+    writer.u16(1);
+    write_container_key(&mut writer, &container.key)?;
+    writer.u64(container.revision);
+    writer.count(
+        container.slots.len(),
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "player inventory result slots",
+    )?;
+    for slot in &container.slots {
+        write_optional_item_stack(&mut writer, slot);
+    }
+    writer.count(
+        referenced_metadata.len(),
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "player inventory result metadata",
+    )?;
+    for metadata in referenced_metadata {
+        write_item_instance_metadata(&mut writer, metadata)?;
+    }
+    Ok(CanonicalHash(wire_checksum_v1(&writer.finish())))
 }
 
 fn write_slot_ref(writer: &mut Writer, value: &SlotRef) -> Result<(), WireError> {
@@ -3498,6 +4060,9 @@ impl Writer {
     fn u16(&mut self, value: u16) {
         self.bytes.extend_from_slice(&value.to_le_bytes());
     }
+    fn i16(&mut self, value: i16) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
     fn u32(&mut self, value: u32) {
         self.bytes.extend_from_slice(&value.to_le_bytes());
     }
@@ -3547,6 +4112,12 @@ impl Writer {
         self.flag(value.is_some());
         if let Some(value) = value {
             self.u32(value);
+        }
+    }
+    fn option_u16(&mut self, value: Option<u16>) {
+        self.flag(value.is_some());
+        if let Some(value) = value {
+            self.u16(value);
         }
     }
     fn option_u64(&mut self, value: Option<u64>) {
@@ -3639,6 +4210,9 @@ impl<'a> Reader<'a> {
     fn u16(&mut self) -> Result<u16, WireError> {
         Ok(u16::from_le_bytes(self.take(2)?.try_into().expect("fixed slice")))
     }
+    fn i16(&mut self) -> Result<i16, WireError> {
+        Ok(i16::from_le_bytes(self.take(2)?.try_into().expect("fixed slice")))
+    }
     fn u32(&mut self) -> Result<u32, WireError> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("fixed slice")))
     }
@@ -3695,6 +4269,9 @@ impl<'a> Reader<'a> {
     }
     fn option_u32(&mut self) -> Result<Option<u32>, WireError> {
         if self.flag()? { Ok(Some(self.u32()?)) } else { Ok(None) }
+    }
+    fn option_u16(&mut self) -> Result<Option<u16>, WireError> {
+        Ok(if self.flag()? { Some(self.u16()?) } else { None })
     }
     fn option_u64(&mut self) -> Result<Option<u64>, WireError> {
         if self.flag()? { Ok(Some(self.u64()?)) } else { Ok(None) }
@@ -4110,6 +4687,141 @@ mod tests {
         };
         command.slots.push(None);
         assert_eq!(encode_gameplay_batch_v1(&over_bound).unwrap_err().code, "domain-count");
+    }
+
+    #[test]
+    fn dedicated_player_bootstrap_status_wire_preserves_full_u64_and_high_utf8() {
+        let query = PlayerBootstrapStatusQueryWireV1 {
+            external_entity_id: "player:\u{6c34}".into(),
+            actor_id: "actor:\u{6c34}".into(),
+            player_id: PlayerId::new(0x89ab_cdef, 0xfedc_ba98),
+        };
+        let query_bytes = encode_player_bootstrap_status_query_v1(&query).unwrap();
+        assert_eq!(
+            query_bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "425753350100010023000000561cf3bf7e4449d32832401580cdddef0a000000706c617965723ae6b0b4090000006163746f723ae6b0b4efcdab8998badcfe"
+        );
+        assert_eq!(decode_player_bootstrap_status_query_v1(&query_bytes).unwrap(), query);
+        assert!(query_bytes.iter().any(|byte| *byte >= 0x80));
+
+        let status = PlayerBootstrapStatusWireV1 {
+            request_payload_hash: CanonicalHash([0x80; 16]),
+            world_authority_revision: WorldAuthorityRevisionV1 {
+                epoch: u64::MAX,
+                mutation: u64::MAX,
+                residency: u64::MAX,
+            },
+            entity_authority_revision: u64::MAX,
+            next_sequence: None,
+            tick: u64::MAX,
+            last_monotonic_time_us: u64::MAX,
+            last_input_sequence: Some(u64::MAX),
+            next_input_sequence: None,
+            last_action_sequence: Some(u64::MAX - 1),
+            next_action_sequence: Some(u64::MAX),
+            authoritative_flags: 0b111,
+            last_applied_input: Some(RuntimeInputFrameV1 {
+                sequence: u64::MAX,
+                target_tick: u64::MAX,
+                move_x: i16::MIN,
+                move_z: i16::MAX,
+                look_yaw: -1,
+                look_pitch: 1,
+                buttons: u32::MAX,
+                selected_slot: 8,
+                flags: 0b111,
+            }),
+            queued_inputs_empty: true,
+            entity: None,
+            runtime_player: None,
+            world_view_binding: None,
+            custody: None,
+        };
+        let status_bytes = encode_player_bootstrap_status_v1(&status).unwrap();
+        assert_eq!(
+            status_bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "42574f350100010084000000d3289bf01939dc61c83aa8c6b3c7e1c280808080808080808080808080808080ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff00ffffffffffffffffffffffffffffffff01ffffffffffffffff0001feffffffffffffff01ffffffffffffffff0701ffffffffffffffffffffffffffffffff0080ff7fffff0100ffffffff080700000100000000"
+        );
+        assert_eq!(decode_player_bootstrap_status_v1(&status_bytes).unwrap(), status);
+        let mut corrupt = status_bytes;
+        *corrupt.last_mut().unwrap() ^= 0x80;
+        assert_eq!(
+            decode_player_bootstrap_status_v1(&corrupt).unwrap_err().code,
+            "domain-checksum"
+        );
+    }
+
+    #[test]
+    fn dedicated_inventory_import_and_receipt_wire_are_exact_and_bounded() {
+        let mut metadata = ItemInstanceMetadataV1 {
+            hash: CanonicalHash::default(),
+            type_id: "legacy:\u{6c34}".into(),
+            schema_id: "legacy-player-item-v1".into(),
+            schema_version: 1,
+            content_version: u32::MAX,
+            canonical_json_bytes: "{\"name\":\"\u{6c34}\"}".as_bytes().to_vec(),
+            unknown_extension_bytes: vec![0, 0x80, 0xff],
+        };
+        metadata.hash = metadata.calculate_hash();
+        let mut slots = vec![None; 9];
+        slots[8] = Some(ItemStack {
+            item_code: u32::MAX,
+            count: u32::MAX,
+            durability_millionths: Some(1_000_000),
+            metadata_hash: metadata.hash,
+        });
+        let request = PlayerInventoryImportWireV1 {
+            import: ImportPlayerInventoryV1 {
+                inventory: ContainerKey::player("actor:\u{6c34}"),
+                expected_revision: 0,
+                slots: slots.clone(),
+                metadata: vec![metadata.clone()],
+            },
+            selected_slot: 8,
+        };
+        let bytes = encode_player_inventory_import_v1(&request).unwrap();
+        assert_eq!(
+            bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "4257503701000100aa000000bb993e07f9f486bd38b55f7d5a206b5200090000006163746f723ae6b0b401090000006163746f723ae6b0b40000000000000000080009000000000000000000000001ffffffffffffffff0140420f00882e9e6aeccf42c3f0de791eecf30a2e01000000882e9e6aeccf42c3f0de791eecf30a2e0a0000006c65676163793ae6b0b4150000006c65676163792d706c617965722d6974656d2d76310100ffffffff0e0000007b226e616d65223a22e6b0b4227d030000000080ff"
+        );
+        assert_eq!(decode_player_inventory_import_v1(&bytes).unwrap(), request);
+        assert!(bytes.iter().any(|byte| *byte >= 0x80));
+
+        let mut container = blockwild_gameplay::Container::new(request.import.inventory.clone(), 9);
+        container.revision = 1;
+        container.slots = slots;
+        let result_hash = player_inventory_result_hash_v1(&container, &[metadata]).unwrap();
+        assert_ne!(result_hash, CanonicalHash::default());
+        let before =
+            blockwild_gameplay::GameplayState::new(WorldKey::new("universe:\u{6c34}", "surface"), 1).identity();
+        let mut after = before.clone();
+        after.revision.sequence = u64::MAX;
+        after.revision.inventory = u64::MAX;
+        after.state_hash = CanonicalHash([0xff; 16]);
+        let receipt = PlayerInventoryImportReceiptWireV1 {
+            request_payload_hash: CanonicalHash(wire_checksum_v1(&bytes)),
+            before,
+            after,
+            accepted_receipt_hash: CanonicalHash([0x81; 16]),
+            inventory_revision: 1,
+            selected_slot: 8,
+            inventory_result_hash: result_hash,
+        };
+        let receipt_bytes = encode_player_inventory_import_receipt_v1(&receipt).unwrap();
+        assert_eq!(
+            receipt_bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "4257493701000100f80000008116c5e70a08f7876835250c5b163328a82a5446608b477238b55f7d5a206b520c000000756e6976657273653ae6b0b4070000007375726661636501000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000f79d45c28f5c7ef3c83a571e907d25030c000000756e6976657273653ae6b0b4070000007375726661636501000000ffffffffffffffffffffffffffffffff0000000000000000000000000000000000000000000000000000000000000000ffffffffffffffffffffffffffffffff8181818181818181818181818181818101000000000000000800213d5b06a014aa2038b55f7d5a206b52"
+        );
+        assert_eq!(
+            decode_player_inventory_import_receipt_v1(&receipt_bytes).unwrap(),
+            receipt
+        );
     }
 
     #[test]
