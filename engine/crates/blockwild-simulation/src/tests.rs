@@ -314,6 +314,115 @@ fn projectile_sweep_property_keeps_hits_inside_expanded_bounds() {
 }
 
 #[test]
+fn action_raycast_uses_exact_dda_normal_and_never_tunnels() {
+    let mut window = fixture::canonical_fixture().physics.window;
+    let cell = CellPos::new(4, 2, 1);
+    let index = window.index(cell).expect("action target is inside fixture window");
+    window.blocks[index] = 7;
+    window = window.seal();
+    let result = raycast_action_target(
+        &window,
+        VoxelRaycastQueryV1 {
+            query_id: 41,
+            origin: Vec3::new(-1.25, 2.0, 1.0),
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            maximum_distance: 12.0,
+            maximum_visited_cells: 64,
+            hit_liquids: false,
+        },
+        &[],
+    )
+    .expect("bounded action ray");
+    let Some(ActionRayTargetV1::Voxel(hit)) = result.target else {
+        panic!("solid voxel should be selected");
+    };
+    assert_eq!(hit.kind, VoxelRayHitKindV1::Solid);
+    assert_eq!(hit.cell, cell);
+    assert_eq!(hit.normal, Vec3::new(-1.0, 0.0, 0.0));
+    assert_eq!(hit.point, Vec3::new(3.5, 2.0, 1.0));
+    assert!(!result.budget_exhausted);
+}
+
+#[test]
+fn action_raycast_entity_order_is_stable_and_voxels_occlude() {
+    let mut window = fixture::canonical_fixture().physics.window;
+    let wall = CellPos::new(5, 2, 1);
+    let index = window.index(wall).expect("wall is inside fixture window");
+    window.blocks[index] = 9;
+    window = window.seal();
+    let query = VoxelRaycastQueryV1 {
+        query_id: 42,
+        origin: Vec3::new(-1.0, 2.0, 1.0),
+        direction: Vec3::new(1.0, 0.0, 0.0),
+        maximum_distance: 12.0,
+        maximum_visited_cells: 64,
+        hit_liquids: false,
+    };
+    let shared = AabbV1::new(Vec3::new(2.0, 1.5, 0.5), Vec3::new(3.0, 2.5, 1.5));
+    let behind = AabbV1::new(Vec3::new(7.0, 1.5, 0.5), Vec3::new(8.0, 2.5, 1.5));
+    let targets = [
+        ActionRayEntityTargetV1 {
+            entity_id: 9,
+            bounds: behind,
+        },
+        ActionRayEntityTargetV1 {
+            entity_id: 8,
+            bounds: shared,
+        },
+        ActionRayEntityTargetV1 {
+            entity_id: 2,
+            bounds: shared,
+        },
+    ];
+    let result = raycast_action_target(&window, query, &targets).expect("valid entity page");
+    assert!(matches!(
+        result.target,
+        Some(ActionRayTargetV1::Entity { entity_id: 2, distance, .. }) if distance == 3.0
+    ));
+
+    let only_behind = raycast_action_target(&window, query, &targets[..1]).expect("valid occluded entity");
+    assert!(matches!(
+        only_behind.target,
+        Some(ActionRayTargetV1::Voxel(VoxelRayHitV1 { cell, .. })) if cell == wall
+    ));
+}
+
+#[test]
+fn action_raycast_unknown_boundary_and_caps_fail_closed() {
+    let mut window = fixture::canonical_fixture().physics.window;
+    let boundary = CellPos::new(4, 2, 1);
+    let index = window.index(boundary).expect("boundary is inside fixture window");
+    window.loaded_mask[index] = 0;
+    window = window.seal();
+    let query = VoxelRaycastQueryV1 {
+        query_id: 43,
+        origin: Vec3::new(-1.0, 2.0, 1.0),
+        direction: Vec3::new(1.0, 0.0, 0.0),
+        maximum_distance: 12.0,
+        maximum_visited_cells: 64,
+        hit_liquids: false,
+    };
+    let result = raycast_action_target(&window, query, &[]).expect("unknown boundary is a result");
+    assert!(matches!(
+        result.target,
+        Some(ActionRayTargetV1::Voxel(VoxelRayHitV1 {
+            kind: VoxelRayHitKindV1::UnknownBoundary,
+            cell,
+            ..
+        })) if cell == boundary
+    ));
+
+    let duplicate = ActionRayEntityTargetV1 {
+        entity_id: 7,
+        bounds: AabbV1::new(Vec3::new(1.0, 1.0, 1.0), Vec3::new(2.0, 2.0, 2.0)),
+    };
+    assert_eq!(
+        raycast_action_target(&window, query, &[duplicate, duplicate]),
+        Err(ContractError::InvalidFlags)
+    );
+}
+
+#[test]
 fn swept_axis_property_never_commits_a_colliding_body() {
     let fixture = fixture::canonical_fixture();
     for index in 0..160_u32 {

@@ -5,6 +5,7 @@ use crate::{
 
 pub const RAYCAST_MAX_QUERIES_V1: usize = 4_096;
 pub const RAYCAST_MAX_VISITED_CELLS_V1: usize = 65_536;
+pub const ACTION_RAYCAST_MAX_ENTITY_TARGETS_V1: usize = 65_536;
 pub const PROJECTILE_MAX_BATCH_V1: usize = 4_096;
 pub const PROJECTILE_MAX_TARGETS_V1: usize = 65_536;
 pub const PROJECTILE_MAX_RADIUS_V1: f64 = 128.0;
@@ -54,6 +55,31 @@ pub struct VoxelRayHitV1 {
 pub struct VoxelRaycastResultV1 {
     pub query_id: u64,
     pub hit: Option<VoxelRayHitV1>,
+    pub visited_cells: usize,
+    pub budget_exhausted: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ActionRayEntityTargetV1 {
+    pub entity_id: u64,
+    pub bounds: AabbV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ActionRayTargetV1 {
+    Entity {
+        entity_id: u64,
+        distance: f64,
+        point: Vec3,
+        normal: Vec3,
+    },
+    Voxel(VoxelRayHitV1),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ActionRaycastResultV1 {
+    pub query_id: u64,
+    pub target: Option<ActionRayTargetV1>,
     pub visited_cells: usize,
     pub budget_exhausted: bool,
 }
@@ -204,6 +230,61 @@ pub fn raycast_voxel_batch(
         return Err(ContractError::InvalidFlags);
     }
     ordered.into_iter().map(|query| raycast_voxels(window, query)).collect()
+}
+
+/// One deterministic action ray against the authoritative voxel window and a
+/// bounded page of exact entity bounds. A voxel hit wins an exact-distance
+/// tie, so an entity touching an opaque face can never be selected through the
+/// face. Entity input order cannot affect the result.
+pub fn raycast_action_target(
+    window: &WorldReadWindowV1,
+    query: VoxelRaycastQueryV1,
+    entities: &[ActionRayEntityTargetV1],
+) -> Result<ActionRaycastResultV1, ContractError> {
+    if entities.len() > ACTION_RAYCAST_MAX_ENTITY_TARGETS_V1 {
+        return Err(ContractError::InvalidBudget);
+    }
+    let mut entities = entities.to_vec();
+    entities.sort_by_key(|target| target.entity_id);
+    if entities.windows(2).any(|pair| pair[0].entity_id == pair[1].entity_id)
+        || entities.iter().any(|target| !valid_target_bounds(target.bounds))
+    {
+        return Err(ContractError::InvalidFlags);
+    }
+
+    let voxel = raycast_voxels(window, query)?;
+    let length = query.direction.length();
+    // `raycast_voxels` already rejects a zero/non-finite direction and an
+    // invalid distance, so normalization is infallible after it succeeds.
+    let direction = query.direction * length.recip();
+    let displacement = direction * query.maximum_distance;
+    let entity = entities
+        .iter()
+        .filter_map(|target| {
+            sweep_point_aabb(query.origin, displacement, target.bounds).map(|hit| {
+                let distance = hit.time * query.maximum_distance;
+                (target.entity_id, distance, hit)
+            })
+        })
+        .filter(|(_, distance, _)| voxel.hit.is_none_or(|voxel_hit| *distance < voxel_hit.distance))
+        .min_by(|left, right| left.1.total_cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+
+    let target = match (entity, voxel.hit) {
+        (Some((entity_id, distance, hit)), _) => Some(ActionRayTargetV1::Entity {
+            entity_id,
+            distance,
+            point: hit.point,
+            normal: hit.normal,
+        }),
+        (None, Some(hit)) => Some(ActionRayTargetV1::Voxel(hit)),
+        (None, None) => None,
+    };
+    Ok(ActionRaycastResultV1 {
+        query_id: query.query_id,
+        target,
+        visited_cells: voxel.visited_cells,
+        budget_exhausted: voxel.budget_exhausted,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
