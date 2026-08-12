@@ -29,16 +29,16 @@ use blockwild_entity::{
 use blockwild_gameplay::{
     ActorGrant, ActorRole, ApplyBlockActionV1, BlockActionGeneratedStackV1, BlockActionLootBindingV1,
     BlockActionLootCellV1, BlockActionLootContextV1, BlockActionLootPlanV1, BlockActionLootRngCursorV1,
-    BlockActionLootRuleOutcomeV1, BlockActionRngDrawPurposeV1, BlockActionRngDrawV1, CombatCommand, ContainerKey,
-    ContainerKind, ContentActionPromotionBlockerRecordV1, ContentActionPromotionSupportLevelV1, ContentActionToolKind,
-    ContentArtifact, ContentBlockBreakReplacement, ContentBlockContextualOverride, ContentBlockDurabilityCost,
-    ContentDomain, ContentDomainDigest, ContentItemUseKind, ContentRenderPresentationBinding,
-    ContentRenderPresentationRole, ContentRuntimeRegistry, ContentSchema, CreateGeneratedDropCustodyV1,
-    CreatePlayerCustodyCommand, DropRemovalReasonV1, DroppedItemSpatialV1, ExpectedStack, FixedVec3, FixedWorldVec3V1,
-    GameplayActor, GameplayAuthority, GameplayBatch, GameplayCommand, GameplayReceipt, GameplayScheduleAdvanceV1,
-    GameplayState, GeneratedDropProvenanceV1, InventoryCommand, ItemDefinition, ItemInstanceMetadataV1, ItemStack,
-    MetadataBlobStore, PlayerDropStageRequestV1, PlayerInventoryBindingV1, RejectionCode,
-    RemoveEmptyDropCustodyCommand, RotationMicroturnsV1, SlotRef, TransferCommand, WorldKey,
+    BlockActionLootRuleOutcomeV1, BlockActionRngDrawPurposeV1, BlockActionRngDrawV1, CombatCommand, CombatVitalUnits,
+    CombatantState, ContainerKey, ContainerKind, ContentActionPromotionBlockerRecordV1,
+    ContentActionPromotionSupportLevelV1, ContentActionToolKind, ContentArtifact, ContentBlockBreakReplacement,
+    ContentBlockContextualOverride, ContentBlockDurabilityCost, ContentDomain, ContentDomainDigest, ContentItemUseKind,
+    ContentRenderPresentationBinding, ContentRenderPresentationRole, ContentRuntimeRegistry, ContentSchema,
+    CreateGeneratedDropCustodyV1, CreatePlayerCustodyCommand, DropRemovalReasonV1, DroppedItemSpatialV1, ExpectedStack,
+    FixedVec3, FixedWorldVec3V1, GameplayActor, GameplayAuthority, GameplayBatch, GameplayCommand, GameplayReceipt,
+    GameplayScheduleAdvanceV1, GameplayState, GeneratedDropProvenanceV1, InventoryCommand, ItemDefinition,
+    ItemInstanceMetadataV1, ItemStack, MetadataBlobStore, PlayerDropStageRequestV1, PlayerInventoryBindingV1,
+    RejectionCode, RemoveEmptyDropCustodyCommand, RotationMicroturnsV1, SlotRef, TransferCommand, WorldKey,
     WorldViewAcceptedReceiptV1, WorldViewAuthorityV1, WorldViewBatchV1, WorldViewCommandV1, WorldViewReceiptV1,
     advance_projectile_position_v1, compile_content_bundle, decode_gameplay_authority_snapshot,
     evaluate_block_action_loot_v1, install_content_bundle, materialize_content_runtime,
@@ -97,14 +97,15 @@ use crate::{
     ContentInstallPageWireV1, ContentInstallReceiptStatusV1, ContentInstallReceiptWireV1,
     EntityAuthorityImportReceiptWireV1, EntityCompatibilityImportWireV1, PlayerBindingStageRequestV1,
     PlayerBootstrapCustodyWireV1, PlayerBootstrapEntityWireV1, PlayerBootstrapRuntimePlayerWireV1,
-    PlayerBootstrapStatusQueryWireV1, PlayerBootstrapStatusWireV1, PlayerInventoryImportReceiptWireV1,
-    PlayerInventoryImportWireV1, RuntimeCameraConfigReceiptWireV1, RuntimeCameraConfigWireV1,
-    RuntimeContextCommandContinuityQueryWireV2, RuntimeContextCommandContinuityReceiptWireV2,
-    RuntimePersistenceDispatchReceiptWireV1, RuntimePersistenceDispatchWireV1, RuntimePlayerBindingWireV1,
-    WorldViewExtractionInputV1, collect_world_view_extraction_v1, decode_world_view_native_record_v1,
-    encode_world_view_native_record_v1, initialize_world_view_authority_v1, player_inventory_result_hash_v1,
-    runtime_camera_config_state_hash_v1, stage_player_binding_v1, stage_world_view_batches_v1,
-    validate_world_view_runtime_links_v1,
+    PlayerBootstrapStatusQueryWireV1, PlayerBootstrapStatusWireV1, PlayerCombatBootstrapBlockerV1,
+    PlayerCombatBootstrapStatusV1, PlayerCombatBootstrapStatusWireV1, PlayerCombatantBootstrapWireV1,
+    PlayerInventoryImportReceiptWireV1, PlayerInventoryImportWireV1, RuntimeCameraConfigReceiptWireV1,
+    RuntimeCameraConfigWireV1, RuntimeContextCommandContinuityQueryWireV2,
+    RuntimeContextCommandContinuityReceiptWireV2, RuntimePersistenceDispatchReceiptWireV1,
+    RuntimePersistenceDispatchWireV1, RuntimePlayerBindingWireV1, WorldViewExtractionInputV1,
+    collect_world_view_extraction_v1, decode_world_view_native_record_v1, encode_world_view_native_record_v1,
+    initialize_world_view_authority_v1, player_inventory_result_hash_v1, runtime_camera_config_state_hash_v1,
+    stage_player_binding_v1, stage_world_view_batches_v1, validate_world_view_runtime_links_v1,
 };
 
 pub const INTEGRATED_RUNTIME_SCHEMA_V2: u16 = 2;
@@ -1271,12 +1272,9 @@ impl IntegratedRuntimeV2 {
         candidate.entities = imported;
         candidate.entity_command_sequence = last_sequence.unwrap_or_default();
         candidate.rebuild_entity_schedules()?;
-        validate_world_view_runtime_links_v1(
-            &candidate.world_view.state,
-            &candidate.gameplay.state,
-            &candidate.entities,
-        )
-        .map_err(|error| IntegratedRuntimeError::new("entity-snapshot-world-view", error.to_string()))?;
+        candidate
+            .validate_runtime_cross_domain_links_v1()
+            .map_err(|error| IntegratedRuntimeError::new("entity-snapshot-world-view", error.message))?;
         if candidate
             .player
             .as_ref()
@@ -1653,6 +1651,63 @@ impl IntegratedRuntimeV2 {
                     "summon presentation id and creature content ref do not identify one authored role profile",
                 ));
             }
+        }
+        Ok(())
+    }
+
+    fn validate_runtime_cross_domain_links_v1(&self) -> Result<(), IntegratedRuntimeError> {
+        validate_world_view_runtime_links_v1(&self.world_view.state, &self.gameplay.state, &self.entities)
+            .map_err(|error| IntegratedRuntimeError::new("runtime-cross-domain-links", error.to_string()))?;
+        let linked_player_combatant = self.gameplay.state.combat.combatants.values().find(|combatant| {
+            combatant.entity_id.is_some()
+                && self.world_view.state.player_bindings.values().any(|binding| {
+                    binding.actor_id == combatant.record_id || Some(binding.entity_id) == combatant.entity_id
+                })
+        });
+        let Some(linked_player_combatant) = linked_player_combatant else {
+            return Ok(());
+        };
+        let Some(player) = &self.player else {
+            return Err(IntegratedRuntimeError::new(
+                "runtime-player-combat-link",
+                "player-bound R7 combatant exists without the runtime player authority",
+            ));
+        };
+        let binding = self
+            .world_view
+            .state
+            .player_binding(player.binding.player_id)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "runtime-player-link",
+                    "bound runtime player has no matching world-view player binding",
+                )
+            })?;
+        let entity = self.entities.hot().get(&player.entity_id).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "runtime-player-link",
+                "bound runtime player references an absent, stale, or cold R6 entity",
+            )
+        })?;
+        if binding.actor_id != player.binding.actor_id
+            || binding.player_id != player.binding.player_id
+            || binding.entity_id != player.entity_id
+            || entity.record.class != EntityClass::Player
+            || entity.record.external_entity_id != player.binding.external_entity_id
+        {
+            return Err(IntegratedRuntimeError::new(
+                "runtime-player-link",
+                "runtime player, world-view binding, and R6 player entity disagree",
+            ));
+        }
+        if linked_player_combatant.record_id != binding.actor_id
+            || linked_player_combatant.owner_id.as_deref() != Some(binding.actor_id.as_str())
+            || linked_player_combatant.entity_id != Some(binding.entity_id)
+        {
+            return Err(IntegratedRuntimeError::new(
+                "runtime-player-combat-link",
+                "linked player combatant disagrees with runtime and world-view player authority",
+            ));
         }
         Ok(())
     }
@@ -2712,12 +2767,9 @@ impl IntegratedRuntimeV2 {
             .map_err(|error| IntegratedRuntimeError::domain("recovery-network", error))?;
         candidate.durable_network_state_pristine = true;
         candidate.rebuild_entity_schedules()?;
-        validate_world_view_runtime_links_v1(
-            &candidate.world_view.state,
-            &candidate.gameplay.state,
-            &candidate.entities,
-        )
-        .map_err(|error| IntegratedRuntimeError::new("recovery-world-view", error.to_string()))?;
+        candidate
+            .validate_runtime_cross_domain_links_v1()
+            .map_err(|error| IntegratedRuntimeError::new("recovery-world-view", error.message))?;
         candidate.validate_block_action_history_v1()?;
         candidate.validate_combat_presentation_bindings_v1()?;
         if candidate
@@ -4170,6 +4222,9 @@ impl IntegratedRuntimeV2 {
         if let Err(error) = staged_runtime.sync_entity_schedules(&entity_receipts) {
             return reject_batch(&batch.batch_id, error.code, &error.message, before);
         }
+        if let Err(error) = staged_runtime.validate_runtime_cross_domain_links_v1() {
+            return reject_batch(&batch.batch_id, error.code, &error.message, before);
+        }
         if let Err(error) = staged_runtime.validate_combat_presentation_bindings_v1() {
             return reject_batch(&batch.batch_id, error.code, &error.message, before);
         }
@@ -4669,6 +4724,278 @@ impl IntegratedRuntimeV2 {
         })
     }
 
+    /// Installs the native player combat record from the fully staged outer
+    /// transaction candidate. Callers must invoke this only after all domain
+    /// operations, including inventory import, have succeeded.
+    pub fn install_bound_player_combatant_v1(&mut self) -> Result<(), IntegratedRuntimeError> {
+        self.ensure_running()?;
+        let player = self.player.clone().ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "player-combat-binding",
+                "player combat install requires a complete runtime player binding",
+            )
+        })?;
+        let entity = self.entities.hot().get(&player.entity_id).cloned().ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "player-combat-entity",
+                "player combat install requires the bound hot R6 entity",
+            )
+        })?;
+        if entity.record.class != EntityClass::Player
+            || entity.record.external_entity_id != player.binding.external_entity_id
+            || entity.record.health.to_bits() != entity.components.vitals.health.to_bits()
+            || entity.record.maximum_health.to_bits() != entity.components.vitals.maximum_health.to_bits()
+        {
+            return Err(IntegratedRuntimeError::new(
+                "player-combat-entity",
+                "bound R6 player identity or component vitals are inconsistent",
+            ));
+        }
+        let binding = self
+            .world_view
+            .state
+            .player_binding(player.binding.player_id)
+            .cloned()
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "player-combat-binding",
+                    "player combat install requires the world-view player binding",
+                )
+            })?;
+        if binding.actor_id != player.binding.actor_id
+            || binding.entity_id != player.entity_id
+            || usize::from(binding.selected_slot) != usize::from(player.selected_slot)
+        {
+            return Err(IntegratedRuntimeError::new(
+                "player-combat-binding",
+                "runtime and world-view player bindings disagree",
+            ));
+        }
+        let inventory = self
+            .gameplay
+            .state
+            .inventory
+            .containers
+            .get(&binding.inventory_container)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "player-combat-inventory",
+                    "player combat install requires imported inventory custody",
+                )
+            })?;
+        let equipment = self
+            .gameplay
+            .state
+            .inventory
+            .containers
+            .get(&binding.equipment_container)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "player-combat-inventory",
+                    "player combat install requires equipment custody",
+                )
+            })?;
+        if inventory.revision == 0
+            || usize::from(binding.selected_slot) >= inventory.slots.len()
+            || equipment.slots.is_empty()
+        {
+            return Err(IntegratedRuntimeError::new(
+                "player-combat-inventory",
+                "player combat install requires a completed native inventory import candidate",
+            ));
+        }
+        let health = quantize_player_vital_millihearts_v1(entity.record.health, "health")?;
+        let max_health = quantize_player_vital_millihearts_v1(entity.record.maximum_health, "maximum health")?;
+        if max_health == 0 || health > max_health {
+            return Err(IntegratedRuntimeError::new(
+                "player-combat-vitals",
+                "quantized R6 player vitals are outside their native bounds",
+            ));
+        }
+        let combatant = CombatantState {
+            record_id: player.binding.actor_id.clone(),
+            owner_id: Some(player.binding.actor_id.clone()),
+            revision: 0,
+            position: FixedVec3 {
+                x_milli: quantize_player_position_millimeters_v1(entity.record.position.x, "x")?,
+                y_milli: quantize_player_position_millimeters_v1(entity.record.position.y, "y")?,
+                z_milli: quantize_player_position_millimeters_v1(entity.record.position.z, "z")?,
+            },
+            health,
+            max_health,
+            stamina: 0,
+            mana: 0,
+            armor: 0,
+            resist_per_mille: BTreeMap::new(),
+            statuses: BTreeMap::new(),
+            cooldown_until: BTreeMap::new(),
+            alive: health > 0,
+            vital_units: CombatVitalUnits::MilliheartsV1,
+            entity_id: Some(player.entity_id),
+        };
+        self.gameplay
+            .install_linked_combatant_v1(combatant)
+            .map_err(|error| IntegratedRuntimeError::new("player-combat-install", error.message))?;
+        self.invalidate_state_hash();
+        Ok(())
+    }
+
+    /// Returns an explicit native combat bootstrap classification. Legacy
+    /// records remain visibly unlinked; this read never upgrades or fabricates
+    /// an R6 entity link.
+    pub fn player_combat_bootstrap_status_v1(
+        &self,
+        query: &PlayerBootstrapStatusQueryWireV1,
+        request_payload_hash: CanonicalHash,
+    ) -> Result<PlayerCombatBootstrapStatusWireV1, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        let mut matching_entities = self
+            .entities
+            .hot()
+            .iter()
+            .filter(|(_, entity)| entity.record.external_entity_id == query.external_entity_id)
+            .map(|(entity_id, entity)| (*entity_id, entity.record.clone(), true))
+            .chain(
+                self.entities
+                    .cold()
+                    .iter()
+                    .filter(|(_, entity)| entity.record.external_entity_id == query.external_entity_id)
+                    .map(|(entity_id, entity)| (*entity_id, entity.record.clone(), false)),
+            )
+            .collect::<Vec<_>>();
+        if matching_entities.len() > 1 {
+            return Err(IntegratedRuntimeError::new(
+                "player-combat-duplicate-entity",
+                "multiple R6 entities use the requested external player identity",
+            ));
+        }
+        let target = matching_entities.pop();
+        let target_entity_id = target.as_ref().map(|(entity_id, _, _)| *entity_id);
+        let matching_combatants = self
+            .gameplay
+            .state
+            .combat
+            .combatants
+            .values()
+            .filter(|combatant| {
+                combatant.record_id == query.actor_id
+                    || target_entity_id.is_some_and(|entity_id| combatant.entity_id == Some(entity_id))
+            })
+            .collect::<Vec<_>>();
+        let base = |status, blocker, combatant| PlayerCombatBootstrapStatusWireV1 {
+            request_payload_hash,
+            entity_authority_revision: self.entities.revision(),
+            gameplay_sequence: self.gameplay.state.revision.sequence,
+            gameplay_combat_revision: self.gameplay.state.revision.combat,
+            gameplay_state_hash: self.gameplay.state.state_hash(),
+            status,
+            blocker,
+            combatant,
+        };
+        if matching_combatants.is_empty() {
+            return Ok(base(PlayerCombatBootstrapStatusV1::Absent, None, None));
+        }
+        if matching_combatants.len() > 1 {
+            return Ok(base(
+                PlayerCombatBootstrapStatusV1::Blocked,
+                Some(PlayerCombatBootstrapBlockerV1::DuplicateCombatClaim),
+                None,
+            ));
+        }
+        let combatant = matching_combatants[0];
+        let attestation = |cross_domain_parity| PlayerCombatantBootstrapWireV1 {
+            record_id: combatant.record_id.clone(),
+            owner_id: combatant.owner_id.clone(),
+            revision: combatant.revision,
+            entity_id: combatant.entity_id,
+            vital_units: combatant.vital_units,
+            health: combatant.health,
+            max_health: combatant.max_health,
+            alive: combatant.alive,
+            cross_domain_parity,
+        };
+        if combatant.record_id == query.actor_id
+            && combatant.entity_id.is_none()
+            && combatant.vital_units == CombatVitalUnits::LegacyWholeHeartsV1
+        {
+            return Ok(base(
+                PlayerCombatBootstrapStatusV1::LegacyUnlinked,
+                Some(PlayerCombatBootstrapBlockerV1::LegacyUnlinkedRequiresExplicitMigration),
+                Some(attestation(false)),
+            ));
+        }
+        let blocked = |blocker| {
+            base(
+                PlayerCombatBootstrapStatusV1::Blocked,
+                Some(blocker),
+                Some(attestation(false)),
+            )
+        };
+        let Some((entity_id, record, hot)) = target else {
+            return Ok(blocked(PlayerCombatBootstrapBlockerV1::MissingPlayerEntity));
+        };
+        let world_view_binding = self.world_view.state.player_binding(query.player_id);
+        let binding_complete =
+            hot && self.player.as_ref().is_some_and(|player| {
+                player.entity_id == entity_id
+                    && player.binding.external_entity_id == query.external_entity_id
+                    && player.binding.actor_id == query.actor_id
+                    && player.binding.player_id == query.player_id
+            }) && world_view_binding.is_some_and(|binding| {
+                binding.entity_id == entity_id
+                    && binding.actor_id == query.actor_id
+                    && self
+                        .gameplay
+                        .state
+                        .inventory
+                        .containers
+                        .get(&binding.inventory_container)
+                        .is_some_and(|inventory| {
+                            inventory.revision > 0 && usize::from(binding.selected_slot) < inventory.slots.len()
+                        })
+                    && self
+                        .gameplay
+                        .state
+                        .inventory
+                        .containers
+                        .contains_key(&binding.equipment_container)
+            });
+        if !binding_complete {
+            return Ok(blocked(PlayerCombatBootstrapBlockerV1::IncompletePlayerBinding));
+        }
+        if combatant.record_id != query.actor_id {
+            return Ok(blocked(PlayerCombatBootstrapBlockerV1::RecordIdentityConflict));
+        }
+        if combatant.entity_id != Some(entity_id) {
+            return Ok(blocked(PlayerCombatBootstrapBlockerV1::EntityLinkConflict));
+        }
+        if combatant.owner_id.as_deref() != Some(query.actor_id.as_str()) {
+            return Ok(blocked(PlayerCombatBootstrapBlockerV1::OwnerConflict));
+        }
+        if combatant.vital_units != CombatVitalUnits::MilliheartsV1 {
+            return Ok(blocked(PlayerCombatBootstrapBlockerV1::VitalUnitConflict));
+        }
+        let Ok(health) = quantize_player_vital_millihearts_v1(record.health, "health") else {
+            return Ok(blocked(PlayerCombatBootstrapBlockerV1::InvalidEntityVitals));
+        };
+        let Ok(max_health) = quantize_player_vital_millihearts_v1(record.maximum_health, "maximum health") else {
+            return Ok(blocked(PlayerCombatBootstrapBlockerV1::InvalidEntityVitals));
+        };
+        if max_health == 0
+            || health > max_health
+            || combatant.health != health
+            || combatant.max_health != max_health
+            || combatant.alive != (health > 0)
+        {
+            return Ok(blocked(PlayerCombatBootstrapBlockerV1::VitalParityConflict));
+        }
+        Ok(base(
+            PlayerCombatBootstrapStatusV1::ExactLinked,
+            None,
+            Some(attestation(true)),
+        ))
+    }
+
     pub fn context_command_continuity_status_v2(
         &self,
         query: &RuntimeContextCommandContinuityQueryWireV2,
@@ -4789,12 +5116,9 @@ impl IntegratedRuntimeV2 {
                 "simulation revision is exhausted while selecting the imported slot",
             )
         })?;
-        validate_world_view_runtime_links_v1(
-            &candidate.world_view.state,
-            &candidate.gameplay.state,
-            &candidate.entities,
-        )
-        .map_err(|error| IntegratedRuntimeError::new("player-inventory-import-links", error.to_string()))?;
+        candidate
+            .validate_runtime_cross_domain_links_v1()
+            .map_err(|error| IntegratedRuntimeError::new("player-inventory-import-links", error.message))?;
         let inventory = candidate
             .gameplay
             .state
@@ -9802,6 +10126,44 @@ fn entity_component_to_milli_v1(value: f32) -> Option<i64> {
     Some(scaled.round() as i64)
 }
 
+fn quantize_player_vital_millihearts_v1(value: f32, label: &str) -> Result<u32, IntegratedRuntimeError> {
+    if !value.is_finite() || value.is_sign_negative() {
+        return Err(IntegratedRuntimeError::new(
+            "player-combat-vitals",
+            format!("R6 player {label} is not a finite nonnegative f32"),
+        ));
+    }
+    let scaled = f64::from(value) * 1_000.0;
+    let rounded = scaled.round();
+    if !rounded.is_finite() || rounded < 0.0 || rounded > f64::from(u32::MAX) {
+        return Err(IntegratedRuntimeError::new(
+            "player-combat-vitals",
+            format!("R6 player {label} exceeds the milliheart range"),
+        ));
+    }
+    let millihearts = rounded as u32;
+    let roundtrip = millihearts as f32 / 1_000.0;
+    if roundtrip.to_bits() != value.to_bits() {
+        return Err(IntegratedRuntimeError::new(
+            "player-combat-vitals",
+            format!("R6 player {label} is not canonically representable in millihearts"),
+        ));
+    }
+    Ok(millihearts)
+}
+
+fn quantize_player_position_millimeters_v1(value: f32, axis: &str) -> Result<i32, IntegratedRuntimeError> {
+    let scaled = f64::from(value) * 1_000.0;
+    let rounded = scaled.round();
+    if !rounded.is_finite() || rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
+        return Err(IntegratedRuntimeError::new(
+            "player-combat-position",
+            format!("R6 player {axis} position exceeds the fixed combat range"),
+        ));
+    }
+    Ok(rounded as i32)
+}
+
 fn drop_entity_transform_matches_v1(drop: &DroppedItemSpatialV1, record: &EntityCompatibilityRecord) -> bool {
     let position_matches = [
         (drop.position.x_milli, record.position.x),
@@ -12455,6 +12817,324 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn player_vital_milliheart_quantization_is_checked_and_canonical() {
+        assert_eq!(quantize_player_vital_millihearts_v1(10.0, "health").unwrap(), 10_000);
+        assert_eq!(quantize_player_vital_millihearts_v1(9.5, "health").unwrap(), 9_500);
+        assert_eq!(quantize_player_vital_millihearts_v1(0.0, "health").unwrap(), 0);
+        for value in [-0.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1.0 / 3.0, 4_294_968.0] {
+            assert!(
+                quantize_player_vital_millihearts_v1(value, "health").is_err(),
+                "unexpectedly accepted {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn player_combat_status_distinguishes_absent_legacy_and_exact_linked() {
+        let query = PlayerBootstrapStatusQueryWireV1 {
+            external_entity_id: "player:one".into(),
+            actor_id: "player:one".into(),
+            player_id: PlayerId::new(1, 1),
+        };
+        let absent = runtime_with_bound_player();
+        let status = absent
+            .player_combat_bootstrap_status_v1(&query, CanonicalHash([1; 16]))
+            .unwrap();
+        assert_eq!(status.status, PlayerCombatBootstrapStatusV1::Absent);
+        assert!(status.blocker.is_none() && status.combatant.is_none());
+
+        let mut legacy = runtime_with_bound_player();
+        legacy.gameplay.state.combat.combatants.insert(
+            "player:one".into(),
+            CombatantState {
+                record_id: "player:one".into(),
+                owner_id: Some("player:one".into()),
+                revision: 0,
+                position: FixedVec3::default(),
+                health: 20,
+                max_health: 20,
+                stamina: 100,
+                mana: 100,
+                armor: 0,
+                resist_per_mille: BTreeMap::new(),
+                statuses: BTreeMap::new(),
+                cooldown_until: BTreeMap::new(),
+                alive: true,
+                vital_units: CombatVitalUnits::LegacyWholeHeartsV1,
+                entity_id: None,
+            },
+        );
+        legacy.invalidate_state_hash();
+        let status = legacy
+            .player_combat_bootstrap_status_v1(&query, CanonicalHash([2; 16]))
+            .unwrap();
+        assert_eq!(status.status, PlayerCombatBootstrapStatusV1::LegacyUnlinked);
+        assert_eq!(
+            status.blocker,
+            Some(PlayerCombatBootstrapBlockerV1::LegacyUnlinkedRequiresExplicitMigration)
+        );
+        assert_eq!(status.combatant.unwrap().entity_id, None);
+
+        let mut linked = runtime_with_bound_player();
+        linked
+            .import_player_inventory(
+                PlayerInventoryImportWireV1 {
+                    import: blockwild_gameplay::ImportPlayerInventoryV1 {
+                        inventory: ContainerKey::player("player:one"),
+                        expected_revision: 0,
+                        slots: vec![None; 9],
+                        metadata: Vec::new(),
+                    },
+                    selected_slot: 0,
+                },
+                CanonicalHash([3; 16]),
+            )
+            .unwrap();
+        let before_combat_hash = linked.state_hash();
+        linked.install_bound_player_combatant_v1().unwrap();
+        let installed_hash = linked.state_hash();
+        assert_ne!(
+            installed_hash, before_combat_hash,
+            "combat install must invalidate the cached runtime hash"
+        );
+        let status = linked
+            .player_combat_bootstrap_status_v1(&query, CanonicalHash([4; 16]))
+            .unwrap();
+        assert_eq!(status.status, PlayerCombatBootstrapStatusV1::ExactLinked);
+        assert!(status.blocker.is_none());
+        let combatant = status.combatant.unwrap();
+        assert_eq!(combatant.vital_units, CombatVitalUnits::MilliheartsV1);
+        assert_eq!((combatant.health, combatant.max_health), (20_000, 20_000));
+        assert!(combatant.cross_domain_parity);
+        assert!(linked.gameplay.state.combat.abilities.is_empty());
+
+        let evolved = linked.gameplay.state.combat.combatants.get_mut("player:one").unwrap();
+        evolved.revision = 4;
+        evolved.position.x_milli = 9_250;
+        evolved.stamina = 55;
+        evolved.mana = 34;
+        linked.invalidate_state_hash();
+        let evolved_hash = linked.state_hash();
+        linked.install_bound_player_combatant_v1().unwrap();
+        assert_eq!(
+            linked.state_hash(),
+            evolved_hash,
+            "exact V4 replay must not reset evolved combat state"
+        );
+        let replayed = &linked.gameplay.state.combat.combatants["player:one"];
+        assert_eq!(replayed.revision, 4);
+        assert_eq!(replayed.position.x_milli, 9_250);
+        assert_eq!((replayed.stamina, replayed.mana), (55, 34));
+    }
+
+    #[test]
+    fn linked_player_combat_restore_import_and_outer_transaction_reject_cross_domain_drift_atomically() {
+        let mut runtime = runtime_with_linked_player_combat();
+        let player_entity_id = runtime.player.as_ref().unwrap().entity_id;
+
+        let mut other = EntityCompatibilityRecord::new("construct:other", "construct:other", "construct");
+        other.class = EntityClass::Construct;
+        let mut replay_anchor =
+            EntityCompatibilityRecord::new("construct:replay-anchor", "construct:replay-anchor", "construct");
+        replay_anchor.class = EntityClass::Construct;
+        commit_entity_commands(
+            &mut runtime,
+            "spawn-other-linked-candidate",
+            vec![
+                EntityCommand::Spawn {
+                    record: other,
+                    residency: EntityResidency::Hot,
+                },
+                EntityCommand::Spawn {
+                    record: replay_anchor,
+                    residency: EntityResidency::Hot,
+                },
+            ],
+        );
+        let other_entity_id = runtime
+            .entities
+            .hot()
+            .iter()
+            .find(|(_, entity)| entity.record.external_entity_id == "construct:other")
+            .map(|(entity_id, _)| *entity_id)
+            .unwrap();
+        let replay_anchor_entity_id = runtime
+            .entities
+            .hot()
+            .iter()
+            .find(|(_, entity)| entity.record.external_entity_id == "construct:replay-anchor")
+            .map(|(entity_id, _)| *entity_id)
+            .unwrap();
+        let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint),
+        )
+        .unwrap();
+        assert!(
+            restored.gameplay.state.combat.combatants["legacy-unlinked"]
+                .entity_id
+                .is_none()
+        );
+
+        let wrong_link = rewrite_checkpoint_cross_domain_records(&checkpoint, |gameplay, _, _| {
+            gameplay
+                .state
+                .combat
+                .combatants
+                .get_mut("player:one")
+                .unwrap()
+                .entity_id = Some(other_entity_id);
+            gameplay
+                .install_linked_combatant_v1(CombatantState {
+                    record_id: "replay-anchor".into(),
+                    owner_id: None,
+                    revision: 0,
+                    position: FixedVec3::default(),
+                    health: 1_000,
+                    max_health: 1_000,
+                    stamina: 0,
+                    mana: 0,
+                    armor: 0,
+                    resist_per_mille: BTreeMap::new(),
+                    statuses: BTreeMap::new(),
+                    cooldown_until: BTreeMap::new(),
+                    alive: true,
+                    vital_units: CombatVitalUnits::MilliheartsV1,
+                    entity_id: Some(replay_anchor_entity_id),
+                })
+                .unwrap();
+        });
+        let wrong_link_error = match IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &wrong_link,
+            integrated_runtime_checkpoint_hash_v1(&wrong_link),
+        ) {
+            Ok(_) => panic!("checkpoint with a cross-linked player combatant unexpectedly restored"),
+            Err(error) => error,
+        };
+        assert_eq!(wrong_link_error.code, "recovery-world-view");
+        assert!(
+            wrong_link_error
+                .message
+                .contains("R7 player combatant player:one disagrees with bound R6 entity")
+        );
+
+        let missing_runtime_player = rewrite_checkpoint_cross_domain_records(&checkpoint, |_, core, _| {
+            core.player = None;
+        });
+        let missing_runtime_error = match IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &missing_runtime_player,
+            integrated_runtime_checkpoint_hash_v1(&missing_runtime_player),
+        ) {
+            Ok(_) => panic!("checkpoint with linked player combat but no runtime player unexpectedly restored"),
+            Err(error) => error,
+        };
+        assert_eq!(missing_runtime_error.code, "recovery-world-view");
+        assert!(
+            missing_runtime_error
+                .message
+                .contains("player-bound R7 combatant exists without the runtime player authority")
+        );
+
+        let wrong_external_restore = rewrite_checkpoint_cross_domain_records(&checkpoint, |_, _, entities| {
+            let mut record = entities.compatibility_record(player_entity_id).unwrap().clone();
+            record.external_entity_id = "player:wrong-external".into();
+            entities
+                .apply_batch(&EntityCommandBatch {
+                    schema: ENTITY_COMMAND_SCHEMA,
+                    sequence: runtime.entity_command_sequence.saturating_add(1),
+                    expected_revision: entities.revision(),
+                    tick: runtime.tick,
+                    commands: vec![EntityCommand::ReplaceCompatibilityRecord {
+                        id: player_entity_id,
+                        value: record,
+                    }],
+                })
+                .unwrap();
+        });
+        let wrong_external_restore_error = match IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &wrong_external_restore,
+            integrated_runtime_checkpoint_hash_v1(&wrong_external_restore),
+        ) {
+            Ok(_) => panic!("checkpoint with drifted R6 player external identity unexpectedly restored"),
+            Err(error) => error,
+        };
+        assert_eq!(wrong_external_restore_error.code, "recovery-world-view");
+        assert!(
+            wrong_external_restore_error
+                .message
+                .contains("runtime player, world-view binding, and R6 player entity disagree")
+        );
+
+        let mut imported_entities = runtime.entities.clone();
+        let mut wrong_external = imported_entities
+            .compatibility_record(player_entity_id)
+            .unwrap()
+            .clone();
+        wrong_external.external_entity_id = "player:wrong-external".into();
+        imported_entities
+            .apply_batch(&EntityCommandBatch {
+                schema: ENTITY_COMMAND_SCHEMA,
+                sequence: runtime.entity_command_sequence.saturating_add(1),
+                expected_revision: imported_entities.revision(),
+                tick: runtime.tick,
+                commands: vec![EntityCommand::ReplaceCompatibilityRecord {
+                    id: player_entity_id,
+                    value: wrong_external,
+                }],
+            })
+            .unwrap();
+        let imported_snapshot = encode_entity_authority_snapshot(&imported_entities).unwrap();
+        let before_import = runtime.identity();
+        let wrong_external_import_error = runtime
+            .import_entity_authority_snapshot(runtime.entities.revision(), &imported_snapshot)
+            .unwrap_err();
+        assert_eq!(wrong_external_import_error.code, "entity-snapshot-world-view");
+        assert!(
+            wrong_external_import_error
+                .message
+                .contains("runtime player, world-view binding, and R6 player entity disagree")
+        );
+        assert_eq!(runtime.identity(), before_import);
+        assert_eq!(
+            runtime
+                .entities
+                .compatibility_record(player_entity_id)
+                .unwrap()
+                .external_entity_id,
+            "player:one"
+        );
+
+        let mut wrong_class = runtime.entities.compatibility_record(player_entity_id).unwrap().clone();
+        wrong_class.class = EntityClass::Construct;
+        let mut batch = IntegratedRuntimeBatchV2::empty("combat-link-transaction-rollback", runtime.identity());
+        batch.entities.push(EntityCommandBatch {
+            schema: ENTITY_COMMAND_SCHEMA,
+            sequence: runtime.entity_command_sequence.saturating_add(1),
+            expected_revision: runtime.entities.revision(),
+            tick: runtime.tick,
+            commands: vec![EntityCommand::ReplaceCompatibilityRecord {
+                id: player_entity_id,
+                value: wrong_class,
+            }],
+        });
+        let before_transaction = runtime.identity();
+        let IntegratedRuntimeReceiptV2::Rejected(rejection) = runtime.commit(batch) else {
+            panic!("outer transaction that invalidates linked player combat unexpectedly committed");
+        };
+        assert_eq!(rejection.code, "world-view-rejected");
+        assert_eq!(runtime.identity(), before_transaction);
+        assert_eq!(
+            runtime.entities.compatibility_record(player_entity_id).unwrap().class,
+            EntityClass::Player
+        );
+        assert_eq!(
+            runtime.gameplay.state.combat.combatants["player:one"].entity_id,
+            Some(player_entity_id)
+        );
+    }
+
     fn runtime_with_section() -> IntegratedRuntimeV2 {
         runtime_with_section_config(IntegratedRuntimeConfigV2::default())
     }
@@ -12494,6 +13174,46 @@ mod tests {
 
     fn runtime_with_bound_player() -> IntegratedRuntimeV2 {
         runtime_with_bound_player_config(IntegratedRuntimeConfigV2::default())
+    }
+
+    fn runtime_with_linked_player_combat() -> IntegratedRuntimeV2 {
+        let mut runtime = runtime_with_bound_player();
+        runtime.gameplay.state.combat.combatants.insert(
+            "legacy-unlinked".into(),
+            CombatantState {
+                record_id: "legacy-unlinked".into(),
+                owner_id: None,
+                revision: 0,
+                position: FixedVec3::default(),
+                health: 10,
+                max_health: 20,
+                stamina: 0,
+                mana: 0,
+                armor: 0,
+                resist_per_mille: BTreeMap::new(),
+                statuses: BTreeMap::new(),
+                cooldown_until: BTreeMap::new(),
+                alive: true,
+                vital_units: CombatVitalUnits::LegacyWholeHeartsV1,
+                entity_id: None,
+            },
+        );
+        runtime
+            .import_player_inventory(
+                PlayerInventoryImportWireV1 {
+                    import: blockwild_gameplay::ImportPlayerInventoryV1 {
+                        inventory: ContainerKey::player("player:one"),
+                        expected_revision: 0,
+                        slots: vec![None; 9],
+                        metadata: Vec::new(),
+                    },
+                    selected_slot: 0,
+                },
+                CanonicalHash([0x91; 16]),
+            )
+            .unwrap();
+        runtime.install_bound_player_combatant_v1().unwrap();
+        runtime
     }
 
     fn runtime_with_bound_player_config(config: IntegratedRuntimeConfigV2) -> IntegratedRuntimeV2 {
@@ -15240,6 +15960,107 @@ mod tests {
             descriptors,
         )
         .unwrap();
+    }
+
+    fn rewrite_checkpoint_cross_domain_records(
+        checkpoint: &[u8],
+        mut rewrite: impl FnMut(&mut GameplayAuthority, &mut IntegratedRuntimeCoreSnapshotV1, &mut EntityAuthority),
+    ) -> Vec<u8> {
+        let mut outer = NativeReaderV1::new(checkpoint);
+        let body = outer.bytes(NATIVE_RECORD_MAX_BYTES_V1).unwrap();
+        let stored_outer_hash = outer.hash().unwrap();
+        outer.finish().unwrap();
+        assert_eq!(runtime_checkpoint_hash_v1(&body), stored_outer_hash);
+
+        let mut reader = NativeReaderV1::new(&body);
+        reader.magic(NATIVE_CHECKPOINT_MAGIC_V1).unwrap();
+        assert_eq!(reader.u16().unwrap(), NATIVE_CHECKPOINT_SCHEMA_V1);
+        let _old_bundle_hash = reader.hash().unwrap();
+        let expected_state_hash = reader.hash().unwrap();
+        let expected_replay_hash = reader.hash().unwrap();
+        let record_count = reader
+            .count(NATIVE_CHECKPOINT_MAX_RECORDS_V1, "checkpoint records")
+            .unwrap();
+        let mut envelopes = BTreeMap::new();
+        for _ in 0..record_count {
+            let kind = IntegratedRuntimeNativeRecordKindV1::from_tag(reader.u8().unwrap()).unwrap();
+            let envelope =
+                decode_native_record_envelope_v1(&reader.bytes(NATIVE_RECORD_MAX_BYTES_V1).unwrap()).unwrap();
+            assert_eq!(kind, envelope.kind);
+            envelopes.insert(kind, envelope);
+        }
+        assert!(
+            !reader.bool().unwrap(),
+            "fixture checkpoint unexpectedly has a durable head"
+        );
+        let dispatcher = reader.bytes(NATIVE_RECORD_MAX_BYTES_V1).unwrap();
+        reader.finish().unwrap();
+
+        let mut decoded =
+            decode_gameplay_authority_snapshot(&envelopes[&IntegratedRuntimeNativeRecordKindV1::Gameplay].body)
+                .unwrap();
+        let runtime = envelopes
+            .get(&IntegratedRuntimeNativeRecordKindV1::Runtime)
+            .expect("runtime checkpoint envelope");
+        let mut core = decode_runtime_core_snapshot_v1(&runtime.body).unwrap();
+        let mut entities =
+            decode_entity_authority_snapshot(&envelopes[&IntegratedRuntimeNativeRecordKindV1::Entities].body).unwrap();
+        rewrite(&mut decoded.authority, &mut core, &mut entities);
+        if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V5 {
+            core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&core).unwrap());
+            core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&core));
+        }
+        envelopes
+            .get_mut(&IntegratedRuntimeNativeRecordKindV1::Gameplay)
+            .expect("gameplay checkpoint envelope")
+            .body = decoded
+            .authority
+            .encode_snapshot(&decoded.unknown_extension_bytes)
+            .unwrap();
+        envelopes
+            .get_mut(&IntegratedRuntimeNativeRecordKindV1::Runtime)
+            .expect("runtime checkpoint envelope")
+            .body = encode_runtime_core_snapshot_body_v1(&core, core.schema).unwrap();
+        envelopes
+            .get_mut(&IntegratedRuntimeNativeRecordKindV1::Entities)
+            .expect("entity checkpoint envelope")
+            .body = encode_entity_authority_snapshot(&entities).unwrap();
+        let bodies = envelopes
+            .iter()
+            .map(|(kind, envelope)| (*kind, envelope.body.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let first = envelopes.values().next().unwrap();
+        let bundle_hash = native_bundle_hash_v1(
+            &first.universe_id,
+            &first.location_id,
+            first.generator_hash,
+            first.content_hash,
+            &bodies,
+        );
+        for envelope in envelopes.values_mut() {
+            envelope.bundle_hash = bundle_hash;
+        }
+
+        let mut writer = NativeWriterV1::default();
+        writer.raw(NATIVE_CHECKPOINT_MAGIC_V1);
+        writer.u16(NATIVE_CHECKPOINT_SCHEMA_V1);
+        writer.hash(bundle_hash);
+        writer.hash(expected_state_hash);
+        writer.hash(expected_replay_hash);
+        writer.u32(record_count as u32);
+        for kind in IntegratedRuntimeNativeRecordKindV1::ALL {
+            writer.u8(kind as u8);
+            writer
+                .bytes(&encode_native_record_envelope_v1(&envelopes[&kind]).unwrap())
+                .unwrap();
+        }
+        writer.bool(false);
+        writer.bytes(&dispatcher).unwrap();
+        let body = writer.finish();
+        let mut output = NativeWriterV1::default();
+        output.bytes(&body).unwrap();
+        output.hash(runtime_checkpoint_hash_v1(&body));
+        output.finish()
     }
 
     fn activate_fixture_network_grant(runtime: &mut IntegratedRuntimeV2) {

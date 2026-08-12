@@ -49,6 +49,13 @@ import {
   type RustIntegratedPlayerInventoryBindingAttestationV1,
   type RustIntegratedPlayerRuntimeContinuityV1,
 } from "./rust-integrated-runtime-player-status";
+import {
+  decodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1,
+  encodeRustIntegratedPlayerCombatBootstrapStatusQueryV1,
+  RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+  RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
+  type RustIntegratedPlayerCombatBootstrapStatusReceiptV1,
+} from "./rust-integrated-runtime-player-combat-status";
 import type {
   RustEntityCompatibilityRecordR6,
   RustEntityResidencyR6,
@@ -64,10 +71,12 @@ export type {
   RustIntegratedPlayerRuntimeContinuityV1,
 } from "./rust-integrated-runtime-player-status";
 
-const BWF6_ACK_MAGIC = Uint8Array.of(0x42, 0x57, 0x46, 0x36);
-const BWF6_ACK_BYTES = 38;
 export const RUST_INTEGRATED_PLAYER_FINAL_BIND_TYPE_V3 = "blockwild.simulation.player-bind.r5.v3";
 export const RUST_INTEGRATED_PLAYER_FINAL_BIND_RECEIPT_TYPE_V3 = "blockwild.simulation.player-bind-final-receipt.r5.v3";
+const BWF7_ACK_MAGIC = Uint8Array.of(0x42, 0x57, 0x46, 0x37);
+const BWF7_ACK_BYTES = 38;
+export const RUST_INTEGRATED_PLAYER_COMBAT_BIND_TYPE_V4 = "blockwild.simulation.player-bind.r5.v4";
+export const RUST_INTEGRATED_PLAYER_COMBAT_BIND_RECEIPT_TYPE_V4 = "blockwild.simulation.player-bind-final-receipt.r5.v4";
 const PLAYER_BACK_SLOT_V1 = 7;
 const U64_MAX = (BigInt(1) << BigInt(64)) - BigInt(1);
 const textEncoder = new TextEncoder();
@@ -95,6 +104,7 @@ export type RustIntegratedPlayerBootstrapObservationV1 = Readonly<{
   }> | null;
   worldViewBinding: RustIntegratedPlayerInventoryBindingAttestationV1 | null;
   custody: RustIntegratedPlayerCustodyAttestationV1;
+  combat: RustIntegratedPlayerCombatBootstrapStatusReceiptV1;
 }>;
 
 export type RustIntegratedPlayerBootstrapIntentV1 = Readonly<{
@@ -117,6 +127,7 @@ export type RustIntegratedPlayerBootstrapPlanV1 =
     batch: null;
     entityImport: null;
     inventoryImport: null;
+    combatBind: null;
   }>
   | Readonly<{
     status: "import-pristine" | "bind-and-import";
@@ -125,6 +136,7 @@ export type RustIntegratedPlayerBootstrapPlanV1 =
     batch: RustIntegratedRuntimeCommandBatchV1;
     entityImport: null;
     inventoryImport: RustIntegratedPlayerInventoryImportV1;
+    combatBind: RustIntegratedRuntimeCommandBatchV1["operations"][number] | null;
   }>
   | Readonly<{
     status: "spawn-bind-and-import";
@@ -133,10 +145,20 @@ export type RustIntegratedPlayerBootstrapPlanV1 =
     batch: RustIntegratedRuntimeCommandBatchV1;
     entityImport: RustIntegratedEntityCompatibilityImportV1;
     inventoryImport: RustIntegratedPlayerInventoryImportV1;
+    combatBind: RustIntegratedRuntimeCommandBatchV1["operations"][number];
+  }>
+  | Readonly<{
+    status: "install-combat";
+    entityId: bigint;
+    expected: RustIntegratedRuntimeIdentityV1;
+    batch: RustIntegratedRuntimeCommandBatchV1;
+    entityImport: null;
+    inventoryImport: null;
+    combatBind: RustIntegratedRuntimeCommandBatchV1["operations"][number];
   }>;
 
 export type RustIntegratedPlayerBootstrapResultV1 = Readonly<{
-  status: "already-matching" | "inventory-imported" | "bound-and-imported" | "spawned-bound-and-imported";
+  status: "already-matching" | "combat-installed" | "inventory-imported" | "bound-and-imported" | "spawned-bound-and-imported";
   entityId: bigint;
   identity: RustIntegratedRuntimeIdentityV1;
   receipt: RustIntegratedRuntimeCommandReceiptV1 | null;
@@ -288,8 +310,8 @@ function validateMatchingBindings(
 function bindingOperation(binding: RustIntegratedPlayerBindingV1) {
   return createRustIntegratedRuntimeDomainOperationV1({
     domain: "simulation",
-    typeId: RUST_INTEGRATED_PLAYER_FINAL_BIND_TYPE_V3,
-    schema: 3,
+    typeId: RUST_INTEGRATED_PLAYER_COMBAT_BIND_TYPE_V4,
+    schema: 4,
     payload: encodeRustIntegratedPlayerBindingV1(binding),
   });
 }
@@ -324,6 +346,66 @@ function batchFor(
     expected,
     operations,
   });
+}
+
+function canonicalMillihearts(value: number, label: string) {
+  if (!Number.isFinite(value) || value < 0 || Object.is(value, -0) || value !== Math.fround(value)) {
+    fail("bootstrap-combat-vitals", `${label} is not a finite nonnegative native f32`);
+  }
+  const rounded = Math.round(value * 1_000);
+  if (!Number.isSafeInteger(rounded) || rounded < 0 || rounded > 0xffff_ffff) {
+    fail("bootstrap-combat-vitals", `${label} exceeds the milliheart range`);
+  }
+  const roundtrip = Math.fround(Math.fround(rounded) / Math.fround(1_000));
+  if (!Object.is(roundtrip, value)) {
+    fail("bootstrap-combat-vitals", `${label} is not canonically representable in millihearts`);
+  }
+  return rounded;
+}
+
+export function validateRustIntegratedPlayerCombatBootstrapV1(
+  observation: RustIntegratedPlayerBootstrapObservationV1,
+  actorId: string,
+) {
+  const status = observation.combat;
+  u64(status.entityAuthorityRevision, "combat status entity authority revision");
+  u64(status.gameplaySequence, "combat status gameplay sequence");
+  u64(status.gameplayCombatRevision, "combat status gameplay revision");
+  if (!/^[0-9a-f]{32}$/u.test(status.gameplayStateHash)
+    || status.entityAuthorityRevision !== observation.entityAuthority.revision
+    || status.entityAuthorityRevision !== BigInt(observation.identity.revision.entities)) {
+    fail("bootstrap-combat-status", "BWO7 authority cursors contradict BWO5");
+  }
+  if (status.status === "absent") return false;
+  if (status.status === "legacy-unlinked" || status.status === "blocked") {
+    fail(
+      "bootstrap-combat-blocked",
+      `native player combat bootstrap is blocked: ${status.blocker ?? "missing-blocker"}`,
+    );
+  }
+  const entity = observation.entity;
+  const combatant = status.combatant;
+  if (status.status !== "exact-linked"
+    || status.blocker !== null
+    || entity === null
+    || combatant === null
+    || !combatant.crossDomainParity
+    || combatant.recordId !== actorId
+    || combatant.ownerId !== actorId
+    || combatant.entityId !== entity.entityId
+    || combatant.vitalUnits !== "millihearts-v1") {
+    fail("bootstrap-combat-status", "BWO7 does not attest the exact linked player combat record");
+  }
+  const health = canonicalMillihearts(entity.record.health, "R6 player health");
+  const maxHealth = canonicalMillihearts(entity.record.maximumHealth, "R6 player maximum health");
+  if (maxHealth === 0
+    || health > maxHealth
+    || combatant.health !== health
+    || combatant.maxHealth !== maxHealth
+    || combatant.alive !== (health > 0)) {
+    fail("bootstrap-combat-status", "BWO7 combat vitals do not match the exact R6 player record");
+  }
+  return true;
 }
 
 /**
@@ -366,10 +448,11 @@ export function planRustIntegratedPlayerBootstrapV1(
   if (hasRuntimeBinding !== hasWorldViewBinding) {
     fail("bootstrap-partial", "runtime and world-view player binding attestations disagree");
   }
+  const hasCombat = validateRustIntegratedPlayerCombatBootstrapV1(observation, desired.binding.actorId);
 
   if (observation.entity === null) {
-    if (hasRuntimeBinding || observation.custody.status !== "absent") {
-      fail("bootstrap-partial", "player binding or custody exists without its authoritative entity");
+    if (hasRuntimeBinding || observation.custody.status !== "absent" || hasCombat) {
+      fail("bootstrap-partial", "player binding, custody, or combat exists without its authoritative entity");
     }
     const sequence = observation.entityAuthority.nextSequence;
     if (sequence === null) fail("bootstrap-sequence", "spawn requires an explicit next R6 entity command sequence");
@@ -398,6 +481,7 @@ export function planRustIntegratedPlayerBootstrapV1(
       batch: batchFor(observation.identity, intent.commandActorId, operations),
       entityImport,
       inventoryImport: desired.inventory,
+      combatBind: operations[1],
     });
   }
 
@@ -411,7 +495,9 @@ export function planRustIntegratedPlayerBootstrapV1(
   }
 
   if (!hasRuntimeBinding) {
-    if (observation.custody.status !== "absent") fail("bootstrap-partial", "player custody exists without a complete authoritative binding");
+    if (observation.custody.status !== "absent" || hasCombat) {
+      fail("bootstrap-partial", "player custody or combat exists without a complete authoritative binding");
+    }
     const operations = Object.freeze([bindingOperation(desired.binding), inventoryOperation(desired.inventory)]);
     return Object.freeze({
       status: "bind-and-import",
@@ -420,6 +506,7 @@ export function planRustIntegratedPlayerBootstrapV1(
       batch: batchFor(observation.identity, intent.commandActorId, operations),
       entityImport: null,
       inventoryImport: desired.inventory,
+      combatBind: operations[0],
     });
   }
 
@@ -428,14 +515,17 @@ export function planRustIntegratedPlayerBootstrapV1(
     if (custody.inventorySlots.some((slot) => slot !== null) || custody.metadata.length !== 0) {
       fail("bootstrap-mismatch", "revision-zero player custody is not pristine");
     }
+    const combatBind = hasCombat ? null : bindingOperation(desired.binding);
     const operation = inventoryOperation(desired.inventory);
+    const operations = Object.freeze(combatBind === null ? [operation] : [combatBind, operation]);
     return Object.freeze({
       status: "import-pristine",
       entityId: entity.entityId,
       expected: observation.identity,
-      batch: batchFor(observation.identity, intent.commandActorId, Object.freeze([operation])),
+      batch: batchFor(observation.identity, intent.commandActorId, operations),
       entityImport: null,
       inventoryImport: desired.inventory,
+      combatBind,
     });
   }
   const restoredHash = rustIntegratedPlayerInventoryResultHashV1({
@@ -449,6 +539,18 @@ export function planRustIntegratedPlayerBootstrapV1(
     || restoredHash !== intent.inventory.restoredInventoryHash) {
     fail("bootstrap-mismatch", "restored player inventory or selected slot contradicts the durable import attestation");
   }
+  if (!hasCombat) {
+    const combatBind = bindingOperation(desired.binding);
+    return Object.freeze({
+      status: "install-combat",
+      entityId: entity.entityId,
+      expected: observation.identity,
+      batch: batchFor(observation.identity, intent.commandActorId, Object.freeze([combatBind])),
+      entityImport: null,
+      inventoryImport: null,
+      combatBind,
+    });
+  }
   return Object.freeze({
     status: "already-matching",
     entityId: entity.entityId,
@@ -456,6 +558,7 @@ export function planRustIntegratedPlayerBootstrapV1(
     batch: null,
     entityImport: null,
     inventoryImport: null,
+    combatBind: null,
   });
 }
 
@@ -467,18 +570,18 @@ function validateBindReceipt(
   const operation = receipt.domainReceipts[operationIndex];
   if (!operation
     || operation.domain !== "simulation"
-    || operation.typeId !== RUST_INTEGRATED_PLAYER_FINAL_BIND_RECEIPT_TYPE_V3
-    || operation.schema !== 3
+    || operation.typeId !== RUST_INTEGRATED_PLAYER_COMBAT_BIND_RECEIPT_TYPE_V4
+    || operation.schema !== 4
     || operation.payloadHash !== rustIntegratedRuntimeWireChecksumV1(operation.payload)
-    || operation.payload.byteLength !== BWF6_ACK_BYTES
-    || !BWF6_ACK_MAGIC.every((byte, index) => operation.payload[index] === byte)) {
-    fail("bootstrap-receipt", "BWF6 returned the wrong ordered native receipt");
+    || operation.payload.byteLength !== BWF7_ACK_BYTES
+    || !BWF7_ACK_MAGIC.every((byte, index) => operation.payload[index] === byte)) {
+    fail("bootstrap-receipt", "BWF7 returned the wrong ordered native receipt");
   }
   const view = new DataView(operation.payload.buffer, operation.payload.byteOffset, operation.payload.byteLength);
   if (view.getUint16(4, true) !== 1
-    || !bytesEqual(operation.payload.subarray(6, 22), hexBytes(request.payloadHash, "BWF6 request payload hash"))
-    || !bytesEqual(operation.payload.subarray(22, 38), hexBytes(receipt.after.stateHash, "BWF6 terminal state hash"))) {
-    fail("bootstrap-receipt", "BWF6 acknowledgement does not attest the request and terminal runtime state");
+    || !bytesEqual(operation.payload.subarray(6, 22), hexBytes(request.payloadHash, "BWF7 request payload hash"))
+    || !bytesEqual(operation.payload.subarray(22, 38), hexBytes(receipt.after.stateHash, "BWF7 terminal state hash"))) {
+    fail("bootstrap-receipt", "BWF7 acknowledgement does not attest the request and terminal runtime state");
   }
 }
 
@@ -502,7 +605,7 @@ function validateInventoryReceipt(
   );
 }
 
-/** Executes one planned batch and requires exact ordered BWA6/BWF6/BWI7 receipts. */
+/** Executes one planned batch and requires exact ordered BWA6/BWF7/BWI7 receipts. */
 export async function executeRustIntegratedPlayerBootstrapV1(
   service: RustIntegratedPlayerBootstrapServiceV1,
   observation: RustIntegratedPlayerBootstrapObservationV1,
@@ -551,13 +654,20 @@ export async function executeRustIntegratedPlayerBootstrapV1(
     validateInventoryReceipt(receipt, 1, plan.batch.operations[1], plan.inventoryImport);
     return Object.freeze({ status: "bound-and-imported", entityId: plan.entityId, identity: receipt.after, receipt });
   }
-  validateInventoryReceipt(receipt, 0, plan.batch.operations[0], plan.inventoryImport);
+  if (plan.status === "install-combat") {
+    validateBindReceipt(receipt, 0, plan.batch.operations[0]);
+    return Object.freeze({ status: "combat-installed", entityId: plan.entityId, identity: receipt.after, receipt });
+  }
+  const inventoryIndex = plan.combatBind === null ? 0 : 1;
+  if (plan.combatBind !== null) validateBindReceipt(receipt, 0, plan.batch.operations[0]);
+  validateInventoryReceipt(receipt, inventoryIndex, plan.batch.operations[inventoryIndex], plan.inventoryImport);
   return Object.freeze({ status: "inventory-imported", entityId: plan.entityId, identity: receipt.after, receipt });
 }
 
 function observationFromStatus(
   identity: RustIntegratedRuntimeIdentityV1,
   status: RustIntegratedPlayerBootstrapStatusReceiptV1,
+  combat: RustIntegratedPlayerCombatBootstrapStatusReceiptV1,
 ): RustIntegratedPlayerBootstrapObservationV1 {
   return Object.freeze({
     identity,
@@ -568,6 +678,7 @@ function observationFromStatus(
     runtimePlayer: status.runtimePlayer,
     worldViewBinding: status.worldViewBinding,
     custody: status.custody,
+    combat,
   });
 }
 
@@ -589,7 +700,18 @@ export async function queryRustIntegratedPlayerBootstrapObservationV1(
     schema: 1,
     payload,
   });
-  const batch = batchFor(expected, intent.commandActorId, Object.freeze([operation]));
+  const combatPayload = encodeRustIntegratedPlayerCombatBootstrapStatusQueryV1({
+    externalEntityId: desired.binding.externalEntityId,
+    actorId: desired.binding.actorId,
+    playerId: desired.playerId,
+  });
+  const combatOperation = createRustIntegratedRuntimeDomainOperationV1({
+    domain: "simulation",
+    typeId: RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
+    schema: 1,
+    payload: combatPayload,
+  });
+  const batch = batchFor(expected, intent.commandActorId, Object.freeze([operation, combatOperation]));
   const receipt = await service.command(batch);
   if (receipt.commandId !== batch.commandId || receipt.idempotencyKey !== batch.idempotencyKey || receipt.commandHash !== batch.commandHash) {
     fail("bootstrap-status-receipt", "status receipt does not identify the exact BWS5 command");
@@ -599,15 +721,24 @@ export async function queryRustIntegratedPlayerBootstrapObservationV1(
     fail(receipt.code, receipt.message);
   }
   const response = receipt.domainReceipts[0];
-  if (receipt.domainReceipts.length !== 1 || !rustIntegratedRuntimeIdentityEqualsV1(receipt.before, expected)
+  const combatResponse = receipt.domainReceipts[1];
+  if (receipt.domainReceipts.length !== 2 || !rustIntegratedRuntimeIdentityEqualsV1(receipt.before, expected)
     || !rustIntegratedRuntimeIdentityEqualsV1(receipt.after, expected)
     || !rustIntegratedRuntimeIdentityEqualsV1(service.identity(), expected)
     || !response || response.domain !== "simulation"
     || response.typeId !== RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1
-    || response.schema !== 1 || response.payloadHash !== rustIntegratedRuntimeWireChecksumV1(response.payload)) {
-    fail("bootstrap-status-receipt", "BWS5 returned a mutating or incorrectly typed receipt");
+    || response.schema !== 1 || response.payloadHash !== rustIntegratedRuntimeWireChecksumV1(response.payload)
+    || !combatResponse || combatResponse.domain !== "simulation"
+    || combatResponse.typeId !== RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1
+    || combatResponse.schema !== 1
+    || combatResponse.payloadHash !== rustIntegratedRuntimeWireChecksumV1(combatResponse.payload)) {
+    fail("bootstrap-status-receipt", "BWS5/BWS7 returned a mutating or incorrectly typed receipt");
   }
-  return observationFromStatus(expected, decodeRustIntegratedPlayerBootstrapStatusReceiptV1(response.payload, operation.payloadHash));
+  return observationFromStatus(
+    expected,
+    decodeRustIntegratedPlayerBootstrapStatusReceiptV1(response.payload, operation.payloadHash),
+    decodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1(combatResponse.payload, combatOperation.payloadHash),
+  );
 }
 
 /** Status-query plus one atomic bootstrap transaction. */

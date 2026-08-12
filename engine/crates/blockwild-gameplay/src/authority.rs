@@ -4,10 +4,10 @@ use blockwild_types::{CanonicalHash, CanonicalHasher};
 
 use crate::{
     AcceptedReceipt, ActorGrant, AuthorityIdentity, CardforgeCommand, CardforgeState, CombatCommand, CombatState,
-    ContainerKey, Domain, GameplayActor, GameplayBatch, GameplayCommand, GameplayEvent, GameplayReceipt,
-    GameplayRevision, GameplayScheduleAdvanceV1, IDEMPOTENCY_WINDOW, InventoryCommand, InventoryState,
-    MAX_SCHEDULE_MACHINE_ADVANCES_V1, MachineCommand, MachineStateSet, OpaquePayload, ProgressionState, Rejection,
-    RejectionCode, ResourceDelta, Scope, StatDelta, WorldKey, validate_id,
+    CombatVitalUnits, CombatantState, ContainerKey, Domain, GameplayActor, GameplayBatch, GameplayCommand,
+    GameplayEvent, GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1, IDEMPOTENCY_WINDOW, InventoryCommand,
+    InventoryState, MAX_SCHEDULE_MACHINE_ADVANCES_V1, MachineCommand, MachineStateSet, OpaquePayload, ProgressionState,
+    Rejection, RejectionCode, ResourceDelta, Scope, StatDelta, WorldKey, validate_id,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -127,6 +127,107 @@ impl GameplayAuthority {
         crate::validate_id("actor grant", &actor_id)?;
         self.grants.insert(actor_id, grant);
         Ok(())
+    }
+
+    /// Installs the sole precision combat record for an already-validated R6
+    /// entity link. This is an engine bootstrap seam, not a browser-authored
+    /// gameplay command: callers must derive every vital from native authority
+    /// before invoking it.
+    ///
+    /// An exact existing link is replay-safe and is never reset. In particular,
+    /// combat revision, cooldown, resource, status, and position evolution are
+    /// preserved after the initial install.
+    pub fn install_linked_combatant_v1(&mut self, combatant: CombatantState) -> Result<bool, Rejection> {
+        validate_id("linked combatant", &combatant.record_id)?;
+        if let Some(owner_id) = combatant.owner_id.as_deref() {
+            validate_id("linked combatant owner", owner_id)?;
+        }
+        let Some(entity_id) = combatant.entity_id else {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "linked combatant is missing its R6 entity",
+            ));
+        };
+        if entity_id.packed() == 0
+            || combatant.vital_units != CombatVitalUnits::MilliheartsV1
+            || combatant.max_health == 0
+            || combatant.health > combatant.max_health
+            || combatant.alive != (combatant.health > 0)
+        {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "linked combatant has invalid precision vitals or entity identity",
+            ));
+        }
+        if self
+            .state
+            .combat
+            .combatants
+            .iter()
+            .any(|(record_id, existing)| record_id != &combatant.record_id && existing.entity_id == Some(entity_id))
+        {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "R6 entity is already linked to another combat record",
+            ));
+        }
+        if let Some(existing) = self.state.combat.combatants.get(&combatant.record_id) {
+            if existing.owner_id == combatant.owner_id
+                && existing.entity_id == combatant.entity_id
+                && existing.vital_units == combatant.vital_units
+                && existing.health == combatant.health
+                && existing.max_health == combatant.max_health
+                && existing.alive == combatant.alive
+            {
+                return Ok(false);
+            }
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "combat record already exists with different authority or vitals",
+            ));
+        }
+        let next_sequence = self
+            .state
+            .revision
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "gameplay sequence is exhausted"))?;
+        let next_combat = self
+            .state
+            .revision
+            .combat
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "combat revision is exhausted"))?;
+        let before_hash = self.state.state_hash();
+        let mut command_hasher = CanonicalHasher::new("blockwild.gameplay.player-combat-bootstrap.command.v1");
+        command_hasher.write_str(&combatant.record_id);
+        command_hasher.write_str(combatant.owner_id.as_deref().unwrap_or_default());
+        command_hasher.write_u64(entity_id.packed());
+        command_hasher.write_u32(combatant.health);
+        command_hasher.write_u32(combatant.max_health);
+        command_hasher.write_u16(u16::from(combatant.alive));
+        let command_hash = command_hasher.finish();
+        self.state
+            .combat
+            .combatants
+            .insert(combatant.record_id.clone(), combatant);
+        self.state.revision.sequence = next_sequence;
+        self.state.revision.combat = next_combat;
+        let after_hash = self.state.state_hash();
+        let mut receipt_hasher = CanonicalHasher::new("blockwild.gameplay.player-combat-bootstrap.receipt.v1");
+        receipt_hasher.write_bytes(before_hash.as_bytes());
+        receipt_hasher.write_bytes(after_hash.as_bytes());
+        receipt_hasher.write_bytes(command_hash.as_bytes());
+        self.replay.push(ReplayEntry {
+            sequence: next_sequence,
+            actor_id: "system:player-combat-bootstrap".into(),
+            idempotency_key: "player-combat-bootstrap-v1".into(),
+            command_hash,
+            before_hash,
+            after_hash,
+            receipt_hash: receipt_hasher.finish(),
+        });
+        Ok(true)
     }
 
     #[must_use]

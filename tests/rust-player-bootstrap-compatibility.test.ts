@@ -40,6 +40,11 @@ import {
   RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
   RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
 } from "../app/game/rust-integrated-runtime-player-status.ts";
+import {
+  encodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1,
+  RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+  RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
+} from "../app/game/rust-integrated-runtime-player-combat-status.ts";
 import { PLAYER_RENDER_MODEL_ID_V1 } from "../app/game/rust-player-render-profile.ts";
 
 const ZERO_HASH = "00000000000000000000000000000000";
@@ -319,7 +324,9 @@ class IdentityStatusService implements RustIntegratedPlayerBootstrapServiceV1 {
   async command(batch: RustIntegratedRuntimeCommandBatchV1): Promise<RustIntegratedRuntimeCommandReceiptV1> {
     this.batches.push(batch);
     const request = batch.operations[0];
+    const combatRequest = batch.operations[1];
     assert.equal(request.typeId, RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1);
+    assert.equal(combatRequest.typeId, RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1);
     const payload = encodeRustIntegratedPlayerBootstrapStatusReceiptV1({
       requestPayloadHash: request.payloadHash,
       worldAuthorityRevision: Object.freeze({ epoch: BigInt(1), mutation: BigInt(2), residency: BigInt(3) }),
@@ -345,6 +352,21 @@ class IdentityStatusService implements RustIntegratedPlayerBootstrapServiceV1 {
       schema: 1,
       payload,
     });
+    const combatResponse = createRustIntegratedRuntimeDomainOperationV1({
+      domain: "simulation",
+      typeId: RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+      schema: 1,
+      payload: encodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1({
+        requestPayloadHash: combatRequest.payloadHash,
+        entityAuthorityRevision: BigInt(3),
+        gameplaySequence: BigInt(0),
+        gameplayCombatRevision: BigInt(0),
+        gameplayStateHash: ZERO_HASH,
+        status: "absent",
+        blocker: null,
+        combatant: null,
+      }),
+    });
     const receipt: RustIntegratedRuntimeAcceptedReceiptV1 = Object.freeze({
       status: "accepted",
       commandId: batch.commandId,
@@ -352,14 +374,14 @@ class IdentityStatusService implements RustIntegratedPlayerBootstrapServiceV1 {
       commandHash: batch.commandHash,
       before: this.current,
       after: this.current,
-      domainReceipts: Object.freeze([response]),
+      domainReceipts: Object.freeze([response, combatResponse]),
       receiptHash: rustIntegratedRuntimeWireChecksumV1(new Uint8Array()),
     });
     return receipt;
   }
 }
 
-test("identity-only BWS5 status query is two-phase, audit-actor explicit, and identity neutral", async () => {
+test("identity-only BWS5 plus BWS7 query is two-phase, audit-actor explicit, and identity neutral", async () => {
   const activeProfile = profile();
   const identity = deriveRustPlayerBootstrapCompatibilityIdentityV1(activeProfile, {
     universeKey: "world:fixture-world",
@@ -376,13 +398,15 @@ test("identity-only BWS5 status query is two-phase, audit-actor explicit, and id
   });
   assert.equal(service.batches.length, 1);
   assert.equal(service.batches[0].actorId, "reviewed:status-reader");
-  assert.equal(service.batches[0].operations.length, 1);
+  assert.equal(service.batches[0].operations.length, 2);
   assert.equal(service.batches[0].operations[0].typeId, RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1);
+  assert.equal(service.batches[0].operations[1].typeId, RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1);
   assert.equal(service.identity(), before);
   assert.equal(observation.identity, before);
   assert.equal(observation.custody.status, "absent");
   assert.equal(observation.entityAuthority.nextSequence, BigInt(4));
   assert.equal(observation.continuity.nextInputSequence, BigInt(1));
   assert.equal(observation.worldAuthorityRevision.mutation, BigInt(2));
+  assert.equal(observation.combat.status, "absent");
   assert.equal(ZERO_HASH.length, 32);
 });

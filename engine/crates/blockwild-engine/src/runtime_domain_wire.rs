@@ -15,9 +15,9 @@ use blockwild_entity::{
 };
 use blockwild_gameplay::{
     ALL_CONTENT_DOMAINS, AcceptedReceipt, ActivityLease, ActorGrant, ActorRole, ApplyBlockActionV1, AuthorityIdentity,
-    BattleAction, BlockActionLootCellV1, CardforgeCommand, CombatCommand, ContainerKind, ContentArtifact,
-    ContentDomain, ContentDomainDigest, CraftCommand, CreateDropCustodyCommand, CreateGeneratedDropCustodyV1,
-    CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3, FurnaceAdvanceCommand,
+    BattleAction, BlockActionLootCellV1, CardforgeCommand, CombatCommand, CombatVitalUnits, ContainerKind,
+    ContentArtifact, ContentDomain, ContentDomainDigest, CraftCommand, CreateDropCustodyCommand,
+    CreateGeneratedDropCustodyV1, CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3, FurnaceAdvanceCommand,
     GAMEPLAY_COMMAND_ADVANCE_SCHEDULE_TAG_V1, GameplayActor, GameplayBatch, GameplayCommand, GameplayEvent,
     GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1, GeneratedDropProvenanceV1,
     INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG, INVENTORY_COMMAND_CREATE_GENERATED_DROP_CUSTODY_V1_TAG,
@@ -86,6 +86,8 @@ const TERRAIN_RESIDENCY_RECONCILE_BATCH_MAGIC: [u8; 4] = *b"BWT5";
 const TERRAIN_RESIDENCY_RECONCILE_RECEIPT_MAGIC: [u8; 4] = *b"BWU5";
 const PLAYER_BOOTSTRAP_STATUS_QUERY_MAGIC: [u8; 4] = *b"BWS5";
 const PLAYER_BOOTSTRAP_STATUS_RECEIPT_MAGIC: [u8; 4] = *b"BWO5";
+const PLAYER_COMBAT_BOOTSTRAP_STATUS_QUERY_MAGIC_V1: [u8; 4] = *b"BWS7";
+const PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_MAGIC_V1: [u8; 4] = *b"BWO7";
 const CONTEXT_COMMAND_CONTINUITY_QUERY_MAGIC_V2: [u8; 4] = *b"BWS6";
 const CONTEXT_COMMAND_CONTINUITY_RECEIPT_MAGIC_V2: [u8; 4] = *b"BWO6";
 const PLAYER_INVENTORY_IMPORT_MAGIC: [u8; 4] = *b"BWP7";
@@ -111,6 +113,9 @@ pub const TERRAIN_RESIDENCY_RECONCILE_RECEIPT_TYPE_V2: &str =
     "blockwild.world.terrain-residency-reconcile-receipt.r4.v2";
 pub const PLAYER_BOOTSTRAP_STATUS_TYPE_V1: &str = "blockwild.simulation.player-bootstrap-status.r5.v1";
 pub const PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1: &str = "blockwild.simulation.player-bootstrap-status-receipt.r5.v1";
+pub const PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1: &str = "blockwild.simulation.player-combat-bootstrap-status.r7.v1";
+pub const PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1: &str =
+    "blockwild.simulation.player-combat-bootstrap-status-receipt.r7.v1";
 pub const CONTEXT_COMMAND_CONTINUITY_TYPE_V2: &str = "blockwild.simulation.context-command-continuity.r5.v2";
 pub const CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2: &str =
     "blockwild.simulation.context-command-continuity-receipt.r5.v2";
@@ -118,6 +123,8 @@ pub const PLAYER_INVENTORY_IMPORT_TYPE_V1: &str = "blockwild.gameplay.player-inv
 pub const PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1: &str = "blockwild.gameplay.player-inventory-import-receipt.r7.v1";
 pub const SIMULATION_PLAYER_BIND_TYPE_V3: &str = "blockwild.simulation.player-bind.r5.v3";
 pub const SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3: &str = "blockwild.simulation.player-bind-final-receipt.r5.v3";
+pub const SIMULATION_PLAYER_BIND_TYPE_V4: &str = "blockwild.simulation.player-bind.r5.v4";
+pub const SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V4: &str = "blockwild.simulation.player-bind-final-receipt.r5.v4";
 pub const SIMULATION_CAMERA_CONFIG_TYPE_V1: &str = "blockwild.simulation.camera-config.r5.v1";
 pub const SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1: &str = "blockwild.simulation.camera-config-receipt.r5.v1";
 
@@ -227,6 +234,55 @@ pub struct PlayerBootstrapStatusWireV1 {
     pub runtime_player: Option<PlayerBootstrapRuntimePlayerWireV1>,
     pub world_view_binding: Option<PlayerInventoryBindingV1>,
     pub custody: Option<PlayerBootstrapCustodyWireV1>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PlayerCombatBootstrapStatusV1 {
+    Absent = 0,
+    LegacyUnlinked = 1,
+    ExactLinked = 2,
+    Blocked = 3,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum PlayerCombatBootstrapBlockerV1 {
+    LegacyUnlinkedRequiresExplicitMigration = 1,
+    DuplicateCombatClaim = 2,
+    MissingPlayerEntity = 3,
+    IncompletePlayerBinding = 4,
+    RecordIdentityConflict = 5,
+    EntityLinkConflict = 6,
+    OwnerConflict = 7,
+    VitalUnitConflict = 8,
+    VitalParityConflict = 9,
+    InvalidEntityVitals = 10,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerCombatantBootstrapWireV1 {
+    pub record_id: String,
+    pub owner_id: Option<String>,
+    pub revision: u64,
+    pub entity_id: Option<EntityId>,
+    pub vital_units: CombatVitalUnits,
+    pub health: u32,
+    pub max_health: u32,
+    pub alive: bool,
+    pub cross_domain_parity: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerCombatBootstrapStatusWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub entity_authority_revision: u64,
+    pub gameplay_sequence: u64,
+    pub gameplay_combat_revision: u64,
+    pub gameplay_state_hash: CanonicalHash,
+    pub status: PlayerCombatBootstrapStatusV1,
+    pub blocker: Option<PlayerCombatBootstrapBlockerV1>,
+    pub combatant: Option<PlayerCombatantBootstrapWireV1>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -813,6 +869,181 @@ pub fn decode_player_bootstrap_status_v1(bytes: &[u8]) -> Result<PlayerBootstrap
         world_view_binding,
         custody,
     })
+}
+
+pub fn encode_player_combat_bootstrap_status_query_v1(
+    value: &PlayerBootstrapStatusQueryWireV1,
+) -> Result<Vec<u8>, WireError> {
+    validate_player_bootstrap_target(value)?;
+    let mut writer = Writer::default();
+    writer.string(&value.external_entity_id)?;
+    writer.string(&value.actor_id)?;
+    writer.u64(value.player_id.packed());
+    wrap(PLAYER_COMBAT_BOOTSTRAP_STATUS_QUERY_MAGIC_V1, writer.finish())
+}
+
+pub fn decode_player_combat_bootstrap_status_query_v1(
+    bytes: &[u8],
+) -> Result<PlayerBootstrapStatusQueryWireV1, WireError> {
+    let mut reader = Reader::new(unwrap(PLAYER_COMBAT_BOOTSTRAP_STATUS_QUERY_MAGIC_V1, bytes)?);
+    let value = PlayerBootstrapStatusQueryWireV1 {
+        external_entity_id: reader.string()?,
+        actor_id: reader.string()?,
+        player_id: {
+            let packed = reader.u64()?;
+            PlayerId::new(packed as u32, (packed >> 32) as u32)
+        },
+    };
+    reader.finish()?;
+    validate_player_bootstrap_target(&value)?;
+    Ok(value)
+}
+
+pub fn encode_player_combat_bootstrap_status_v1(
+    value: &PlayerCombatBootstrapStatusWireV1,
+) -> Result<Vec<u8>, WireError> {
+    validate_player_combat_bootstrap_status_v1(value)?;
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    writer.u64(value.entity_authority_revision);
+    writer.u64(value.gameplay_sequence);
+    writer.u64(value.gameplay_combat_revision);
+    writer.hash(value.gameplay_state_hash);
+    writer.u8(value.status as u8);
+    writer.flag(value.blocker.is_some());
+    if let Some(blocker) = value.blocker {
+        writer.u8(blocker as u8);
+    }
+    writer.flag(value.combatant.is_some());
+    if let Some(combatant) = &value.combatant {
+        writer.string(&combatant.record_id)?;
+        writer.option_string(combatant.owner_id.as_deref())?;
+        writer.u64(combatant.revision);
+        writer.option_u64(combatant.entity_id.map(EntityId::packed));
+        writer.u8(combatant.vital_units as u8);
+        writer.u32(combatant.health);
+        writer.u32(combatant.max_health);
+        writer.flag(combatant.alive);
+        writer.flag(combatant.cross_domain_parity);
+    }
+    wrap(PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_MAGIC_V1, writer.finish())
+}
+
+pub fn decode_player_combat_bootstrap_status_v1(bytes: &[u8]) -> Result<PlayerCombatBootstrapStatusWireV1, WireError> {
+    let mut reader = Reader::new(unwrap(PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_MAGIC_V1, bytes)?);
+    let request_payload_hash = reader.hash()?;
+    let entity_authority_revision = reader.u64()?;
+    let gameplay_sequence = reader.u64()?;
+    let gameplay_combat_revision = reader.u64()?;
+    let gameplay_state_hash = reader.hash()?;
+    let status = match reader.u8()? {
+        0 => PlayerCombatBootstrapStatusV1::Absent,
+        1 => PlayerCombatBootstrapStatusV1::LegacyUnlinked,
+        2 => PlayerCombatBootstrapStatusV1::ExactLinked,
+        3 => PlayerCombatBootstrapStatusV1::Blocked,
+        _ => {
+            return Err(WireError::new(
+                "player-combat-status",
+                "unknown combat bootstrap status",
+            ));
+        }
+    };
+    let blocker = if reader.flag()? {
+        Some(match reader.u8()? {
+            1 => PlayerCombatBootstrapBlockerV1::LegacyUnlinkedRequiresExplicitMigration,
+            2 => PlayerCombatBootstrapBlockerV1::DuplicateCombatClaim,
+            3 => PlayerCombatBootstrapBlockerV1::MissingPlayerEntity,
+            4 => PlayerCombatBootstrapBlockerV1::IncompletePlayerBinding,
+            5 => PlayerCombatBootstrapBlockerV1::RecordIdentityConflict,
+            6 => PlayerCombatBootstrapBlockerV1::EntityLinkConflict,
+            7 => PlayerCombatBootstrapBlockerV1::OwnerConflict,
+            8 => PlayerCombatBootstrapBlockerV1::VitalUnitConflict,
+            9 => PlayerCombatBootstrapBlockerV1::VitalParityConflict,
+            10 => PlayerCombatBootstrapBlockerV1::InvalidEntityVitals,
+            _ => {
+                return Err(WireError::new(
+                    "player-combat-status",
+                    "unknown combat bootstrap blocker",
+                ));
+            }
+        })
+    } else {
+        None
+    };
+    let combatant = if reader.flag()? {
+        Some(PlayerCombatantBootstrapWireV1 {
+            record_id: reader.string()?,
+            owner_id: reader.option_string()?,
+            revision: reader.u64()?,
+            entity_id: reader.option_u64()?.map(unpack_entity_id).transpose()?,
+            vital_units: match reader.u8()? {
+                0 => CombatVitalUnits::LegacyWholeHeartsV1,
+                1 => CombatVitalUnits::MilliheartsV1,
+                _ => return Err(WireError::new("player-combat-status", "unknown combat vital unit")),
+            },
+            health: reader.u32()?,
+            max_health: reader.u32()?,
+            alive: reader.flag()?,
+            cross_domain_parity: reader.flag()?,
+        })
+    } else {
+        None
+    };
+    reader.finish()?;
+    let value = PlayerCombatBootstrapStatusWireV1 {
+        request_payload_hash,
+        entity_authority_revision,
+        gameplay_sequence,
+        gameplay_combat_revision,
+        gameplay_state_hash,
+        status,
+        blocker,
+        combatant,
+    };
+    validate_player_combat_bootstrap_status_v1(&value)?;
+    Ok(value)
+}
+
+fn validate_player_combat_bootstrap_status_v1(value: &PlayerCombatBootstrapStatusWireV1) -> Result<(), WireError> {
+    match (value.status, value.blocker, value.combatant.as_ref()) {
+        (PlayerCombatBootstrapStatusV1::Absent, None, None) => {}
+        (
+            PlayerCombatBootstrapStatusV1::LegacyUnlinked,
+            Some(PlayerCombatBootstrapBlockerV1::LegacyUnlinkedRequiresExplicitMigration),
+            Some(combatant),
+        ) if combatant.entity_id.is_none()
+            && combatant.vital_units == CombatVitalUnits::LegacyWholeHeartsV1
+            && !combatant.cross_domain_parity => {}
+        (PlayerCombatBootstrapStatusV1::ExactLinked, None, Some(combatant))
+            if combatant.entity_id.is_some()
+                && combatant.vital_units == CombatVitalUnits::MilliheartsV1
+                && combatant.cross_domain_parity => {}
+        (PlayerCombatBootstrapStatusV1::Blocked, Some(_), _) => {}
+        _ => {
+            return Err(WireError::new(
+                "player-combat-status",
+                "combat bootstrap status, blocker, and record are inconsistent",
+            ));
+        }
+    }
+    if let Some(combatant) = &value.combatant {
+        let mut writer = Writer::default();
+        writer.string(&combatant.record_id)?;
+        writer.option_string(combatant.owner_id.as_deref())?;
+        if combatant.max_health == 0
+            || combatant.health > combatant.max_health
+            || ((combatant.vital_units != CombatVitalUnits::LegacyWholeHeartsV1 || combatant.entity_id.is_some())
+                && combatant.alive != (combatant.health > 0))
+            || (combatant.cross_domain_parity
+                && (combatant.entity_id.is_none() || combatant.vital_units != CombatVitalUnits::MilliheartsV1))
+        {
+            return Err(WireError::new(
+                "player-combat-status",
+                "combat bootstrap record has invalid vital or entity fields",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn write_integrated_runtime_identity_v2(
@@ -5972,6 +6203,84 @@ mod tests {
     }
 
     #[test]
+    fn dedicated_player_combat_bootstrap_status_is_additive_and_explicit() {
+        let query = PlayerBootstrapStatusQueryWireV1 {
+            external_entity_id: "player:\u{6c34}".into(),
+            actor_id: "actor:\u{6c34}".into(),
+            player_id: PlayerId::new(0x89ab_cdef, 0xfedc_ba98),
+        };
+        let query_bytes = encode_player_combat_bootstrap_status_query_v1(&query).unwrap();
+        assert_eq!(
+            query_bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "425753370100010023000000561cf3bf7e4449d32832401580cdddef0a000000706c617965723ae6b0b4090000006163746f723ae6b0b4efcdab8998badcfe"
+        );
+        assert_eq!(
+            decode_player_combat_bootstrap_status_query_v1(&query_bytes).unwrap(),
+            query
+        );
+
+        let linked = PlayerCombatBootstrapStatusWireV1 {
+            request_payload_hash: CanonicalHash([0x90; 16]),
+            entity_authority_revision: 7,
+            gameplay_sequence: 8,
+            gameplay_combat_revision: 9,
+            gameplay_state_hash: CanonicalHash([0x91; 16]),
+            status: PlayerCombatBootstrapStatusV1::ExactLinked,
+            blocker: None,
+            combatant: Some(PlayerCombatantBootstrapWireV1 {
+                record_id: "actor:\u{6c34}".into(),
+                owner_id: Some("actor:\u{6c34}".into()),
+                revision: 4,
+                entity_id: Some(EntityId::new(5, 2)),
+                vital_units: CombatVitalUnits::MilliheartsV1,
+                health: 9_500,
+                max_health: 10_000,
+                alive: true,
+                cross_domain_parity: true,
+            }),
+        };
+        let linked_bytes = encode_player_combat_bootstrap_status_v1(&linked).unwrap();
+        assert_eq!(
+            linked_bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "42574f370100010072000000490f1e0fa01d246758cc66aa3975fa289090909090909090909090909090909007000000000000000800000000000000090000000000000091919191919191919191919191919191020001090000006163746f723ae6b0b401090000006163746f723ae6b0b40400000000000000010500000002000000011c250000102700000101"
+        );
+        assert_eq!(&linked_bytes[..4], b"BWO7");
+        assert_eq!(decode_player_combat_bootstrap_status_v1(&linked_bytes).unwrap(), linked);
+
+        let legacy = PlayerCombatBootstrapStatusWireV1 {
+            status: PlayerCombatBootstrapStatusV1::LegacyUnlinked,
+            blocker: Some(PlayerCombatBootstrapBlockerV1::LegacyUnlinkedRequiresExplicitMigration),
+            combatant: Some(PlayerCombatantBootstrapWireV1 {
+                record_id: "actor:legacy".into(),
+                owner_id: None,
+                revision: 0,
+                entity_id: None,
+                vital_units: CombatVitalUnits::LegacyWholeHeartsV1,
+                health: 10,
+                max_health: 10,
+                alive: true,
+                cross_domain_parity: false,
+            }),
+            ..linked
+        };
+        let legacy_bytes = encode_player_combat_bootstrap_status_v1(&legacy).unwrap();
+        assert_eq!(decode_player_combat_bootstrap_status_v1(&legacy_bytes).unwrap(), legacy);
+
+        let invalid = PlayerCombatBootstrapStatusWireV1 {
+            status: PlayerCombatBootstrapStatusV1::ExactLinked,
+            blocker: Some(PlayerCombatBootstrapBlockerV1::VitalParityConflict),
+            ..legacy
+        };
+        assert_eq!(
+            encode_player_combat_bootstrap_status_v1(&invalid).unwrap_err().code,
+            "player-combat-status"
+        );
+    }
+
+    #[test]
     fn dedicated_inventory_import_and_receipt_wire_are_exact_and_bounded() {
         let mut metadata = ItemInstanceMetadataV1 {
             hash: CanonicalHash::default(),
@@ -6359,6 +6668,10 @@ mod tests {
         let encoded = encode_runtime_player_binding_v1(&binding).unwrap();
 
         assert!(binding.player_id.packed() > 9_007_199_254_740_991);
+        assert_eq!(
+            encoded.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "425742360100010066000000da0d6d9fc18becf9c8d1481e3c51c6c70b000000706c617965723a776964650a0000006163746f723a776964657856341298badcfe01666666666666d63fcdccccccccccfc3f9a9999999999f53f00000000000054403333333333331140cdcccccccccc184000000000000020400000000000002e40"
+        );
         assert_eq!(decode_runtime_player_binding_v1(&encoded).unwrap(), binding);
     }
 

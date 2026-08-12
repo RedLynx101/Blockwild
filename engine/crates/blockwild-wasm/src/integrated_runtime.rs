@@ -17,25 +17,28 @@ use blockwild_engine::{
     INTEGRATED_RUNTIME_LEGACY_MIGRATION_SCHEMA_V1, IntegratedRuntimeBatchV2, IntegratedRuntimeConfigV2,
     IntegratedRuntimeError, IntegratedRuntimeIdentityV2, IntegratedRuntimeLegacyMigrationV1,
     IntegratedRuntimeReceiptV2, IntegratedRuntimeRenderPresentationBindingV1, IntegratedRuntimeV2,
-    PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1, PLAYER_BOOTSTRAP_STATUS_TYPE_V1, PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1,
-    PLAYER_INVENTORY_IMPORT_TYPE_V1, RuntimeCommandCacheLookupV1, SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1,
-    SIMULATION_CAMERA_CONFIG_TYPE_V1, SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3, SIMULATION_PLAYER_BIND_TYPE_V3,
-    TERRAIN_RESIDENCY_BATCH_TYPE_V1, TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2,
+    PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1, PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
+    PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1, PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
+    PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1, PLAYER_INVENTORY_IMPORT_TYPE_V1, RuntimeCommandCacheLookupV1,
+    SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1, SIMULATION_CAMERA_CONFIG_TYPE_V1,
+    SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3, SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V4,
+    SIMULATION_PLAYER_BIND_TYPE_V3, SIMULATION_PLAYER_BIND_TYPE_V4, TERRAIN_RESIDENCY_BATCH_TYPE_V1,
+    TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2,
     TERRAIN_RESIDENCY_RECONCILE_RECEIPT_TYPE_V2, WorldViewExtractionInputV1, decode_content_install_page_v1,
     decode_entity_authority_export_v1, decode_entity_authority_import_v2, decode_entity_command_batch_v1,
     decode_entity_compatibility_export_v1, decode_entity_compatibility_import_v1, decode_gameplay_actor_grant_v1,
     decode_gameplay_batch_v1, decode_network_agent_grant_v1, decode_network_command_release_v1,
     decode_network_delta_build_request_v1, decode_network_peer_grant_v1, decode_network_peer_release_v1,
     decode_network_reconnect_request_v1, decode_network_replication_record_v1, decode_player_bootstrap_status_query_v1,
-    decode_player_inventory_import_v1, decode_runtime_camera_config_v1,
+    decode_player_combat_bootstrap_status_query_v1, decode_player_inventory_import_v1, decode_runtime_camera_config_v1,
     decode_runtime_context_command_continuity_query_v2, decode_runtime_persistence_dispatch_v1,
     decode_runtime_player_binding_v1, decode_terrain_residency_batch_v1, decode_terrain_residency_reconcile_batch_v2,
     encode_content_install_receipt_v1, encode_entity_authority_import_receipt_v1, encode_entity_event_batch_v1,
-    encode_gameplay_receipt_v1, encode_player_bootstrap_status_v1, encode_player_inventory_import_receipt_v1,
-    encode_runtime_camera_config_receipt_v1, encode_runtime_context_command_continuity_receipt_v2,
-    encode_runtime_persistence_dispatch_receipt_v1, encode_terrain_residency_receipt_v1,
-    encode_terrain_residency_reconcile_receipt_v2, integrated_runtime_checkpoint_hash_v1,
-    runtime_camera_config_state_hash_v1,
+    encode_gameplay_receipt_v1, encode_player_bootstrap_status_v1, encode_player_combat_bootstrap_status_v1,
+    encode_player_inventory_import_receipt_v1, encode_runtime_camera_config_receipt_v1,
+    encode_runtime_context_command_continuity_receipt_v2, encode_runtime_persistence_dispatch_receipt_v1,
+    encode_terrain_residency_receipt_v1, encode_terrain_residency_reconcile_receipt_v2,
+    integrated_runtime_checkpoint_hash_v1, runtime_camera_config_state_hash_v1,
 };
 use blockwild_network::{InterestSelectionStatsV1, encode_network_checkpoint_v1, encode_network_delta_v1};
 use blockwild_persistence::{PersistenceDispatchOutcomeV1, PersistenceDispatchStatusV1, PersistenceRetryDirectiveV1};
@@ -1378,13 +1381,39 @@ fn dispatch_command(
     runtime: &IntegratedRuntimeV2,
     batch: &RuntimeCommandBatchV1,
 ) -> Result<(IntegratedRuntimeV2, Vec<RuntimeDomainOperationV1>), (String, String)> {
+    let combat_bind_count = batch
+        .operations
+        .iter()
+        .filter(|operation| {
+            operation.domain == RuntimeDomainV1::Simulation && operation.type_id == SIMULATION_PLAYER_BIND_TYPE_V4
+        })
+        .count();
+    let player_bind_count = batch
+        .operations
+        .iter()
+        .filter(|operation| {
+            operation.domain == RuntimeDomainV1::Simulation
+                && matches!(
+                    operation.type_id.as_str(),
+                    SIMULATION_PLAYER_BIND_TYPE_V2 | SIMULATION_PLAYER_BIND_TYPE_V3 | SIMULATION_PLAYER_BIND_TYPE_V4
+                )
+        })
+        .count();
+    if combat_bind_count > 1 || (combat_bind_count == 1 && player_bind_count != 1) {
+        return Err((
+            "player-combat-bind-count".into(),
+            "a player combat bind V4 must be the outer transaction's only player-bind operation".into(),
+        ));
+    }
     let mut candidate = runtime.clone();
     let mut receipts = Vec::with_capacity(batch.operations.len());
     let mut deferred_final_bind_receipts = Vec::<(usize, WireHash)>::new();
+    let mut deferred_combat_bind_receipts = Vec::<(usize, WireHash)>::new();
     for (index, operation) in batch.operations.iter().enumerate() {
         let expected_schema = match (operation.domain, operation.type_id.as_str()) {
             (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V2) => 2,
             (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V3) => 3,
+            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V4) => 4,
             (RuntimeDomainV1::Simulation, CONTEXT_COMMAND_CONTINUITY_TYPE_V2) => 2,
             (RuntimeDomainV1::World, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2) => 2,
             _ => 1,
@@ -1455,6 +1484,20 @@ fn dispatch_command(
                     final_bind_ack(operation.payload_hash, &candidate),
                 )
             }
+            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V4) => {
+                let binding = decode_runtime_player_binding_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                candidate
+                    .bind_player(binding)
+                    .map_err(|error| (error.code, error.message))?;
+                deferred_combat_bind_receipts.push((receipts.len(), operation.payload_hash));
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V4,
+                    4,
+                    final_combat_bind_ack(operation.payload_hash, &candidate),
+                )
+            }
             (RuntimeDomainV1::Simulation, SIMULATION_CAMERA_CONFIG_TYPE_V1) => {
                 let request = decode_runtime_camera_config_v1(&operation.payload)
                     .map_err(|error| (error.code.into(), error.message))?;
@@ -1478,6 +1521,19 @@ fn dispatch_command(
                     RuntimeDomainV1::Simulation,
                     PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
                     encode_player_bootstrap_status_v1(&status).map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Simulation, PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1) => {
+                let query = decode_player_combat_bootstrap_status_query_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let status = candidate
+                    .player_combat_bootstrap_status_v1(&query, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Simulation,
+                    PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+                    encode_player_combat_bootstrap_status_v1(&status)
+                        .map_err(|error| (error.code.into(), error.message))?,
                 )
             }
             (RuntimeDomainV1::Simulation, CONTEXT_COMMAND_CONTINUITY_TYPE_V2) => {
@@ -1766,12 +1822,25 @@ fn dispatch_command(
         };
         receipts.push(response);
     }
+    for _ in &deferred_combat_bind_receipts {
+        candidate
+            .install_bound_player_combatant_v1()
+            .map_err(|error| (error.code, error.message))?;
+    }
     for (receipt_index, request_hash) in deferred_final_bind_receipts {
         receipts[receipt_index] = domain_operation_with_schema(
             RuntimeDomainV1::Simulation,
             SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3,
             3,
             final_bind_ack(request_hash, &candidate),
+        );
+    }
+    for (receipt_index, request_hash) in deferred_combat_bind_receipts {
+        receipts[receipt_index] = domain_operation_with_schema(
+            RuntimeDomainV1::Simulation,
+            SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V4,
+            4,
+            final_combat_bind_ack(request_hash, &candidate),
         );
     }
     Ok((candidate, receipts))
@@ -1809,6 +1878,15 @@ fn domain_ack(magic: [u8; 4], operation: &RuntimeDomainOperationV1, runtime: &In
 fn final_bind_ack(request_hash: WireHash, runtime: &IntegratedRuntimeV2) -> Vec<u8> {
     let mut payload = Vec::with_capacity(38);
     payload.extend_from_slice(b"BWF6");
+    payload.extend_from_slice(&1_u16.to_le_bytes());
+    payload.extend_from_slice(&request_hash.0);
+    payload.extend_from_slice(runtime.state_hash().as_bytes());
+    payload
+}
+
+fn final_combat_bind_ack(request_hash: WireHash, runtime: &IntegratedRuntimeV2) -> Vec<u8> {
+    let mut payload = Vec::with_capacity(38);
+    payload.extend_from_slice(b"BWF7");
     payload.extend_from_slice(&1_u16.to_le_bytes());
     payload.extend_from_slice(&request_hash.0);
     payload.extend_from_slice(runtime.state_hash().as_bytes());
@@ -4308,11 +4386,13 @@ mod tests {
         EntityCompatibilityImportWireV1, ImportPlayerInventoryV1, ItemStack, LEGACY_STATE_PLAYER_V1,
         PlayerBootstrapStatusQueryWireV1, PlayerInventoryImportWireV1, RuntimeCameraConfigWireV1,
         RuntimePersistenceDispatchWireV1, RuntimePlayerBindingWireV1, decode_entity_authority_import_receipt_v1,
-        decode_entity_event_batch_v1, decode_player_bootstrap_status_v1, decode_player_inventory_import_receipt_v1,
-        decode_runtime_camera_config_receipt_v1, encode_entity_authority_export_v1, encode_entity_authority_import_v2,
-        encode_entity_command_batch_v1, encode_entity_compatibility_export_v1, encode_entity_compatibility_import_v1,
-        encode_player_bootstrap_status_query_v1, encode_player_inventory_import_v1, encode_runtime_camera_config_v1,
-        encode_runtime_persistence_dispatch_v1, encode_runtime_player_binding_v1,
+        decode_entity_event_batch_v1, decode_player_bootstrap_status_v1, decode_player_combat_bootstrap_status_v1,
+        decode_player_inventory_import_receipt_v1, decode_runtime_camera_config_receipt_v1,
+        encode_entity_authority_export_v1, encode_entity_authority_import_v2, encode_entity_command_batch_v1,
+        encode_entity_compatibility_export_v1, encode_entity_compatibility_import_v1,
+        encode_player_bootstrap_status_query_v1, encode_player_combat_bootstrap_status_query_v1,
+        encode_player_inventory_import_v1, encode_runtime_camera_config_v1, encode_runtime_persistence_dispatch_v1,
+        encode_runtime_player_binding_v1,
     };
     use blockwild_entity::{
         ActionState, DespawnReason, ENTITY_COMMAND_SCHEMA, EntityClass, EntityCommand, EntityCommandBatch,
@@ -4804,6 +4884,235 @@ mod tests {
         .unwrap();
         assert!(dispatch_command(&runtime, &rollback_batch).is_err());
         assert_eq!(runtime.identity(), initial);
+    }
+
+    #[test]
+    fn combat_bind_v4_installs_after_inventory_and_later_failure_rolls_back_every_domain() {
+        let RuntimeRequestV1::Create { config, .. } = create_request(951) else {
+            unreachable!("fixture is a create request")
+        };
+        let runtime = create_runtime(config).unwrap();
+        let initial = runtime.identity();
+        let query = PlayerBootstrapStatusQueryWireV1 {
+            external_entity_id: "player:combat".into(),
+            actor_id: "actor:combat".into(),
+            player_id: blockwild_types::PlayerId::new(0x1234_5678, 0x9abc_def0),
+        };
+        let mut record = EntityCompatibilityRecord::new("player:combat", "specimen:combat", "player");
+        record.class = EntityClass::Player;
+        record.position = EntityVec3::new(8.0, 64.0, 8.0);
+        record.health = 9.5;
+        record.maximum_health = 10.0;
+        let entity_payload = encode_entity_compatibility_import_v1(&EntityCompatibilityImportWireV1 {
+            sequence: 1,
+            expected_revision: 0,
+            tick: 0,
+            desired_id: Some(blockwild_types::EntityId::new(17, 3)),
+            residency: EntityResidency::Hot,
+            record,
+        })
+        .unwrap();
+        let binding_payload = encode_runtime_player_binding_v1(&RuntimePlayerBindingWireV1 {
+            external_entity_id: query.external_entity_id.clone(),
+            actor_id: query.actor_id.clone(),
+            player_id: query.player_id,
+            creative_mode: false,
+            radius: 0.35,
+            standing_height: 1.8,
+            crouching_height: 1.35,
+            mass: 80.0,
+            walk_speed: 4.3,
+            sprint_speed: 6.2,
+            creative_flight_speed: 8.0,
+            maximum_oxygen_seconds: 15.0,
+        })
+        .unwrap();
+        let inventory_request = PlayerInventoryImportWireV1 {
+            import: ImportPlayerInventoryV1 {
+                inventory: ContainerKey::player(query.actor_id.clone()),
+                expected_revision: 0,
+                slots: vec![None; 9],
+                metadata: Vec::new(),
+            },
+            selected_slot: 4,
+        };
+        let duplicate_bind_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "combat-bootstrap-duplicate-bind".into(),
+            idempotency_key: "combat-bootstrap-duplicate-bind".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&initial),
+            operations: vec![
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_PLAYER_BIND_TYPE_V4,
+                    4,
+                    binding_payload.clone(),
+                ),
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_PLAYER_BIND_TYPE_V4,
+                    4,
+                    binding_payload.clone(),
+                ),
+            ],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let Err(duplicate_error) = dispatch_command(&runtime, &duplicate_bind_batch) else {
+            panic!("duplicate V4 bind unexpectedly succeeded");
+        };
+        assert_eq!(duplicate_error.0, "player-combat-bind-count");
+        assert_eq!(runtime.identity(), initial);
+        let mixed_version_bind_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "combat-bootstrap-mixed-version-bind".into(),
+            idempotency_key: "combat-bootstrap-mixed-version-bind".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&initial),
+            operations: vec![
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_PLAYER_BIND_TYPE_V4,
+                    4,
+                    binding_payload.clone(),
+                ),
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_PLAYER_BIND_TYPE_V3,
+                    3,
+                    binding_payload.clone(),
+                ),
+            ],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let Err(mixed_version_error) = dispatch_command(&runtime, &mixed_version_bind_batch) else {
+            panic!("mixed-version player binds unexpectedly succeeded");
+        };
+        assert_eq!(mixed_version_error.0, "player-combat-bind-count");
+        assert_eq!(runtime.identity(), initial);
+        assert!(runtime.player().is_none());
+        assert!(runtime.gameplay().state.combat.combatants.is_empty());
+        let operations = vec![
+            domain_operation(
+                RuntimeDomainV1::Entities,
+                ENTITY_COMPATIBILITY_IMPORT_TYPE_V1,
+                entity_payload.clone(),
+            ),
+            domain_operation_with_schema(
+                RuntimeDomainV1::Simulation,
+                SIMULATION_PLAYER_BIND_TYPE_V4,
+                4,
+                binding_payload.clone(),
+            ),
+            domain_operation(
+                RuntimeDomainV1::Gameplay,
+                PLAYER_INVENTORY_IMPORT_TYPE_V1,
+                encode_player_inventory_import_v1(&inventory_request).unwrap(),
+            ),
+        ];
+        let install_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "combat-bootstrap-install".into(),
+            idempotency_key: "combat-bootstrap-install".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&initial),
+            operations,
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (installed, receipts) = dispatch_command(&runtime, &install_batch).unwrap();
+        assert_eq!(receipts.len(), 3);
+        assert_eq!(receipts[1].type_id, SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V4);
+        assert_eq!(receipts[1].schema, 4);
+        assert_eq!(&receipts[1].payload[..4], b"BWF7");
+        assert_eq!(&receipts[1].payload[6..22], &wire_checksum_v1(&binding_payload));
+        assert_eq!(&receipts[1].payload[22..38], installed.state_hash().as_bytes());
+        assert!(installed.gameplay().state.combat.abilities.is_empty());
+        let combatant = &installed.gameplay().state.combat.combatants[&query.actor_id];
+        assert_eq!((combatant.health, combatant.max_health), (9_500, 10_000));
+        assert_eq!(combatant.entity_id, Some(blockwild_types::EntityId::new(17, 3)));
+        assert_eq!(combatant.vital_units as u8, 1);
+
+        let status_payload = encode_player_combat_bootstrap_status_query_v1(&query).unwrap();
+        let status_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "combat-bootstrap-status".into(),
+            idempotency_key: "combat-bootstrap-status".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&installed.identity()),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Simulation,
+                PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
+                status_payload,
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (unchanged, status_receipts) = dispatch_command(&installed, &status_batch).unwrap();
+        assert_eq!(unchanged.identity(), installed.identity());
+        assert_eq!(
+            status_receipts[0].type_id,
+            PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1
+        );
+        let status = decode_player_combat_bootstrap_status_v1(&status_receipts[0].payload).unwrap();
+        assert_eq!(
+            status.status,
+            blockwild_engine::PlayerCombatBootstrapStatusV1::ExactLinked
+        );
+        assert!(status.combatant.unwrap().cross_domain_parity);
+
+        let mut invalid_slots = vec![None; 9];
+        invalid_slots[0] = Some(ItemStack::simple(999, 1));
+        let invalid_inventory = encode_player_inventory_import_v1(&PlayerInventoryImportWireV1 {
+            import: ImportPlayerInventoryV1 {
+                inventory: ContainerKey::player(query.actor_id.clone()),
+                expected_revision: 0,
+                slots: invalid_slots,
+                metadata: Vec::new(),
+            },
+            selected_slot: 0,
+        })
+        .unwrap();
+        let rollback_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "combat-bootstrap-rollback".into(),
+            idempotency_key: "combat-bootstrap-rollback".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&initial),
+            operations: vec![
+                domain_operation(
+                    RuntimeDomainV1::Entities,
+                    ENTITY_COMPATIBILITY_IMPORT_TYPE_V1,
+                    entity_payload,
+                ),
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_PLAYER_BIND_TYPE_V4,
+                    4,
+                    binding_payload,
+                ),
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    PLAYER_INVENTORY_IMPORT_TYPE_V1,
+                    invalid_inventory,
+                ),
+            ],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        assert!(dispatch_command(&runtime, &rollback_batch).is_err());
+        assert_eq!(runtime.identity(), initial);
+        assert!(runtime.entities().hot().is_empty());
+        assert!(runtime.player().is_none());
+        assert!(runtime.gameplay().state.combat.combatants.is_empty());
+        let player_status = runtime
+            .player_bootstrap_status(&query, CanonicalHash([0x94; 16]))
+            .unwrap();
+        assert!(player_status.entity.is_none());
+        assert!(player_status.runtime_player.is_none());
+        assert!(player_status.world_view_binding.is_none());
+        assert!(player_status.custody.is_none());
+        let absent = runtime
+            .player_combat_bootstrap_status_v1(&query, CanonicalHash([0x95; 16]))
+            .unwrap();
+        assert_eq!(absent.status, blockwild_engine::PlayerCombatBootstrapStatusV1::Absent);
     }
 
     #[test]

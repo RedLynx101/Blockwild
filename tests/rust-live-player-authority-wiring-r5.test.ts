@@ -40,6 +40,11 @@ import {
   RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
   RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
 } from "../app/game/rust-integrated-runtime-player-status.ts";
+import {
+  encodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1,
+  RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+  RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
+} from "../app/game/rust-integrated-runtime-player-combat-status.ts";
 import type { RustIntegratedRuntimeServiceV1 } from "../app/game/rust-integrated-runtime-service.ts";
 import {
   RUST_CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2,
@@ -319,12 +324,15 @@ function identity(overrides: Partial<RustIntegratedRuntimeIdentityV1> = {}): Rus
   });
 }
 
+type CombatStatusMode = "exact" | "absent" | "legacy" | "blocked" | "vitals-drift";
+
 class RestoredRuntimeService {
   current = identity();
   worldRevision = Object.freeze({ epoch: BigInt(1), mutation: BigInt(0), residency: BigInt(0) });
   readonly batches: RustIntegratedRuntimeCommandBatchV1[] = [];
   readonly submittedInputs: RustIntegratedRuntimeInputFrameV1[] = [];
   extractCalls = 0;
+  private combatQueryCount = 0;
   readonly activeProfile = profile();
   readonly desired = createRustPlayerBootstrapNewWorldCompatibilityV1(this.activeProfile, Object.freeze({
     schema: 1 as const,
@@ -361,6 +369,8 @@ class RestoredRuntimeService {
     lookYaw: null,
     lookPitch: 0,
   };
+
+  constructor(private readonly combatModes: readonly CombatStatusMode[] = Object.freeze(["exact"])) {}
 
   diagnostics(): Readonly<{
     authoritative: boolean;
@@ -437,21 +447,79 @@ class RestoredRuntimeService {
     });
   }
 
+  private combatStatusPayload(requestPayloadHash: string, mode: CombatStatusMode) {
+    const actorId = this.desired.identity.actorId;
+    if (mode === "absent") {
+      return encodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1({
+        requestPayloadHash,
+        entityAuthorityRevision: BigInt(this.current.revision.entities),
+        gameplaySequence: BigInt(0),
+        gameplayCombatRevision: BigInt(0),
+        gameplayStateHash: "6".repeat(32),
+        status: "absent",
+        blocker: null,
+        combatant: null,
+      });
+    }
+    const legacy = mode === "legacy";
+    const blocked = mode === "blocked";
+    return encodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1({
+      requestPayloadHash,
+      entityAuthorityRevision: BigInt(this.current.revision.entities),
+      gameplaySequence: BigInt(1),
+      gameplayCombatRevision: BigInt(1),
+      gameplayStateHash: "6".repeat(32),
+      status: legacy ? "legacy-unlinked" : blocked ? "blocked" : "exact-linked",
+      blocker: legacy
+        ? "legacy-unlinked-requires-explicit-migration"
+        : blocked
+          ? "vital-parity-conflict"
+          : null,
+      combatant: Object.freeze({
+        recordId: actorId,
+        ownerId: actorId,
+        revision: BigInt(0),
+        entityId: legacy ? null : PLAYER_ENTITY_ID,
+        vitalUnits: legacy ? "legacy-whole-hearts-v1" : "millihearts-v1",
+        health: legacy
+          ? Math.round(this.desired.intent.entity.health)
+          : Math.round(this.desired.intent.entity.health * 1_000) - (mode === "vitals-drift" ? 1 : 0),
+        maxHealth: legacy
+          ? Math.round(this.desired.intent.entity.maximumHealth)
+          : Math.round(this.desired.intent.entity.maximumHealth * 1_000),
+        alive: this.desired.intent.entity.health > 0,
+        crossDomainParity: !legacy && !blocked,
+      }),
+    });
+  }
+
   async command(batch: RustIntegratedRuntimeCommandBatchV1): Promise<RustIntegratedRuntimeCommandReceiptV1> {
     this.batches.push(batch);
     const operation = batch.operations[0];
     const before = this.current;
-    let response;
+    let responses;
     if (operation.typeId === RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1) {
-      response = createRustIntegratedRuntimeDomainOperationV1({
-        domain: "simulation",
-        typeId: RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
-        schema: 1,
-        payload: this.statusPayload(operation.payloadHash),
-      });
+      const combatOperation = batch.operations[1];
+      assert.equal(combatOperation?.typeId, RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1);
+      const combatMode = this.combatModes[Math.min(this.combatQueryCount, this.combatModes.length - 1)]!;
+      this.combatQueryCount += 1;
+      responses = Object.freeze([
+        createRustIntegratedRuntimeDomainOperationV1({
+          domain: "simulation",
+          typeId: RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+          schema: 1,
+          payload: this.statusPayload(operation.payloadHash),
+        }),
+        createRustIntegratedRuntimeDomainOperationV1({
+          domain: "simulation",
+          typeId: RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+          schema: 1,
+          payload: this.combatStatusPayload(combatOperation.payloadHash, combatMode),
+        }),
+      ]);
     } else if (operation.typeId === RUST_CONTEXT_COMMAND_CONTINUITY_TYPE_V2) {
       assert.deepEqual(decodeRustIntegratedRuntimeContextContinuityQueryV2(operation.payload), { expected: before });
-      response = createRustIntegratedRuntimeDomainOperationV1({
+      responses = Object.freeze([createRustIntegratedRuntimeDomainOperationV1({
         domain: "simulation",
         typeId: RUST_CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2,
         schema: 2,
@@ -462,7 +530,7 @@ class RestoredRuntimeService {
           nextSequence: 1,
           queuedCommandsEmpty: true,
         }),
-      });
+      })]);
     } else if (operation.typeId === RUST_INTEGRATED_TERRAIN_RESIDENCY_RECONCILE_TYPE_V2) {
       const request = decodeRustIntegratedTerrainResidencyReconcileRequestV2(operation.payload);
       this.worldRevision = Object.freeze({ ...request.expectedWorldRevision, residency: request.expectedWorldRevision.residency + BigInt(1) });
@@ -470,7 +538,7 @@ class RestoredRuntimeService {
         revision: Object.freeze({ ...before.revision, world: Number(this.worldRevision.mutation + this.worldRevision.residency) }),
         stateHash: "4".repeat(32),
       });
-      response = createRustIntegratedRuntimeDomainOperationV1({
+      responses = Object.freeze([createRustIntegratedRuntimeDomainOperationV1({
         domain: "world",
         typeId: RUST_INTEGRATED_TERRAIN_RESIDENCY_RECONCILE_RECEIPT_TYPE_V2,
         schema: 2,
@@ -488,7 +556,7 @@ class RestoredRuntimeService {
           evictedChunks: Object.freeze([]),
           stateHash: this.current.stateHash,
         }),
-      });
+      })]);
     } else {
       throw new Error(`unexpected mutating bootstrap operation ${operation.typeId}`);
     }
@@ -499,7 +567,7 @@ class RestoredRuntimeService {
       commandHash: batch.commandHash,
       before,
       after: this.current,
-      domainReceipts: Object.freeze([response]),
+      domainReceipts: responses,
       receiptHash: ZERO_HASH,
     }) satisfies RustIntegratedRuntimeAcceptedReceiptV1;
   }
@@ -773,11 +841,54 @@ test("complete restored native player status is accepted without a browser inven
   assert.equal(state.pitch, 0);
   assert.deepEqual(service.batches.flatMap((batch) => batch.operations.map((operation) => operation.typeId)), [
     RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
+    RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
     RUST_INTEGRATED_TERRAIN_RESIDENCY_RECONCILE_TYPE_V2,
     RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
+    RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
     RUST_CONTEXT_COMMAND_CONTINUITY_TYPE_V2,
   ], "a complete restored native graph must not receive BWI/BWF/entity-import overwrite operations");
   await (engine as unknown as { stopRustLivePlayerAuthorityR5(): Promise<void> }).stopRustLivePlayerAuthorityR5();
+});
+
+test("live activation rejects absent, legacy, blocked, and drifted combat before terrain readiness", async () => {
+  const cases = Object.freeze([
+    Object.freeze({ mode: "absent" as const, message: /linked combat/u }),
+    Object.freeze({ mode: "legacy" as const, message: /explicit-migration/u }),
+    Object.freeze({ mode: "blocked" as const, message: /vital-parity-conflict/u }),
+    Object.freeze({ mode: "vitals-drift" as const, message: /do not match/u }),
+  ]);
+  for (const { mode, message } of cases) {
+    const service = new RestoredRuntimeService(Object.freeze([mode]));
+    const { engine, activeHost } = engineHarness(service);
+    await assert.rejects(
+      (engine as unknown as { activateRustLivePlayerAuthorityR5(input: unknown): Promise<void> })
+        .activateRustLivePlayerAuthorityR5({ generation: 7, kind: "load", save: null, host: activeHost }),
+      message,
+    );
+    assert.equal(
+      service.batches.some((batch) => batch.operations.some(
+        (operation) => operation.typeId === RUST_INTEGRATED_TERRAIN_RESIDENCY_RECONCILE_TYPE_V2,
+      )),
+      false,
+      `${mode} combat must fail before terrain can contribute to readiness`,
+    );
+  }
+});
+
+test("post-terrain status requery rejects newly drifted combat before the player pump opens", async () => {
+  const service = new RestoredRuntimeService(Object.freeze(["exact", "vitals-drift"]));
+  const { engine, activeHost } = engineHarness(service);
+  await assert.rejects(
+    (engine as unknown as { activateRustLivePlayerAuthorityR5(input: unknown): Promise<void> })
+      .activateRustLivePlayerAuthorityR5({ generation: 7, kind: "load", save: null, host: activeHost }),
+    /do not match/u,
+  );
+  assert.equal(service.batches.filter((batch) => batch.operations.some(
+    (operation) => operation.typeId === RUST_INTEGRATED_TERRAIN_RESIDENCY_RECONCILE_TYPE_V2,
+  )).length, 1, "the mutation is followed by an exact BWS5/BWS7 readiness requery");
+  assert.equal(service.batches.some((batch) => batch.operations.some(
+    (operation) => operation.typeId === RUST_CONTEXT_COMMAND_CONTINUITY_TYPE_V2,
+  )), false, "drifted post-mutation combat must fail before the native input pump is created");
 });
 
 test("accepted pump extraction advances only the native presentation mirror and stale generations cannot", async () => {

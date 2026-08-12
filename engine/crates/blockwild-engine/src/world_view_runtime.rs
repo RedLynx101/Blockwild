@@ -118,10 +118,52 @@ pub fn validate_world_view_entity_links_v1(
 /// spatial records. Legacy unlinked V1/V2 records remain loadable but are not
 /// silently promoted into this graph.
 pub fn validate_combat_entity_links_v1(
+    state: &WorldViewStateV1,
     gameplay: &GameplayState,
     entities: &EntityAuthority,
 ) -> Result<(), WorldViewRuntimeErrorV1> {
     let mut claims = BTreeMap::<EntityId, &'static str>::new();
+    for combatant in gameplay.combat.combatants.values() {
+        let Some(entity_id) = combatant.entity_id else {
+            // Legacy whole-heart records deliberately remain unlinked and
+            // loadable until an explicit migration exists.
+            continue;
+        };
+        require_live_entity(entities, entity_id, "combatant")?;
+        if let Some(previous) = claims.insert(entity_id, "combatant") {
+            return Err(entity_conflict(entity_id, previous, "combatant"));
+        }
+        if state.dropped_items.values().any(|drop| drop.entity_id == entity_id) {
+            return Err(entity_conflict(entity_id, "dropped item", "combatant"));
+        }
+        let actor_binding = state
+            .player_bindings
+            .values()
+            .find(|binding| binding.actor_id == combatant.record_id);
+        let entity_binding = state
+            .player_bindings
+            .values()
+            .find(|binding| binding.entity_id == entity_id);
+        if let Some(binding) = actor_binding {
+            let record = entities.compatibility_record(entity_id).expect("live R6 combatant");
+            if binding.entity_id != entity_id
+                || entity_binding != Some(binding)
+                || combatant.owner_id.as_deref() != Some(binding.actor_id.as_str())
+                || record.class != EntityClass::Player
+            {
+                return Err(WorldViewRuntimeErrorV1::new(
+                    WorldViewRuntimeErrorCodeV1::EntityReferenceConflict,
+                    format!(
+                        "R7 player combatant {} disagrees with bound R6 entity {}",
+                        combatant.record_id,
+                        entity_id.packed()
+                    ),
+                ));
+            }
+        } else if entity_binding.is_some() {
+            return Err(entity_conflict(entity_id, "player binding", "combatant"));
+        }
+    }
     for projectile in gameplay.combat.projectiles.values() {
         let Some(link) = &projectile.presentation else {
             continue;
@@ -237,7 +279,7 @@ pub fn validate_world_view_runtime_links_v1(
             return Err(entity_conflict(entity_id, "dropped item", claim));
         }
     }
-    validate_combat_entity_links_v1(gameplay, entities)
+    validate_combat_entity_links_v1(state, gameplay, entities)
 }
 
 fn require_live_entity(
@@ -641,9 +683,10 @@ mod tests {
         ENTITY_COMMAND_SCHEMA, EntityCommand, EntityCommandBatch, EntityCompatibilityRecord, EntityResidency,
     };
     use blockwild_gameplay::{
-        ActorGrant, ActorRole, Container, ContainerKind, FixedWorldVec3V1, GameplayAuthority, ItemDefinition,
-        LinearRgbMillionthsV1, MachineKind, MachineLightKindV1, MachineLightProfileV1, MachineState,
-        PlayerInventoryBindingV1, RotationMicroturnsV1, Scope, WorldViewActorGrantV1, WorldViewScopeV1,
+        ActorGrant, ActorRole, CombatPresentationLinkV1, CombatVitalUnits, CombatantState, Container, ContainerKind,
+        ContentDomain, FixedVec3, FixedWorldVec3V1, GameplayAuthority, ItemDefinition, LinearRgbMillionthsV1,
+        MachineKind, MachineLightKindV1, MachineLightProfileV1, MachineState, PlayerInventoryBindingV1,
+        ProjectileState, RotationMicroturnsV1, Scope, WorldViewActorGrantV1, WorldViewScopeV1,
     };
     use blockwild_types::PlayerId;
 
@@ -651,6 +694,7 @@ mod tests {
 
     const PLAYER_ENTITY: EntityId = EntityId::new(11, 1);
     const DROP_ENTITY: EntityId = EntityId::new(12, 1);
+    const OTHER_ENTITY: EntityId = EntityId::new(13, 1);
     const PLAYER_ID: PlayerId = PlayerId::new(7, 1);
 
     struct Fixture {
@@ -817,6 +861,28 @@ mod tests {
         }
     }
 
+    fn linked_combatant(record_id: &str, owner_id: Option<&str>, entity_id: Option<EntityId>) -> CombatantState {
+        CombatantState {
+            record_id: record_id.into(),
+            owner_id: owner_id.map(str::to_owned),
+            revision: 0,
+            position: FixedVec3::default(),
+            health: 9_500,
+            max_health: 10_000,
+            stamina: 0,
+            mana: 0,
+            armor: 0,
+            resist_per_mille: BTreeMap::new(),
+            statuses: BTreeMap::new(),
+            cooldown_until: BTreeMap::new(),
+            alive: true,
+            vital_units: entity_id.map_or(CombatVitalUnits::LegacyWholeHeartsV1, |_| {
+                CombatVitalUnits::MilliheartsV1
+            }),
+            entity_id,
+        }
+    }
+
     #[test]
     fn entity_links_reject_missing_and_cross_kind_aliases() {
         let fixture = fixture(true);
@@ -840,6 +906,70 @@ mod tests {
         let mut aliased = fixture.world_view.state.clone();
         aliased.dropped_items.get_mut("drop-one").unwrap().entity_id = PLAYER_ENTITY;
         let error = validate_world_view_entity_links_v1(&aliased, &fixture.entities).unwrap_err();
+        assert_eq!(error.code, WorldViewRuntimeErrorCodeV1::EntityReferenceConflict);
+    }
+
+    #[test]
+    fn combatant_links_require_live_unique_nonaliased_r6_ownership() {
+        let mut fixture = fixture(true);
+        fixture.gameplay.state.combat.combatants.insert(
+            "player-seven".into(),
+            linked_combatant("player-seven", Some("player-seven"), Some(PLAYER_ENTITY)),
+        );
+        fixture
+            .gameplay
+            .state
+            .combat
+            .combatants
+            .insert("legacy".into(), linked_combatant("legacy", None, None));
+        validate_world_view_runtime_links_v1(&fixture.world_view.state, &fixture.gameplay.state, &fixture.entities)
+            .unwrap();
+
+        let mut wrong_player = fixture.gameplay.state.clone();
+        wrong_player
+            .combat
+            .combatants
+            .get_mut("player-seven")
+            .unwrap()
+            .entity_id = Some(DROP_ENTITY);
+        let error = validate_world_view_runtime_links_v1(&fixture.world_view.state, &wrong_player, &fixture.entities)
+            .unwrap_err();
+        assert_eq!(error.code, WorldViewRuntimeErrorCodeV1::EntityReferenceConflict);
+
+        let mut missing = fixture.gameplay.state.clone();
+        missing.combat.combatants.get_mut("player-seven").unwrap().entity_id = Some(OTHER_ENTITY);
+        let error =
+            validate_world_view_runtime_links_v1(&fixture.world_view.state, &missing, &fixture.entities).unwrap_err();
+        assert_eq!(error.code, WorldViewRuntimeErrorCodeV1::EntityReferenceMissing);
+
+        spawn_at(&mut fixture.entities, OTHER_ENTITY, "projectile-shared");
+        fixture.gameplay.state.combat.combatants.insert(
+            "other-combatant".into(),
+            linked_combatant("other-combatant", None, Some(OTHER_ENTITY)),
+        );
+        fixture.gameplay.state.combat.projectiles.insert(
+            "projectile-shared".into(),
+            ProjectileState {
+                projectile_id: "projectile-shared".into(),
+                source_id: "other-combatant".into(),
+                target_id: None,
+                ability_id: "test".into(),
+                position: FixedVec3::default(),
+                velocity: FixedVec3::default(),
+                spawned_tick: 0,
+                expires_tick: 1,
+                revision: 0,
+                presentation: Some(CombatPresentationLinkV1 {
+                    entity_id: OTHER_ENTITY,
+                    content_domain: ContentDomain::Item,
+                    content_id: "test".into(),
+                    presentation_id: "test".into(),
+                }),
+            },
+        );
+        let error =
+            validate_world_view_runtime_links_v1(&fixture.world_view.state, &fixture.gameplay.state, &fixture.entities)
+                .unwrap_err();
         assert_eq!(error.code, WorldViewRuntimeErrorCodeV1::EntityReferenceConflict);
     }
 

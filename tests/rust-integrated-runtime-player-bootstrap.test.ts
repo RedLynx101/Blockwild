@@ -41,16 +41,22 @@ import {
   RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
 } from "../app/game/rust-integrated-runtime-player-status.ts";
 import {
+  decodeRustIntegratedPlayerCombatBootstrapStatusQueryV1,
+  encodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1,
+  RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+} from "../app/game/rust-integrated-runtime-player-combat-status.ts";
+import {
   executeRustIntegratedPlayerBootstrapV1,
   planRustIntegratedPlayerBootstrapV1,
   queryRustIntegratedPlayerBootstrapObservationV1,
   RustIntegratedPlayerBootstrapErrorV1,
+  validateRustIntegratedPlayerCombatBootstrapV1,
   type RustIntegratedPlayerBootstrapIntentV1,
   type RustIntegratedPlayerBootstrapObservationV1,
   type RustIntegratedPlayerBootstrapServiceV1,
 } from "../app/game/rust-integrated-runtime-player-bootstrap.ts";
 import {
-  RUST_INTEGRATED_PLAYER_FINAL_BIND_RECEIPT_TYPE_V3,
+  RUST_INTEGRATED_PLAYER_COMBAT_BIND_RECEIPT_TYPE_V4,
 } from "../app/game/rust-integrated-runtime-player-bootstrap.ts";
 import type { RustEntityCompatibilityRecordR6 } from "../app/game/rust-entity-authority-contract-r6.ts";
 
@@ -169,6 +175,19 @@ function continuity() {
   });
 }
 
+function absentCombat(entityRevision: bigint) {
+  return Object.freeze({
+    requestPayloadHash: ZERO_HASH,
+    entityAuthorityRevision: entityRevision,
+    gameplaySequence: BigInt(0),
+    gameplayCombatRevision: BigInt(0),
+    gameplayStateHash: ZERO_HASH,
+    status: "absent" as const,
+    blocker: null,
+    combatant: null,
+  });
+}
+
 function intent(): RustIntegratedPlayerBootstrapIntentV1 {
   const { class: _class, locationId: _locationId, ...entity } = playerRecord();
   assert.equal(_class, "player");
@@ -207,6 +226,7 @@ function absentObservation(): RustIntegratedPlayerBootstrapObservationV1 {
     runtimePlayer: null,
     worldViewBinding: null,
     custody: Object.freeze({ status: "absent" }),
+    combat: absentCombat(BigInt(5)),
   });
 }
 
@@ -247,6 +267,26 @@ function matchingObservation(): RustIntegratedPlayerBootstrapObservationV1 {
       equipmentSlots: Object.freeze(Array.from({ length: 8 }, () => null)),
       metadata: Object.freeze([]),
     }),
+    combat: Object.freeze({
+      requestPayloadHash: ZERO_HASH,
+      entityAuthorityRevision: BigInt(6),
+      gameplaySequence: BigInt(1),
+      gameplayCombatRevision: BigInt(1),
+      gameplayStateHash: "7".repeat(32),
+      status: "exact-linked" as const,
+      blocker: null,
+      combatant: Object.freeze({
+        recordId: binding.actorId,
+        ownerId: binding.actorId,
+        revision: BigInt(0),
+        entityId: ENTITY_ID,
+        vitalUnits: "millihearts-v1" as const,
+        health: 13_000,
+        maxHealth: 20_000,
+        alive: true,
+        crossDomainParity: true,
+      }),
+    }),
   });
 }
 
@@ -256,7 +296,7 @@ function bytes(hex: string) {
 
 function bindAck(requestHash: string, terminalHash: string) {
   return Uint8Array.of(
-    0x42, 0x57, 0x46, 0x36, 1, 0,
+    0x42, 0x57, 0x46, 0x37, 1, 0,
     ...bytes(requestHash),
     ...bytes(terminalHash),
   );
@@ -324,8 +364,8 @@ class FakeBootstrapService implements RustIntegratedPlayerBootstrapServiceV1 {
       if (operation.domain === "simulation") {
         return createRustIntegratedRuntimeDomainOperationV1({
           domain: "simulation",
-          typeId: RUST_INTEGRATED_PLAYER_FINAL_BIND_RECEIPT_TYPE_V3,
-          schema: 3,
+          typeId: RUST_INTEGRATED_PLAYER_COMBAT_BIND_RECEIPT_TYPE_V4,
+          schema: 4,
           payload: bindAck(operation.payloadHash, after.stateHash),
         });
       }
@@ -595,19 +635,25 @@ test("BWS5/BWO5/BWP7/BWI7 match frozen native high-byte vectors", () => {
   assert.deepEqual(decodeRustIntegratedPlayerInventoryImportReceiptV1(receiptBytes), inventoryReceipt);
 });
 
-test("bootstrap status query is an exact nonmutating BWS5 command", async () => {
+test("bootstrap status query is an exact nonmutating BWS5 plus BWS7 command", async () => {
   const expected = absentObservation();
   let commands = 0;
   const service: RustIntegratedPlayerBootstrapServiceV1 = {
     identity: () => expected.identity,
     command: async (batch) => {
       commands += 1;
-      assert.equal(batch.operations.length, 1);
+      assert.equal(batch.operations.length, 2);
       const request = batch.operations[0];
+      const combatRequest = batch.operations[1];
       assert.equal(request.domain, "simulation");
       assert.equal(request.typeId, RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1);
       assert.equal(request.schema, 1);
       assert.deepEqual(decodeRustIntegratedPlayerBootstrapStatusQueryV1(request.payload), {
+        externalEntityId: "player:primary",
+        actorId: "player:noah",
+        playerId: deriveRustIntegratedPlayerIdV1("blockwild:primary", "player:noah"),
+      });
+      assert.deepEqual(decodeRustIntegratedPlayerCombatBootstrapStatusQueryV1(combatRequest.payload), {
         externalEntityId: "player:primary",
         actorId: "player:noah",
         playerId: deriveRustIntegratedPlayerIdV1("blockwild:primary", "player:noah"),
@@ -622,6 +668,10 @@ test("bootstrap status query is an exact nonmutating BWS5 command", async () => 
         worldViewBinding: expected.worldViewBinding,
         custody: expected.custody,
       });
+      const combatPayload = encodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1({
+        ...expected.combat,
+        requestPayloadHash: combatRequest.payloadHash,
+      });
       return Object.freeze({
         status: "accepted" as const,
         commandId: batch.commandId,
@@ -629,21 +679,33 @@ test("bootstrap status query is an exact nonmutating BWS5 command", async () => 
         commandHash: batch.commandHash,
         before: expected.identity,
         after: expected.identity,
-        domainReceipts: Object.freeze([createRustIntegratedRuntimeDomainOperationV1({
-          domain: "simulation",
-          typeId: RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
-          schema: 1,
-          payload,
-        })]),
+        domainReceipts: Object.freeze([
+          createRustIntegratedRuntimeDomainOperationV1({
+            domain: "simulation",
+            typeId: RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+            schema: 1,
+            payload,
+          }),
+          createRustIntegratedRuntimeDomainOperationV1({
+            domain: "simulation",
+            typeId: RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+            schema: 1,
+            payload: combatPayload,
+          }),
+        ]),
         receiptHash: ZERO_HASH,
       });
     },
   };
-  assert.deepEqual(await queryRustIntegratedPlayerBootstrapObservationV1(service, intent()), expected);
+  const result = await queryRustIntegratedPlayerBootstrapObservationV1(service, intent());
+  assert.deepEqual(result, Object.freeze({
+    ...expected,
+    combat: Object.freeze({ ...expected.combat, requestPayloadHash: result.combat.requestPayloadHash }),
+  }));
   assert.equal(commands, 1);
 });
 
-test("absent bootstrap atomically orders BWI5, deferred BWF6, then BWP7", async () => {
+test("absent bootstrap atomically orders BWI5, deferred BWF7, then BWP7", async () => {
   const observation = absentObservation();
   const service = new FakeBootstrapService(observation.identity);
   const result = await executeRustIntegratedPlayerBootstrapV1(service, observation, intent());
@@ -663,6 +725,73 @@ test("matching restored state is a no-op even when simulation fields evolved", a
   assert.equal(service.batches.length, 0);
 });
 
+test("live readiness requires exact linked combat and rejects legacy, blocked, or vital drift", () => {
+  const matching = matchingObservation();
+  assert.equal(validateRustIntegratedPlayerCombatBootstrapV1(matching, "player:noah"), true);
+  assert.equal(
+    validateRustIntegratedPlayerCombatBootstrapV1(
+      Object.freeze({ ...matching, combat: absentCombat(matching.entityAuthority.revision) }),
+      "player:noah",
+    ),
+    false,
+  );
+  const legacy = Object.freeze({
+    ...matching,
+    combat: Object.freeze({
+      ...matching.combat,
+      status: "legacy-unlinked" as const,
+      blocker: "legacy-unlinked-requires-explicit-migration" as const,
+      combatant: Object.freeze({
+        ...matching.combat.combatant!,
+        entityId: null,
+        vitalUnits: "legacy-whole-hearts-v1" as const,
+        health: 13,
+        maxHealth: 20,
+        crossDomainParity: false,
+      }),
+    }),
+  });
+  assert.throws(
+    () => validateRustIntegratedPlayerCombatBootstrapV1(legacy, "player:noah"),
+    /explicit-migration/u,
+  );
+  const blocked = Object.freeze({
+    ...matching,
+    combat: Object.freeze({
+      ...matching.combat,
+      status: "blocked" as const,
+      blocker: "vital-parity-conflict" as const,
+      combatant: Object.freeze({ ...matching.combat.combatant!, crossDomainParity: false }),
+    }),
+  });
+  assert.throws(
+    () => validateRustIntegratedPlayerCombatBootstrapV1(blocked, "player:noah"),
+    /vital-parity-conflict/u,
+  );
+  const drift = Object.freeze({
+    ...matching,
+    combat: Object.freeze({
+      ...matching.combat,
+      combatant: Object.freeze({ ...matching.combat.combatant!, health: 12_999 }),
+    }),
+  });
+  assert.throws(
+    () => validateRustIntegratedPlayerCombatBootstrapV1(drift, "player:noah"),
+    /do not match/u,
+  );
+  const cursorDrift = Object.freeze({
+    ...matching,
+    combat: Object.freeze({
+      ...matching.combat,
+      entityAuthorityRevision: matching.combat.entityAuthorityRevision + BigInt(1),
+    }),
+  });
+  assert.throws(
+    () => validateRustIntegratedPlayerCombatBootstrapV1(cursorDrift, "player:noah"),
+    /authority cursors/u,
+  );
+});
+
 test("matching evolved native inventory is a no-op at its exact durable revision", async () => {
   const source = matchingObservation();
   const observation = Object.freeze({
@@ -679,13 +808,14 @@ test("matching evolved native inventory is a no-op at its exact durable revision
   assert.equal(service.batches.length, 0);
 });
 
-test("an exact unbound entity emits deferred BWF6 then BWP7", async () => {
+test("an exact unbound entity emits deferred BWF7 then BWP7", async () => {
   const source = matchingObservation();
   const observation = Object.freeze({
     ...source,
     runtimePlayer: null,
     worldViewBinding: null,
     custody: Object.freeze({ status: "absent" as const }),
+    combat: absentCombat(source.entityAuthority.revision),
   });
   const service = new FakeBootstrapService(observation.identity);
   const result = await executeRustIntegratedPlayerBootstrapV1(service, observation, intent());

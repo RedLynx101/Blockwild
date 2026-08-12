@@ -42,6 +42,13 @@ import {
   RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
 } from "./rust-integrated-runtime-player-status";
 import {
+  decodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1,
+  encodeRustIntegratedPlayerCombatBootstrapStatusQueryV1,
+  RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+  RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
+  type RustIntegratedPlayerCombatBootstrapStatusReceiptV1,
+} from "./rust-integrated-runtime-player-combat-status";
+import {
   deriveRustIntegratedLocationIdV1,
   deriveRustIntegratedPlayerIdV1,
 } from "./rust-integrated-runtime-identity";
@@ -560,6 +567,7 @@ export type RustPlayerBootstrapIdentityStatusQueryV1 = Readonly<{
 function observationFromStatus(
   identity: RustIntegratedRuntimeIdentityV1,
   status: ReturnType<typeof decodeRustIntegratedPlayerBootstrapStatusReceiptV1>,
+  combat: RustIntegratedPlayerCombatBootstrapStatusReceiptV1,
 ): RustIntegratedPlayerBootstrapObservationV1 {
   return Object.freeze({
     identity,
@@ -570,14 +578,15 @@ function observationFromStatus(
     runtimePlayer: status.runtimePlayer,
     worldViewBinding: status.worldViewBinding,
     custody: status.custody,
+    combat,
   });
 }
 
 /**
- * Two-phase, identity-only BWS5 read. Unlike the convenience bootstrap query,
+ * Two-phase, identity-only BWS5/BWS7 read. Unlike the convenience bootstrap query,
  * this does not require guessing a restored custody revision/hash before BWO5
  * has returned them. `commandActorId` remains explicit and grants no gameplay
- * authority; the sole operation is the identity-neutral status read.
+ * authority; both operations are identity-neutral status reads.
  */
 export async function queryRustPlayerBootstrapIdentityStatusV1(
   service: RustIntegratedPlayerBootstrapServiceV1,
@@ -598,6 +607,17 @@ export async function queryRustPlayerBootstrapIdentityStatusV1(
     schema: 1,
     payload,
   });
+  const combatPayload = encodeRustIntegratedPlayerCombatBootstrapStatusQueryV1({
+    externalEntityId: query.externalEntityId,
+    actorId: query.actorId,
+    playerId: query.playerId,
+  });
+  const combatOperation = createRustIntegratedRuntimeDomainOperationV1({
+    domain: "simulation",
+    typeId: RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
+    schema: 1,
+    payload: combatPayload,
+  });
   const keySource = [
     expected.universeId,
     expected.locationId,
@@ -605,6 +625,7 @@ export async function queryRustPlayerBootstrapIdentityStatusV1(
     String(expected.tick),
     query.commandActorId,
     operation.payloadHash,
+    combatOperation.payloadHash,
   ].join("\u0000");
   const key = `player-bootstrap-status:${rustIntegratedRuntimeWireChecksumV1(textEncoder.encode(keySource))}`;
   const batch = createRustIntegratedRuntimeCommandBatchV1({
@@ -612,7 +633,7 @@ export async function queryRustPlayerBootstrapIdentityStatusV1(
     idempotencyKey: key,
     actorId: query.commandActorId,
     expected,
-    operations: Object.freeze([operation]),
+    operations: Object.freeze([operation, combatOperation]),
   });
   const receipt = await service.command(batch);
   if (receipt.commandId !== batch.commandId || receipt.idempotencyKey !== batch.idempotencyKey
@@ -626,7 +647,8 @@ export async function queryRustPlayerBootstrapIdentityStatusV1(
     return fail("identity-status-rejected", `${receipt.code}: ${receipt.message}`);
   }
   const response = receipt.domainReceipts[0];
-  if (receipt.domainReceipts.length !== 1
+  const combatResponse = receipt.domainReceipts[1];
+  if (receipt.domainReceipts.length !== 2
     || !rustIntegratedRuntimeIdentityEqualsV1(receipt.before, expected)
     || !rustIntegratedRuntimeIdentityEqualsV1(receipt.after, expected)
     || !rustIntegratedRuntimeIdentityEqualsV1(service.identity(), expected)
@@ -634,11 +656,17 @@ export async function queryRustPlayerBootstrapIdentityStatusV1(
     || response.domain !== "simulation"
     || response.typeId !== RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1
     || response.schema !== 1
-    || response.payloadHash !== rustIntegratedRuntimeWireChecksumV1(response.payload)) {
-    fail("identity-status-mutated", "BWS5 status read mutated identity or returned an invalid BWO5 receipt");
+    || response.payloadHash !== rustIntegratedRuntimeWireChecksumV1(response.payload)
+    || !combatResponse
+    || combatResponse.domain !== "simulation"
+    || combatResponse.typeId !== RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1
+    || combatResponse.schema !== 1
+    || combatResponse.payloadHash !== rustIntegratedRuntimeWireChecksumV1(combatResponse.payload)) {
+    fail("identity-status-mutated", "BWS5/BWS7 status read mutated identity or returned an invalid receipt");
   }
   return observationFromStatus(
     expected,
     decodeRustIntegratedPlayerBootstrapStatusReceiptV1(response.payload, operation.payloadHash),
+    decodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1(combatResponse.payload, combatOperation.payloadHash),
   );
 }

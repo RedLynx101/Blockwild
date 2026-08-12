@@ -683,6 +683,7 @@ import {
 } from "./rust-integrated-runtime-contract";
 import {
   executeRustIntegratedPlayerBootstrapV1,
+  validateRustIntegratedPlayerCombatBootstrapV1,
   type RustIntegratedPlayerBootstrapObservationV1,
 } from "./rust-integrated-runtime-player-bootstrap";
 import { queryRustIntegratedRuntimeContextContinuityV2 } from "./rust-integrated-runtime-context-continuity-v2";
@@ -6254,8 +6255,9 @@ export class VoxelEngine {
     const runtimePlayer = observation.runtimePlayer;
     const worldView = observation.worldViewBinding;
     const custody = observation.custody;
-    if (!entity || !runtimePlayer || !worldView || custody.status !== "present") {
-      throw new Error("Rust player status is partial; native entity, binding, world view, and custody must all be present");
+    const combatReady = validateRustIntegratedPlayerCombatBootstrapV1(observation, expected.actorId);
+    if (!entity || !runtimePlayer || !worldView || custody.status !== "present" || !combatReady) {
+      throw new Error("Rust player status is partial; native entity, binding, world view, custody, and linked combat must all be present");
     }
     if (entity.residency !== "hot"
       || entity.record.class !== "player"

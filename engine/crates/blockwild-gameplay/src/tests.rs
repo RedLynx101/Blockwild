@@ -1558,6 +1558,91 @@ fn combat_test_combatant(record_id: &str, x_milli: i32) -> CombatantState {
     }
 }
 
+fn linked_player_combatant(record_id: &str, entity_id: EntityId) -> CombatantState {
+    CombatantState {
+        record_id: record_id.into(),
+        owner_id: Some(record_id.into()),
+        revision: 0,
+        position: FixedVec3 {
+            x_milli: 8_000,
+            y_milli: 64_000,
+            z_milli: 8_000,
+        },
+        health: 9_500,
+        max_health: 10_000,
+        stamina: 0,
+        mana: 0,
+        armor: 0,
+        resist_per_mille: BTreeMap::new(),
+        statuses: BTreeMap::new(),
+        cooldown_until: BTreeMap::new(),
+        alive: true,
+        vital_units: CombatVitalUnits::MilliheartsV1,
+        entity_id: Some(entity_id),
+    }
+}
+
+#[test]
+fn linked_player_combat_install_is_replay_safe_and_rejects_duplicate_entity_claims() {
+    let entity_id = EntityId::new(7, 2);
+    let mut authority = GameplayAuthority::new(GameplayState::new(WorldKey::new("world", "surface"), 1));
+    let combatant = linked_player_combatant("actor:player", entity_id);
+    let before_hash = authority.state.state_hash();
+    assert!(authority.install_linked_combatant_v1(combatant.clone()).unwrap());
+    let installed_hash = authority.state.state_hash();
+    assert_ne!(installed_hash, before_hash);
+    assert_eq!(
+        (authority.state.revision.sequence, authority.state.revision.combat),
+        (1, 1)
+    );
+    assert!(
+        authority.state.combat.abilities.is_empty(),
+        "bootstrap must not fabricate abilities"
+    );
+
+    let evolved = authority.state.combat.combatants.get_mut("actor:player").unwrap();
+    evolved.revision = 3;
+    evolved.position.x_milli = 12_500;
+    evolved.stamina = 73;
+    evolved.mana = 41;
+    evolved.armor = 8;
+    let evolved_hash = authority.state.state_hash();
+    assert!(!authority.install_linked_combatant_v1(combatant).unwrap());
+    let replayed = &authority.state.combat.combatants["actor:player"];
+    assert_eq!(replayed.revision, 3);
+    assert_eq!(replayed.position.x_milli, 12_500);
+    assert_eq!((replayed.stamina, replayed.mana, replayed.armor), (73, 41, 8));
+    assert_eq!(authority.state.state_hash(), evolved_hash);
+    assert_ne!(evolved_hash, installed_hash);
+    assert_eq!(
+        (authority.state.revision.sequence, authority.state.revision.combat),
+        (1, 1)
+    );
+
+    let error = authority
+        .install_linked_combatant_v1(linked_player_combatant("actor:duplicate", entity_id))
+        .unwrap_err();
+    assert_eq!(error.code, RejectionCode::Conflict);
+    assert!(!authority.state.combat.combatants.contains_key("actor:duplicate"));
+}
+
+#[test]
+fn linked_player_combat_install_never_reinterprets_legacy_records() {
+    let entity_id = EntityId::new(8, 2);
+    let mut state = GameplayState::new(WorldKey::new("world", "surface"), 1);
+    state
+        .combat
+        .combatants
+        .insert("actor:legacy".into(), combat_test_combatant("actor:legacy", 0));
+    let before = state.clone();
+    let mut authority = GameplayAuthority::new(state);
+    let error = authority
+        .install_linked_combatant_v1(linked_player_combatant("actor:legacy", entity_id))
+        .unwrap_err();
+    assert_eq!(error.code, RejectionCode::Conflict);
+    assert_eq!(authority.state, before);
+}
+
 #[test]
 fn projectile_magic_applies_damage_status_and_cooldown_deterministically() {
     let mut combat = CombatState::default();
