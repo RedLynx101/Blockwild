@@ -1,6 +1,7 @@
 import type {
   RustIntegratedRuntimeCommandBatchV1,
   RustIntegratedRuntimeConfigV1,
+  RustIntegratedRuntimeExtractionViewV1,
   RustIntegratedRuntimeInputFrameV1,
 } from "./rust-integrated-runtime-contract";
 import {
@@ -55,7 +56,9 @@ export class RustIntegratedRuntimeBrowserAdapterV1 {
   step(monotonicTimeUs: number, budgetUs: number, inputs: readonly RustIntegratedRuntimeInputFrameV1[]) {
     return this.service.step(monotonicTimeUs, budgetUs, inputs);
   }
-  extract(afterRevision: number, maxBytes?: number) { return this.service.extract(afterRevision, maxBytes); }
+  extract(afterRevision: number, maxBytes?: number, view?: RustIntegratedRuntimeExtractionViewV1) {
+    return this.service.extract(afterRevision, maxBytes, view);
+  }
   pollBulkPlatform(maxBytes?: number) { return this.service.pollBulkPlatform(maxBytes); }
   completeBulkPlatform(transferToken: number, response: Uint8Array) { return this.service.completeBulkPlatform(transferToken, response); }
   stageCompatibilitySaveChunk(stageId: string, chunkIndex: number, chunkCount: number, totalBytes: number, payload: Uint8Array) {

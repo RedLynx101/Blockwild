@@ -5,6 +5,9 @@ import {
   RUST_RUNTIME_INPUT_FLAG_V1,
   rustIntegratedRuntimeIdentityEqualsV1,
   type RustIntegratedRuntimeExtractionV1,
+  type RustIntegratedRuntimeExtractionViewV1,
+  type RustIntegratedRuntimeCommandBatchV1,
+  type RustIntegratedRuntimeCommandReceiptV1,
   type RustIntegratedRuntimeIdentityV1,
   type RustIntegratedRuntimeInputActionKindV1,
   type RustIntegratedRuntimeInputActionReceiptV1,
@@ -15,6 +18,17 @@ import type {
   RustIntegratedPlayerBootstrapStatusReceiptV1,
   RustIntegratedPlayerRuntimeContinuityV1,
 } from "./rust-integrated-runtime-player-status.ts";
+import {
+  planRustLiveCameraConfigR10,
+  rustLiveCameraConfigMatchesR10,
+  validateRustLiveCameraAfterCommandR10,
+  validateRustLiveCameraConfigReceiptR10,
+  type RustLiveCameraConfigIntentR10,
+} from "./rust-live-camera-control-r10.ts";
+import {
+  decodeRustLiveCameraViewR10,
+  type RustLiveCameraViewR10,
+} from "./rust-live-camera-view-r10.ts";
 
 export const RUST_LIVE_INPUT_STEP_BUDGET_US_R5 = 8_000;
 export const RUST_LIVE_INPUT_AXIS_DIVISOR_R5 = 32_767;
@@ -82,27 +96,57 @@ export interface RustLiveInputPumpServiceR5 {
     budgetUs: number,
     inputs: readonly RustIntegratedRuntimeInputFrameV1[],
   ): Promise<RustIntegratedRuntimeStepResultR5>;
-  extract(afterRevision: number): Promise<RustIntegratedRuntimeExtractionV1>;
+  extract(
+    afterRevision: number,
+    maxBytes?: number,
+    view?: RustIntegratedRuntimeExtractionViewV1,
+  ): Promise<RustIntegratedRuntimeExtractionV1>;
+  command?(batch: RustIntegratedRuntimeCommandBatchV1): Promise<RustIntegratedRuntimeCommandReceiptV1>;
 }
 
 export type RustLiveInputPumpOptionsR5 = Readonly<{
   service: RustLiveInputPumpServiceR5;
   status: Pick<RustIntegratedPlayerBootstrapStatusReceiptV1,
-    "entityAuthority" | "continuity" | "worldViewBinding">;
+    "entityAuthority" | "continuity" | "worldViewBinding">
+    & Partial<Pick<RustIntegratedPlayerBootstrapStatusReceiptV1, "entity" | "runtimePlayer">>;
   worldGeneration: number;
   afterExtractionRevision?: number;
+  externalEntityId?: string;
   nowUs?: () => number;
 }>;
 
 export type RustLiveInputPumpAdvanceOptionsR5 = Readonly<{
   initialSync?: boolean;
+  view?: RustIntegratedRuntimeExtractionViewV1;
 }>;
+
+export type RustLiveInputPumpExtractionCauseR5 = "initial" | "authority" | "viewport" | "camera-config";
 
 export type RustLiveInputPumpAdvanceResultR5 = Readonly<{
   discarded: boolean;
   step: RustIntegratedRuntimeStepResultR5 | null;
   extraction: RustIntegratedRuntimeExtractionV1 | null;
+  cause?: RustLiveInputPumpExtractionCauseR5 | null;
+  camera?: RustLiveCameraViewR10 | null;
 }>;
+
+export type RustLiveInputPumpViewResultR5 = Readonly<{
+  discarded: boolean;
+  extraction: RustIntegratedRuntimeExtractionV1 | null;
+  cause: "viewport" | null;
+  camera: RustLiveCameraViewR10 | null;
+}>;
+
+export type RustLiveInputPumpCameraConfigResultR10 = Readonly<{
+  discarded: boolean;
+  changed: boolean;
+  receipt: RustIntegratedRuntimeCommandReceiptV1 | null;
+  extraction: RustIntegratedRuntimeExtractionV1 | null;
+  camera: RustLiveCameraViewR10 | null;
+}>;
+
+export type RustLiveCameraConfigUpdateR10 = RustLiveCameraConfigIntentR10
+  | ((current: RustLiveCameraViewR10) => RustLiveCameraConfigIntentR10);
 
 export type RustLiveInputPumpStateR5 = "ready" | "failed" | "stopping" | "stopped";
 
@@ -126,6 +170,10 @@ export type RustLiveInputPumpDiagnosticsR5 = Readonly<{
   samples: number;
   stepCalls: number;
   extractionCalls: number;
+  commandCalls: number;
+  viewExtractionCalls: number;
+  lastView: RustIntegratedRuntimeExtractionViewV1 | null;
+  cameraRevision: bigint | null;
   appliedInputs: number;
   discardedContinuations: number;
   lastError: string | null;
@@ -211,6 +259,24 @@ function frozenIdentity(value: RustIntegratedRuntimeIdentityV1): RustIntegratedR
 
 function frozenFrame(value: RustIntegratedRuntimeInputFrameV1): RustIntegratedRuntimeInputFrameV1 {
   return Object.freeze({ ...value });
+}
+
+function checkedView(value: RustIntegratedRuntimeExtractionViewV1) {
+  return Object.freeze({
+    viewportWidth: integer(value.viewportWidth, 1, 16_384, "camera viewport width"),
+    viewportHeight: integer(value.viewportHeight, 1, 16_384, "camera viewport height"),
+    viewRevision: integer(value.viewRevision, 0, U64_SAFE_MAX, "camera view revision"),
+  });
+}
+
+function sameView(
+  left: RustIntegratedRuntimeExtractionViewV1 | null,
+  right: RustIntegratedRuntimeExtractionViewV1,
+) {
+  return left !== null
+    && left.viewportWidth === right.viewportWidth
+    && left.viewportHeight === right.viewportHeight
+    && left.viewRevision === right.viewRevision;
 }
 
 export function quantizeRustLiveInputAxisR5(value: number) {
@@ -362,6 +428,7 @@ export class RustLiveInputPumpR5 {
 
   private readonly service: RustLiveInputPumpServiceR5;
   private readonly nowUs: () => number;
+  private readonly playerExternalEntityId: string | null;
   private readonly actionTransitions = new Map<number, boolean[]>();
   private tail: Promise<unknown> = Promise.resolve();
   private stopPromise: Promise<void> | null = null;
@@ -381,10 +448,15 @@ export class RustLiveInputPumpR5 {
   private lastIdentity: RustIntegratedRuntimeIdentityV1;
   private lastExtractionRevision: number;
   private lastExtractionHash: string | null = null;
+  private lastView: RustIntegratedRuntimeExtractionViewV1 | null = null;
+  private scheduledView: RustIntegratedRuntimeExtractionViewV1 | null = null;
+  private camera: RustLiveCameraViewR10 | null = null;
   private pendingInput: PendingInputR5 | null = null;
   private samples = 0;
   private stepCalls = 0;
   private extractionCalls = 0;
+  private commandCalls = 0;
+  private viewExtractionCalls = 0;
   private appliedInputs = 0;
   private discardedContinuations = 0;
 
@@ -392,6 +464,14 @@ export class RustLiveInputPumpR5 {
     this.service = options.service;
     this.worldGeneration = integer(options.worldGeneration, 0, U64_SAFE_MAX, "world generation");
     this.nowUs = options.nowUs ?? defaultNowUs;
+    this.playerExternalEntityId = options.externalEntityId
+      ?? options.status.runtimePlayer?.binding.externalEntityId
+      ?? options.status.entity?.record.externalEntityId
+      ?? null;
+    if (this.playerExternalEntityId !== null
+      && (typeof this.playerExternalEntityId !== "string" || this.playerExternalEntityId.length === 0)) {
+      fail("camera-binding", "live input pump external player identity is empty");
+    }
     const identity = frozenIdentity(this.service.identity());
     const continuity = validateContinuity(options.status, identity);
     this.lastIdentity = identity;
@@ -442,20 +522,44 @@ export class RustLiveInputPumpR5 {
     this.requireGeneration(worldGeneration);
     this.requireReady();
     const lifecycle = this.lifecycle;
+    const view = options.view ? checkedView(options.view) : this.scheduledView ?? this.lastView;
+    if (view !== null) this.reserveView(view);
     this.queuedAdvances += 1;
-    const operation = this.tail.then(() => this.runAdvance(worldGeneration, lifecycle, Boolean(options.initialSync)));
-    this.tail = operation.then(
-      () => { this.queuedAdvances -= 1; },
-      (error) => {
-        this.queuedAdvances -= 1;
-        if (this.stateValue === "ready") this.failClosed(error);
-      },
-    );
+    const operation = this.enqueueOperation(() => this.runAdvance(
+      worldGeneration,
+      lifecycle,
+      Boolean(options.initialSync),
+      view,
+    ));
+    operation.finally(() => { this.queuedAdvances -= 1; }).catch(() => undefined);
     return operation;
   }
 
-  syncInitial(worldGeneration: number) {
-    return this.advance(worldGeneration, { initialSync: true });
+  syncInitial(worldGeneration: number, view?: RustIntegratedRuntimeExtractionViewV1) {
+    return this.advance(worldGeneration, { initialSync: true, ...(view ? { view } : {}) });
+  }
+
+  refreshView(worldGeneration: number, view: RustIntegratedRuntimeExtractionViewV1) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    const requested = checkedView(view);
+    this.reserveView(requested);
+    const lifecycle = this.lifecycle;
+    return this.enqueueOperation(() => this.runRefreshView(worldGeneration, lifecycle, requested));
+  }
+
+  applyCameraConfig(
+    worldGeneration: number,
+    desired: RustLiveCameraConfigUpdateR10,
+    view?: RustIntegratedRuntimeExtractionViewV1,
+  ) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    const requested = view ? checkedView(view) : this.scheduledView ?? this.lastView;
+    if (requested === null) fail("camera-view", "camera configuration requires an accepted view context");
+    this.reserveView(requested);
+    const lifecycle = this.lifecycle;
+    return this.enqueueOperation(() => this.runCameraConfig(worldGeneration, lifecycle, desired, requested));
   }
 
   async drain() {
@@ -499,6 +603,10 @@ export class RustLiveInputPumpR5 {
       samples: this.samples,
       stepCalls: this.stepCalls,
       extractionCalls: this.extractionCalls,
+      commandCalls: this.commandCalls,
+      viewExtractionCalls: this.viewExtractionCalls,
+      lastView: this.lastView,
+      cameraRevision: this.camera?.cameraRevision ?? null,
       appliedInputs: this.appliedInputs,
       discardedContinuations: this.discardedContinuations,
       lastError: this.lastError,
@@ -509,6 +617,7 @@ export class RustLiveInputPumpR5 {
     worldGeneration: number,
     lifecycle: number,
     initialSync: boolean,
+    view: RustIntegratedRuntimeExtractionViewV1 | null,
   ): Promise<RustLiveInputPumpAdvanceResultR5> {
     if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
     this.requireReady();
@@ -540,26 +649,113 @@ export class RustLiveInputPumpR5 {
     if (staged) this.commitAppliedInput(staged);
 
     const authorityChanged = step.fixedSteps > 0 || step.inputsApplied === 1;
-    if (!authorityChanged && !initialSync) {
+    const viewChanged = view !== null && !sameView(this.lastView, view);
+    if (!authorityChanged && !initialSync && !viewChanged) {
       return Object.freeze({ discarded: false, step, extraction: null });
     }
 
     this.inFlight = true;
     this.extractionCalls += 1;
+    if (viewChanged && !initialSync) this.viewExtractionCalls += 1;
     let extraction: RustIntegratedRuntimeExtractionV1;
-    try {
-      extraction = await this.service.extract(this.lastExtractionRevision);
-    } catch (error) {
-      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
-      throw error;
-    } finally {
-      this.inFlight = false;
-    }
+    try { extraction = await this.service.extract(this.lastExtractionRevision, undefined, view ?? undefined); }
+    catch (error) { if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded(); throw error; }
+    finally { this.inFlight = false; }
     if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
-    this.validateExtraction(extraction, step.identity, authorityChanged);
-    this.lastExtractionRevision = extraction.extractionRevision;
-    this.lastExtractionHash = extraction.extractionHash;
-    return Object.freeze({ discarded: false, step, extraction });
+    this.validateExtraction(extraction, step.identity, authorityChanged || viewChanged);
+    const camera = view ? this.decodeCamera(extraction, view) : null;
+    this.commitExtraction(extraction, view, camera);
+    return Object.freeze({
+      discarded: false,
+      step,
+      extraction,
+      cause: initialSync ? "initial" : authorityChanged ? "authority" : "viewport",
+      camera,
+    });
+  }
+
+  private async runRefreshView(
+    worldGeneration: number,
+    lifecycle: number,
+    requested: RustIntegratedRuntimeExtractionViewV1,
+  ): Promise<RustLiveInputPumpViewResultR5> {
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedView();
+    if (sameView(this.lastView, requested)) {
+      return Object.freeze({ discarded: false, extraction: null, cause: null, camera: this.camera });
+    }
+    this.validateCurrentView(requested);
+    const identity = this.lastIdentity;
+    this.inFlight = true;
+    this.extractionCalls += 1;
+    this.viewExtractionCalls += 1;
+    let extraction: RustIntegratedRuntimeExtractionV1;
+    try { extraction = await this.service.extract(this.lastExtractionRevision, undefined, requested); }
+    catch (error) { if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedView(); throw error; }
+    finally { this.inFlight = false; }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedView();
+    this.validateExtraction(extraction, identity, true);
+    const camera = this.decodeCamera(extraction, requested);
+    this.commitExtraction(extraction, requested, camera);
+    return Object.freeze({ discarded: false, extraction, cause: "viewport", camera });
+  }
+
+  private async runCameraConfig(
+    worldGeneration: number,
+    lifecycle: number,
+    desired: RustLiveCameraConfigUpdateR10,
+    requested: RustIntegratedRuntimeExtractionViewV1,
+  ): Promise<RustLiveInputPumpCameraConfigResultR10> {
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedCamera();
+    this.validateCurrentView(requested);
+    const current = this.camera;
+    if (current === null) fail("camera-state", "camera configuration requires a decoded authoritative camera row");
+    const resolvedDesired = typeof desired === "function" ? desired(current) : desired;
+    if (rustLiveCameraConfigMatchesR10(current, resolvedDesired)) {
+      if (!sameView(this.lastView, requested)) {
+        const refreshed = await this.runRefreshView(worldGeneration, lifecycle, requested);
+        return Object.freeze({
+          discarded: refreshed.discarded,
+          changed: false,
+          receipt: null,
+          extraction: refreshed.extraction,
+          camera: refreshed.camera,
+        });
+      }
+      return Object.freeze({ discarded: false, changed: false, receipt: null, extraction: null, camera: current });
+    }
+    const command = this.service.command;
+    if (!command) fail("camera-service", "live input service does not expose integrated camera commands");
+    if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), this.lastIdentity)) {
+      fail("identity-drift", "Rust runtime identity moved outside the live input pump");
+    }
+    const plan = planRustLiveCameraConfigR10(this.lastIdentity, current, resolvedDesired);
+    this.inFlight = true;
+    this.commandCalls += 1;
+    let receipt: RustIntegratedRuntimeCommandReceiptV1;
+    try { receipt = await command.call(this.service, plan.batch); }
+    catch (error) { if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedCamera(); throw error; }
+    finally { this.inFlight = false; }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedCamera();
+    const validated = validateRustLiveCameraConfigReceiptR10(plan, receipt);
+    if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), validated.outer.after)) {
+      fail("camera-command-receipt", "service identity disagrees with accepted camera command receipt");
+    }
+    if (!validated.changed) {
+      fail("camera-command-receipt", "accepted camera command was idempotent despite differing from the extracted camera row");
+    }
+    this.lastIdentity = frozenIdentity(validated.outer.after);
+    this.inFlight = true;
+    this.extractionCalls += 1;
+    let extraction: RustIntegratedRuntimeExtractionV1;
+    try { extraction = await this.service.extract(this.lastExtractionRevision, undefined, requested); }
+    catch (error) { if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedCamera(); throw error; }
+    finally { this.inFlight = false; }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedCamera();
+    this.validateExtraction(extraction, validated.outer.after, true);
+    const camera = this.decodeCamera(extraction, requested);
+    validateRustLiveCameraAfterCommandR10(validated, camera);
+    this.commitExtraction(extraction, requested, camera);
+    return Object.freeze({ discarded: false, changed: true, receipt, extraction, camera });
   }
 
   private createPendingInput(identity: RustIntegratedRuntimeIdentityV1): PendingInputR5 {
@@ -678,6 +874,66 @@ export class RustLiveInputPumpR5 {
     }
   }
 
+  private decodeCamera(
+    extraction: RustIntegratedRuntimeExtractionV1,
+    view: RustIntegratedRuntimeExtractionViewV1,
+  ) {
+    const externalEntityId = this.serviceExternalEntityId();
+    return decodeRustLiveCameraViewR10(extraction, externalEntityId, view);
+  }
+
+  private serviceExternalEntityId() {
+    const value = this.playerExternalEntityId;
+    if (!value) fail("camera-binding", "live input pump has no authoritative external player identity");
+    return value;
+  }
+
+  private commitExtraction(
+    extraction: RustIntegratedRuntimeExtractionV1,
+    view: RustIntegratedRuntimeExtractionViewV1 | null,
+    camera: RustLiveCameraViewR10 | null,
+  ) {
+    this.lastExtractionRevision = extraction.extractionRevision;
+    this.lastExtractionHash = extraction.extractionHash;
+    if (view !== null) this.lastView = view;
+    if (camera !== null) this.camera = camera;
+  }
+
+  private validateQueuedView(requested: RustIntegratedRuntimeExtractionViewV1) {
+    const reference = this.scheduledView ?? this.lastView;
+    if (reference !== null && requested.viewRevision < reference.viewRevision) {
+      fail("view-revision-regression", "camera view revision regressed");
+    }
+    if (reference !== null && requested.viewRevision === reference.viewRevision && !sameView(reference, requested)) {
+      fail("view-revision-conflict", "camera view revision was reused for different viewport dimensions");
+    }
+  }
+
+  private reserveView(requested: RustIntegratedRuntimeExtractionViewV1) {
+    this.validateQueuedView(requested);
+    if (this.scheduledView === null || requested.viewRevision > this.scheduledView.viewRevision) {
+      this.scheduledView = requested;
+    }
+  }
+
+  private validateCurrentView(requested: RustIntegratedRuntimeExtractionViewV1) {
+    if (this.lastView !== null && requested.viewRevision < this.lastView.viewRevision) {
+      fail("view-revision-regression", "camera view revision regressed");
+    }
+    if (this.lastView !== null && requested.viewRevision === this.lastView.viewRevision && !sameView(this.lastView, requested)) {
+      fail("view-revision-conflict", "camera view revision was reused for different viewport dimensions");
+    }
+  }
+
+  private enqueueOperation<T>(run: () => Promise<T>) {
+    const operation = this.tail.then(run);
+    this.tail = operation.then(
+      () => undefined,
+      (error) => { if (this.stateValue === "ready") this.failClosed(error); },
+    );
+    return operation;
+  }
+
   private nextMonotonicTime() {
     const candidate = integer(Math.floor(finite(this.nowUs(), "monotonic clock")), 0, U64_SAFE_MAX,
       "monotonic clock");
@@ -702,6 +958,16 @@ export class RustLiveInputPumpR5 {
   private discarded(): RustLiveInputPumpAdvanceResultR5 {
     this.discardedContinuations += 1;
     return Object.freeze({ discarded: true, step: null, extraction: null });
+  }
+
+  private discardedView(): RustLiveInputPumpViewResultR5 {
+    this.discardedContinuations += 1;
+    return Object.freeze({ discarded: true, extraction: null, cause: null, camera: null });
+  }
+
+  private discardedCamera(): RustLiveInputPumpCameraConfigResultR10 {
+    this.discardedContinuations += 1;
+    return Object.freeze({ discarded: true, changed: false, receipt: null, extraction: null, camera: null });
   }
 
   private failClosed(error: unknown) {
