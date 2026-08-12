@@ -220,6 +220,194 @@ test("real IndexedDB preserves exact revisions across reopen, rejects stale tabs
       upgradedCurrent: [2, 7, 1],
     });
 
+    const migration = await page.evaluate(async () => {
+      const adapterModule = await import("/app/game/indexeddb-persistence-adapter.ts");
+      const contract = await import("/app/game/persistence-journal-contract.ts");
+      const requestResult = (request) => new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const transactionComplete = (transaction) => new Promise((resolve, reject) => {
+        transaction.oncomplete = resolve;
+        transaction.onabort = () => reject(transaction.error ?? new DOMException("transaction aborted", "AbortError"));
+        transaction.onerror = () => reject(transaction.error ?? new Error("transaction failed"));
+      });
+      const openDatabase = (name) => new Promise((resolve, reject) => {
+        const request = indexedDB.open(name, adapterModule.RUST_PERSISTENCE_DATABASE_VERSION_V1);
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      const inspectDatabase = async (name) => {
+        const database = await openDatabase(name);
+        const stores = ["meta", "journal", "records", "record-versions", "checkpoints", "legacy-backups", "tombstones"];
+        const transaction = database.transaction(stores, "readonly");
+        const done = transactionComplete(transaction);
+        const entries = await Promise.all(stores.map(async (store) => [store, await requestResult(transaction.objectStore(store).getAll())]));
+        await done;
+        database.close();
+        return Object.fromEntries(entries);
+      };
+      const makeMigration = (worldId, label, seed) => {
+        const sourcePayload = Uint8Array.of(seed, seed + 1, seed + 2);
+        const bundle = contract.createLegacyMigrationBundleV1({
+          sourceKey: `legacy:${label}`,
+          sourceFormat: "blockwild-world-v2",
+          worldId,
+          sourcePayload,
+          normalizedPayload: Uint8Array.of(seed + 3, seed + 4),
+        });
+        const entries = [
+          { address: { universeId: worldId, locationId: "overworld", kind: "entity", recordId: `${label}:alpha` }, payload: Uint8Array.of(seed, 1) },
+          { address: { universeId: worldId, locationId: "overworld", kind: "entity", recordId: `${label}:omega` }, payload: Uint8Array.of(seed, 9) },
+        ];
+        const checkpoint = contract.createPersistenceCheckpointV1({
+          checkpointId: `checkpoint:migration:${label}`,
+          parentCheckpointId: null,
+          worldId,
+          journalSequence: 0,
+          generatorHash: "0123456789abcdef0123456789abcdef",
+          contentHash: "fedcba9876543210fedcba9876543210",
+          createdAt: seed,
+          records: entries.map((entry) => ({ address: entry.address, revision: 1, byteLength: entry.payload.byteLength, payloadHash: contract.persistencePayloadHashV1(entry.payload) })),
+        });
+        return { bundle, sourcePayload, checkpoint, recordPayloads: new Map(entries.map((entry) => [contract.persistenceRecordKeyV1(entry.address), entry.payload])), entries };
+      };
+
+      const raceName = `blockwild-r8-migration-race-${crypto.randomUUID()}`;
+      const raceWorld = "world:migration-race-browser";
+      const first = makeMigration(raceWorld, "first", 10);
+      const second = makeMigration(raceWorld, "second", 20);
+      const firstAdapter = new adapterModule.IndexedDbPersistenceAdapterV1(indexedDB, raceName);
+      const secondAdapter = new adapterModule.IndexedDbPersistenceAdapterV1(indexedDB, raceName);
+      // Settle both opens so Promise call order is transaction creation order.
+      await firstAdapter.readLatestCheckpoint(raceWorld);
+      await secondAdapter.readLatestCheckpoint(raceWorld);
+      const race = await Promise.allSettled([firstAdapter.commitMigration(first), secondAdapter.commitMigration(second)]);
+      const firstReadback = await firstAdapter.verifyMigrationReadback(first);
+      const secondReadback = await secondAdapter.verifyMigrationReadback(second);
+      const beforeRetry = await inspectDatabase(raceName);
+      await firstAdapter.commitMigration(first);
+      const afterRetry = await inspectDatabase(raceName);
+
+      const firstVersionKey = `${contract.persistenceRecordKeyV1(first.checkpoint.records[0].address)}|revision:${String(1).padStart(20, "0")}`;
+      const corruptionDatabase = await openDatabase(raceName);
+      const corruption = corruptionDatabase.transaction("record-versions", "readwrite");
+      const corruptionDone = transactionComplete(corruption);
+      corruption.objectStore("record-versions").delete(firstVersionKey);
+      await corruptionDone;
+      corruptionDatabase.close();
+      let corruptRetry = "fulfilled";
+      try { await firstAdapter.commitMigration(first); } catch { corruptRetry = "rejected"; }
+      const corruptReadback = await firstAdapter.verifyMigrationReadback(first);
+      const afterCorruptRetry = await inspectDatabase(raceName);
+      await firstAdapter.close();
+      await secondAdapter.destroyForDiagnostics();
+
+      const abortName = `blockwild-r8-migration-abort-${crypto.randomUUID()}`;
+      const abortWorld = "world:migration-abort-browser";
+      const abortedInput = makeMigration(abortWorld, "aborted", 30);
+      const injected = new adapterModule.IndexedDbPersistenceAdapterV1(indexedDB, abortName);
+      await injected.readLatestCheckpoint(abortWorld);
+      const originalOpen = injected.open.bind(injected);
+      injected.open = async () => {
+        const database = await originalOpen();
+        return new Proxy(database, {
+          get(target, property) {
+            if (property !== "transaction") {
+              const value = Reflect.get(target, property, target);
+              return typeof value === "function" ? value.bind(target) : value;
+            }
+            return (...args) => {
+              const idbTransaction = target.transaction(...args);
+              return new Proxy(idbTransaction, {
+                get(transactionTarget, transactionProperty) {
+                  if (transactionProperty !== "objectStore") {
+                    const value = Reflect.get(transactionTarget, transactionProperty, transactionTarget);
+                    return typeof value === "function" ? value.bind(transactionTarget) : value;
+                  }
+                  return (storeName) => {
+                    const store = transactionTarget.objectStore(storeName);
+                    return new Proxy(store, {
+                      get(storeTarget, storeProperty) {
+                        if (storeProperty === "put" && storeName === "checkpoints") return () => { throw new DOMException("forced migration abort", "AbortError"); };
+                        const value = Reflect.get(storeTarget, storeProperty, storeTarget);
+                        return typeof value === "function" ? value.bind(storeTarget) : value;
+                      },
+                    });
+                  };
+                },
+                set(transactionTarget, property, value) { return Reflect.set(transactionTarget, property, value, transactionTarget); },
+              });
+            };
+          },
+        });
+      };
+      let abortResult = "fulfilled";
+      try { await injected.commitMigration(abortedInput); } catch { abortResult = "rejected"; }
+      await injected.close();
+      const afterAbort = await inspectDatabase(abortName);
+
+      // A tombstone is also a preflight conflict and must remain the only
+      // durable object after the rejected migration.
+      const tombstoneDatabase = await openDatabase(abortName);
+      const tombstoneWrite = tombstoneDatabase.transaction("tombstones", "readwrite");
+      const tombstoneDone = transactionComplete(tombstoneWrite);
+      tombstoneWrite.objectStore("tombstones").put({ key: `tombstone|${encodeURIComponent(abortWorld)}`, worldId: abortWorld, tombstoneHash: "0".repeat(32), storageRevision: 1 });
+      await tombstoneDone;
+      tombstoneDatabase.close();
+      const tombstoneAdapter = new adapterModule.IndexedDbPersistenceAdapterV1(indexedDB, abortName);
+      let tombstoneResult = "fulfilled";
+      try { await tombstoneAdapter.commitMigration(abortedInput); } catch { tombstoneResult = "rejected"; }
+      await tombstoneAdapter.close();
+      const afterTombstone = await inspectDatabase(abortName);
+      await new adapterModule.IndexedDbPersistenceAdapterV1(indexedDB, abortName).destroyForDiagnostics();
+
+      const count = (snapshot, store) => snapshot[store].length;
+      const meta = (snapshot, prefix) => snapshot.meta.find((entry) => entry.key.startsWith(prefix))?.value ?? null;
+      return {
+        raceStatuses: race.map((result) => result.status),
+        firstReady: firstReadback.ready,
+        secondReady: secondReadback.ready,
+        marker: meta(beforeRetry, "migration-complete|"),
+        head: meta(beforeRetry, "latest-checkpoint|"),
+        sequence: meta(beforeRetry, "journal-sequence|"),
+        revisionBeforeRetry: meta(beforeRetry, "storage-revision|"),
+        revisionAfterRetry: meta(afterRetry, "storage-revision|"),
+        raceCounts: Object.fromEntries(["journal", "records", "record-versions", "checkpoints", "legacy-backups", "tombstones"].map((store) => [store, count(beforeRetry, store)])),
+        corruptRetry,
+        corruptReady: corruptReadback.ready,
+        corruptMissingVersion: corruptReadback.missingRecords.includes(`version:${firstVersionKey}`),
+        versionsAfterCorruptRetry: count(afterCorruptRetry, "record-versions"),
+        currentsAfterCorruptRetry: count(afterCorruptRetry, "records"),
+        abortResult,
+        abortCounts: Object.fromEntries(["meta", "journal", "records", "record-versions", "checkpoints", "legacy-backups", "tombstones"].map((store) => [store, count(afterAbort, store)])),
+        tombstoneResult,
+        tombstoneCounts: Object.fromEntries(["meta", "journal", "records", "record-versions", "checkpoints", "legacy-backups", "tombstones"].map((store) => [store, count(afterTombstone, store)])),
+      };
+    });
+
+    assert.deepEqual(migration, {
+      raceStatuses: ["fulfilled", "rejected"],
+      firstReady: true,
+      secondReady: false,
+      marker: migration.marker,
+      head: "checkpoint:migration:first",
+      sequence: 0,
+      revisionBeforeRetry: 1,
+      revisionAfterRetry: 1,
+      raceCounts: { journal: 0, records: 2, "record-versions": 2, checkpoints: 1, "legacy-backups": 1, tombstones: 0 },
+      corruptRetry: "rejected",
+      corruptReady: false,
+      corruptMissingVersion: true,
+      versionsAfterCorruptRetry: 1,
+      currentsAfterCorruptRetry: 2,
+      abortResult: "rejected",
+      abortCounts: { meta: 0, journal: 0, records: 0, "record-versions": 0, checkpoints: 0, "legacy-backups": 0, tombstones: 0 },
+      tombstoneResult: "rejected",
+      tombstoneCounts: { meta: 0, journal: 0, records: 0, "record-versions": 0, checkpoints: 0, "legacy-backups": 0, tombstones: 1 },
+    });
+    assert.match(migration.marker, /^migration-v1\|[0-9a-f]{32}\|[0-9a-f]{32}$/u);
+
     const devtools = await page.context().newCDPSession(page);
     const origin = new URL(url).origin;
     const usage = await devtools.send("Storage.getUsageAndQuota", { origin });

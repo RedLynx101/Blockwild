@@ -1,6 +1,8 @@
 import {
   PERSISTENCE_RECORD_KIND_ORDER_V1,
   PERSISTENCE_SCHEMA_V1,
+  createLegacyMigrationBundleV1,
+  createPersistenceCheckpointV1,
   persistencePayloadMatchesV1,
   persistenceRecordKeyV1,
   type PersistenceCheckpointV1,
@@ -67,6 +69,33 @@ type StoredTombstone = Readonly<{
   storageRevision: number;
 }>;
 
+type MigrationStateSnapshotV1 = Readonly<{
+  marker: StoredMeta | undefined;
+  head: StoredMeta | undefined;
+  sequence: StoredMeta | undefined;
+  storageRevision: StoredMeta | undefined;
+  tombstone: StoredTombstone | undefined;
+  journal: readonly StoredJournal[];
+  records: readonly StoredRecord[];
+  recordVersions: readonly StoredRecord[];
+  checkpoints: readonly StoredCheckpoint[];
+  backups: readonly StoredLegacyBackup[];
+}>;
+
+type PreparedMigrationWriteV1 = Readonly<{
+  bundle: PersistenceLegacyMigrationBundleV1;
+  sourcePayload: Uint8Array;
+  checkpoint: PersistenceCheckpointV1;
+  records: readonly StoredRecord[];
+  backup: StoredLegacyBackup;
+  markerValue: string;
+}>;
+
+type MigrationInspectionV1 = Readonly<{
+  readback: PersistenceMigrationReadbackV1;
+  pristine: boolean;
+}>;
+
 export type PersistenceMigrationWriteV1 = Readonly<{
   bundle: PersistenceLegacyMigrationBundleV1;
   sourcePayload: Uint8Array;
@@ -103,18 +132,196 @@ function platformChunkKey(operation: StoredPlatformChunk["operation"], worldId: 
 function recordBelongsToWorld(record: StoredRecord | undefined, worldId: string) {
   if (!record) return false;
   const address = record.address;
+  if (!address || typeof address.universeId !== "string" || typeof address.locationId !== "string") return false;
   return address.universeId === worldId
     || address.universeId === `world:${worldId}`
     || `${address.universeId}@${address.locationId}` === worldId
     || `world:${address.universeId}` === worldId;
 }
 
+function recordStorageKeyBelongsToWorld(key: unknown, worldId: string) {
+  if (typeof key !== "string") return false;
+  const currentKey = key.split("|revision:", 1)[0];
+  const separator = currentKey.indexOf("@");
+  const kind = currentKey.indexOf("/", separator + 1);
+  if (separator < 1 || kind < 0) return false;
+  try {
+    const universeId = decodeURIComponent(currentKey.slice(0, separator));
+    const locationId = decodeURIComponent(currentKey.slice(separator + 1, kind));
+    return universeId === worldId || universeId === `world:${worldId}`
+      || `${universeId}@${locationId}` === worldId || `world:${universeId}` === worldId;
+  } catch { return false; }
+}
+
 function sameStoredRecord(left: StoredRecord, right: StoredRecord) {
-  return left.revision === right.revision
-    && persistenceRecordKeyV1(left.address) === persistenceRecordKeyV1(right.address)
-    && left.payloadHash === right.payloadHash
-    && left.payload.byteLength === right.payload.byteLength
-    && left.payload.every((value, index) => value === right.payload[index]);
+  try {
+    return left.revision === right.revision
+      && persistenceRecordKeyV1(left.address) === persistenceRecordKeyV1(right.address)
+      && left.payloadHash === right.payloadHash
+      && left.payload instanceof Uint8Array
+      && right.payload instanceof Uint8Array
+      && left.payload.byteLength === right.payload.byteLength
+      && left.payload.every((value, index) => value === right.payload[index]);
+  } catch { return false; }
+}
+
+function sameBytes(left: Uint8Array, right: Uint8Array) {
+  return left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);
+}
+
+function cloneMigrationBundle(bundle: PersistenceLegacyMigrationBundleV1): PersistenceLegacyMigrationBundleV1 {
+  return Object.freeze({ ...bundle, normalizedPayload: Uint8Array.from(bundle.normalizedPayload) });
+}
+
+function sameMigrationBundle(left: PersistenceLegacyMigrationBundleV1, right: PersistenceLegacyMigrationBundleV1) {
+  try {
+    return left.schemaVersion === right.schemaVersion
+      && left.sourceKey === right.sourceKey
+      && left.sourceFormat === right.sourceFormat
+      && left.worldId === right.worldId
+      && left.sourceHash === right.sourceHash
+      && left.normalizedHash === right.normalizedHash
+      && left.migrationHash === right.migrationHash
+      && left.normalizedPayload instanceof Uint8Array
+      && right.normalizedPayload instanceof Uint8Array
+      && sameBytes(left.normalizedPayload, right.normalizedPayload);
+  } catch { return false; }
+}
+
+function sameCheckpoint(left: PersistenceCheckpointV1, right: PersistenceCheckpointV1) {
+  try {
+    if (left.schemaVersion !== right.schemaVersion || left.checkpointId !== right.checkpointId
+      || left.parentCheckpointId !== right.parentCheckpointId || left.worldId !== right.worldId
+      || left.journalSequence !== right.journalSequence || left.generatorHash !== right.generatorHash
+      || left.contentHash !== right.contentHash || left.createdAt !== right.createdAt
+      || left.checkpointHash !== right.checkpointHash || left.records.length !== right.records.length) return false;
+    return left.records.every((record, index) => {
+      const expected = right.records[index];
+      return persistenceRecordKeyV1(record.address) === persistenceRecordKeyV1(expected.address)
+        && record.revision === expected.revision && record.byteLength === expected.byteLength
+        && record.payloadHash === expected.payloadHash;
+    });
+  } catch { return false; }
+}
+
+function migrationMarkerValue(bundle: PersistenceLegacyMigrationBundleV1, checkpoint: PersistenceCheckpointV1) {
+  return `migration-v1|${bundle.migrationHash}|${checkpoint.checkpointHash}`;
+}
+
+function canonicalMigrationIdentity(input: Pick<PersistenceMigrationWriteV1, "bundle" | "checkpoint">) {
+  const bundle = createLegacyMigrationBundleV1({
+    sourceKey: input.bundle.sourceKey,
+    sourceFormat: input.bundle.sourceFormat,
+    worldId: input.bundle.worldId,
+    sourcePayload: new Uint8Array(),
+    normalizedPayload: input.bundle.normalizedPayload,
+  });
+  // The source bytes are intentionally unavailable during standalone readback;
+  // retain the supplied source hash while independently canonicalizing every
+  // other field and the migration-domain hash below.
+  const canonicalBundle = Object.freeze({ ...bundle, sourceHash: input.bundle.sourceHash });
+  const migrationHasher = new TypeScriptCanonicalHasher("blockwild-persistence-migration-v1");
+  migrationHasher.writeU16(PERSISTENCE_SCHEMA_V1).writeString(input.bundle.sourceKey).writeString(input.bundle.sourceFormat)
+    .writeString(input.bundle.worldId).writeString(input.bundle.sourceHash).writeString(bundle.normalizedHash);
+  const expectedBundle = Object.freeze({ ...canonicalBundle, migrationHash: migrationHasher.finishHex() });
+  if (!sameMigrationBundle(input.bundle, expectedBundle)) throw new Error("legacy migration bundle is not canonical");
+  const canonicalCheckpoint = createPersistenceCheckpointV1({
+    checkpointId: input.checkpoint.checkpointId,
+    parentCheckpointId: input.checkpoint.parentCheckpointId,
+    worldId: input.checkpoint.worldId,
+    journalSequence: input.checkpoint.journalSequence,
+    generatorHash: input.checkpoint.generatorHash,
+    contentHash: input.checkpoint.contentHash,
+    createdAt: input.checkpoint.createdAt,
+    records: input.checkpoint.records,
+  });
+  if (!sameCheckpoint(input.checkpoint, canonicalCheckpoint)) throw new Error("migration checkpoint is not canonical");
+  if (input.checkpoint.worldId !== input.bundle.worldId) throw new Error("migration checkpoint belongs to another world");
+  if (input.checkpoint.parentCheckpointId !== null || input.checkpoint.journalSequence !== 0) throw new Error("legacy migration must create a root checkpoint at journal sequence zero");
+  return Object.freeze({ bundle: cloneMigrationBundle(input.bundle), checkpoint: cloneCheckpoint(input.checkpoint) });
+}
+
+function prepareMigrationWrite(input: PersistenceMigrationWriteV1): PreparedMigrationWriteV1 {
+  const identity = canonicalMigrationIdentity(input);
+  if (!persistencePayloadMatchesV1(input.sourcePayload, identity.bundle.sourceHash)) throw new Error("legacy source payload does not match migration fingerprint");
+  if (input.recordPayloads.size !== identity.checkpoint.records.length) throw new Error("migration payload map does not exactly match its checkpoint record table");
+  const records = identity.checkpoint.records.map((descriptor) => {
+    const key = persistenceRecordKeyV1(descriptor.address);
+    const payload = input.recordPayloads.get(key);
+    if (!payload) throw new Error(`migration record ${key} is missing`);
+    if (payload.byteLength !== descriptor.byteLength || !persistencePayloadMatchesV1(payload, descriptor.payloadHash)) throw new Error(`migration record ${key} failed semantic readback hashing`);
+    const stored = Object.freeze({ key, address: Object.freeze({ ...descriptor.address }), revision: descriptor.revision, payload: Uint8Array.from(payload), payloadHash: descriptor.payloadHash }) satisfies StoredRecord;
+    if (!recordBelongsToWorld(stored, identity.bundle.worldId)) throw new Error(`migration record ${key} belongs to another world`);
+    return stored;
+  });
+  const backup = Object.freeze({
+    key: backupKey(identity.bundle), worldId: identity.bundle.worldId, sourceKey: identity.bundle.sourceKey,
+    bundle: identity.bundle, sourcePayload: Uint8Array.from(input.sourcePayload),
+  }) satisfies StoredLegacyBackup;
+  return Object.freeze({ ...identity, sourcePayload: Uint8Array.from(input.sourcePayload), records: Object.freeze(records), backup, markerValue: migrationMarkerValue(identity.bundle, identity.checkpoint) });
+}
+
+function storedRecordMatchesDescriptor(record: StoredRecord, key: string, descriptor: PersistenceCheckpointV1["records"][number], versioned: boolean) {
+  const expectedKey = versioned ? recordVersionKey(descriptor.address, descriptor.revision) : key;
+  try {
+    return record.key === expectedKey && persistenceRecordKeyV1(record.address) === key
+      && record.revision === descriptor.revision && record.payloadHash === descriptor.payloadHash
+      && record.payload instanceof Uint8Array && record.payload.byteLength === descriptor.byteLength
+      && persistencePayloadMatchesV1(record.payload, descriptor.payloadHash);
+  } catch { return false; }
+}
+
+function inspectMigrationState(input: Pick<PersistenceMigrationWriteV1, "bundle" | "checkpoint">, state: MigrationStateSnapshotV1): MigrationInspectionV1 {
+  const identity = canonicalMigrationIdentity(input);
+  const expectedCurrentKeys = new Set(identity.checkpoint.records.map((descriptor) => persistenceRecordKeyV1(descriptor.address)));
+  const expectedVersionKeys = new Set(identity.checkpoint.records.map((descriptor) => recordVersionKey(descriptor.address, descriptor.revision)));
+  const relevantRecords = state.records.filter((record) => expectedCurrentKeys.has(record?.key) || recordStorageKeyBelongsToWorld(record?.key, identity.bundle.worldId) || recordBelongsToWorld(record, identity.bundle.worldId));
+  const relevantVersions = state.recordVersions.filter((record) => expectedVersionKeys.has(record?.key) || recordStorageKeyBelongsToWorld(record?.key, identity.bundle.worldId) || recordBelongsToWorld(record, identity.bundle.worldId));
+  const relevantCheckpoints = state.checkpoints.filter((stored) => stored?.key === checkpointKey(identity.bundle.worldId, identity.checkpoint.checkpointId) || stored?.checkpoint?.worldId === identity.bundle.worldId);
+  const relevantBackups = state.backups.filter((stored) => stored?.key === backupKey(identity.bundle) || stored?.worldId === identity.bundle.worldId);
+  const relevantJournal = state.journal.filter((stored) => stored?.worldId === identity.bundle.worldId || stored?.key?.startsWith(`${encodeURIComponent(identity.bundle.worldId)}|`));
+  const missingRecords: string[] = [];
+  const corruptRecords: string[] = [];
+  for (const descriptor of identity.checkpoint.records) {
+    const key = persistenceRecordKeyV1(descriptor.address);
+    const current = relevantRecords.find((record) => record?.key === key);
+    const versionKey = recordVersionKey(descriptor.address, descriptor.revision);
+    const version = relevantVersions.find((record) => record?.key === versionKey);
+    if (!current) missingRecords.push(`current:${key}`);
+    else if (!storedRecordMatchesDescriptor(current, key, descriptor, false)) corruptRecords.push(`current:${key}`);
+    if (!version) missingRecords.push(`version:${versionKey}`);
+    else if (!storedRecordMatchesDescriptor(version, key, descriptor, true)) corruptRecords.push(`version:${versionKey}`);
+  }
+  for (const record of relevantRecords) if (!expectedCurrentKeys.has(record.key)) corruptRecords.push(`unexpected-current:${record.key}`);
+  for (const record of relevantVersions) if (!expectedVersionKeys.has(record.key)) corruptRecords.push(`unexpected-version:${record.key}`);
+  const storedCheckpoint = relevantCheckpoints.find((stored) => stored.key === checkpointKey(identity.bundle.worldId, identity.checkpoint.checkpointId));
+  const checkpointExact = Boolean(storedCheckpoint && sameCheckpoint(storedCheckpoint.checkpoint, identity.checkpoint) && relevantCheckpoints.length === 1);
+  if (!checkpointExact) corruptRecords.push(storedCheckpoint ? "checkpoint:mismatch" : "checkpoint:missing");
+  const storedBackup = relevantBackups.find((stored) => stored.key === backupKey(identity.bundle));
+  const backupPreserved = Boolean(storedBackup && storedBackup.worldId === identity.bundle.worldId && storedBackup.sourceKey === identity.bundle.sourceKey
+    && sameMigrationBundle(storedBackup.bundle, identity.bundle) && storedBackup.sourcePayload instanceof Uint8Array
+    && persistencePayloadMatchesV1(storedBackup.sourcePayload, identity.bundle.sourceHash) && relevantBackups.length === 1);
+  if (!backupPreserved) corruptRecords.push(storedBackup ? "legacy-backup:mismatch" : "legacy-backup:missing");
+  const markerExact = state.marker?.value === migrationMarkerValue(identity.bundle, identity.checkpoint);
+  const headExact = state.head?.value === identity.checkpoint.checkpointId;
+  const sequenceExact = state.sequence?.value === 0;
+  const revisionExact = typeof state.storageRevision?.value === "number" && Number.isSafeInteger(state.storageRevision.value) && state.storageRevision.value >= 1;
+  if (!markerExact) corruptRecords.push(state.marker ? "migration-marker:mismatch" : "migration-marker:missing");
+  if (!headExact) corruptRecords.push(state.head ? "latest-checkpoint:mismatch" : "latest-checkpoint:missing");
+  if (!sequenceExact) corruptRecords.push(state.sequence ? "journal-sequence:mismatch" : "journal-sequence:missing");
+  if (!revisionExact) corruptRecords.push(state.storageRevision ? "storage-revision:mismatch" : "storage-revision:missing");
+  if (state.tombstone) corruptRecords.push("tombstone:present");
+  if (relevantJournal.length > 0) corruptRecords.push("journal:unexpected-entry");
+  const checkpointHash = storedCheckpoint?.checkpoint?.checkpointHash ?? null;
+  const ready = markerExact && headExact && sequenceExact && revisionExact && !state.tombstone && relevantJournal.length === 0
+    && checkpointExact && backupPreserved && missingRecords.length === 0 && corruptRecords.length === 0;
+  const readback = Object.freeze({ ready, checkpointHash, missingRecords: Object.freeze(missingRecords), corruptRecords: Object.freeze(corruptRecords), backupPreserved });
+  const storageRevisionPristine = state.storageRevision === undefined
+    || typeof state.storageRevision.value === "number" && Number.isSafeInteger(state.storageRevision.value) && state.storageRevision.value >= 0;
+  const pristine = state.marker === undefined && state.head === undefined && state.sequence === undefined && state.tombstone === undefined
+    && relevantJournal.length === 0 && relevantRecords.length === 0 && relevantVersions.length === 0
+    && relevantCheckpoints.length === 0 && relevantBackups.length === 0 && storageRevisionPristine;
+  return Object.freeze({ readback, pristine });
 }
 
 class PlatformWriter {
@@ -328,6 +535,23 @@ function deleteMatching(store: IDBObjectStore, predicate: (value: unknown, key: 
 async function abortTransaction(transaction: IDBTransaction) {
   try { transaction.abort(); } catch { /* transaction already settled */ }
   try { await transactionDone(transaction); } catch { /* expected abort */ }
+}
+
+async function readMigrationState(transaction: IDBTransaction, worldId: string): Promise<MigrationStateSnapshotV1> {
+  const meta = transaction.objectStore(STORE_META);
+  const [marker, head, sequence, storageRevision, tombstone, journal, records, recordVersions, checkpoints, backups] = await Promise.all([
+    requestValue(meta.get(migrationKey(worldId))) as Promise<StoredMeta | undefined>,
+    requestValue(meta.get(latestCheckpointKey(worldId))) as Promise<StoredMeta | undefined>,
+    requestValue(meta.get(sequenceKey(worldId))) as Promise<StoredMeta | undefined>,
+    requestValue(meta.get(storageRevisionKey(worldId))) as Promise<StoredMeta | undefined>,
+    requestValue(transaction.objectStore(STORE_TOMBSTONES).get(tombstoneKey(worldId))) as Promise<StoredTombstone | undefined>,
+    requestValue(transaction.objectStore(STORE_JOURNAL).getAll()) as Promise<StoredJournal[]>,
+    requestValue(transaction.objectStore(STORE_RECORDS).getAll()) as Promise<StoredRecord[]>,
+    requestValue(transaction.objectStore(STORE_RECORD_VERSIONS).getAll()) as Promise<StoredRecord[]>,
+    requestValue(transaction.objectStore(STORE_CHECKPOINTS).getAll()) as Promise<StoredCheckpoint[]>,
+    requestValue(transaction.objectStore(STORE_LEGACY_BACKUPS).getAll()) as Promise<StoredLegacyBackup[]>,
+  ]);
+  return Object.freeze({ marker, head, sequence, storageRevision, tombstone, journal, records, recordVersions, checkpoints, backups });
 }
 
 export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapterV1 {
@@ -723,48 +947,53 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
 
   /** Separate-namespace migration: source bytes and new records commit together; no legacy key is deleted. */
   async commitMigration(input: PersistenceMigrationWriteV1) {
-    if (!persistencePayloadMatchesV1(input.sourcePayload, input.bundle.sourceHash)) throw new Error("legacy source payload does not match migration fingerprint");
-    if (input.checkpoint.worldId !== input.bundle.worldId) throw new Error("migration checkpoint belongs to another world");
-    for (const descriptor of input.checkpoint.records) {
-      const key = persistenceRecordKeyV1(descriptor.address);
-      const payload = input.recordPayloads.get(key);
-      if (!payload) throw new Error(`migration record ${key} is missing`);
-      if (payload.byteLength !== descriptor.byteLength || !persistencePayloadMatchesV1(payload, descriptor.payloadHash)) throw new Error(`migration record ${key} failed semantic readback hashing`);
-    }
+    const prepared = prepareMigrationWrite(input);
     const database = await this.open();
-    const idb = database.transaction([STORE_META, STORE_RECORDS, STORE_RECORD_VERSIONS, STORE_CHECKPOINTS, STORE_LEGACY_BACKUPS], "readwrite", { durability: "strict" });
-    const records = idb.objectStore(STORE_RECORDS);
-    const versions = idb.objectStore(STORE_RECORD_VERSIONS);
-    for (const descriptor of input.checkpoint.records) {
-      const key = persistenceRecordKeyV1(descriptor.address);
-      const stored = Object.freeze({ key, address: descriptor.address, revision: descriptor.revision, payload: Uint8Array.from(input.recordPayloads.get(key)!), payloadHash: descriptor.payloadHash }) satisfies StoredRecord;
-      records.put(stored);
-      versions.put(Object.freeze({ ...stored, key: recordVersionKey(descriptor.address, descriptor.revision) }) satisfies StoredRecord);
+    const stores = [STORE_META, STORE_JOURNAL, STORE_RECORDS, STORE_RECORD_VERSIONS, STORE_CHECKPOINTS, STORE_LEGACY_BACKUPS, STORE_TOMBSTONES];
+    const idb = database.transaction(stores, "readwrite", { durability: "strict" });
+    const done = transactionDone(idb);
+    try {
+      // This is deliberately one serialized readwrite transaction. A second
+      // tab cannot pass these reads until the first writer commits or aborts.
+      const state = await readMigrationState(idb, prepared.bundle.worldId);
+      const inspection = inspectMigrationState(prepared, state);
+      if (state.marker !== undefined) {
+        if (!inspection.readback.ready) throw new Error("legacy migration conflict: the durable migration marker is incomplete, different, or corrupt");
+        await done;
+        return;
+      }
+      if (!inspection.pristine) throw new Error("legacy migration conflict: durable world state already exists without an exact committed migration marker");
+
+      const meta = idb.objectStore(STORE_META);
+      const records = idb.objectStore(STORE_RECORDS);
+      const versions = idb.objectStore(STORE_RECORD_VERSIONS);
+      for (const stored of prepared.records) {
+        records.put(stored);
+        versions.put(Object.freeze({ ...stored, key: recordVersionKey(stored.address, stored.revision) }) satisfies StoredRecord);
+      }
+      idb.objectStore(STORE_CHECKPOINTS).put(Object.freeze({ key: checkpointKey(prepared.checkpoint.worldId, prepared.checkpoint.checkpointId), checkpoint: prepared.checkpoint }) satisfies StoredCheckpoint);
+      idb.objectStore(STORE_LEGACY_BACKUPS).put(prepared.backup);
+      meta.put(Object.freeze({ key: migrationKey(prepared.bundle.worldId), value: prepared.markerValue }) satisfies StoredMeta);
+      meta.put(Object.freeze({ key: latestCheckpointKey(prepared.bundle.worldId), value: prepared.checkpoint.checkpointId }) satisfies StoredMeta);
+      meta.put(Object.freeze({ key: sequenceKey(prepared.bundle.worldId), value: 0 }) satisfies StoredMeta);
+      const previousRevision = typeof state.storageRevision?.value === "number" ? state.storageRevision.value : 0;
+      meta.put(Object.freeze({ key: storageRevisionKey(prepared.bundle.worldId), value: previousRevision + 1 }) satisfies StoredMeta);
+      await done;
+    } catch (error) {
+      try { idb.abort(); } catch { /* transaction already settled */ }
+      try { await done; } catch { /* preserve the preflight/write failure */ }
+      throw error;
     }
-    idb.objectStore(STORE_CHECKPOINTS).put(Object.freeze({ key: checkpointKey(input.checkpoint.worldId, input.checkpoint.checkpointId), checkpoint: cloneCheckpoint(input.checkpoint) }) satisfies StoredCheckpoint);
-    idb.objectStore(STORE_LEGACY_BACKUPS).put(Object.freeze({ key: backupKey(input.bundle), worldId: input.bundle.worldId, sourceKey: input.bundle.sourceKey, bundle: input.bundle, sourcePayload: Uint8Array.from(input.sourcePayload) }) satisfies StoredLegacyBackup);
-    idb.objectStore(STORE_META).put(Object.freeze({ key: migrationKey(input.bundle.worldId), value: input.checkpoint.checkpointHash }) satisfies StoredMeta);
-    idb.objectStore(STORE_META).put(Object.freeze({ key: latestCheckpointKey(input.bundle.worldId), value: input.checkpoint.checkpointId }) satisfies StoredMeta);
-    await transactionDone(idb);
   }
 
   async verifyMigrationReadback(input: Pick<PersistenceMigrationWriteV1, "bundle" | "checkpoint">): Promise<PersistenceMigrationReadbackV1> {
+    const identity = canonicalMigrationIdentity(input);
     const database = await this.open();
-    const idb = database.transaction([STORE_RECORDS, STORE_CHECKPOINTS, STORE_LEGACY_BACKUPS], "readonly");
-    const checkpointRecord = await requestValue(idb.objectStore(STORE_CHECKPOINTS).get(checkpointKey(input.checkpoint.worldId, input.checkpoint.checkpointId))) as StoredCheckpoint | undefined;
-    const backup = await requestValue(idb.objectStore(STORE_LEGACY_BACKUPS).get(backupKey(input.bundle))) as StoredLegacyBackup | undefined;
-    const missingRecords: string[] = [];
-    const corruptRecords: string[] = [];
-    for (const descriptor of input.checkpoint.records) {
-      const key = persistenceRecordKeyV1(descriptor.address);
-      const record = await requestValue(idb.objectStore(STORE_RECORDS).get(key)) as StoredRecord | undefined;
-      if (!record) missingRecords.push(key);
-      else if (record.revision !== descriptor.revision || record.payloadHash !== descriptor.payloadHash || !persistencePayloadMatchesV1(record.payload, descriptor.payloadHash)) corruptRecords.push(key);
-    }
-    await transactionDone(idb);
-    const backupPreserved = Boolean(backup && persistencePayloadMatchesV1(backup.sourcePayload, input.bundle.sourceHash));
-    const checkpointHash = checkpointRecord?.checkpoint.checkpointHash ?? null;
-    return Object.freeze({ ready: checkpointHash === input.checkpoint.checkpointHash && backupPreserved && !missingRecords.length && !corruptRecords.length, checkpointHash, missingRecords: Object.freeze(missingRecords), corruptRecords: Object.freeze(corruptRecords), backupPreserved });
+    const idb = database.transaction([STORE_META, STORE_JOURNAL, STORE_RECORDS, STORE_RECORD_VERSIONS, STORE_CHECKPOINTS, STORE_LEGACY_BACKUPS, STORE_TOMBSTONES], "readonly");
+    const done = transactionDone(idb);
+    const state = await readMigrationState(idb, identity.bundle.worldId);
+    await done;
+    return inspectMigrationState(identity, state).readback;
   }
 
   async deleteWorld(worldId: string) {
@@ -803,10 +1032,13 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
 /** Deterministic test/headless adapter with the same atomic preflight semantics. */
 export class MemoryPersistenceAdapterV1 implements PersistencePlatformAdapterV1 {
   private readonly sequences = new Map<string, number>();
+  private readonly journals = new Map<string, StoredJournal>();
   private readonly records = new Map<string, StoredRecord>();
   private readonly recordVersions = new Map<string, StoredRecord>();
   private readonly checkpoints = new Map<string, PersistenceCheckpointV1>();
   private readonly latestCheckpoints = new Map<string, string>();
+  private readonly migrationMarkers = new Map<string, string>();
+  private readonly legacyBackups = new Map<string, StoredLegacyBackup>();
   private readonly storageRevisions = new Map<string, number>();
   private readonly platformChunks = new Map<string, StoredPlatformChunk>();
   private readonly tombstones = new Map<string, StoredTombstone>();
@@ -832,6 +1064,7 @@ export class MemoryPersistenceAdapterV1 implements PersistencePlatformAdapterV1 
     }
     this.records.clear(); for (const [key, value] of next) this.records.set(key, value);
     this.sequences.set(transaction.worldId, transaction.nextJournalSequence);
+    this.journals.set(journalKey(transaction.worldId, transaction.nextJournalSequence), Object.freeze({ key: journalKey(transaction.worldId, transaction.nextJournalSequence), worldId: transaction.worldId, sequence: transaction.nextJournalSequence, transaction: cloneTransaction(transaction) }));
     this.storageRevisions.set(transaction.worldId, (this.storageRevisions.get(transaction.worldId) ?? 0) + 1);
     if (checkpoint) await this.putCheckpoint(checkpoint);
     return Object.freeze({ status: "committed", transactionId: transaction.transactionId, journalSequence: transaction.nextJournalSequence, durableHash: transaction.transactionHash });
@@ -850,6 +1083,45 @@ export class MemoryPersistenceAdapterV1 implements PersistencePlatformAdapterV1 
       ? this.records.get(persistenceRecordKeyV1(address))
       : this.recordVersions.get(recordVersionKey(address, revision)) ?? this.records.get(persistenceRecordKeyV1(address));
     return !value || revision !== undefined && value.revision !== revision ? null : Uint8Array.from(value.payload);
+  }
+  private migrationState(worldId: string): MigrationStateSnapshotV1 {
+    const marker = this.migrationMarkers.has(worldId) ? Object.freeze({ key: migrationKey(worldId), value: this.migrationMarkers.get(worldId)! }) : undefined;
+    const head = this.latestCheckpoints.has(worldId) ? Object.freeze({ key: latestCheckpointKey(worldId), value: this.latestCheckpoints.get(worldId)! }) : undefined;
+    const sequence = this.sequences.has(worldId) ? Object.freeze({ key: sequenceKey(worldId), value: this.sequences.get(worldId)! }) : undefined;
+    const storageRevision = this.storageRevisions.has(worldId) ? Object.freeze({ key: storageRevisionKey(worldId), value: this.storageRevisions.get(worldId)! }) : undefined;
+    return Object.freeze({
+      marker, head, sequence, storageRevision, tombstone: this.tombstones.get(worldId),
+      journal: Object.freeze([...this.journals.values()]), records: Object.freeze([...this.records.values()]),
+      recordVersions: Object.freeze([...this.recordVersions.values()]),
+      checkpoints: Object.freeze([...this.checkpoints].map(([key, checkpoint]) => Object.freeze({ key, checkpoint }))),
+      backups: Object.freeze([...this.legacyBackups.values()]),
+    });
+  }
+  async commitMigration(input: PersistenceMigrationWriteV1) {
+    const prepared = prepareMigrationWrite(input);
+    const state = this.migrationState(prepared.bundle.worldId);
+    const inspection = inspectMigrationState(prepared, state);
+    if (state.marker !== undefined) {
+      if (!inspection.readback.ready) throw new Error("legacy migration conflict: the durable migration marker is incomplete, different, or corrupt");
+      return;
+    }
+    if (!inspection.pristine) throw new Error("legacy migration conflict: durable world state already exists without an exact committed migration marker");
+    // All validation precedes these infallible Map mutations, mirroring the
+    // browser transaction's no-partial-write preflight contract.
+    for (const stored of prepared.records) {
+      this.records.set(stored.key, stored);
+      this.recordVersions.set(recordVersionKey(stored.address, stored.revision), Object.freeze({ ...stored, key: recordVersionKey(stored.address, stored.revision) }));
+    }
+    this.checkpoints.set(checkpointKey(prepared.checkpoint.worldId, prepared.checkpoint.checkpointId), prepared.checkpoint);
+    this.legacyBackups.set(prepared.backup.key, prepared.backup);
+    this.migrationMarkers.set(prepared.bundle.worldId, prepared.markerValue);
+    this.latestCheckpoints.set(prepared.bundle.worldId, prepared.checkpoint.checkpointId);
+    this.sequences.set(prepared.bundle.worldId, 0);
+    this.storageRevisions.set(prepared.bundle.worldId, (this.storageRevisions.get(prepared.bundle.worldId) ?? 0) + 1);
+  }
+  async verifyMigrationReadback(input: Pick<PersistenceMigrationWriteV1, "bundle" | "checkpoint">): Promise<PersistenceMigrationReadbackV1> {
+    const identity = canonicalMigrationIdentity(input);
+    return inspectMigrationState(identity, this.migrationState(identity.bundle.worldId)).readback;
   }
   async estimate() { return Object.freeze({ usage: [...this.records.values()].reduce((total, record) => total + record.payload.byteLength, 0), quota: null }); }
   async executePlatform(request: RustPersistencePlatformRequestV1): Promise<Extract<RustPersistenceResponseV1, { kind: "platform" }>> {
@@ -899,6 +1171,7 @@ export class MemoryPersistenceAdapterV1 implements PersistencePlatformAdapterV1 
         cursor = cursor.parentCheckpointId ? this.checkpoints.get(checkpointKey(cursor.worldId, cursor.parentCheckpointId)) ?? null : null;
       }
       for (const [key, candidate] of this.checkpoints) if (candidate.worldId === request.worldId && !keepCheckpoints.has(key)) this.checkpoints.delete(key);
+      for (const [key, journal] of this.journals) if (journal.worldId === request.worldId && journal.sequence <= checkpoint.journalSequence) this.journals.delete(key);
       for (const [key, record] of this.recordVersions) if (recordBelongsToWorld(record, request.worldId) && !keepVersions.has(key)) this.recordVersions.delete(key);
       const next = revision() + 1; this.storageRevisions.set(request.worldId, next); return platformResponse(request, "accepted", { storageRevision: next, durableHash: platformReceiptHash(request, next) });
     }
@@ -924,10 +1197,13 @@ export class MemoryPersistenceAdapterV1 implements PersistencePlatformAdapterV1 
   }
   async deleteWorld(worldId: string) {
     this.sequences.delete(worldId);
+    this.migrationMarkers.delete(worldId);
     this.latestCheckpoints.delete(worldId);
+    for (const [key, journal] of this.journals) if (journal.worldId === worldId) this.journals.delete(key);
     for (const [key, record] of this.records) if (recordBelongsToWorld(record, worldId)) this.records.delete(key);
     for (const [key, record] of this.recordVersions) if (recordBelongsToWorld(record, worldId)) this.recordVersions.delete(key);
     for (const [key, checkpoint] of this.checkpoints) if (checkpoint.worldId === worldId) this.checkpoints.delete(key);
+    for (const [key, backup] of this.legacyBackups) if (backup.worldId === worldId) this.legacyBackups.delete(key);
     for (const [key, chunk] of this.platformChunks) if (chunk.worldId === worldId) this.platformChunks.delete(key);
   }
 }
