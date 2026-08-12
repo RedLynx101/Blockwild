@@ -506,6 +506,51 @@ fn camera_pose_fails_closed_on_missing_window_unknown_cells_and_hostile_viewport
 }
 
 #[test]
+fn camera_pose_zero_distance_collision_has_canonical_finite_orientation() {
+    let base = CameraPoseInputV1 {
+        body_position: Vec3::new(0.0, 0.5, 1.0),
+        look_yaw: 0.37,
+        look_pitch: -0.21,
+        mode: CameraModeV1::ThirdRear,
+        aiming: false,
+        viewport: [800, 600],
+        profile: CameraProfileV1::default(),
+    };
+    let mut window = fixture::canonical_fixture().physics.window;
+    let target_cell = CellPos::new(0, 2, 1);
+    let index = window
+        .index(target_cell)
+        .expect("camera target is inside fixture window");
+    window.loaded_mask[index] = 0;
+    window = window.seal();
+
+    let first = derive_camera_pose_v1(Some(&window), base).expect("origin collision remains a pose");
+    let second = derive_camera_pose_v1(Some(&window), base).expect("origin collision is deterministic");
+    assert!(first.collided);
+    assert_eq!(first.resolved_distance, 0.0);
+    assert_eq!(first, second);
+    assert!(
+        [
+            first.position.x,
+            first.position.y,
+            first.position.z,
+            first.orientation[0],
+            first.orientation[1],
+            first.orientation[2],
+            first.orientation[3],
+            first.vertical_fov_radians,
+            first.near,
+            first.far,
+            first.resolved_distance,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+    );
+    let orientation_length_squared = first.orientation.into_iter().map(|value| value * value).sum::<f64>();
+    assert!((orientation_length_squared - 1.0).abs() <= 1.0e-12);
+}
+
+#[test]
 fn swept_axis_property_never_commits_a_colliding_body() {
     let fixture = fixture::canonical_fixture();
     for index in 0..160_u32 {

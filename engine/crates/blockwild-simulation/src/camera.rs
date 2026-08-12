@@ -139,6 +139,28 @@ fn look_orientation(direction: Vec3) -> [f64; 4] {
     orientation_from_yaw_pitch(yaw, pitch)
 }
 
+fn validate_derived_pose(pose: &CameraPoseV1) -> Result<(), ContractError> {
+    if [
+        pose.position.x,
+        pose.position.y,
+        pose.position.z,
+        pose.orientation[0],
+        pose.orientation[1],
+        pose.orientation[2],
+        pose.orientation[3],
+        pose.vertical_fov_radians,
+        pose.near,
+        pose.far,
+        pose.resolved_distance,
+    ]
+    .into_iter()
+    .any(|value| !value.is_finite())
+    {
+        return Err(ContractError::InvalidNumber);
+    }
+    Ok(())
+}
+
 fn pose_hash(input: CameraPoseInputV1, pose: &CameraPoseV1) -> CanonicalHash {
     let mut hasher = CanonicalHasher::new("blockwild-camera-pose-v1");
     hasher.write_u16(1);
@@ -220,12 +242,17 @@ pub fn derive_camera_pose_v1(
                 (distance - profile.collision_padding).max(0.0)
             });
         let position = target + direction * resolved_distance;
-        (
-            position,
-            look_orientation(target - position),
-            collided,
-            resolved_distance,
-        )
+        let target_direction = target - position;
+        // A contact at the sweep origin legitimately resolves the camera to
+        // the target itself. The zero vector has no look orientation, so use
+        // the canonical inward direction of the requested camera ray without
+        // moving the collision-clamped pose.
+        let look_direction = if target_direction.length() > 0.0 {
+            target_direction
+        } else {
+            direction * -1.0
+        };
+        (position, look_orientation(look_direction), collided, resolved_distance)
     };
     let mut pose = CameraPoseV1 {
         position,
@@ -238,6 +265,7 @@ pub fn derive_camera_pose_v1(
         resolved_distance,
         pose_hash: CanonicalHash::default(),
     };
+    validate_derived_pose(&pose)?;
     pose.pose_hash = pose_hash(input, &pose);
     Ok(pose)
 }
