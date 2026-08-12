@@ -1,5 +1,10 @@
 import * as THREE from "three";
-import type { RendererShellExtractionPublisherR11 } from "./renderer-cutover-r11";
+import {
+  RendererShellExtractionPublisherR11,
+  rendererWorldEpochR11,
+  type RendererShellSnapshotR11,
+  type RendererWorldExtractionSinkR11,
+} from "./renderer-cutover-r11";
 import { isSharedModelGeometry, sharedModelGeometryDiagnostics } from "./shared-model-geometry";
 import { CreatureLodBatcher, type CreatureLodInstance } from "./creature-lod-batcher";
 import { CreatureArticulatedBatcher, type ArticulatedCreatureInstance } from "./creature-articulated-batcher";
@@ -668,6 +673,11 @@ import {
   RustWorldRuntimeManagerV1,
   type RustWorldRuntimeManagedHostV1,
 } from "./rust-world-runtime-manager";
+import {
+  createRustLiveRenderRuntimeR10,
+  type RustLiveRenderRuntimeR10,
+} from "./rust-live-render-runtime-r10";
+import type { RenderEntityFrameContextR10 } from "./rust-render-entity-extraction-r10";
 import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow";
 import { TCG_CATALOG } from "./tcg/catalog";
 import {
@@ -1674,8 +1684,10 @@ export type EngineEvents = {
 export type VoxelEngineOptions = Readonly<{
   agentMode?: boolean;
   agentTestAdmin?: boolean;
-  /** Optional R11 presentation sink. Three remains primary unless the shell explicitly selects otherwise. */
-  renderExtraction?: RendererShellExtractionPublisherR11;
+  /** Optional R11 renderer sink. The engine creates one R10 composer for each activated world. */
+  rustRenderSink?: RendererWorldExtractionSinkR11;
+  /** Renderer epoch shared by the world-scoped R10 composer and its R11 terrain publisher. */
+  rustRenderEpoch?: bigint;
   /** Test injection point; production owns one manager for the lifetime of this engine. */
   rustRuntimeManager?: RustWorldRuntimeManagerV1;
   /** Sole browser catalog owner, transferred from the React shell at construction. */
@@ -1705,6 +1717,7 @@ export type RustLiveRuntimeDiagnosticsV1 = Readonly<{
   nativePersistenceWorldId: string | null;
   hydration: "new-world" | "restored" | "guest-bootstrap" | "blocked" | "none";
   manager: ReturnType<RustWorldRuntimeManagerV1["diagnostics"]>;
+  renderer: RustLiveRenderEngineDiagnosticsR10;
   multiplayer: Readonly<{
     authorityDeltaSequence: number;
     authorityDeltaApplied: number;
@@ -1715,6 +1728,19 @@ export type RustLiveRuntimeDiagnosticsV1 = Readonly<{
     lastStateHash: string | null;
     lastError: string | null;
   }>;
+}>;
+
+export type RustLiveRenderEngineDiagnosticsR10 = Readonly<{
+  schema: 1;
+  configured: boolean;
+  epoch: bigint | null;
+  worldGeneration: number | null;
+  extractionRevision: number;
+  frameSequence: bigint;
+  pollInFlight: boolean;
+  lastError: string | null;
+  runtime: ReturnType<RustLiveRenderRuntimeR10["diagnostics"]> | null;
+  publisher: ReturnType<RendererShellExtractionPublisherR11["diagnostics"]> | null;
 }>;
 
 type VoxelHit = {
@@ -4093,6 +4119,14 @@ export class VoxelEngine {
   renderPixelRatio = 1;
   averageFrameMs = 16.7;
   performanceSampleTime = 0;
+  private readonly rustRenderSink: RendererWorldExtractionSinkR11 | null;
+  private readonly rustRenderBaseEpoch: bigint | null;
+  private rustLiveRenderRuntime: RustLiveRenderRuntimeR10 | null = null;
+  private rustRenderWorldGeneration: number | null = null;
+  private rustRenderWorldEpoch: bigint | null = null;
+  private rustRenderExtractionRevision = 0;
+  private rustRenderFrameSequence = BigInt(0);
+  private rustRenderExtractionPoll: Promise<void> | null = null;
   renderExtraction: RendererShellExtractionPublisherR11 | null = null;
   renderExtractionNextAt = 0;
   renderExtractionErrors = 0;
@@ -4564,7 +4598,13 @@ export class VoxelEngine {
     this.rustRuntimeManager = options.rustRuntimeManager ?? new RustWorldRuntimeManagerV1();
     this.rustWorldHydration = options.rustWorldHydration ?? ((input) => this.hydrateRustWorldPersistence(input));
     this.agentMode = options.agentMode === true;
-    this.renderExtraction = options.renderExtraction ?? null;
+    const rustRenderSink = options.rustRenderSink ?? null;
+    const rustRenderEpoch = options.rustRenderEpoch ?? null;
+    if ((rustRenderSink === null) !== (rustRenderEpoch === null)) {
+      throw new Error("Rust renderer sink and epoch must be configured together");
+    }
+    this.rustRenderSink = rustRenderSink;
+    this.rustRenderBaseEpoch = rustRenderEpoch === null ? null : rendererWorldEpochR11(rustRenderEpoch, 0);
     this.basicWorldRenderer = BASIC_RENDER_DISTANCE_ENABLED && !this.agentMode ? new BasicWorldRenderer(true) : null;
     this.agentTestAdmin = this.agentMode && options.agentTestAdmin === true;
     if (this.agentMode) settings = {
@@ -4769,42 +4809,113 @@ export class VoxelEngine {
    * into Extraction V2. This never traverses `scene`, Three geometry/materials,
    * or voxel storage, and does not claim entity/model/particle parity.
    */
+  private scheduleRustRendererExtractionR10(
+    runtime: RustLiveRenderRuntimeR10,
+    host: RustWorldRuntimeManagedHostV1,
+    generation: number,
+    context: Readonly<Pick<RenderEntityFrameContextR10, "animationTimeMicros" | "camera" | "environment">>,
+  ) {
+    if (this.rustRenderExtractionPoll) return;
+    const operation = (async () => {
+      const afterRevision = this.rustRenderExtractionRevision;
+      const extraction = await host.runtimeService().extract(afterRevision);
+      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
+        || runtime !== this.rustLiveRenderRuntime || host !== this.rustRuntimeHost
+        || this.rustRuntimeOperationsBlocked) return;
+      if (extraction.extractionRevision < afterRevision) {
+        throw new Error("Rust renderer extraction revision regressed");
+      }
+      const hasPayload = extraction.render.byteLength > 0 || extraction.hud.byteLength > 0
+        || extraction.audio.byteLength > 0 || extraction.platformRequests.byteLength > 0
+        || extraction.diagnostics.byteLength > 0;
+      if (!hasPayload) {
+        this.rustRenderExtractionRevision = extraction.extractionRevision;
+        return;
+      }
+      if (extraction.extractionRevision <= afterRevision) {
+        throw new Error("Rust renderer extraction repeated a consumed revision with payload");
+      }
+      const frameSequence = this.rustRenderFrameSequence + BigInt(1);
+      if (frameSequence > BigInt("0xffffffffffffffff")) {
+        throw new RangeError("Rust renderer extraction frame sequence exhausted u64");
+      }
+      const accepted = await runtime.submitRuntimeExtraction(generation, extraction, Object.freeze({
+        epoch: runtime.epoch,
+        frameSequence,
+        simulationTick: BigInt(extraction.identity.tick),
+        animationTimeMicros: context.animationTimeMicros,
+        camera: context.camera,
+        environment: context.environment,
+      }));
+      if (!accepted) throw new Error("Rust live renderer rejected an authoritative extraction");
+      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
+        || runtime !== this.rustLiveRenderRuntime || host !== this.rustRuntimeHost
+        || this.rustRuntimeOperationsBlocked) return;
+      this.rustRenderExtractionRevision = extraction.extractionRevision;
+      this.rustRenderFrameSequence = frameSequence;
+    })();
+    this.rustRenderExtractionPoll = operation;
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error) => {
+      if (generation === this.rustRuntimeTransitionGeneration && runtime === this.rustLiveRenderRuntime) {
+        this.quarantineRustLiveRendererR10(error, runtime);
+      }
+    }).finally(() => {
+      if (this.rustRenderExtractionPoll === operation) this.rustRenderExtractionPoll = null;
+    });
+  }
+
   publishRendererExtractionR11(now: number) {
     const sink = this.renderExtraction;
     if (!sink || now < this.renderExtractionNextAt) return;
     this.renderExtractionNextAt = now + 1000 / 30;
     try {
-      sink.present({
-        simulationTick: BigInt(Math.max(0, Math.floor(this.worldSimulationSeconds() * 1_000_000))),
+      const runtime = this.rustLiveRenderRuntime;
+      const host = this.rustRuntimeHost;
+      const generation = this.rustRenderWorldGeneration;
+      const authoritativeTick = runtime && host && generation !== null
+        ? BigInt(host.runtimeService().identity().tick)
+        : BigInt(Math.max(0, Math.floor(this.worldSimulationSeconds() * 1_000_000)));
+      const snapshot: RendererShellSnapshotR11 = Object.freeze({
+        simulationTick: authoritativeTick,
         animationTimeMicros: BigInt(Math.max(0, Math.floor(now * 1_000))),
-        camera: {
-          position: [this.camera.position.x, this.camera.position.y, this.camera.position.z],
-          orientation: [this.camera.quaternion.x, this.camera.quaternion.y, this.camera.quaternion.z, this.camera.quaternion.w],
+        camera: Object.freeze({
+          position: [this.camera.position.x, this.camera.position.y, this.camera.position.z] as const,
+          orientation: [this.camera.quaternion.x, this.camera.quaternion.y, this.camera.quaternion.z, this.camera.quaternion.w] as const,
           verticalFovRadians: THREE.MathUtils.degToRad(this.camera.fov),
           near: this.camera.near,
           far: this.camera.far,
-          viewport: [Math.max(1, this.canvas.width), Math.max(1, this.canvas.height)],
-        },
-        environment: {
+          viewport: [Math.max(1, this.canvas.width), Math.max(1, this.canvas.height)] as const,
+        }),
+        environment: Object.freeze({
           daylight: this.daylightAmount(),
           worldTime: this.visualWorldTime,
           weather: this.weatherState.kind,
           underwater: this.headSubmerged ? 1 : 0,
           caveOcclusion: this.cameraEnvironment.caveBackdropBlend,
           ...this.rendererEnvironmentR11,
-        },
+        }),
         terrain: this.world.rendererTerrainSnapshotR11(this.camera.position.x, this.camera.position.z, {
           maxChunks: 64,
           maxPages: 512,
           maxBytes: 64 * 1024 * 1024,
         }),
       });
+      if (!sink.present(snapshot)) throw new Error("Rust terrain publisher rejected the composed shadow frame");
+      if (runtime && host && generation !== null) {
+        const environment = sink.diagnostics().environment;
+        if (!environment) throw new Error("Rust terrain publisher did not expose its canonical frame environment");
+        this.scheduleRustRendererExtractionR10(runtime, host, generation, Object.freeze({
+          animationTimeMicros: snapshot.animationTimeMicros,
+          camera: snapshot.camera,
+          environment,
+        }));
+      }
       this.renderExtractionLastError = null;
     } catch (error) {
       // Shadow presentation is diagnostic-only and must never interrupt the
       // authoritative simulation or the selected compatibility renderer.
-      this.renderExtractionErrors += 1;
-      this.renderExtractionLastError = error instanceof Error ? error.message : String(error);
+      this.quarantineRustLiveRendererR10(error, this.rustLiveRenderRuntime);
     }
   }
 
@@ -5316,6 +5427,7 @@ export class VoxelEngine {
       nativePersistenceWorldId: this.rustNativePersistenceWorldId,
       hydration: this.rustRuntimeHydrationState,
       manager: this.rustRuntimeManager.diagnostics(),
+      renderer: this.getRustLiveRenderDiagnosticsR10(),
       multiplayer: Object.freeze({
         authorityDeltaSequence: Math.max(0, ...this.rustPeerDeltaSequences.values()),
         authorityDeltaApplied: this.rustAuthorityDeltaApplied,
@@ -5326,6 +5438,21 @@ export class VoxelEngine {
         lastStateHash: this.rustAuthorityLastStateHash,
         lastError: this.rustAuthorityLastError,
       }),
+    });
+  }
+
+  getRustLiveRenderDiagnosticsR10(): RustLiveRenderEngineDiagnosticsR10 {
+    return Object.freeze({
+      schema: 1,
+      configured: this.rustRenderSink !== null,
+      epoch: this.rustRenderWorldEpoch,
+      worldGeneration: this.rustRenderWorldGeneration,
+      extractionRevision: this.rustRenderExtractionRevision,
+      frameSequence: this.rustRenderFrameSequence,
+      pollInFlight: this.rustRenderExtractionPoll !== null,
+      lastError: this.renderExtractionLastError,
+      runtime: this.rustLiveRenderRuntime?.diagnostics() ?? null,
+      publisher: this.renderExtraction?.diagnostics() ?? null,
     });
   }
 
@@ -5370,6 +5497,99 @@ export class VoxelEngine {
     while (this.rustAuthorityOperations.size) await Promise.allSettled([...this.rustAuthorityOperations]);
   }
 
+  private async disposeRustLiveRendererR10() {
+    const runtime = this.rustLiveRenderRuntime;
+    this.rustLiveRenderRuntime = null;
+    this.renderExtraction = null;
+    this.rustRenderWorldGeneration = null;
+    this.rustRenderWorldEpoch = null;
+    this.rustRenderExtractionRevision = 0;
+    this.rustRenderFrameSequence = BigInt(0);
+    this.rustRenderExtractionPoll = null;
+    this.renderExtractionNextAt = 0;
+    if (!runtime) return;
+    try {
+      await runtime.drain();
+    } catch (error) {
+      this.renderExtractionErrors += 1;
+      this.renderExtractionLastError = error instanceof Error ? error.message : String(error);
+    } finally {
+      await runtime.dispose().catch((error) => {
+        this.renderExtractionErrors += 1;
+        this.renderExtractionLastError = error instanceof Error ? error.message : String(error);
+      });
+    }
+  }
+
+  private quarantineRustLiveRendererR10(error: unknown, expected: RustLiveRenderRuntimeR10 | null) {
+    if (expected && this.rustLiveRenderRuntime !== expected) return;
+    const runtime = this.rustLiveRenderRuntime;
+    this.rustLiveRenderRuntime = null;
+    this.renderExtraction = null;
+    this.rustRenderWorldGeneration = null;
+    this.rustRenderWorldEpoch = null;
+    this.rustRenderExtractionRevision = 0;
+    this.rustRenderFrameSequence = BigInt(0);
+    this.renderExtractionNextAt = 0;
+    this.renderExtractionErrors += 1;
+    this.renderExtractionLastError = error instanceof Error ? error.message : String(error);
+    if (runtime) void this.trackRustAuthorityOperation(runtime.dispose());
+  }
+
+  private async activateRustLiveRendererR10(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+  ) {
+    const sink = this.rustRenderSink;
+    const baseEpoch = this.rustRenderBaseEpoch;
+    if (!sink || baseEpoch === null) return;
+    if (this.rustLiveRenderRuntime || this.renderExtraction) {
+      throw new Error("The previous world renderer composer was not disposed before activation");
+    }
+    const contentHash = host.diagnostics().contentHash;
+    if (!contentHash) {
+      this.quarantineRustLiveRendererR10(new Error("The active Rust world has no attested renderer content hash"), null);
+      return;
+    }
+    const epoch = rendererWorldEpochR11(baseEpoch, generation);
+    if (!sink.switchEpoch(epoch)) {
+      this.quarantineRustLiveRendererR10(new Error("The renderer sink rejected the new world epoch"), null);
+      return;
+    }
+    let runtime: RustLiveRenderRuntimeR10 | null = null;
+    try {
+      runtime = await createRustLiveRenderRuntimeR10({
+        sink,
+        epoch,
+        worldGeneration: generation,
+        expectedContentManifestHash: contentHash,
+      });
+      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
+        || host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") {
+        throw new Error("Rust live renderer activation was superseded before presentation");
+      }
+      const publisher = new RendererShellExtractionPublisherR11(runtime.terrain, epoch);
+      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
+        || host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") {
+        throw new Error("Rust live renderer publisher was superseded before presentation");
+      }
+      this.rustLiveRenderRuntime = runtime;
+      this.renderExtraction = publisher;
+      this.rustRenderWorldGeneration = generation;
+      this.rustRenderWorldEpoch = epoch;
+      this.rustRenderExtractionRevision = 0;
+      this.rustRenderFrameSequence = BigInt(0);
+      this.renderExtractionNextAt = 0;
+      this.renderExtractionLastError = null;
+      publisher.resize(Math.max(1, this.canvas.width), Math.max(1, this.canvas.height));
+    } catch (error) {
+      await runtime?.dispose().catch(() => undefined);
+      if (generation === this.rustRuntimeTransitionGeneration && !this.disposed) {
+        this.quarantineRustLiveRendererR10(error, null);
+      }
+    }
+  }
+
   private async closeMultiplayerForRustTransition(reason: string) {
     await this.disconnectMultiplayer(reason);
     this.rustPeerInterestCenters.clear();
@@ -5386,6 +5606,7 @@ export class VoxelEngine {
     await this.worldStorage.flushPersistence();
     await this.closeMultiplayerForRustTransition(reason);
     await this.drainRustAuthorityOperations();
+    await this.disposeRustLiveRendererR10();
     await this.shutdownBoundNativePersistence();
   }
 
@@ -5416,10 +5637,16 @@ export class VoxelEngine {
       }
       this.rustRuntimeHost = host;
       this.rustRuntimeHydrationState = kind === "create" ? "new-world" : "restored";
+      await this.trackRustAuthorityOperation(this.activateRustLiveRendererR10(generation, host));
+      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
+        || host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") {
+        throw new Error("Rust world activation was superseded during renderer composition startup");
+      }
       return host;
     } catch (error) {
       this.rustRuntimeHost = null;
       this.rustRuntimeHydrationState = "blocked";
+      await this.disposeRustLiveRendererR10();
       await this.shutdownBoundNativePersistence().catch(() => undefined);
       await this.rustRuntimeManager.shutdown().catch(() => undefined);
       throw error;
@@ -5498,6 +5725,8 @@ export class VoxelEngine {
     } catch (error) {
       this.rustRuntimeOperationsBlocked = true;
       this.rustRuntimeHydrationState = "blocked";
+      await this.drainRustAuthorityOperations();
+      await this.disposeRustLiveRendererR10();
       await this.shutdownBoundNativePersistence().catch(() => undefined);
       await this.rustRuntimeManager.shutdown().catch(() => undefined);
       this.rustRuntimeHost = null;
@@ -5530,6 +5759,8 @@ export class VoxelEngine {
     } catch (error) {
       this.rustRuntimeOperationsBlocked = true;
       this.rustRuntimeHydrationState = "blocked";
+      await this.drainRustAuthorityOperations();
+      await this.disposeRustLiveRendererR10();
       await this.shutdownBoundNativePersistence().catch(() => undefined);
       await this.rustRuntimeManager.shutdown().catch(() => undefined);
       this.rustRuntimeHost = null;
@@ -12163,6 +12394,7 @@ export class VoxelEngine {
     await this.worldStorage.flushPersistence();
     await this.disconnectMultiplayer("quit-to-title");
     await this.drainRustAuthorityOperations();
+    await this.disposeRustLiveRendererR10();
     await this.shutdownBoundNativePersistence();
     await this.rustRuntimeManager.shutdown();
     this.rustRuntimeHost = null;
@@ -33911,6 +34143,8 @@ export class VoxelEngine {
       try { await this.disconnectMultiplayer("engine-shutdown"); }
       catch (error) { failure ??= error; }
       try { await this.drainRustAuthorityOperations(); }
+      catch (error) { failure ??= error; }
+      try { await this.disposeRustLiveRendererR10(); }
       catch (error) { failure ??= error; }
       try { await this.shutdownBoundNativePersistence(); }
       catch (error) { failure ??= error; }

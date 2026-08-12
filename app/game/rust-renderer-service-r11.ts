@@ -48,6 +48,12 @@ export type RustRendererDiagnosticsR11 = Readonly<{
 type MutableDiagnosticsR11 = { -readonly [K in keyof RustRendererDiagnosticsR11]: RustRendererDiagnosticsR11[K] };
 const MAX_REPLAY_BYTES_R11 = 256 * 1024 * 1024;
 const MAX_REPLAY_PAGES_R11 = 65_536;
+const U64_MAX_R11 = BigInt("0xffffffffffffffff");
+
+function checkedRendererEpochR11(epoch: bigint) {
+  if (epoch <= BigInt(0) || epoch > U64_MAX_R11) throw new RangeError("renderer epoch must be a positive u64");
+  return epoch;
+}
 
 export type RustRendererArtifactR11 = Readonly<{
   hash: string;
@@ -122,12 +128,14 @@ export async function loadRustRendererArtifactR11(options: Readonly<{
 export class RustRendererServiceR11 {
   private readonly replayPages = new Map<bigint, Uint8Array>();
   private inFlight = false;
+  private inFlightSequence: bigint | null = null;
   private pending: Readonly<{ sequence: bigint; bytes: Uint8Array }> | null = null;
   private pendingSize: Readonly<{ width: number; height: number }> | null = null;
   private sentResourceRevision = BigInt(0);
   private worker: WorkerLikeR11 | null = null;
   private artifact: Pick<RustRendererArtifactR11, "moduleUrl" | "wasmUrl"> | null = null;
   private workerGeneration = 0;
+  private surfaceEpoch = BigInt(0);
   private replayOnReady = false;
   private diagnostics: MutableDiagnosticsR11 = {
     state: "idle", epoch: BigInt(0), resourceRevision: BigInt(0), submittedFrames: 0,
@@ -147,7 +155,9 @@ export class RustRendererServiceR11 {
     if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) throw new RangeError("renderer dimensions must be positive integers");
     this.artifact = Object.freeze({ ...artifact });
     this.replayOnReady = false;
-    this.diagnostics = { ...this.diagnostics, state: "starting", epoch, resourceRevision: BigInt(0),
+    const checkedEpoch = checkedRendererEpochR11(epoch);
+    this.surfaceEpoch = checkedEpoch;
+    this.diagnostics = { ...this.diagnostics, state: "starting", epoch: checkedEpoch, resourceRevision: BigInt(0),
       resourceBytes: 0, replayedResourceBytes: 0, lastPresentedSequence: null, lastError: null };
     this.startWorker(canvas, width, height);
   }
@@ -161,7 +171,7 @@ export class RustRendererServiceR11 {
     if (this.diagnostics.state !== "failed" || !this.artifact) throw new Error("renderer surface restart requires a failed initialized service");
     if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) throw new RangeError("renderer dimensions must be positive integers");
     this.disposeWorker();
-    this.inFlight = false; this.pending = null; this.pendingSize = null; this.sentResourceRevision = BigInt(0);
+    this.inFlight = false; this.inFlightSequence = null; this.pending = null; this.pendingSize = null; this.sentResourceRevision = BigInt(0);
     this.replayOnReady = true;
     this.diagnostics.state = "starting"; this.diagnostics.lastError = null; this.diagnostics.workerRestarts += 1;
     this.startWorker(canvas, width, height);
@@ -212,6 +222,7 @@ export class RustRendererServiceR11 {
   requestRecovery(reason = "renderer recovery requested") {
     if (!this.worker || this.diagnostics.state === "failed" || this.diagnostics.state === "stopped") return false;
     this.inFlight = false;
+    this.inFlightSequence = null;
     this.diagnostics.state = "recovering";
     this.diagnostics.lastError = reason;
     this.diagnostics.deviceRecoveries += 1;
@@ -220,17 +231,20 @@ export class RustRendererServiceR11 {
   }
 
   switchEpoch(epoch: bigint) {
-    this.replayPages.clear(); this.pending = null; this.inFlight = false; this.sentResourceRevision = BigInt(0);
-    this.diagnostics = { ...this.diagnostics, epoch, resourceRevision: BigInt(0), resourceBytes: 0,
-      replayedResourceBytes: 0, lastPresentedSequence: null, state: "recovering" };
+    const nextEpoch = checkedRendererEpochR11(epoch);
+    const starting = this.diagnostics.state === "starting";
+    this.replayPages.clear(); this.pending = null; this.inFlight = false; this.inFlightSequence = null; this.sentResourceRevision = BigInt(0);
+    this.diagnostics = { ...this.diagnostics, epoch: nextEpoch, resourceRevision: BigInt(0), resourceBytes: 0,
+      replayedResourceBytes: 0, lastPresentedSequence: null, state: starting ? "starting" : "recovering" };
     this.diagnostics.deviceRecoveries += 1;
-    this.send({ type: "recover", epoch });
+    if (!starting) this.send({ type: "recover", epoch: nextEpoch });
   }
 
   stop() {
     if (!this.worker) return;
     this.send({ type: "shutdown" });
-    this.disposeWorker(); this.pending = null; this.pendingSize = null; this.inFlight = false; this.replayPages.clear(); this.sentResourceRevision = BigInt(0); this.artifact = null; this.replayOnReady = false;
+    this.disposeWorker(); this.pending = null; this.pendingSize = null; this.inFlight = false; this.inFlightSequence = null; this.replayPages.clear(); this.sentResourceRevision = BigInt(0); this.artifact = null; this.replayOnReady = false;
+    this.surfaceEpoch = BigInt(0);
     this.diagnostics.state = "stopped";
   }
 
@@ -238,7 +252,12 @@ export class RustRendererServiceR11 {
 
   private handle(event: RustRendererWorkerEventR11) {
     if (event.type === "ready") {
-      if (event.epoch !== this.diagnostics.epoch) { this.fail(`worker ready epoch mismatch: expected ${this.diagnostics.epoch}, received ${event.epoch}`); return; }
+      if (event.epoch !== this.surfaceEpoch) { this.fail(`worker ready epoch mismatch: expected ${this.surfaceEpoch}, received ${event.epoch}`); return; }
+      if (event.epoch !== this.diagnostics.epoch) {
+        this.diagnostics.state = "recovering";
+        this.send({ type: "recover", epoch: this.diagnostics.epoch });
+        return;
+      }
       this.diagnostics.state = "ready";
       this.diagnostics.backend = event.backend;
       this.diagnostics.adapter = event.adapter;
@@ -246,7 +265,8 @@ export class RustRendererServiceR11 {
       this.sendPendingSize(); this.sendUnsentResources(this.replayOnReady); this.replayOnReady = false; this.flush();
     }
     else if (event.type === "frame-presented") {
-      this.inFlight = false; this.diagnostics.presentedFrames += 1; this.diagnostics.latestCpuMicros = event.cpuMicros;
+      if (!this.inFlight || event.sequence !== this.inFlightSequence || this.diagnostics.state !== "ready") return;
+      this.inFlight = false; this.inFlightSequence = null; this.diagnostics.presentedFrames += 1; this.diagnostics.latestCpuMicros = event.cpuMicros;
       this.diagnostics.latestGpuMicros = event.gpuMicros; this.diagnostics.visibleInstances = event.visibleInstances;
       this.diagnostics.culledInstances = event.culledInstances; this.diagnostics.drawCalls = event.drawCalls;
       this.diagnostics.transparentDrawCalls = event.transparentDrawCalls;
@@ -259,10 +279,11 @@ export class RustRendererServiceR11 {
       if (event.skippedReason) this.diagnostics.skippedFrames += 1;
       this.flush();
     } else if (event.type === "device-lost") {
-      this.inFlight = false; this.diagnostics.state = "recovering"; this.diagnostics.lastError = event.reason;
+      this.inFlight = false; this.inFlightSequence = null; this.diagnostics.state = "recovering"; this.diagnostics.lastError = event.reason;
       this.diagnostics.deviceRecoveries += 1; this.send({ type: "recover", epoch: this.diagnostics.epoch });
     } else if (event.type === "replay-required") {
       if (event.epoch !== this.diagnostics.epoch) { this.fail(`worker replay epoch mismatch: expected ${this.diagnostics.epoch}, received ${event.epoch}`); return; }
+      this.surfaceEpoch = event.epoch;
       this.diagnostics.state = "ready";
       this.diagnostics.lastError = null;
       this.sentResourceRevision = BigInt(0);
@@ -286,7 +307,7 @@ export class RustRendererServiceR11 {
   }
 
   private sendFrame(sequence: bigint, bytes: Uint8Array) {
-    this.inFlight = true; this.transfer({ type: "frame", bytes: bytes.buffer as ArrayBuffer, sequence }, bytes);
+    this.inFlight = true; this.inFlightSequence = sequence; this.transfer({ type: "frame", bytes: bytes.buffer as ArrayBuffer, sequence }, bytes);
   }
 
   private sendUnsentResources(replayed = false) {
@@ -334,6 +355,7 @@ export class RustRendererServiceR11 {
 
   private fail(message: string) {
     this.inFlight = false;
+    this.inFlightSequence = null;
     this.pending = null;
     this.diagnostics.state = "failed";
     this.diagnostics.lastError = message;

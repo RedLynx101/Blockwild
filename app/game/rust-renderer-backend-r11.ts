@@ -12,6 +12,7 @@ export type RendererBackendR11 = Readonly<{
   frame(frame: RenderFrameV2 | Uint8Array): boolean;
   resize(width: number, height: number): void;
   requestRecovery(reason?: string): void;
+  switchEpoch(epoch: bigint): void;
   restartSurface?(canvas: OffscreenCanvas, width: number, height: number): void;
   dispose(): void;
   diagnostics(): ReturnType<RustRendererServiceR11["snapshot"]>;
@@ -50,6 +51,7 @@ export function createRustRendererBackendR11(options: Readonly<{
     frame: (frame: RenderFrameV2 | Uint8Array) => service.present(frame),
     resize: (width: number, height: number) => service.resize(width, height),
     requestRecovery: (reason?: string) => service.requestRecovery(reason),
+    switchEpoch: (epoch: bigint) => service.switchEpoch(epoch),
     restartSurface: (canvas: OffscreenCanvas, width: number, height: number) => service.restartSurface(canvas, width, height),
     dispose: () => service.stop(),
     diagnostics: () => service.snapshot(),

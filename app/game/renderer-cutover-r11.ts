@@ -96,9 +96,14 @@ export interface RendererExtractionSinkR11 {
   diagnostics(): Readonly<Record<string, unknown>>;
 }
 
+export interface RendererWorldExtractionSinkR11 extends RendererExtractionSinkR11 {
+  /** Starts an empty renderer store for a newly activated world. */
+  switchEpoch(epoch: bigint): boolean;
+}
+
 type RendererRuntimeStateR11 = "compatibility" | "starting" | "ready" | "failed" | "stopped";
 
-export class RendererCutoverRuntimeR11 implements RendererExtractionSinkR11 {
+export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11 {
   readonly decision: RendererCutoverDecisionR11;
   private backend: RendererBackendR11 | null = null;
   private state: RendererRuntimeStateR11 = "compatibility";
@@ -108,6 +113,7 @@ export class RendererCutoverRuntimeR11 implements RendererExtractionSinkR11 {
   private width: number;
   private height: number;
   private artifactHash: string | null = null;
+  private epoch: bigint;
   private readonly canvasRole: "primary" | "shadow";
 
   constructor(private readonly options: Readonly<{
@@ -124,6 +130,7 @@ export class RendererCutoverRuntimeR11 implements RendererExtractionSinkR11 {
     loadArtifact?: () => Promise<RustRendererArtifactR11>;
     createBackend?: (options: Readonly<{ canvas: HTMLCanvasElement; artifact: RustRendererArtifactR11; epoch: bigint; width: number; height: number }>) => RendererBackendR11 | null;
   }>) {
+    this.epoch = checkedRendererEpoch(options.epoch);
     this.width = checkedDimension(options.width, "renderer width");
     this.height = checkedDimension(options.height, "renderer height");
     this.canvasRole = options.canvasRole;
@@ -148,7 +155,7 @@ export class RendererCutoverRuntimeR11 implements RendererExtractionSinkR11 {
       const artifact = await (this.options.loadArtifact ?? (() => loadRustRendererArtifactR11()))();
       if (this.isStopped()) return;
       const backend = (this.options.createBackend ?? createRustRendererBackendR11)({
-        canvas: this.options.canvas, artifact, epoch: this.options.epoch, width: this.width, height: this.height,
+        canvas: this.options.canvas, artifact, epoch: this.epoch, width: this.width, height: this.height,
       });
       if (!backend) throw new Error("Rust WebGPU backend rejected the selected canvas capability");
       if (this.isStopped()) { backend.dispose(); return; }
@@ -166,6 +173,7 @@ export class RendererCutoverRuntimeR11 implements RendererExtractionSinkR11 {
 
   resources(batch: RenderResourceBatchV2) {
     if (!this.needsExtraction || this.state === "failed" || this.state === "stopped") return false;
+    if (batch.epoch !== this.epoch) throw new Error("renderer extraction resource epoch does not match the active world");
     const bytes = encodeRenderResourceBatchV2(batch);
     if (this.backend) this.backend.resources(bytes);
     else {
@@ -177,6 +185,7 @@ export class RendererCutoverRuntimeR11 implements RendererExtractionSinkR11 {
 
   frame(frame: RenderFrameV2) {
     if (!this.needsExtraction || this.state === "failed" || this.state === "stopped") return false;
+    if (frame.epoch !== this.epoch) return false;
     const bytes = encodeRenderFrameV2(frame);
     if (this.backend) return this.backend.frame(bytes);
     this.pendingFrame = bytes;
@@ -193,6 +202,16 @@ export class RendererCutoverRuntimeR11 implements RendererExtractionSinkR11 {
     this.backend.requestRecovery(reason); return true;
   }
 
+  switchEpoch(epoch: bigint) {
+    const next = checkedRendererEpoch(epoch);
+    if (!this.needsExtraction || this.state === "failed" || this.state === "stopped") return false;
+    this.backend?.switchEpoch(next);
+    this.epoch = next;
+    this.pendingResources.length = 0;
+    this.pendingFrame = null;
+    return true;
+  }
+
   diagnostics() {
     const backend = this.backend?.diagnostics() ?? null;
     return Object.freeze({
@@ -205,6 +224,7 @@ export class RendererCutoverRuntimeR11 implements RendererExtractionSinkR11 {
       fallback: this.decision.fallback,
       openPromotionGates: this.decision.openPromotionGates,
       state: this.state,
+      epoch: this.epoch,
       artifactHash: this.artifactHash,
       startError: this.startError,
       canvasRole: this.canvasRole,
@@ -541,6 +561,20 @@ function rendererEnvironmentFromShellR11(
 function checkedDimension(value: number, label: string) {
   if (!Number.isInteger(value) || value <= 0 || value > 16_384) throw new RangeError(`${label} must be an integer in 1..16384`);
   return value;
+}
+
+const RENDERER_U64_MAX_R11 = BigInt("0xffffffffffffffff");
+
+function checkedRendererEpoch(value: bigint) {
+  if (value <= BigInt(0) || value > RENDERER_U64_MAX_R11) throw new RangeError("renderer epoch must be a positive u64");
+  return value;
+}
+
+/** Stable, overflow-safe world epoch. Generation zero intentionally preserves the shell base epoch. */
+export function rendererWorldEpochR11(baseEpoch: bigint, worldGeneration: number) {
+  const base = checkedRendererEpoch(baseEpoch);
+  if (!Number.isSafeInteger(worldGeneration) || worldGeneration < 0) throw new RangeError("renderer world generation is invalid");
+  return (base - BigInt(1) + BigInt(worldGeneration)) % RENDERER_U64_MAX_R11 + BigInt(1);
 }
 
 function clamp01(value: number) { return Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0)); }

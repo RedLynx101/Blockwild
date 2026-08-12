@@ -357,6 +357,7 @@ test("backend integration exposes one lazy global composer without taking live e
     frame: (value: RenderFrameV2 | Uint8Array) => { assert.equal(value instanceof Uint8Array, false); frames.push(value as RenderFrameV2); return true; },
     resize: () => undefined,
     requestRecovery: () => undefined,
+    switchEpoch: () => undefined,
     dispose: () => undefined,
     diagnostics: () => ({ state: "ready" }) as never,
   });

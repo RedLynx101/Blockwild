@@ -5,6 +5,7 @@ import {
   RendererCutoverRuntimeR11,
   RendererShellExtractionPublisherR11,
   rendererRequestFromSearchR11,
+  rendererWorldEpochR11,
   resolveRendererCutoverR11,
   type RendererExtractionSinkR11,
 } from "../app/game/renderer-cutover-r11.ts";
@@ -19,6 +20,15 @@ const ALL_GATES = {
   comparativePerformance: true,
   compatibilityBundleIsolated: true,
 } as const;
+
+test("world renderer epochs are deterministic, positive, and overflow-safe", () => {
+  const maximum = BigInt("0xffffffffffffffff");
+  assert.equal(rendererWorldEpochR11(BigInt(40), 0), BigInt(40));
+  assert.equal(rendererWorldEpochR11(BigInt(40), 2), BigInt(42));
+  assert.equal(rendererWorldEpochR11(maximum, 1), BigInt(1));
+  assert.throws(() => rendererWorldEpochR11(BigInt(0), 1), /positive u64/u);
+  assert.throws(() => rendererWorldEpochR11(BigInt(1), -1), /world generation/u);
+});
 
 test("normal renderer selection stays Three and does not silently add a shadow", () => {
   assert.equal(rendererRequestFromSearchR11("?renderer=unknown"), "three");
@@ -67,6 +77,7 @@ test("shadow runtime queues immutable extraction until its distinct backend is r
     frame: (value) => { commands.push(`frame:${value instanceof Uint8Array}`); return true; },
     resize: (width, height) => { commands.push(`resize:${width}x${height}`); },
     requestRecovery: (reason) => { commands.push(`recover:${reason}`); },
+    switchEpoch: (epoch) => { commands.push(`epoch:${epoch}`); },
     dispose: () => { commands.push("dispose"); },
     diagnostics: () => ({ state: "ready" }) as never,
   };
@@ -84,6 +95,41 @@ test("shadow runtime queues immutable extraction until its distinct backend is r
   assert.equal(runtime.requestRecovery("test"), true);
   assert.equal(commands.at(-1), "recover:test");
   runtime.stop(); assert.equal(commands.at(-1), "dispose");
+});
+
+test("world epoch switch drops queued prior-world frames before revisions restart", async () => {
+  const commands: string[] = [];
+  let backendEpoch = BigInt(0);
+  let resolveArtifact!: (value: { hash: string }) => void;
+  const artifactPromise = new Promise<{ hash: string }>((resolve) => { resolveArtifact = resolve; });
+  const backend: RendererBackendR11 = {
+    kind: "rust-webgpu",
+    resources: () => { commands.push("resources"); },
+    frame: () => { commands.push("frame"); return true; },
+    resize: () => undefined,
+    requestRecovery: () => undefined,
+    switchEpoch: (epoch) => { commands.push(`switch:${epoch}`); },
+    dispose: () => undefined,
+    diagnostics: () => ({ state: "ready" }) as never,
+  };
+  const runtime = new RendererCutoverRuntimeR11({
+    request: "wgpu-shadow", canvas: {} as HTMLCanvasElement, canvasRole: "shadow", epoch: BigInt(41), width: 640, height: 360,
+    capability: CAPABLE, allowWgpuShadow: true,
+    loadArtifact: () => artifactPromise as Promise<never>,
+    createBackend: (options) => { backendEpoch = options.epoch; return backend; },
+  });
+  const oldPublisher = new RendererShellExtractionPublisherR11(runtime, BigInt(41));
+  oldPublisher.present(shellSnapshot());
+  const starting = runtime.start();
+  assert.equal(runtime.switchEpoch(BigInt(42)), true);
+  assert.equal(oldPublisher.present(shellSnapshot()), false, "a stale world publisher cannot repopulate the new epoch queue");
+  const nextPublisher = new RendererShellExtractionPublisherR11(runtime, BigInt(42));
+  nextPublisher.present(shellSnapshot());
+  resolveArtifact({ hash: "b".repeat(64) });
+  await starting;
+  assert.equal(backendEpoch, BigInt(42));
+  assert.deepEqual(commands.slice(0, 2), ["resources", "frame"], "only the new world queue may reach the backend");
+  assert.equal(runtime.diagnostics().epoch, BigInt(42));
 });
 
 test("terrain publisher seeds canonical materials without claiming full-game parity", () => {

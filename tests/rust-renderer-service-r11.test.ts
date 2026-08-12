@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createRenderFrameV2, decodeRenderFrameV2, decodeRenderResourceBatchV2 } from "../app/game/rust-render-extraction-v2.ts";
+import { createRenderFrameV2, createRenderResourceBatchV2, decodeRenderFrameV2, decodeRenderResourceBatchV2 } from "../app/game/rust-render-extraction-v2.ts";
 import { RustRendererServiceR11, loadRustRendererArtifactR11 } from "../app/game/rust-renderer-service-r11.ts";
 import type { RustRendererWorkerCommandR11, RustRendererWorkerEventR11 } from "../app/game/rust-renderer-worker-r11.ts";
 
@@ -76,6 +76,62 @@ test("explicit recovery and resize commands preserve one deterministic replay so
   assert.deepEqual(fake.commands.at(-1), { type: "recover", epoch: frame.epoch });
   fake.emit({ type: "replay-required", epoch: frame.epoch, reason: "device recreated" });
   assert.equal(fake.commands.filter((command) => command.type === "resources").length, 2);
+});
+
+test("world epoch switch clears replay history so source revisions restart at one", async () => {
+  const fake = new FakeWorker();
+  const service = new RustRendererServiceR11(() => fake as never);
+  const resources = decodeRenderResourceBatchV2(await fixture("canonical-resources.bwrd"));
+  const frame = decodeRenderFrameV2(await fixture("canonical-frame.bwrf"));
+  service.start({} as OffscreenCanvas, { moduleUrl: "/renderer.js", wasmUrl: "/renderer.wasm" }, frame.epoch, 640, 360);
+  fake.emit({ type: "ready", backend: "wgpu", adapter: "test", timestampQuerySupported: false, epoch: frame.epoch });
+  assert.equal(service.applyResources(resources), true);
+  const nextEpoch = frame.epoch + BigInt(1);
+  service.switchEpoch(nextEpoch);
+  assert.equal(service.snapshot().epoch, nextEpoch);
+  assert.equal(service.snapshot().resourceRevision, BigInt(0));
+  assert.deepEqual(fake.commands.at(-1), { type: "recover", epoch: nextEpoch });
+  fake.emit({ type: "frame-presented", sequence: BigInt(99), cpuMicros: 1, gpuMicros: null, visibleInstances: 9, culledInstances: 0, drawCalls: 9, transparentDrawCalls: 0, geometryBytes: 9, instanceBytes: 9, residentInstanceBytes: 9, instanceBufferReallocations: 9, skippedReason: null, bytes: 9 });
+  assert.equal(service.snapshot().lastPresentedSequence, null, "a prior-world frame acknowledgement cannot mutate the new epoch");
+  const nextResources = createRenderResourceBatchV2({ epoch: nextEpoch, revision: BigInt(1), operations: resources.operations });
+  assert.equal(service.applyResources(nextResources), true);
+  assert.equal(service.snapshot().resourceRevision, BigInt(1));
+  fake.emit({ type: "replay-required", epoch: nextEpoch, reason: "world switch" });
+  assert.equal(fake.commands.filter((command) => command.type === "resources").length, 2);
+  const nextFrame = createRenderFrameV2({
+    ...frame,
+    epoch: nextEpoch,
+    frameSequence: BigInt(100),
+    resourceRevision: BigInt(1),
+  });
+  assert.equal(service.present(nextFrame), true);
+  fake.emit({ type: "frame-presented", sequence: BigInt(99), cpuMicros: 1, gpuMicros: null, visibleInstances: 9, culledInstances: 0, drawCalls: 9, transparentDrawCalls: 0, geometryBytes: 9, instanceBytes: 9, residentInstanceBytes: 9, instanceBufferReallocations: 9, skippedReason: null, bytes: 9 });
+  assert.equal(service.snapshot().lastPresentedSequence, null, "a late prior-world acknowledgement cannot complete a new-world frame");
+  fake.emit({ type: "frame-presented", sequence: BigInt(100), cpuMicros: 2, gpuMicros: null, visibleInstances: 1, culledInstances: 0, drawCalls: 1, transparentDrawCalls: 0, geometryBytes: 1, instanceBytes: 1, residentInstanceBytes: 1, instanceBufferReallocations: 0, skippedReason: null, bytes: 1 });
+  assert.equal(service.snapshot().lastPresentedSequence, BigInt(100));
+  assert.throws(() => service.switchEpoch(BigInt(0)), /positive u64/u);
+});
+
+test("epoch switch during worker startup waits for the old surface before recovering the new world", async () => {
+  const fake = new FakeWorker();
+  const service = new RustRendererServiceR11(() => fake as never);
+  const resources = decodeRenderResourceBatchV2(await fixture("canonical-resources.bwrd"));
+  const frame = decodeRenderFrameV2(await fixture("canonical-frame.bwrf"));
+  const nextEpoch = frame.epoch + BigInt(1);
+  service.start({} as OffscreenCanvas, { moduleUrl: "/renderer.js", wasmUrl: "/renderer.wasm" }, frame.epoch, 640, 360);
+  service.switchEpoch(nextEpoch);
+  assert.equal(fake.commands.length, 1, "recover cannot race the still-initializing surface");
+  assert.equal(service.applyResources(createRenderResourceBatchV2({
+    epoch: nextEpoch,
+    revision: BigInt(1),
+    operations: resources.operations,
+  })), true);
+  fake.emit({ type: "ready", backend: "wgpu", adapter: "test", timestampQuerySupported: false, epoch: frame.epoch });
+  assert.deepEqual(fake.commands.at(-1), { type: "recover", epoch: nextEpoch });
+  assert.equal(service.snapshot().state, "recovering");
+  fake.emit({ type: "replay-required", epoch: nextEpoch, reason: "startup world switch" });
+  assert.equal(service.snapshot().state, "ready");
+  assert.equal(fake.commands.filter((command) => command.type === "resources").length, 1);
 });
 
 test("published renderer selection is content-addressed and rejects path substitution", async () => {

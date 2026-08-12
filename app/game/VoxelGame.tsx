@@ -70,7 +70,6 @@ import { BASIC_RENDER_DISTANCE_ENABLED } from "./performance";
 import {
   CLOSED_RENDERER_PROMOTION_GATES_R11,
   RendererCutoverRuntimeR11,
-  RendererShellExtractionPublisherR11,
   rendererRequestFromSearchR11,
 } from "./renderer-cutover-r11";
 import { WHEAT_MILL_CYCLE_SECONDS } from "./wheat-mill";
@@ -2309,9 +2308,6 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       allowWgpuPrimary: false,
       promotionGates: CLOSED_RENDERER_PROMOTION_GATES_R11,
     });
-    const renderExtraction = rendererCutover.needsExtraction
-      ? new RendererShellExtractionPublisherR11(rendererCutover, rendererEpoch)
-      : null;
     void rendererCutover.start();
     let browserStorage: Storage | null = null;
     try { browserStorage = window.localStorage; } catch { /* WorldStorage reports browser storage unavailability. */ }
@@ -2402,7 +2398,8 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       }, settings, {
         agentMode,
         agentTestAdmin: agentMode && new URLSearchParams(window.location.search).get("testAdmin") === "1",
-        renderExtraction: renderExtraction ?? undefined,
+        rustRenderSink: rendererCutover.needsExtraction ? rendererCutover : undefined,
+        rustRenderEpoch: rendererCutover.needsExtraction ? rendererEpoch : undefined,
         worldStorage: storage,
       });
     } catch {
@@ -2432,7 +2429,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     };
     automationWindow.render_renderer_cutover_to_text = () => JSON.stringify({
       ...rendererCutover.diagnostics(),
-      producer: renderExtraction?.diagnostics() ?? null,
+      producer: engine.getRustLiveRenderDiagnosticsR10(),
       engineErrors: engine.renderExtractionErrors,
       engineLastError: engine.renderExtractionLastError,
     }, (_, value) => typeof value === "bigint" ? value.toString() : value);
@@ -2583,8 +2580,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     return () => {
       window.clearTimeout(toastTimerRef.current);
       if (treeFallTimer !== undefined) window.clearTimeout(treeFallTimer);
-      void engine.shutdown().catch(() => undefined);
-      rendererCutover.stop();
+      void engine.shutdown().catch(() => undefined).finally(() => rendererCutover.stop());
       engineRef.current = null;
       worldStorageRef.current = null;
       characterStoreRef.current = null;
