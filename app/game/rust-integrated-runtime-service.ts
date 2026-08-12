@@ -2,6 +2,7 @@ import {
   RUST_INTEGRATED_RUNTIME_MAX_EXTRACTION_BYTES,
   RUST_INTEGRATED_RUNTIME_MAX_IDEMPOTENCY_RECEIPTS,
   RUST_INTEGRATED_RUNTIME_MAX_INPUT_FRAMES,
+  RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_COMMANDS_V2,
   rustIntegratedRuntimeIdentityEqualsV1,
   type RustIntegratedRuntimeCommandBatchV1,
   type RustIntegratedRuntimeCommandReceiptV1,
@@ -10,6 +11,8 @@ import {
   type RustIntegratedRuntimeExtractionViewV1,
   type RustIntegratedRuntimeIdentityV1,
   type RustIntegratedRuntimeInputFrameV1,
+  type RustIntegratedRuntimeContextCommandV2,
+  type RustIntegratedRuntimeStepResultV2,
   type RustIntegratedRuntimeRequestV1,
   type RustIntegratedRuntimeResponseV1,
   type RustIntegratedRuntimeTransportV1,
@@ -445,6 +448,67 @@ export class RustIntegratedRuntimeServiceV1 {
         this.acceptWorkerEpoch(response);
         if (response.type !== "runtime-step-result-v1") throw new RustIntegratedRuntimeServiceError("invalid-response", "runtime step did not return a fixed-step result");
         if (!identityDoesNotRegress(expected, response.identity)) throw new RustIntegratedRuntimeServiceError("invalid-response", "runtime step regressed the authoritative identity");
+        this.currentIdentity = response.identity;
+        return response;
+      } catch (error) {
+        this.failClosed(error);
+        throw error;
+      } finally {
+        this.recordMetric("step", this.now() - started);
+      }
+    });
+  }
+
+  stepV2(
+    monotonicTimeUs: number,
+    budgetUs: number,
+    inputs: readonly RustIntegratedRuntimeInputFrameV1[],
+    contextCommands: readonly RustIntegratedRuntimeContextCommandV2[],
+  ): Promise<RustIntegratedRuntimeStepResultV2> {
+    this.requireReady();
+    this.requireCapability(
+      FIXED_STEP_INPUT_CAPABILITY,
+      "StepV2 remains unavailable until the live fixed-step browser cutover gate is complete",
+    );
+    validateInputs(inputs);
+    if (contextCommands.length > RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_COMMANDS_V2) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError("capacity", "StepV2 context command batch exceeds 128 commands"));
+    }
+    return this.enqueue(async () => {
+      const started = this.now();
+      try {
+        const expected = this.requireIdentity();
+        const transport = this.transport;
+        if (!transport?.requestStepV2) {
+          throw new RustIntegratedRuntimeServiceError("not-ready", "integrated runtime transport does not expose StepV2");
+        }
+        this.requests += 1;
+        const requestId = this.requestId();
+        const clientEpoch = this.clientEpoch;
+        const response = await transport.requestStepV2({
+          type: "runtime-step-v2",
+          requestId,
+          clientEpoch,
+          expected,
+          monotonicTimeUs,
+          budgetUs,
+          inputs,
+          contextCommands,
+        });
+        if (response.requestId !== requestId || response.clientEpoch !== clientEpoch) {
+          this.staleResponses += 1;
+          throw new RustIntegratedRuntimeServiceError(
+            "invalid-response",
+            "runtime StepV2 response has a stale epoch or request id",
+          );
+        }
+        this.acceptWorkerEpoch(response);
+        if (response.type === "runtime-error-v1") {
+          throw new RustIntegratedRuntimeServiceError("worker-failed", `${response.code}: ${response.message}`);
+        }
+        if (!identityDoesNotRegress(expected, response.identity)) {
+          throw new RustIntegratedRuntimeServiceError("invalid-response", "runtime StepV2 regressed the authoritative identity");
+        }
         this.currentIdentity = response.identity;
         return response;
       } catch (error) {
@@ -990,7 +1054,7 @@ export class RustIntegratedRuntimeServiceV1 {
     this.currentIdentity = after;
   }
 
-  private acceptWorkerEpoch(response: RustIntegratedRuntimeResponseV1) {
+  private acceptWorkerEpoch(response: Readonly<{ workerEpoch: number }>) {
     if (response.workerEpoch < 1) {
       this.staleResponses += 1;
       throw new RustIntegratedRuntimeServiceError("invalid-response", "integrated runtime response has an invalid worker generation");

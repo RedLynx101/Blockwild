@@ -487,15 +487,21 @@ fn dispatch(
                     state.inventory.import_player_inventory_v1(command)?
                 }
                 InventoryCommand::ApplyBlockActionV1(command) => state.inventory.apply_block_action_v1(command)?,
+                InventoryCommand::CreateGeneratedDropCustodyV1(command) => {
+                    state.inventory.create_generated_drop_custody_v1(command)?
+                }
             };
             resource_deltas.extend(deltas);
             touched.insert(Domain::Inventory);
-            let event_kind = match command {
-                InventoryCommand::ImportPlayerInventoryV1(_) => "player-inventory-imported-v1",
-                InventoryCommand::ApplyBlockActionV1(_) => "block-action-v1",
-                _ => "inventory",
+            let (event_kind, record_id) = match command {
+                InventoryCommand::ImportPlayerInventoryV1(_) => ("player-inventory-imported-v1", None),
+                InventoryCommand::ApplyBlockActionV1(_) => ("block-action-v1", None),
+                InventoryCommand::CreateGeneratedDropCustodyV1(command) => {
+                    ("generated-drop-custody-v1", Some(command.custody.id.clone()))
+                }
+                _ => ("inventory", None),
             };
-            push_event(events, batch_id, command_index, &actor.actor_id, event_kind, None);
+            push_event(events, batch_id, command_index, &actor.actor_id, event_kind, record_id);
         }
         GameplayCommand::Machine(command) => {
             let deltas = state.machines.apply(command, state.tick)?;
@@ -669,6 +675,21 @@ fn authorize_command(
 ) -> Result<(), Rejection> {
     if matches!(
         command,
+        GameplayCommand::Inventory(InventoryCommand::CreateGeneratedDropCustodyV1(_))
+    ) {
+        if actor.role == crate::ActorRole::System
+            && grant.role == crate::ActorRole::System
+            && grant.scopes.contains(&Scope::System)
+        {
+            return Ok(());
+        }
+        return Err(Rejection::new(
+            RejectionCode::Unauthorized,
+            "generated-drop custody creation requires the system actor",
+        ));
+    }
+    if matches!(
+        command,
         GameplayCommand::Inventory(InventoryCommand::ImportPlayerInventoryV1(_))
     ) {
         if actor.role == crate::ActorRole::System
@@ -740,6 +761,7 @@ fn authorize_command(
                 InventoryCommand::CreatePlayerCustody(command) => owns(&command.inventory) && owns(&command.equipment),
                 InventoryCommand::ImportPlayerInventoryV1(_) => false,
                 InventoryCommand::ApplyBlockActionV1(command) => owns(&command.inventory),
+                InventoryCommand::CreateGeneratedDropCustodyV1(_) => false,
             };
             if !allowed {
                 return Err(Rejection::new(

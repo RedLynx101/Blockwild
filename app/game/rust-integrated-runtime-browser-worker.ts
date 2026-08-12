@@ -5,7 +5,9 @@ import {
   type RustEngineWasmExports,
 } from "./rust-engine-loader";
 import {
+  decodeRustIntegratedRuntimeStepResultV2,
   decodeRustIntegratedRuntimeResponseV1,
+  encodeRustIntegratedRuntimeStepRequestV2,
   encodeRustIntegratedRuntimeRequestV1,
 } from "./rust-integrated-runtime-codec";
 import {
@@ -18,6 +20,8 @@ import {
 import type {
   RustIntegratedRuntimeRequestV1,
   RustIntegratedRuntimeResponseV1,
+  RustIntegratedRuntimeStepRequestV2,
+  RustIntegratedRuntimeStepResultV2,
 } from "./rust-integrated-runtime-contract";
 import {
   installRustIntegratedRuntimeWorkerHandlerV1,
@@ -111,6 +115,23 @@ export class RustIntegratedRuntimeBrowserKernelV1 implements RustIntegratedRunti
       this.runtimeHandle = response.runtimeHandle;
     }
     if (response.type === "runtime-shutdown-v1") this.runtimeHandle = 0;
+    return response;
+  }
+
+  async handleStepV2(
+    request: RustIntegratedRuntimeStepRequestV2,
+  ): Promise<RustIntegratedRuntimeStepResultV2 | Extract<RustIntegratedRuntimeResponseV1, { type: "runtime-error-v1" }>> {
+    const exports = await this.load();
+    const raw = asBytes(exports.blockwild_runtime_step_v2(
+      this.requireHandle(),
+      encodeRustIntegratedRuntimeStepRequestV2(request),
+    ));
+    const schema = raw.byteLength >= 8
+      ? new DataView(raw.buffer, raw.byteOffset, raw.byteLength).getUint16(6, true)
+      : 0;
+    if (schema === 6) return decodeRustIntegratedRuntimeStepResultV2(raw);
+    const response = decodeRustIntegratedRuntimeResponseV1(raw);
+    if (response.type !== "runtime-error-v1") throw new Error("schema-6 StepV2 returned an invalid legacy response");
     return response;
   }
 

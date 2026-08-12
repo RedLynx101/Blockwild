@@ -249,6 +249,291 @@ fn inventory_import_idempotency_key_conflict_does_not_mutate_twice() {
     assert_eq!(authority.replay().len(), 1);
 }
 
+fn generated_drop_provenance() -> GeneratedDropProvenanceV1 {
+    GeneratedDropProvenanceV1 {
+        schema_version: BLOCK_ACTION_GENERATED_DROP_PROVENANCE_SCHEMA_VERSION_V1,
+        manifest_hash: CanonicalHash([1; 16]),
+        installed_registry_hash: CanonicalHash([2; 16]),
+        catalog_blob_hash: CanonicalHash([3; 16]),
+        action_report_hash: CanonicalHash([4; 16]),
+        rng_semantics_hash: CanonicalHash([5; 16]),
+        block_action_sequence: 41,
+        origin_input_sequence: 39,
+        block_id: 7,
+        position: BlockActionLootCellV1 { x: -2, y: 63, z: 11 },
+        loot_plan_hash: CanonicalHash([6; 16]),
+        group_ordinal: 2,
+    }
+}
+
+fn generated_drop_command() -> CreateGeneratedDropCustodyV1 {
+    let provenance = generated_drop_provenance();
+    CreateGeneratedDropCustodyV1::new(
+        ContainerKey {
+            kind: ContainerKind::Container,
+            id: provenance.custody_id_v1(),
+            owner_id: None,
+        },
+        ItemStack::simple(77, 5),
+        provenance,
+    )
+}
+
+fn generated_drop_authority() -> (GameplayAuthority, GameplayActor, ContainerKey) {
+    let mut state = GameplayState::new(WorldKey::new("generated-drop-universe", "surface"), 17);
+    state
+        .inventory
+        .register_item(ItemDefinition {
+            code: 77,
+            content_id: "generated-drop-item".into(),
+            max_stack: 16,
+            tags: BTreeSet::new(),
+        })
+        .unwrap();
+    let player_inventory = ContainerKey::player("generated-drop-player");
+    state
+        .inventory
+        .insert_container(Container::new(player_inventory.clone(), 9))
+        .unwrap();
+    let actor = GameplayActor {
+        actor_id: "generated-drop-system".into(),
+        player_id: None,
+        entity_id: None,
+        role: ActorRole::System,
+    };
+    let mut authority = GameplayAuthority::new(state);
+    authority
+        .grant_actor(actor.actor_id.clone(), ActorGrant::system())
+        .unwrap();
+    (authority, actor, player_inventory)
+}
+
+fn generated_drop_batch(
+    authority: &GameplayAuthority,
+    actor: GameplayActor,
+    suffix: &str,
+    command: CreateGeneratedDropCustodyV1,
+) -> GameplayBatch {
+    GameplayBatch::new(
+        format!("generated-drop-{suffix}"),
+        format!("generated-drop-key-{suffix}"),
+        actor,
+        authority.state.identity(),
+        vec![GameplayCommand::Inventory(
+            InventoryCommand::CreateGeneratedDropCustodyV1(command),
+        )],
+    )
+}
+
+#[test]
+fn generated_drop_is_system_owned_custody_with_conservation_replay_and_checkpoint_proof() {
+    let (mut authority, actor, player_inventory) = generated_drop_authority();
+    let command = generated_drop_command();
+    assert_eq!(command.request_hash.to_hex(), "83a090d59d372b15b05d98afda5e11b7");
+    let request = generated_drop_batch(&authority, actor, "accepted", command.clone());
+    let first = accepted(authority.apply_batch(&request));
+    let retry = accepted(authority.apply_batch(&request));
+    assert_eq!(retry, first);
+    assert_eq!(authority.replay().len(), 1);
+    assert_eq!(first.touched_domains, BTreeSet::from([Domain::Inventory]));
+    assert_eq!(first.events.len(), 1);
+    assert_eq!(first.events[0].kind, "generated-drop-custody-v1");
+    assert_eq!(first.events[0].record_id.as_deref(), Some(command.custody.id.as_str()));
+    assert_eq!(
+        first.resource_deltas,
+        [ResourceDelta {
+            item_code: 77,
+            metadata_hash: CanonicalHash::default(),
+            amount: 5,
+            reason: GENERATED_DROP_RESOURCE_REASON_V1.to_owned(),
+        }]
+    );
+    assert_eq!(
+        authority.state.inventory.containers[&command.custody].slots,
+        [Some(command.stack)]
+    );
+    assert!(
+        authority.state.inventory.containers[&player_inventory]
+            .slots
+            .iter()
+            .all(Option::is_none)
+    );
+    let replay = &authority.replay()[0];
+    assert_eq!(replay.sequence, first.after.revision.sequence);
+    assert_eq!(replay.command_hash, request.command_hash);
+    assert_eq!(replay.before_hash, first.before.state_hash);
+    assert_eq!(replay.after_hash, first.after.state_hash);
+    assert_eq!(replay.receipt_hash, first.receipt_hash);
+
+    let snapshot = authority.encode_snapshot(&[0x80, 0xff]).unwrap();
+    let decoded = decode_gameplay_authority_snapshot(&snapshot).unwrap();
+    assert_eq!(decoded.authority.state, authority.state);
+    assert_eq!(decoded.authority.replay(), authority.replay());
+    assert_eq!(decoded.authority.replay_hash(), authority.replay_hash());
+    assert_eq!(decoded.authority.encode_snapshot(&[0x80, 0xff]).unwrap(), snapshot);
+}
+
+#[test]
+fn generated_drop_is_system_only_even_for_inventory_admin() {
+    let (mut authority, _, _) = generated_drop_authority();
+    let player_id = PlayerId::new(81, 1);
+    let entity_id = EntityId::new(82, 1);
+    let actor = GameplayActor {
+        actor_id: "generated-drop-inventory-admin".into(),
+        player_id: Some(player_id),
+        entity_id: Some(entity_id),
+        role: ActorRole::Host,
+    };
+    authority
+        .grant_actor(
+            actor.actor_id.clone(),
+            ActorGrant {
+                player_id: Some(player_id),
+                entity_id: Some(entity_id),
+                role: ActorRole::Host,
+                scopes: BTreeSet::from([Scope::InventoryAny]),
+            },
+        )
+        .unwrap();
+    let before = authority.state.clone();
+    let request = generated_drop_batch(&authority, actor, "admin", generated_drop_command());
+    assert_eq!(
+        rejection(authority.apply_batch(&request)).code,
+        RejectionCode::Unauthorized
+    );
+    assert_eq!(authority.state, before);
+    assert!(authority.replay().is_empty());
+}
+
+#[test]
+fn generated_drop_rejects_hash_custody_stack_metadata_and_provenance_tamper_atomically() {
+    type Mutation = Box<dyn Fn(&mut GameplayAuthority, &mut CreateGeneratedDropCustodyV1)>;
+    let mutations: Vec<(Mutation, RejectionCode)> = vec![
+        (
+            Box::new(|_, command| command.request_hash = CanonicalHash([9; 16])),
+            RejectionCode::Conflict,
+        ),
+        (
+            Box::new(|_, command| command.custody.id = "wrong-generated-custody".into()),
+            RejectionCode::InvalidCommand,
+        ),
+        (
+            Box::new(|_, command| command.custody.owner_id = Some("generated-drop-player".into())),
+            RejectionCode::InvalidCommand,
+        ),
+        (
+            Box::new(|_, command| {
+                command.provenance.schema_version = 2;
+                command.request_hash = command.calculate_request_hash_v1();
+            }),
+            RejectionCode::InvalidCommand,
+        ),
+        (
+            Box::new(|_, command| {
+                command.provenance.loot_plan_hash = CanonicalHash::default();
+                command.request_hash = command.calculate_request_hash_v1();
+            }),
+            RejectionCode::Conflict,
+        ),
+        (
+            Box::new(|_, command| {
+                command.provenance.group_ordinal = MAX_BLOCK_ACTION_GENERATED_DROPS_V1 as u16;
+                command.request_hash = command.calculate_request_hash_v1();
+            }),
+            RejectionCode::Capacity,
+        ),
+        (
+            Box::new(|_, command| {
+                command.stack.item_code = 999_999;
+                command.request_hash = command.calculate_request_hash_v1();
+            }),
+            RejectionCode::InvalidCommand,
+        ),
+        (
+            Box::new(|_, command| {
+                command.stack.count = 17;
+                command.request_hash = command.calculate_request_hash_v1();
+            }),
+            RejectionCode::InvalidCommand,
+        ),
+        (
+            Box::new(|_, command| {
+                command.stack.durability_millionths = Some(1);
+                command.request_hash = command.calculate_request_hash_v1();
+            }),
+            RejectionCode::InvalidCommand,
+        ),
+        (
+            Box::new(|_, command| {
+                command.stack.metadata_hash = CanonicalHash([8; 16]);
+                command.request_hash = command.calculate_request_hash_v1();
+            }),
+            RejectionCode::InvalidCommand,
+        ),
+    ];
+    for (index, (mutate, expected)) in mutations.into_iter().enumerate() {
+        let (mut authority, actor, _) = generated_drop_authority();
+        let mut command = generated_drop_command();
+        mutate(&mut authority, &mut command);
+        let before = authority.state.clone();
+        let request = generated_drop_batch(&authority, actor, &format!("invalid-{index}"), command);
+        assert_eq!(
+            rejection(authority.apply_batch(&request)).code,
+            expected,
+            "mutation {index}"
+        );
+        assert_eq!(authority.state, before, "mutation {index} was not atomic");
+        assert!(authority.replay().is_empty());
+    }
+}
+
+#[test]
+fn generated_drop_duplicate_and_container_capacity_reject_without_mutation() {
+    let (mut authority, actor, _) = generated_drop_authority();
+    let command = generated_drop_command();
+    let first = generated_drop_batch(&authority, actor.clone(), "first", command.clone());
+    accepted(authority.apply_batch(&first));
+    let after_first = authority.state.clone();
+    let duplicate = generated_drop_batch(&authority, actor, "duplicate", command);
+    assert_eq!(
+        rejection(authority.apply_batch(&duplicate)).code,
+        RejectionCode::Conflict
+    );
+    assert_eq!(authority.state, after_first);
+    assert_eq!(authority.replay().len(), 1);
+
+    let mut inventory = InventoryState::default();
+    inventory
+        .register_item(ItemDefinition {
+            code: 77,
+            content_id: "generated-drop-item".into(),
+            max_stack: 16,
+            tags: BTreeSet::new(),
+        })
+        .unwrap();
+    for index in 0..MAX_GENERATED_DROP_CUSTODY_CONTAINERS_V1 {
+        inventory
+            .insert_container(Container::new(
+                ContainerKey {
+                    kind: ContainerKind::Container,
+                    id: format!("block-loot-custody-v1:{index}:0"),
+                    owner_id: None,
+                },
+                1,
+            ))
+            .unwrap();
+    }
+    let before = inventory.clone();
+    assert_eq!(
+        inventory
+            .create_generated_drop_custody_v1(&generated_drop_command())
+            .unwrap_err()
+            .code,
+        RejectionCode::Capacity
+    );
+    assert_eq!(inventory, before);
+}
+
 fn block_action_inventory_fixture() -> (InventoryState, ContainerKey, ItemStack) {
     let mut state = InventoryState::default();
     for (code, id, max_stack) in [(10, "test-pick", 1), (20, "test-block", 64), (30, "filler", 64)] {

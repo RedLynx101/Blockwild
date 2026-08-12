@@ -685,6 +685,7 @@ import {
   executeRustIntegratedPlayerBootstrapV1,
   type RustIntegratedPlayerBootstrapObservationV1,
 } from "./rust-integrated-runtime-player-bootstrap";
+import { queryRustIntegratedRuntimeContextContinuityV2 } from "./rust-integrated-runtime-context-continuity-v2";
 import {
   createRustPlayerBootstrapNewWorldCompatibilityV1,
   deriveRustPlayerBootstrapCompatibilityIdentityV1,
@@ -6436,7 +6437,14 @@ export class VoxelEngine {
     this.rustLivePlayerInitialYawRadiansR10 = entity.record.yaw;
     this.rustLiveSelectedSlotIntentR5 = worldView.selectedSlot;
     this.rustLiveLookIntentR5 = Object.freeze({ yawRadians, pitchRadians });
-    const pump = createRustLiveInputPumpR5({ service, status: observation, worldGeneration: generation });
+    const contextContinuity = await queryRustIntegratedRuntimeContextContinuityV2(service);
+    this.assertRustLiveGenerationR5(generation, host, "context command continuity");
+    const pump = createRustLiveInputPumpR5({
+      service,
+      status: observation,
+      contextContinuity,
+      worldGeneration: generation,
+    });
     this.rustLiveInputPump = pump;
     try {
       // Seed the first fixed step from exact BWS5 continuity/entity state. This

@@ -25,6 +25,7 @@ import type {
   RustIntegratedPlayerBootstrapStatusReceiptV1,
   RustIntegratedPlayerRuntimeContinuityV1,
 } from "./rust-integrated-runtime-player-status.ts";
+import type { RustIntegratedRuntimeContextContinuityV2 } from "./rust-integrated-runtime-context-continuity-v2.ts";
 import {
   planRustLiveCameraConfigR10,
   rustLiveCameraConfigMatchesR10,
@@ -134,6 +135,8 @@ export type RustLiveInputPumpOptionsR5 = Readonly<{
   nowUs?: () => number;
   /** Explicit restore/status seam; absence disables semantic command queueing. */
   nextContextCommandSequence?: number | null;
+  /** Exact nonmutating BWO6 observation composed with BWO5 at activation. */
+  contextContinuity?: RustIntegratedRuntimeContextContinuityV2;
 }>;
 
 export type RustLiveInputPumpAdvanceOptionsR5 = Readonly<{
@@ -482,6 +485,7 @@ export class RustLiveInputPumpR5 {
   private nextInputSequence: number;
   private nextActionSequence: number;
   private nextContextCommandSequence: number | null;
+  private readonly contextContinuityConfigured: boolean;
   private readonly contextCommandIntents: RustLiveContextCommandIntentV2[] = [];
   private lastMonotonicTimeUs: number;
   private lastIdentity: RustIntegratedRuntimeIdentityV1;
@@ -516,10 +520,23 @@ export class RustLiveInputPumpR5 {
     this.lastIdentity = identity;
     this.nextInputSequence = continuity.nextInputSequence;
     this.nextActionSequence = continuity.nextActionSequence;
-    this.nextContextCommandSequence = options.nextContextCommandSequence === undefined
-      || options.nextContextCommandSequence === null
+    const contextContinuity = options.contextContinuity;
+    this.contextContinuityConfigured = contextContinuity !== undefined
+      || options.nextContextCommandSequence !== undefined;
+    if (contextContinuity && (!rustIntegratedRuntimeIdentityEqualsV1(contextContinuity.identity, identity)
+      || !contextContinuity.queuedCommandsEmpty)) {
+      fail("context-command-continuity", "BWO6 context continuity does not attest the exact idle runtime identity");
+    }
+    const observedContextSequence = contextContinuity
+      ? contextContinuity.nextSequence
+      : options.nextContextCommandSequence ?? null;
+    if (contextContinuity && options.nextContextCommandSequence !== undefined
+      && options.nextContextCommandSequence !== contextContinuity.nextSequence) {
+      fail("context-command-continuity", "manual context cursor contradicts the BWO6 observation");
+    }
+    this.nextContextCommandSequence = observedContextSequence === null
       ? null
-      : integer(options.nextContextCommandSequence, 1, U64_SAFE_MAX, "next context command sequence");
+      : integer(observedContextSequence, 1, U64_SAFE_MAX, "next context command sequence");
     this.lastMonotonicTimeUs = continuity.lastMonotonicTimeUs;
     this.lastAppliedButtons = continuity.lastAppliedButtons;
     this.physicalActionButtons = continuity.lastAppliedButtons & ACTION_BUTTON_MASK;
@@ -562,7 +579,9 @@ export class RustLiveInputPumpR5 {
     this.requireGeneration(worldGeneration);
     this.requireReady();
     if (this.nextContextCommandSequence === null) {
-      fail("context-command-continuity", "Rust status does not attest the next context command sequence");
+      fail("context-command-continuity", this.contextContinuityConfigured
+        ? "Rust context command sequence is exhausted"
+        : "Rust status does not attest the next context command sequence");
     }
     if (!this.service.stepV2) {
       fail("context-command-service", "Rust runtime does not expose the schema-6 StepV2 dispatcher");
@@ -982,7 +1001,9 @@ export class RustLiveInputPumpR5 {
     }
     const last = pending.contextCommands[pending.contextCommands.length - 1];
     this.contextCommandIntents.splice(0, pending.contextIntentCount);
-    this.nextContextCommandSequence = integer(last.sequence + 1, 1, U64_SAFE_MAX, "next context command sequence");
+    this.nextContextCommandSequence = last.sequence === U64_SAFE_MAX
+      ? null
+      : integer(last.sequence + 1, 1, U64_SAFE_MAX, "next context command sequence");
   }
 
   private commitAppliedInput(staged: StagedAppliedInputR5) {

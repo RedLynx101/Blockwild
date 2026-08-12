@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use blockwild_types::{CanonicalHash, CanonicalHasher};
 
 use crate::{
-    ALL_CONTENT_DOMAINS, CONTENT_MANIFEST_SCHEMA_VERSION, ContentDomain, ContentManifestEntry, MAX_CONTENT_ENTRIES,
-    MAX_ITEM_STACK, MetadataBlob, MetadataBlobStore, ProductionContentManifest,
+    ALL_CONTENT_DOMAINS, CONTENT_MANIFEST_SCHEMA_VERSION, ContentDomain, ContentManifestEntry,
+    MAX_BLOCK_ACTION_GENERATED_DROPS_V1, MAX_CONTENT_ENTRIES, MAX_ITEM_STACK, MetadataBlob, MetadataBlobStore,
+    ProductionContentManifest, block_action_loot_generated_drop_maximum_v1, supported_block_action_roll_count_v1,
 };
 
 pub const CONTENT_RUNTIME_SCHEMA_VERSION: u16 = 1;
@@ -2269,7 +2270,33 @@ fn validate_action_links(registry: &ContentRuntimeRegistry, blockers: &mut Vec<C
     if !contextual_v2 {
         return;
     }
+    let item_max_stacks = registry
+        .items
+        .values()
+        .map(|item| (item.item_code, item.max_stack))
+        .collect::<BTreeMap<_, _>>();
     for profile in catalog.profiles.values() {
+        if profile.break_profile.as_ref().is_some_and(|action| {
+            action
+                .loot
+                .rules
+                .iter()
+                .all(|rule| item_max_stacks.contains_key(&rule.item_code))
+        }) && let Ok(maximum) = block_action_loot_generated_drop_maximum_v1(profile, &item_max_stacks)
+            && maximum > MAX_BLOCK_ACTION_GENERATED_DROPS_V1
+        {
+            blockers.push(runtime_blocker(
+                ContentRuntimeBlockerCode::Capacity,
+                ContentRuntimeStage::References,
+                Some(ContentDomain::Item),
+                Some(BLOCK_ACTION_CATALOG_ID.to_owned()),
+                &format!("$.profiles[id={}].breakProfile.loot.rules", profile.block_id),
+                Some(format!(
+                    "0..{MAX_BLOCK_ACTION_GENERATED_DROPS_V1} grouped generated drops"
+                )),
+                Some(maximum.to_string()),
+            ));
+        }
         if let Some(harvest) = &profile.harvest_intent {
             for (field, replacement) in [
                 ("replacementWithoutScythe", harvest.replacement_without_scythe),
@@ -6762,6 +6789,16 @@ fn parse_block_loot_rule(
     let count_base = field_path(base, "count");
     let count_object = required_object_at(record, object, "count", base, blockers)?;
     let count = parse_block_loot_count(record, count_object, &count_base, blockers)?;
+    if !supported_block_action_roll_count_v1(roll_scope, &count) {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            &count_base,
+            "supported roll/count pair for block-action-authoritative-rng-v1",
+            &format!("{roll_scope:?}:{count:?}"),
+        ));
+    }
     if roll_scope == ContentBlockLootRollScope::None
         && (chance_millionths != CONTENT_ACTION_FIXED_SCALE || chance_modifier != ContentBlockLootChanceModifier::None)
     {
@@ -6906,6 +6943,23 @@ fn parse_block_loot_profile(
                 &rules_path,
                 "shared-exclusive rules only in exclusive mode",
                 "shared-exclusive",
+            ));
+        }
+        ContentBlockLootMode::All
+            if rules
+                .iter()
+                .any(|rule| rule.roll_scope == ContentBlockLootRollScope::SharedPlantYield)
+                && rules
+                    .iter()
+                    .any(|rule| rule.roll_scope != ContentBlockLootRollScope::SharedPlantYield) =>
+        {
+            blockers.push(for_record(
+                record,
+                ContentRuntimeBlockerCode::DescriptorMismatch,
+                ContentRuntimeStage::Invariants,
+                &rules_path,
+                "one homogeneous shared-plant-yield group",
+                "mixed roll scopes",
             ));
         }
         ContentBlockLootMode::Exclusive => {
@@ -8213,6 +8267,20 @@ mod tests {
         }));
         validate_action_promotion_report_v1(&report).expect("generated report validates");
         assert_eq!(report.report_hash, canonical_action_promotion_report_hash_v1(&report));
+        let binding = crate::BlockActionLootBindingV1::from_installed_content_v1(&registry, &report)
+            .expect("exact installed report binds RNG implementation");
+        assert_eq!(binding.canonical_hash_v1().to_hex(), "009fd65fbe007a6d003f25edae6b9851");
+
+        let mut self_consistent_tamper = report.clone();
+        self_consistent_tamper.rng_semantics_hash = Some(CanonicalHash([9; 16]));
+        self_consistent_tamper.report_hash = canonical_action_promotion_report_hash_v1(&self_consistent_tamper);
+        validate_action_promotion_report_v1(&self_consistent_tamper).expect("tamper is internally hashed");
+        assert_eq!(
+            crate::BlockActionLootBindingV1::from_installed_content_v1(&registry, &self_consistent_tamper)
+                .unwrap_err()
+                .code,
+            crate::BlockActionLootErrorCodeV1::Binding
+        );
     }
 
     #[test]
@@ -8356,6 +8424,18 @@ mod tests {
                 "\"chanceMillionths\":830000",
                 ContentRuntimeBlockerCode::DescriptorMismatch,
                 "exclusive probability gap",
+            ),
+            (
+                "\"count\":{\"kind\":\"constant\",\"value\":1},\"id\":\"first\"",
+                "\"count\":{\"kind\":\"uniform-inclusive\",\"maximum\":2,\"minimum\":1},\"id\":\"first\"",
+                ContentRuntimeBlockerCode::DescriptorMismatch,
+                "unsupported exclusive count mapping",
+            ),
+            (
+                "\"base\":2,\"floorRollMultiplier\":2",
+                "\"base\":33,\"floorRollMultiplier\":2",
+                ContentRuntimeBlockerCode::Capacity,
+                "generated drop grouping capacity",
             ),
         ];
         for (needle, replacement, code, label) in cases {

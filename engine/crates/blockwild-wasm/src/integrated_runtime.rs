@@ -6,13 +6,14 @@
 //! never interpreted as successful no-ops.
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use blockwild_authority::BlockCatalogV1;
 use blockwild_engine::{
-    CONTENT_INSTALL_PAGE_TYPE_V1, CONTENT_INSTALL_RECEIPT_TYPE_V1, ENTITY_AUTHORITY_EXPORT_TYPE_V1,
-    ENTITY_AUTHORITY_IMPORT_RECEIPT_TYPE_V1, ENTITY_AUTHORITY_IMPORT_TYPE_V2, ENTITY_AUTHORITY_SNAPSHOT_TYPE_V2,
-    ENTITY_COMPATIBILITY_EXPORT_TYPE_V1, ENTITY_COMPATIBILITY_IMPORT_TYPE_V1, ENTITY_COMPATIBILITY_RECORD_TYPE_V1,
+    CONTENT_INSTALL_PAGE_TYPE_V1, CONTENT_INSTALL_RECEIPT_TYPE_V1, CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2,
+    CONTEXT_COMMAND_CONTINUITY_TYPE_V2, ENTITY_AUTHORITY_EXPORT_TYPE_V1, ENTITY_AUTHORITY_IMPORT_RECEIPT_TYPE_V1,
+    ENTITY_AUTHORITY_IMPORT_TYPE_V2, ENTITY_AUTHORITY_SNAPSHOT_TYPE_V2, ENTITY_COMPATIBILITY_EXPORT_TYPE_V1,
+    ENTITY_COMPATIBILITY_IMPORT_TYPE_V1, ENTITY_COMPATIBILITY_RECORD_TYPE_V1,
     INTEGRATED_RUNTIME_LEGACY_MIGRATION_SCHEMA_V1, IntegratedRuntimeBatchV2, IntegratedRuntimeConfigV2,
     IntegratedRuntimeError, IntegratedRuntimeIdentityV2, IntegratedRuntimeLegacyMigrationV1,
     IntegratedRuntimeReceiptV2, IntegratedRuntimeRenderPresentationBindingV1, IntegratedRuntimeV2,
@@ -26,13 +27,15 @@ use blockwild_engine::{
     decode_gameplay_batch_v1, decode_network_agent_grant_v1, decode_network_command_release_v1,
     decode_network_delta_build_request_v1, decode_network_peer_grant_v1, decode_network_peer_release_v1,
     decode_network_reconnect_request_v1, decode_network_replication_record_v1, decode_player_bootstrap_status_query_v1,
-    decode_player_inventory_import_v1, decode_runtime_camera_config_v1, decode_runtime_persistence_dispatch_v1,
+    decode_player_inventory_import_v1, decode_runtime_camera_config_v1,
+    decode_runtime_context_command_continuity_query_v2, decode_runtime_persistence_dispatch_v1,
     decode_runtime_player_binding_v1, decode_terrain_residency_batch_v1, decode_terrain_residency_reconcile_batch_v2,
     encode_content_install_receipt_v1, encode_entity_authority_import_receipt_v1, encode_entity_event_batch_v1,
     encode_gameplay_receipt_v1, encode_player_bootstrap_status_v1, encode_player_inventory_import_receipt_v1,
-    encode_runtime_camera_config_receipt_v1, encode_runtime_persistence_dispatch_receipt_v1,
-    encode_terrain_residency_receipt_v1, encode_terrain_residency_reconcile_receipt_v2,
-    integrated_runtime_checkpoint_hash_v1, runtime_camera_config_state_hash_v1,
+    encode_runtime_camera_config_receipt_v1, encode_runtime_context_command_continuity_receipt_v2,
+    encode_runtime_persistence_dispatch_receipt_v1, encode_terrain_residency_receipt_v1,
+    encode_terrain_residency_reconcile_receipt_v2, integrated_runtime_checkpoint_hash_v1,
+    runtime_camera_config_state_hash_v1,
 };
 use blockwild_network::{InterestSelectionStatsV1, encode_network_checkpoint_v1, encode_network_delta_v1};
 use blockwild_persistence::{PersistenceDispatchOutcomeV1, PersistenceDispatchStatusV1, PersistenceRetryDirectiveV1};
@@ -49,9 +52,10 @@ use blockwild_runtime_wire::{
     RUNTIME_BULK_MAX_QUEUED_BYTES_V1, RuntimeBulkEncodedV1, RuntimeBulkRequestV1, RuntimeBulkResponseV1,
     RuntimeBulkSaveStageStateV1, RuntimeBulkStateV1, RuntimeCommandBatchV1, RuntimeCommandReceiptV1, RuntimeConfigV1,
     RuntimeDomainOperationV1, RuntimeDomainV1, RuntimeExtractionV1, RuntimeIdentityV1, RuntimeRequestV1,
-    RuntimeResponseV1, RuntimeRevisionV1, SIMULATION_PLAYER_BIND_RECEIPT_TYPE_V2, SIMULATION_PLAYER_BIND_TYPE_V2,
-    WireHash, command_receipt_hash_v1, decode_bulk_request_v1, decode_request_v1, encode_bulk_response_v1,
-    encode_response_v1, extraction_checksum_v1, wire_checksum_v1,
+    RuntimeResponseV1, RuntimeRevisionV1, RuntimeStepResponseV2, SIMULATION_PLAYER_BIND_RECEIPT_TYPE_V2,
+    SIMULATION_PLAYER_BIND_TYPE_V2, WireHash, command_receipt_hash_v1, decode_bulk_request_v1, decode_request_v1,
+    decode_step_request_v2, encode_bulk_response_v1, encode_response_v1, encode_step_response_v2,
+    extraction_checksum_v1, seal_semantic_action_receipt_v2, wire_checksum_v1,
 };
 use blockwild_simulation::{CameraModeV1, CameraPoseV1, CameraProfileV1};
 use blockwild_types::{CanonicalHash, CanonicalHasher};
@@ -63,6 +67,7 @@ const ENTITY_EXTRACTION_SCHEMA_V3: u16 = 3;
 const ENTITY_EXTRACTION_HEADER_BYTES_V3: usize = 51;
 const MAX_ENTITY_EXTRACTION_RECORDS_V3: usize = 4_096;
 const MAX_ENTITY_EXTRACTION_BYTES_V3: usize = 4 * 1_048_576;
+const MAX_STEP_V2_RETRY_RECEIPTS: usize = 256;
 const DOMAIN_VIEW_SCHEMA_V1: u16 = 1;
 const DOMAIN_VIEW_MAX_RECORDS_V1: usize = 2_048;
 // Eight views plus the independently capped 4 MiB BWR6 entity stream must fit
@@ -120,6 +125,10 @@ struct IntegratedRuntimeStoreV2 {
     runtimes: BTreeMap<u32, IntegratedRuntimeV2>,
     bulk_attachments: BTreeMap<(u32, u64), Vec<u8>>,
     extraction_cursors: BTreeMap<u32, RuntimeExtractionCursorV1>,
+    // Bounded, nondurable transport replay only. Semantic sequence ownership
+    // lives in IntegratedRuntimeV2 and is never reconstructed from this cache.
+    step_v2_retries: BTreeMap<(u32, u32, u32), (WireHash, Vec<u8>)>,
+    step_v2_retry_order: VecDeque<(u32, u32, u32)>,
 }
 
 impl IntegratedRuntimeStoreV2 {
@@ -130,8 +139,24 @@ impl IntegratedRuntimeStoreV2 {
         }
         let handle = self.next_handle;
         self.extraction_cursors.remove(&handle);
+        self.step_v2_retries
+            .retain(|(runtime_handle, _, _), _| *runtime_handle != handle);
+        self.step_v2_retry_order
+            .retain(|(runtime_handle, _, _)| *runtime_handle != handle);
         self.runtimes.insert(handle, runtime);
         handle
+    }
+
+    fn cache_step_v2_retry(&mut self, key: (u32, u32, u32), request_hash: WireHash, response: Vec<u8>) {
+        if !self.step_v2_retries.contains_key(&key) {
+            self.step_v2_retry_order.push_back(key);
+        }
+        self.step_v2_retries.insert(key, (request_hash, response));
+        while self.step_v2_retry_order.len() > MAX_STEP_V2_RETRY_RECEIPTS {
+            if let Some(expired) = self.step_v2_retry_order.pop_front() {
+                self.step_v2_retries.remove(&expired);
+            }
+        }
     }
 }
 
@@ -380,6 +405,12 @@ pub fn blockwild_runtime_command_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8
 #[wasm_bindgen]
 #[must_use]
 pub fn blockwild_runtime_step_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8> {
+    if request_bytes
+        .get(6..8)
+        .is_some_and(|bytes| u16::from_le_bytes(bytes.try_into().expect("fixed schema bytes")) == 6)
+    {
+        return dispatch_step_request_v2(handle, request_bytes);
+    }
     let Ok(request) = decode_request_v1(request_bytes) else {
         return Vec::new();
     };
@@ -445,6 +476,120 @@ pub fn blockwild_runtime_step_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8> {
             }
             Err(error) => encode_error(request_id, client_epoch, &error.code, &error.message, Some(current)),
         }
+    })
+}
+
+fn dispatch_step_request_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8> {
+    let Ok(request) = decode_step_request_v2(request_bytes) else {
+        return Vec::new();
+    };
+    let request_hash = WireHash(wire_checksum_v1(request_bytes));
+    let retry_key = (handle, request.client_epoch, request.request_id);
+    INTEGRATED_RUNTIMES.with(|store| {
+        let mut store = store.borrow_mut();
+        if let Some((cached_hash, cached_response)) = store.step_v2_retries.get(&retry_key) {
+            if *cached_hash == request_hash {
+                return cached_response.clone();
+            }
+            let current = store
+                .runtimes
+                .get(&handle)
+                .map(|runtime| wire_identity(&runtime.identity()));
+            return encode_error(
+                request.request_id,
+                request.client_epoch,
+                "step-v2-request-conflict",
+                "StepV2 request id was reused with different canonical bytes",
+                current,
+            );
+        }
+        let response = match store.runtimes.get(&handle).cloned() {
+            None => encode_error(
+                request.request_id,
+                request.client_epoch,
+                "invalid-handle",
+                "unknown integrated runtime handle",
+                None,
+            ),
+            Some(mut candidate) => {
+                let current = wire_identity(&candidate.identity());
+                if request.expected != current {
+                    encode_error(
+                        request.request_id,
+                        request.client_epoch,
+                        "stale-runtime",
+                        "StepV2 references obsolete authority",
+                        Some(current),
+                    )
+                } else {
+                    match candidate.step_context_v2(
+                        request.monotonic_time_us,
+                        request.budget_us,
+                        &request.inputs,
+                        &request.context_commands,
+                    ) {
+                        Ok(summary) => {
+                            let identity = wire_identity(&candidate.identity());
+                            let replay_hash = wire_hash(summary.replay_hash);
+                            let semantic_receipts = summary
+                                .semantic_receipts
+                                .into_iter()
+                                .map(|receipt| {
+                                    seal_semantic_action_receipt_v2(receipt, &identity, replay_hash)
+                                        .map_err(|error| (error.code, error.message))
+                                })
+                                .collect::<Result<Vec<_>, _>>();
+                            match semantic_receipts {
+                                Ok(semantic_receipts) => {
+                                    let encoded = encode_step_response_v2(&RuntimeStepResponseV2 {
+                                        request_id: request.request_id,
+                                        client_epoch: request.client_epoch,
+                                        worker_epoch: WORKER_EPOCH,
+                                        identity,
+                                        fixed_steps: u16::try_from(summary.fixed_steps)
+                                            .expect("fixed steps are capped at eight"),
+                                        inputs_applied: u16::try_from(summary.inputs_applied)
+                                            .expect("input frames are bounded"),
+                                        commands_processed: u16::try_from(summary.processed_batches)
+                                            .expect("processed batches are bounded"),
+                                        commands_accepted: u16::try_from(summary.accepted_batches)
+                                            .expect("accepted batches are bounded"),
+                                        action_receipts: summary.action_receipts,
+                                        replay_hash,
+                                        semantic_receipts,
+                                    });
+                                    match encoded {
+                                        Ok(encoded) => {
+                                            store.runtimes.insert(handle, candidate);
+                                            encoded
+                                        }
+                                        Err(error) => encode_error(
+                                            request.request_id,
+                                            request.client_epoch,
+                                            error.code,
+                                            error.message,
+                                            Some(current),
+                                        ),
+                                    }
+                                }
+                                Err((code, message)) => {
+                                    encode_error(request.request_id, request.client_epoch, code, message, Some(current))
+                                }
+                            }
+                        }
+                        Err(error) => encode_error(
+                            request.request_id,
+                            request.client_epoch,
+                            error.code,
+                            error.message,
+                            Some(current),
+                        ),
+                    }
+                }
+            }
+        };
+        store.cache_step_v2_retry(retry_key, request_hash, response.clone());
+        response
     })
 }
 
@@ -1191,6 +1336,12 @@ pub fn blockwild_runtime_destroy_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8
             .bulk_attachments
             .retain(|(runtime_handle, _), _| *runtime_handle != handle);
         store.extraction_cursors.remove(&handle);
+        store
+            .step_v2_retries
+            .retain(|(runtime_handle, _, _), _| *runtime_handle != handle);
+        store
+            .step_v2_retry_order
+            .retain(|(runtime_handle, _, _)| *runtime_handle != handle);
         runtime.shutdown();
         encode(RuntimeResponseV1::Shutdown {
             request_id,
@@ -1234,6 +1385,7 @@ fn dispatch_command(
         let expected_schema = match (operation.domain, operation.type_id.as_str()) {
             (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V2) => 2,
             (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V3) => 3,
+            (RuntimeDomainV1::Simulation, CONTEXT_COMMAND_CONTINUITY_TYPE_V2) => 2,
             (RuntimeDomainV1::World, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2) => 2,
             _ => 1,
         };
@@ -1326,6 +1478,20 @@ fn dispatch_command(
                     RuntimeDomainV1::Simulation,
                     PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
                     encode_player_bootstrap_status_v1(&status).map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Simulation, CONTEXT_COMMAND_CONTINUITY_TYPE_V2) => {
+                let query = decode_runtime_context_command_continuity_query_v2(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let status = candidate
+                    .context_command_continuity_status_v2(&query, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2,
+                    2,
+                    encode_runtime_context_command_continuity_receipt_v2(&status)
+                        .map_err(|error| (error.code.into(), error.message))?,
                 )
             }
             (RuntimeDomainV1::Entities, ENTITY_AUTHORITY_EXPORT_TYPE_V1) => {
@@ -4155,9 +4321,11 @@ mod tests {
     };
     use blockwild_runtime_wire::{
         DEFAULT_GENERATION_OPTIONS_JSON_V1, DEFAULT_TERRAIN_CONTENT_HASH_V2, MAX_EXTRACTION_BYTES,
-        RuntimeBulkRequestV1, RuntimeBulkResponseV1, RuntimeBulkStateV1, RuntimeInputFrameV1, RuntimeRequestV1,
-        RuntimeRevisionV1, decode_bulk_response_v1, decode_response_v1, encode_bulk_request_v1, encode_request_v1,
-        seal_runtime_command_batch_v1,
+        RuntimeBulkRequestV1, RuntimeBulkResponseV1, RuntimeBulkStateV1, RuntimeContextCommandActionV2,
+        RuntimeContextCommandV2, RuntimeInputFrameV1, RuntimeRequestV1, RuntimeRevisionV1,
+        RuntimeSemanticActionReasonV2, RuntimeStepRequestV2, decode_bulk_response_v1, decode_response_v1,
+        decode_step_response_v2, encode_bulk_request_v1, encode_request_v1, encode_step_request_v2,
+        seal_context_command_v2, seal_runtime_command_batch_v1,
     };
     use blockwild_simulation::CameraProfileV1;
 
@@ -5415,6 +5583,180 @@ mod tests {
                 }
             ),
             "unexpected step response: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn step_v2_exact_retry_is_transport_only_and_semantic_sequence_dispatches_once() {
+        let source = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        let checkpoint = source.export_runtime_checkpoint().unwrap();
+        let checkpoint_hash = integrated_runtime_checkpoint_hash_v1(&checkpoint);
+        let (handle, identity) = insert_test_runtime(source);
+        let command = seal_context_command_v2(RuntimeContextCommandV2 {
+            sequence: 1,
+            target_tick: 1,
+            action: RuntimeContextCommandActionV2::MountedAbility {
+                mount_entity_id: u64::MAX,
+                mount_entity_revision: 9,
+                seat_index: 1,
+                ability_slot: 2,
+            },
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let queued_request = encode_step_request_v2(&RuntimeStepRequestV2 {
+            request_id: 701,
+            client_epoch: 91,
+            expected: identity,
+            monotonic_time_us: 1_000_000,
+            budget_us: 8_000,
+            inputs: vec![],
+            context_commands: vec![command.clone()],
+        })
+        .unwrap();
+        let queued_bytes = blockwild_runtime_step_v2(handle, &queued_request);
+        let queued = decode_step_response_v2(&queued_bytes).unwrap();
+        assert_eq!(queued.fixed_steps, 0);
+        assert!(queued.semantic_receipts.is_empty());
+        assert_eq!(blockwild_runtime_step_v2(handle, &queued_request), queued_bytes);
+        let conflicting_retry = encode_step_request_v2(&RuntimeStepRequestV2 {
+            request_id: 701,
+            client_epoch: 91,
+            expected: queued.identity.clone(),
+            monotonic_time_us: 1_000_001,
+            budget_us: 8_000,
+            inputs: vec![],
+            context_commands: vec![],
+        })
+        .unwrap();
+        assert_eq!(
+            response_error_code(decode_response_v1(&blockwild_runtime_step_v2(handle, &conflicting_retry)).unwrap()),
+            "step-v2-request-conflict"
+        );
+
+        let duplicate_request = encode_step_request_v2(&RuntimeStepRequestV2 {
+            request_id: 702,
+            client_epoch: 91,
+            expected: queued.identity.clone(),
+            monotonic_time_us: 1_000_001,
+            budget_us: 8_000,
+            inputs: vec![],
+            context_commands: vec![command],
+        })
+        .unwrap();
+        assert_eq!(
+            response_error_code(decode_response_v1(&blockwild_runtime_step_v2(handle, &duplicate_request)).unwrap()),
+            "context-command-sequence"
+        );
+
+        let drain_request = encode_step_request_v2(&RuntimeStepRequestV2 {
+            request_id: 703,
+            client_epoch: 91,
+            expected: queued.identity,
+            monotonic_time_us: 1_050_000,
+            budget_us: 8_000,
+            inputs: vec![],
+            context_commands: vec![],
+        })
+        .unwrap();
+        let drained = decode_step_response_v2(&blockwild_runtime_step_v2(handle, &drain_request)).unwrap();
+        assert_eq!(drained.fixed_steps, 1);
+        assert_eq!(drained.semantic_receipts.len(), 1);
+        assert_eq!(drained.semantic_receipts[0].command_sequence, 1);
+        assert_eq!(
+            drained.semantic_receipts[0].reason,
+            RuntimeSemanticActionReasonV2::Blocked
+        );
+        assert_eq!(drained.semantic_receipts[0].resolved_entity, None);
+
+        let later_request = encode_step_request_v2(&RuntimeStepRequestV2 {
+            request_id: 704,
+            client_epoch: 91,
+            expected: drained.identity,
+            monotonic_time_us: 1_100_000,
+            budget_us: 8_000,
+            inputs: vec![],
+            context_commands: vec![],
+        })
+        .unwrap();
+        let later = decode_step_response_v2(&blockwild_runtime_step_v2(handle, &later_request)).unwrap();
+        assert!(later.semantic_receipts.is_empty());
+
+        let shutdown = RuntimeRequestV1::Shutdown {
+            request_id: 705,
+            client_epoch: 91,
+            expected: Some(later.identity),
+        };
+        assert!(matches!(
+            decode_response_v1(&blockwild_runtime_destroy_v2(
+                handle,
+                &encode_request_v1(&shutdown).unwrap()
+            ))
+            .unwrap(),
+            RuntimeResponseV1::Shutdown { .. }
+        ));
+        assert_eq!(
+            response_error_code(decode_response_v1(&blockwild_runtime_step_v2(handle, &queued_request)).unwrap()),
+            "invalid-handle",
+            "destroyed handles must not replay a cached StepV2 success"
+        );
+        INTEGRATED_RUNTIMES.with(|store| store.borrow_mut().next_handle = handle.saturating_sub(1));
+        let restored = decode_response_v1(&blockwild_runtime_create_v2(
+            &encode_request_v1(&RuntimeRequestV1::Restore {
+                request_id: 706,
+                client_epoch: 91,
+                expected_checkpoint_hash: WireHash(checkpoint_hash.0),
+                checkpoint,
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        let RuntimeResponseV1::Restored {
+            runtime_handle: reused_handle,
+            identity: reused_identity,
+            ..
+        } = restored
+        else {
+            panic!("expected restored runtime: {restored:?}")
+        };
+        assert_eq!(reused_handle, handle);
+        INTEGRATED_RUNTIMES.with(|store| {
+            assert!(
+                !store.borrow().step_v2_retries.contains_key(&(handle, 91, 701)),
+                "fresh handle insertion must clear every prior-generation retry entry"
+            );
+        });
+        let fresh_request = encode_step_request_v2(&RuntimeStepRequestV2 {
+            request_id: 701,
+            client_epoch: 91,
+            expected: reused_identity,
+            monotonic_time_us: 1_000_000,
+            budget_us: 8_000,
+            inputs: vec![],
+            context_commands: vec![],
+        })
+        .unwrap();
+        assert!(decode_step_response_v2(&blockwild_runtime_step_v2(reused_handle, &fresh_request)).is_ok());
+    }
+
+    #[test]
+    fn step_v2_retry_cache_is_bounded_and_evicts_oldest_transport_receipt() {
+        let mut store = IntegratedRuntimeStoreV2::default();
+        for request_id in 1..=u32::try_from(MAX_STEP_V2_RETRY_RECEIPTS + 1).unwrap() {
+            store.cache_step_v2_retry(
+                (7, 9, request_id),
+                WireHash([request_id as u8; 16]),
+                request_id.to_le_bytes().to_vec(),
+            );
+        }
+        assert_eq!(store.step_v2_retries.len(), MAX_STEP_V2_RETRY_RECEIPTS);
+        assert_eq!(store.step_v2_retry_order.len(), MAX_STEP_V2_RETRY_RECEIPTS);
+        assert!(!store.step_v2_retries.contains_key(&(7, 9, 1)));
+        assert_eq!(store.step_v2_retry_order.front(), Some(&(7, 9, 2)));
+        assert!(
+            store
+                .step_v2_retries
+                .contains_key(&(7, 9, u32::try_from(MAX_STEP_V2_RETRY_RECEIPTS + 1).unwrap()))
         );
     }
 

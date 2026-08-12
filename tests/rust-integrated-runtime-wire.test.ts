@@ -614,6 +614,77 @@ test("protocol-test service awaits and caches one deterministic receipt without 
   await service.shutdown();
 });
 
+test("protocol-test service routes StepV2 only through the dedicated transport and validates correlation", async () => {
+  let current = identity();
+  const captured: RustIntegratedRuntimeStepRequestV2[] = [];
+  const transport = {
+    async request(request: RustIntegratedRuntimeRequestV1): Promise<RustIntegratedRuntimeResponseV1> {
+      if (request.type !== "runtime-create-v1") throw new Error(`unexpected generic ${request.type}`);
+      return {
+        type: "runtime-ready-v1", requestId: request.requestId, clientEpoch: request.clientEpoch,
+        workerEpoch: 6, runtimeHandle: 1, identity: current, artifactHash: "fixture", instanceId: "step-v2",
+        capabilities: CAPABILITIES,
+      };
+    },
+    async requestStepV2(request: RustIntegratedRuntimeStepRequestV2) {
+      captured.push(request);
+      current = identity(1, "7".repeat(32));
+      return Object.freeze({
+        type: "runtime-step-result-v2" as const,
+        requestId: request.requestId,
+        clientEpoch: request.clientEpoch,
+        workerEpoch: 6,
+        identity: current,
+        fixedSteps: 1,
+        inputsApplied: 0,
+        commandsProcessed: 0,
+        commandsAccepted: 0,
+        actionReceipts: Object.freeze([]),
+        replayHash: "8".repeat(32),
+        semanticReceipts: Object.freeze([]),
+      });
+    },
+    dispose() {},
+  };
+  const service = new RustIntegratedRuntimeServiceV1({ mode: "protocol-test", transportFactory: () => transport });
+  await service.start(createRequest().config);
+  const result = await service.stepV2(50_000, 8_000, [], []);
+  assert.equal(captured[0]?.type, "runtime-step-v2");
+  assert.deepEqual(captured[0]?.expected, identity());
+  assert.equal(result.type, "runtime-step-result-v2");
+  assert.deepEqual(service.identity(), current);
+
+  const missing = new RustIntegratedRuntimeServiceV1({
+    mode: "protocol-test",
+    transportFactory: () => ({
+      request: transport.request,
+      dispose() {},
+    }),
+  });
+  await missing.start(createRequest().config);
+  await assert.rejects(
+    missing.stepV2(50_000, 8_000, [], []),
+    (error: unknown) => error instanceof RustIntegratedRuntimeServiceError && error.code === "not-ready",
+  );
+
+  const stale = new RustIntegratedRuntimeServiceV1({
+    mode: "protocol-test",
+    transportFactory: () => ({
+      request: transport.request,
+      async requestStepV2(request) {
+        const response = await transport.requestStepV2(request);
+        return Object.freeze({ ...response, requestId: request.requestId + 1 });
+      },
+      dispose() {},
+    }),
+  });
+  await stale.start(createRequest().config);
+  await assert.rejects(
+    stale.stepV2(50_000, 8_000, [], []),
+    (error: unknown) => error instanceof RustIntegratedRuntimeServiceError && error.code === "invalid-response",
+  );
+});
+
 test("concurrent batches authored from one snapshot reject stale locally without failing authority", async () => {
   let commandCalls = 0;
   let current = identity();

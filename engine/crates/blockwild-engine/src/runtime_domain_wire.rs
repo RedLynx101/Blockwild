@@ -15,16 +15,17 @@ use blockwild_entity::{
 };
 use blockwild_gameplay::{
     ALL_CONTENT_DOMAINS, AcceptedReceipt, ActivityLease, ActorGrant, ActorRole, ApplyBlockActionV1, AuthorityIdentity,
-    BattleAction, CardforgeCommand, CombatCommand, ContainerKind, ContentArtifact, ContentDomain, ContentDomainDigest,
-    CraftCommand, CreateDropCustodyCommand, CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3,
-    FurnaceAdvanceCommand, GAMEPLAY_COMMAND_ADVANCE_SCHEDULE_TAG_V1, GameplayActor, GameplayBatch, GameplayCommand,
-    GameplayEvent, GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1,
-    INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG, INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG, Ingredient, InventoryCommand,
-    ItemInstanceMetadataV1, MAX_ITEM_INSTANCE_METADATA_BYTES_V1, MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1,
-    MachineCommand, MachineOperation, OpaquePayload, PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1, PacifyMethod,
-    PlayerInventoryBindingV1, PrintingKey, ProgressionAction, ProgressionCommand, Rejection, RejectionCode,
-    RemoveEmptyDropCustodyCommand, ResourceDelta, ResourceEndpoint, ResourceKey, ResourceKind, Scope, SlotRef,
-    StatDelta, TransferCommand, WorldKey,
+    BattleAction, BlockActionLootCellV1, CardforgeCommand, CombatCommand, ContainerKind, ContentArtifact,
+    ContentDomain, ContentDomainDigest, CraftCommand, CreateDropCustodyCommand, CreateGeneratedDropCustodyV1,
+    CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3, FurnaceAdvanceCommand,
+    GAMEPLAY_COMMAND_ADVANCE_SCHEDULE_TAG_V1, GameplayActor, GameplayBatch, GameplayCommand, GameplayEvent,
+    GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1, GeneratedDropProvenanceV1,
+    INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG, INVENTORY_COMMAND_CREATE_GENERATED_DROP_CUSTODY_V1_TAG,
+    INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG, Ingredient, InventoryCommand, ItemInstanceMetadataV1,
+    MAX_ITEM_INSTANCE_METADATA_BYTES_V1, MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1, MachineCommand,
+    MachineOperation, OpaquePayload, PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1, PacifyMethod, PlayerInventoryBindingV1,
+    PrintingKey, ProgressionAction, ProgressionCommand, Rejection, RejectionCode, RemoveEmptyDropCustodyCommand,
+    ResourceDelta, ResourceEndpoint, ResourceKey, ResourceKind, Scope, SlotRef, StatDelta, TransferCommand, WorldKey,
 };
 pub use blockwild_gameplay::{ContainerKey, ImportPlayerInventoryV1, ItemStack};
 use blockwild_network::{
@@ -43,10 +44,10 @@ use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, LocationId, Play
 
 use crate::{
     INTEGRATED_RUNTIME_MAX_TERRAIN_RECONCILE_EVICTED_CHUNKS_V2, INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1,
-    IntegratedTerrainChunkCoordinateV1, IntegratedTerrainResidencyBatchV1, IntegratedTerrainResidencyChunkReceiptV1,
-    IntegratedTerrainResidencyReceiptV1, IntegratedTerrainResidencyReconcileBatchV2,
-    IntegratedTerrainResidencyReconcileReceiptV2, IntegratedTerrainResidencyStatusV1,
-    validate_canonical_generation_options_json_v1,
+    IntegratedRuntimeIdentityV2, IntegratedRuntimeRevisionV2, IntegratedTerrainChunkCoordinateV1,
+    IntegratedTerrainResidencyBatchV1, IntegratedTerrainResidencyChunkReceiptV1, IntegratedTerrainResidencyReceiptV1,
+    IntegratedTerrainResidencyReconcileBatchV2, IntegratedTerrainResidencyReconcileReceiptV2,
+    IntegratedTerrainResidencyStatusV1, validate_canonical_generation_options_json_v1,
 };
 
 const DOMAIN_PROTOCOL_V1: u16 = 1;
@@ -85,6 +86,8 @@ const TERRAIN_RESIDENCY_RECONCILE_BATCH_MAGIC: [u8; 4] = *b"BWT5";
 const TERRAIN_RESIDENCY_RECONCILE_RECEIPT_MAGIC: [u8; 4] = *b"BWU5";
 const PLAYER_BOOTSTRAP_STATUS_QUERY_MAGIC: [u8; 4] = *b"BWS5";
 const PLAYER_BOOTSTRAP_STATUS_RECEIPT_MAGIC: [u8; 4] = *b"BWO5";
+const CONTEXT_COMMAND_CONTINUITY_QUERY_MAGIC_V2: [u8; 4] = *b"BWS6";
+const CONTEXT_COMMAND_CONTINUITY_RECEIPT_MAGIC_V2: [u8; 4] = *b"BWO6";
 const PLAYER_INVENTORY_IMPORT_MAGIC: [u8; 4] = *b"BWP7";
 const PLAYER_INVENTORY_IMPORT_RECEIPT_MAGIC: [u8; 4] = *b"BWI7";
 const CAMERA_CONFIG_MAGIC: [u8; 4] = *b"BWC5";
@@ -108,6 +111,9 @@ pub const TERRAIN_RESIDENCY_RECONCILE_RECEIPT_TYPE_V2: &str =
     "blockwild.world.terrain-residency-reconcile-receipt.r4.v2";
 pub const PLAYER_BOOTSTRAP_STATUS_TYPE_V1: &str = "blockwild.simulation.player-bootstrap-status.r5.v1";
 pub const PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1: &str = "blockwild.simulation.player-bootstrap-status-receipt.r5.v1";
+pub const CONTEXT_COMMAND_CONTINUITY_TYPE_V2: &str = "blockwild.simulation.context-command-continuity.r5.v2";
+pub const CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2: &str =
+    "blockwild.simulation.context-command-continuity-receipt.r5.v2";
 pub const PLAYER_INVENTORY_IMPORT_TYPE_V1: &str = "blockwild.gameplay.player-inventory-import.r7.v1";
 pub const PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1: &str = "blockwild.gameplay.player-inventory-import-receipt.r7.v1";
 pub const SIMULATION_PLAYER_BIND_TYPE_V3: &str = "blockwild.simulation.player-bind.r5.v3";
@@ -221,6 +227,20 @@ pub struct PlayerBootstrapStatusWireV1 {
     pub runtime_player: Option<PlayerBootstrapRuntimePlayerWireV1>,
     pub world_view_binding: Option<PlayerInventoryBindingV1>,
     pub custody: Option<PlayerBootstrapCustodyWireV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeContextCommandContinuityQueryWireV2 {
+    pub expected: IntegratedRuntimeIdentityV2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeContextCommandContinuityReceiptWireV2 {
+    pub request_payload_hash: CanonicalHash,
+    pub identity: IntegratedRuntimeIdentityV2,
+    pub last_sequence: Option<u64>,
+    pub next_sequence: Option<u64>,
+    pub queued_commands_empty: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -793,6 +813,148 @@ pub fn decode_player_bootstrap_status_v1(bytes: &[u8]) -> Result<PlayerBootstrap
         world_view_binding,
         custody,
     })
+}
+
+fn write_integrated_runtime_identity_v2(
+    writer: &mut Writer,
+    value: &IntegratedRuntimeIdentityV2,
+) -> Result<(), WireError> {
+    if [
+        value.revision.epoch,
+        value.revision.world,
+        value.revision.entities,
+        value.revision.gameplay,
+        value.revision.persistence,
+        value.revision.network,
+        value.revision.simulation,
+        value.tick,
+    ]
+    .into_iter()
+    .any(|field| field > MAX_SAFE_U64)
+    {
+        return Err(WireError::new(
+            "context-continuity-u64",
+            "context continuity identity exceeds the JavaScript-safe u64 range",
+        ));
+    }
+    writer.u16(value.schema_version);
+    writer.string(&value.universe_id)?;
+    writer.string(&value.location_id)?;
+    writer.u64(value.revision.epoch);
+    writer.u64(value.revision.world);
+    writer.u64(value.revision.entities);
+    writer.u64(value.revision.gameplay);
+    writer.u64(value.revision.persistence);
+    writer.u64(value.revision.network);
+    writer.u64(value.revision.simulation);
+    writer.u64(value.tick);
+    writer.hash(value.state_hash);
+    Ok(())
+}
+
+fn read_integrated_runtime_identity_v2(reader: &mut Reader<'_>) -> Result<IntegratedRuntimeIdentityV2, WireError> {
+    let schema_version = reader.u16()?;
+    if schema_version != crate::INTEGRATED_RUNTIME_SCHEMA_V2 {
+        return Err(WireError::new(
+            "context-continuity-identity",
+            "context continuity identity uses an unsupported runtime schema",
+        ));
+    }
+    let value = IntegratedRuntimeIdentityV2 {
+        schema_version,
+        universe_id: reader.string()?,
+        location_id: reader.string()?,
+        revision: IntegratedRuntimeRevisionV2 {
+            epoch: reader.u64()?,
+            world: reader.u64()?,
+            entities: reader.u64()?,
+            gameplay: reader.u64()?,
+            persistence: reader.u64()?,
+            network: reader.u64()?,
+            simulation: reader.u64()?,
+        },
+        tick: reader.u64()?,
+        state_hash: reader.hash()?,
+    };
+    if [
+        value.revision.epoch,
+        value.revision.world,
+        value.revision.entities,
+        value.revision.gameplay,
+        value.revision.persistence,
+        value.revision.network,
+        value.revision.simulation,
+        value.tick,
+    ]
+    .into_iter()
+    .any(|field| field > MAX_SAFE_U64)
+    {
+        return Err(WireError::new(
+            "context-continuity-u64",
+            "context continuity identity exceeds the JavaScript-safe u64 range",
+        ));
+    }
+    Ok(value)
+}
+
+pub fn encode_runtime_context_command_continuity_query_v2(
+    value: &RuntimeContextCommandContinuityQueryWireV2,
+) -> Result<Vec<u8>, WireError> {
+    let mut writer = Writer::default();
+    write_integrated_runtime_identity_v2(&mut writer, &value.expected)?;
+    wrap_schema(CONTEXT_COMMAND_CONTINUITY_QUERY_MAGIC_V2, 2, writer.finish())
+}
+
+pub fn decode_runtime_context_command_continuity_query_v2(
+    bytes: &[u8],
+) -> Result<RuntimeContextCommandContinuityQueryWireV2, WireError> {
+    let mut reader = Reader::new(unwrap_schema(CONTEXT_COMMAND_CONTINUITY_QUERY_MAGIC_V2, 2, bytes)?);
+    let value = RuntimeContextCommandContinuityQueryWireV2 {
+        expected: read_integrated_runtime_identity_v2(&mut reader)?,
+    };
+    reader.finish()?;
+    Ok(value)
+}
+
+pub fn encode_runtime_context_command_continuity_receipt_v2(
+    value: &RuntimeContextCommandContinuityReceiptWireV2,
+) -> Result<Vec<u8>, WireError> {
+    let expected_next = value.last_sequence.map_or(Some(1), |sequence| {
+        sequence.checked_add(1).filter(|next| *next <= MAX_SAFE_U64)
+    });
+    if value.next_sequence != expected_next
+        || value
+            .last_sequence
+            .is_some_and(|sequence| sequence == 0 || sequence > MAX_SAFE_U64)
+    {
+        return Err(WireError::new(
+            "context-continuity-cursor",
+            "context command continuity receipt is discontinuous",
+        ));
+    }
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    write_integrated_runtime_identity_v2(&mut writer, &value.identity)?;
+    writer.option_u64(value.last_sequence);
+    writer.option_u64(value.next_sequence);
+    writer.flag(value.queued_commands_empty);
+    wrap_schema(CONTEXT_COMMAND_CONTINUITY_RECEIPT_MAGIC_V2, 2, writer.finish())
+}
+
+pub fn decode_runtime_context_command_continuity_receipt_v2(
+    bytes: &[u8],
+) -> Result<RuntimeContextCommandContinuityReceiptWireV2, WireError> {
+    let mut reader = Reader::new(unwrap_schema(CONTEXT_COMMAND_CONTINUITY_RECEIPT_MAGIC_V2, 2, bytes)?);
+    let value = RuntimeContextCommandContinuityReceiptWireV2 {
+        request_payload_hash: reader.hash()?,
+        identity: read_integrated_runtime_identity_v2(&mut reader)?,
+        last_sequence: reader.option_u64()?,
+        next_sequence: reader.option_u64()?,
+        queued_commands_empty: reader.flag()?,
+    };
+    reader.finish()?;
+    encode_runtime_context_command_continuity_receipt_v2(&value)?;
+    Ok(value)
 }
 
 pub fn encode_player_inventory_import_v1(value: &PlayerInventoryImportWireV1) -> Result<Vec<u8>, WireError> {
@@ -2304,6 +2466,13 @@ fn write_inventory_command(writer: &mut Writer, value: &InventoryCommand) -> Res
             write_optional_item_stack(writer, &value.created_stack);
             writer.string(&value.reason)?;
         }
+        InventoryCommand::CreateGeneratedDropCustodyV1(value) => {
+            writer.u8(INVENTORY_COMMAND_CREATE_GENERATED_DROP_CUSTODY_V1_TAG as u8);
+            write_container_key(writer, &value.custody)?;
+            write_item_stack(writer, &value.stack);
+            write_generated_drop_provenance_v1(writer, &value.provenance);
+            writer.hash(value.request_hash);
+        }
     }
     Ok(())
 }
@@ -2386,6 +2555,14 @@ fn read_inventory_command(reader: &mut Reader<'_>) -> Result<InventoryCommand, W
                 reason: reader.string()?,
             }))
         }
+        tag if u16::from(tag) == INVENTORY_COMMAND_CREATE_GENERATED_DROP_CUSTODY_V1_TAG => Ok(
+            InventoryCommand::CreateGeneratedDropCustodyV1(CreateGeneratedDropCustodyV1 {
+                custody: read_container_key(reader)?,
+                stack: read_item_stack(reader)?,
+                provenance: read_generated_drop_provenance_v1(reader)?,
+                request_hash: reader.hash()?,
+            }),
+        ),
         _ => Err(WireError::new("inventory-command", "unknown inventory command tag")),
     }
 }
@@ -2462,6 +2639,60 @@ fn write_optional_item_stack(writer: &mut Writer, value: &Option<ItemStack>) {
         writer.option_u32(stack.durability_millionths);
         writer.hash(stack.metadata_hash);
     }
+}
+
+fn write_item_stack(writer: &mut Writer, stack: &ItemStack) {
+    writer.u32(stack.item_code);
+    writer.u32(stack.count);
+    writer.option_u32(stack.durability_millionths);
+    writer.hash(stack.metadata_hash);
+}
+
+fn read_item_stack(reader: &mut Reader<'_>) -> Result<ItemStack, WireError> {
+    Ok(ItemStack {
+        item_code: reader.u32()?,
+        count: reader.u32()?,
+        durability_millionths: reader.option_u32()?,
+        metadata_hash: reader.hash()?,
+    })
+}
+
+fn write_generated_drop_provenance_v1(writer: &mut Writer, value: &GeneratedDropProvenanceV1) {
+    writer.u16(value.schema_version);
+    writer.hash(value.manifest_hash);
+    writer.hash(value.installed_registry_hash);
+    writer.hash(value.catalog_blob_hash);
+    writer.hash(value.action_report_hash);
+    writer.hash(value.rng_semantics_hash);
+    writer.u64(value.block_action_sequence);
+    writer.u64(value.origin_input_sequence);
+    writer.u16(value.block_id);
+    writer.i32(value.position.x);
+    writer.i32(value.position.y);
+    writer.i32(value.position.z);
+    writer.hash(value.loot_plan_hash);
+    writer.u16(value.group_ordinal);
+}
+
+fn read_generated_drop_provenance_v1(reader: &mut Reader<'_>) -> Result<GeneratedDropProvenanceV1, WireError> {
+    Ok(GeneratedDropProvenanceV1 {
+        schema_version: reader.u16()?,
+        manifest_hash: reader.hash()?,
+        installed_registry_hash: reader.hash()?,
+        catalog_blob_hash: reader.hash()?,
+        action_report_hash: reader.hash()?,
+        rng_semantics_hash: reader.hash()?,
+        block_action_sequence: reader.u64()?,
+        origin_input_sequence: reader.u64()?,
+        block_id: reader.u16()?,
+        position: BlockActionLootCellV1 {
+            x: reader.i32()?,
+            y: reader.i32()?,
+            z: reader.i32()?,
+        },
+        loot_plan_hash: reader.hash()?,
+        group_ordinal: reader.u16()?,
+    })
 }
 
 fn read_optional_item_stack(reader: &mut Reader<'_>) -> Result<Option<ItemStack>, WireError> {
@@ -5543,6 +5774,136 @@ mod tests {
         );
         let encoded = encode_gameplay_batch_v1(&batch).unwrap();
         assert_eq!(decode_gameplay_batch_v1(&encoded).unwrap(), batch);
+    }
+
+    #[test]
+    fn generated_drop_custody_inventory_command_wire_preserves_provenance_and_request_hash() {
+        let provenance = GeneratedDropProvenanceV1 {
+            schema_version: blockwild_gameplay::BLOCK_ACTION_GENERATED_DROP_PROVENANCE_SCHEMA_VERSION_V1,
+            manifest_hash: CanonicalHash([1; 16]),
+            installed_registry_hash: CanonicalHash([2; 16]),
+            catalog_blob_hash: CanonicalHash([3; 16]),
+            action_report_hash: CanonicalHash([4; 16]),
+            rng_semantics_hash: CanonicalHash([5; 16]),
+            block_action_sequence: u64::MAX,
+            origin_input_sequence: MAX_SAFE_U64,
+            block_id: u16::MAX,
+            position: BlockActionLootCellV1 {
+                x: i32::MIN,
+                y: 319,
+                z: i32::MAX,
+            },
+            loot_plan_hash: CanonicalHash([6; 16]),
+            group_ordinal: 3,
+        };
+        let command = CreateGeneratedDropCustodyV1::new(
+            ContainerKey {
+                kind: ContainerKind::Container,
+                id: provenance.custody_id_v1(),
+                owner_id: None,
+            },
+            ItemStack {
+                item_code: u32::MAX,
+                count: 64,
+                durability_millionths: Some(1_000_000),
+                metadata_hash: CanonicalHash([0x80; 16]),
+            },
+            provenance,
+        );
+        let state = blockwild_gameplay::GameplayState::new(WorldKey::new("universe", "surface"), 1);
+        let batch = GameplayBatch::new(
+            "generated-drop:1",
+            "generated-drop:1",
+            GameplayActor {
+                actor_id: "block-action-authority".into(),
+                player_id: None,
+                entity_id: None,
+                role: ActorRole::System,
+            },
+            state.identity(),
+            vec![GameplayCommand::Inventory(
+                InventoryCommand::CreateGeneratedDropCustodyV1(command),
+            )],
+        );
+        let encoded = encode_gameplay_batch_v1(&batch).unwrap();
+        assert_eq!(decode_gameplay_batch_v1(&encoded).unwrap(), batch);
+    }
+
+    #[test]
+    fn context_continuity_v2_wire_is_narrow_safe_and_terminal_cursor_exact() {
+        let identity = IntegratedRuntimeIdentityV2 {
+            schema_version: crate::INTEGRATED_RUNTIME_SCHEMA_V2,
+            universe_id: "universe:\u{6c34}".into(),
+            location_id: "surface".into(),
+            revision: IntegratedRuntimeRevisionV2 {
+                epoch: MAX_SAFE_U64,
+                world: MAX_SAFE_U64 - 1,
+                entities: 3,
+                gameplay: 4,
+                persistence: 5,
+                network: 6,
+                simulation: 7,
+            },
+            tick: MAX_SAFE_U64 - 2,
+            state_hash: CanonicalHash([0xab; 16]),
+        };
+        let query = RuntimeContextCommandContinuityQueryWireV2 {
+            expected: identity.clone(),
+        };
+        let encoded_query = encode_runtime_context_command_continuity_query_v2(&query).unwrap();
+        assert_eq!(&encoded_query[..4], b"BWS6");
+        assert_eq!(
+            encoded_query
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "42575336010002006d000000a7ca767bd713f3caf8045bb005c23c8502000c000000756e6976657273653ae6b0b40700000073757266616365ffffffffffff1f00feffffffffff1f0003000000000000000400000000000000050000000000000006000000000000000700000000000000fdffffffffff1f00abababababababababababababababab"
+        );
+        assert_eq!(
+            decode_runtime_context_command_continuity_query_v2(&encoded_query).unwrap(),
+            query
+        );
+
+        let receipt = RuntimeContextCommandContinuityReceiptWireV2 {
+            request_payload_hash: CanonicalHash([0xcd; 16]),
+            identity,
+            last_sequence: Some(MAX_SAFE_U64),
+            next_sequence: None,
+            queued_commands_empty: true,
+        };
+        let encoded_receipt = encode_runtime_context_command_continuity_receipt_v2(&receipt).unwrap();
+        assert_eq!(&encoded_receipt[..4], b"BWO6");
+        assert_eq!(
+            encoded_receipt
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "42574f360100020088000000e97f975e578f8aa4d81b3bf9853fa17ecdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd02000c000000756e6976657273653ae6b0b40700000073757266616365ffffffffffff1f00feffffffffff1f0003000000000000000400000000000000050000000000000006000000000000000700000000000000fdffffffffff1f00abababababababababababababababab01ffffffffffff1f000001"
+        );
+        assert_eq!(
+            decode_runtime_context_command_continuity_receipt_v2(&encoded_receipt).unwrap(),
+            receipt
+        );
+
+        let mut unsafe_identity = query;
+        unsafe_identity.expected.tick = MAX_SAFE_U64 + 1;
+        assert_eq!(
+            encode_runtime_context_command_continuity_query_v2(&unsafe_identity)
+                .unwrap_err()
+                .code,
+            "context-continuity-u64"
+        );
+        let unsafe_cursor = RuntimeContextCommandContinuityReceiptWireV2 {
+            last_sequence: Some(MAX_SAFE_U64 + 1),
+            next_sequence: None,
+            ..receipt
+        };
+        assert_eq!(
+            encode_runtime_context_command_continuity_receipt_v2(&unsafe_cursor)
+                .unwrap_err()
+                .code,
+            "context-continuity-cursor"
+        );
     }
 
     #[test]

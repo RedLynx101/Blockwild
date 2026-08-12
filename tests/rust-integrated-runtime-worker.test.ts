@@ -5,6 +5,7 @@ import type {
   RustIntegratedRuntimeIdentityV1,
   RustIntegratedRuntimeRequestV1,
   RustIntegratedRuntimeResponseV1,
+  RustIntegratedRuntimeStepRequestV2,
 } from "../app/game/rust-integrated-runtime-contract.ts";
 import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import {
@@ -107,6 +108,12 @@ class LinkedWorker {
     const bytes = encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength);
     for (const listener of this.mainMessage) listener({ data: { type: "blockwild-integrated-runtime-wire-v1", bytes } });
   }
+
+  respondStepWithLegacy(response: RustIntegratedRuntimeResponseV1): void {
+    const encoded = encodeRustIntegratedRuntimeResponseV1(response);
+    const bytes = encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength);
+    for (const listener of this.mainMessage) listener({ data: { type: "blockwild-integrated-runtime-step-v2", bytes } });
+  }
 }
 
 test("real worker handler serializes coarse requests through one runtime instance", async () => {
@@ -135,6 +142,80 @@ test("real worker handler serializes coarse requests through one runtime instanc
   assert.equal(handled, 100);
   assert.equal(maximumActive, 1, "the sole Wasm runtime may never be entered concurrently");
   transport.dispose();
+  assert.equal(link.terminated, true);
+});
+
+test("dedicated StepV2 worker message round-trips without entering the generic decoder", async () => {
+  const link = new LinkedWorker();
+  let received: RustIntegratedRuntimeStepRequestV2 | null = null;
+  installRustIntegratedRuntimeWorkerHandlerV1(link.scope, {
+    handle: ready,
+    handleStepV2(request) {
+      received = request;
+      return Object.freeze({
+        type: "runtime-step-result-v2" as const,
+        requestId: request.requestId,
+        clientEpoch: request.clientEpoch,
+        workerEpoch: 3,
+        identity: identity(),
+        fixedSteps: 0,
+        inputsApplied: 0,
+        commandsProcessed: 0,
+        commandsAccepted: 0,
+        actionReceipts: Object.freeze([]),
+        replayHash: ZERO_HASH,
+        semanticReceipts: Object.freeze([]),
+      });
+    },
+  });
+  const transport = new RustIntegratedRuntimeWorkerTransportV1(link.port, 2_000);
+  const request = Object.freeze({
+    type: "runtime-step-v2" as const,
+    requestId: 41,
+    clientEpoch: 7,
+    expected: identity(),
+    monotonicTimeUs: 1_000_000,
+    budgetUs: 8_000,
+    inputs: Object.freeze([]),
+    contextCommands: Object.freeze([]),
+  });
+  const response = await transport.requestStepV2(request);
+  assert.deepEqual(received, request);
+  assert.equal(response.type, "runtime-step-result-v2");
+  assert.equal(response.requestId, 41);
+  transport.dispose();
+});
+
+test("StepV2 worker transport rejects a generic success response and closes the generation", async () => {
+  const link = new LinkedWorker();
+  const transport = new RustIntegratedRuntimeWorkerTransportV1(link.port, 2_000);
+  const pending = transport.requestStepV2({
+    type: "runtime-step-v2",
+    requestId: 42,
+    clientEpoch: 7,
+    expected: identity(),
+    monotonicTimeUs: 1,
+    budgetUs: 8_000,
+    inputs: [],
+    contextCommands: [],
+  });
+  link.respondStepWithLegacy({
+    type: "runtime-step-result-v1",
+    requestId: 42,
+    clientEpoch: 7,
+    workerEpoch: 3,
+    identity: identity(),
+    fixedSteps: 0,
+    inputsApplied: 0,
+    commandsProcessed: 0,
+    commandsAccepted: 0,
+    actionReceipts: [],
+    replayHash: ZERO_HASH,
+  });
+  await assert.rejects(
+    pending,
+    (error: unknown) => error instanceof RustIntegratedRuntimeWorkerError && error.code === "protocol",
+  );
   assert.equal(link.terminated, true);
 });
 

@@ -11,7 +11,9 @@ import {
   createRustIntegratedRuntimeCommandBatchV1,
   createRustIntegratedRuntimeDomainOperationV1,
   decodeRustIntegratedRuntimeRequestV1,
+  decodeRustIntegratedRuntimeStepRequestV2,
   encodeRustIntegratedRuntimeResponseV1,
+  encodeRustIntegratedRuntimeStepResultV2,
 } from "../app/game/rust-integrated-runtime-codec.ts";
 import type { RustIntegratedRuntimeIdentityV1, RustIntegratedRuntimeResponseV1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract.ts";
@@ -39,6 +41,7 @@ test("browser kernel attests the manifest-selected artifact instead of trusting 
   const nativeSaveRequests: RustIntegratedRuntimeBulkRequestV1[] = [];
   let ordinaryBulkCalls = 0;
   let recoveryCommandCalls = 0;
+  let stepMode: "v2" | "error" | "legacy-success" = "v2";
   const base: RustEngineWasmExports = {
     blockwild_protocol_version: () => RUST_ENGINE_PROTOCOL_VERSION,
     blockwild_schema_version: () => RUST_ENGINE_SCHEMA_VERSION,
@@ -76,7 +79,45 @@ test("browser kernel attests the manifest-selected artifact instead of trusting 
         current: identity(),
       });
     },
-    blockwild_runtime_step_v2: () => new Uint8Array(),
+    blockwild_runtime_step_v2: (_handle: number, bytes: Uint8Array) => {
+      const request = decodeRustIntegratedRuntimeStepRequestV2(bytes);
+      if (stepMode === "error") return encoded({
+        type: "runtime-error-v1",
+        requestId: request.requestId,
+        clientEpoch: request.clientEpoch,
+        workerEpoch: 1,
+        code: "fixture-step",
+        message: "fixture rejection",
+        current: identity(),
+      });
+      if (stepMode === "legacy-success") return encoded({
+        type: "runtime-step-result-v1",
+        requestId: request.requestId,
+        clientEpoch: request.clientEpoch,
+        workerEpoch: 1,
+        identity: identity(),
+        fixedSteps: 0,
+        inputsApplied: 0,
+        commandsProcessed: 0,
+        commandsAccepted: 0,
+        actionReceipts: [],
+        replayHash: ZERO_HASH,
+      });
+      return encodeRustIntegratedRuntimeStepResultV2({
+        type: "runtime-step-result-v2",
+        requestId: request.requestId,
+        clientEpoch: request.clientEpoch,
+        workerEpoch: 1,
+        identity: identity(),
+        fixedSteps: 0,
+        inputsApplied: 0,
+        commandsProcessed: 0,
+        commandsAccepted: 0,
+        actionReceipts: [],
+        replayHash: ZERO_HASH,
+        semanticReceipts: [],
+      });
+    },
     blockwild_runtime_extract_v2: () => new Uint8Array(),
     blockwild_runtime_export_save_v2: () => new Uint8Array(),
     blockwild_runtime_initialize_native_save_v2: (_handle: number, control: Uint8Array) => {
@@ -134,6 +175,22 @@ test("browser kernel attests the manifest-selected artifact instead of trusting 
   assert.equal(response.type, "runtime-ready-v1");
   assert.equal(response.type === "runtime-ready-v1" ? response.artifactHash : null, ARTIFACT_HASH);
   assert.equal(response.type === "runtime-ready-v1" ? response.instanceId : null, "native:9");
+
+  const stepRequest = Object.freeze({
+    type: "runtime-step-v2" as const,
+    requestId: 8,
+    clientEpoch: 1,
+    expected: identity(),
+    monotonicTimeUs: 1,
+    budgetUs: 8_000,
+    inputs: Object.freeze([]),
+    contextCommands: Object.freeze([]),
+  });
+  assert.equal((await kernel.handleStepV2(stepRequest)).type, "runtime-step-result-v2");
+  stepMode = "error";
+  assert.equal((await kernel.handleStepV2({ ...stepRequest, requestId: 9 })).type, "runtime-error-v1");
+  stepMode = "legacy-success";
+  await assert.rejects(kernel.handleStepV2({ ...stepRequest, requestId: 10 }), /invalid legacy response/u);
 
   const recovery = await kernel.handle({
     type: "runtime-recover-command-v1",

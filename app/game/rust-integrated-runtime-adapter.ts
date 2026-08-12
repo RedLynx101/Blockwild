@@ -3,6 +3,7 @@ import type {
   RustIntegratedRuntimeConfigV1,
   RustIntegratedRuntimeExtractionViewV1,
   RustIntegratedRuntimeInputFrameV1,
+  RustIntegratedRuntimeContextCommandV2,
 } from "./rust-integrated-runtime-contract";
 import {
   RustIntegratedRuntimeServiceV1,
@@ -56,6 +57,12 @@ export class RustIntegratedRuntimeBrowserAdapterV1 {
   step(monotonicTimeUs: number, budgetUs: number, inputs: readonly RustIntegratedRuntimeInputFrameV1[]) {
     return this.service.step(monotonicTimeUs, budgetUs, inputs);
   }
+  stepV2(
+    monotonicTimeUs: number,
+    budgetUs: number,
+    inputs: readonly RustIntegratedRuntimeInputFrameV1[],
+    contextCommands: readonly RustIntegratedRuntimeContextCommandV2[],
+  ) { return this.service.stepV2(monotonicTimeUs, budgetUs, inputs, contextCommands); }
   extract(afterRevision: number, maxBytes?: number, view?: RustIntegratedRuntimeExtractionViewV1) {
     return this.service.extract(afterRevision, maxBytes, view);
   }

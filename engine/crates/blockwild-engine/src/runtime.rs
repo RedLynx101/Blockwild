@@ -60,15 +60,18 @@ use blockwild_persistence::{
     encode_checkpoint,
 };
 use blockwild_runtime_wire::{
-    MAX_INPUT_FRAMES, MAX_SAFE_U64, MAX_WIRE_BYTES, RUNTIME_BULK_MAX_ATTACHMENT_BYTES_V1,
+    MAX_CONTEXT_COMMANDS_V2, MAX_INPUT_FRAMES, MAX_SAFE_U64, MAX_WIRE_BYTES, RUNTIME_BULK_MAX_ATTACHMENT_BYTES_V1,
     RUNTIME_BULK_MAX_SAVE_CHUNKS_V1, RUNTIME_BULK_SAVE_CHUNK_BYTES_V1, RUNTIME_INPUT_BUTTON_ASCEND_V1,
     RUNTIME_INPUT_BUTTON_CREATIVE_FLIGHT_TOGGLE_V1, RUNTIME_INPUT_BUTTON_CROUCH_V1, RUNTIME_INPUT_BUTTON_DESCEND_V1,
     RUNTIME_INPUT_BUTTON_DROP_V1, RUNTIME_INPUT_BUTTON_INTERACT_V1, RUNTIME_INPUT_BUTTON_JUMP_V1,
     RUNTIME_INPUT_BUTTON_MASK_V1, RUNTIME_INPUT_BUTTON_MOUNT_TOGGLE_V1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1,
     RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1, RUNTIME_INPUT_BUTTON_SPRINT_V1, RUNTIME_INPUT_FLAG_CREATIVE_V1,
     RUNTIME_INPUT_FLAG_FLYING_V1, RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_INPUT_FLAG_MOUNTED_V1, RuntimeCommandReceiptV1,
-    RuntimeInputActionKindV1, RuntimeInputActionOutcomeV1, RuntimeInputActionReceiptV1, RuntimeInputFrameV1, WireHash,
-    decode_command_receipt_v1, encode_command_receipt_v1, validate_command_receipt_hash_v1,
+    RuntimeContainerKeyV2, RuntimeContainerKindV2, RuntimeContextCommandActionV2, RuntimeContextCommandV2,
+    RuntimeInputActionKindV1, RuntimeInputActionOutcomeV1, RuntimeInputActionReceiptV1, RuntimeInputFrameV1,
+    RuntimeSemanticActionOutcomeV2, RuntimeSemanticActionReasonV2, RuntimeSemanticActionReceiptV2,
+    RuntimeSemanticActionResolutionV2, WireHash, context_command_hash_v2, decode_command_receipt_v1,
+    encode_command_receipt_v1, validate_command_receipt_hash_v1,
 };
 use blockwild_simulation::{
     AabbV1, ActionRayEntityTargetV1, ActionRayTargetV1, AirZoneTopologyJobV1, AirZoneTopologyResultV1,
@@ -90,6 +93,7 @@ use crate::{
     PlayerBootstrapCustodyWireV1, PlayerBootstrapEntityWireV1, PlayerBootstrapRuntimePlayerWireV1,
     PlayerBootstrapStatusQueryWireV1, PlayerBootstrapStatusWireV1, PlayerInventoryImportReceiptWireV1,
     PlayerInventoryImportWireV1, RuntimeCameraConfigReceiptWireV1, RuntimeCameraConfigWireV1,
+    RuntimeContextCommandContinuityQueryWireV2, RuntimeContextCommandContinuityReceiptWireV2,
     RuntimePersistenceDispatchReceiptWireV1, RuntimePersistenceDispatchWireV1, RuntimePlayerBindingWireV1,
     WorldViewExtractionInputV1, collect_world_view_extraction_v1, decode_world_view_native_record_v1,
     encode_world_view_native_record_v1, initialize_world_view_authority_v1, player_inventory_result_hash_v1,
@@ -106,6 +110,7 @@ pub const INTEGRATED_RUNTIME_MAX_REPLAY_ENTRIES: usize = 8_192;
 pub const INTEGRATED_RUNTIME_MAX_IDEMPOTENCY_RECEIPTS: usize = 4_096;
 pub const INTEGRATED_RUNTIME_MAX_COMMAND_RECEIPT_CACHE_BYTES_V1: usize = 4 * 1024 * 1024;
 pub const INTEGRATED_RUNTIME_MAX_INPUT_LEAD_TICKS: u64 = 256;
+pub const INTEGRATED_RUNTIME_MAX_CONTEXT_COMMAND_LEAD_TICKS_V2: u64 = INTEGRATED_RUNTIME_MAX_INPUT_LEAD_TICKS;
 pub const INTEGRATED_RUNTIME_MAX_EFFECT_EVENTS: usize = 256;
 pub const INTEGRATED_RUNTIME_MAX_MACHINES_PER_STEP: usize = 64;
 pub const INTEGRATED_RUNTIME_PERSISTENCE_MAX_PENDING: usize = 32;
@@ -149,6 +154,7 @@ const NATIVE_RUNTIME_CORE_SCHEMA_V4: u16 = 4;
 const NATIVE_RUNTIME_CORE_SCHEMA_V5: u16 = 5;
 const NATIVE_RUNTIME_CORE_SCHEMA_V6: u16 = 6;
 const NATIVE_RUNTIME_CORE_SCHEMA_V7: u16 = 7;
+const NATIVE_RUNTIME_CORE_SCHEMA_V8: u16 = 8;
 const DURABLE_SESSION_NEUTRAL_ID_V1: &str = "blockwild-durable-session-neutral-v1";
 const DEFAULT_TERRAIN_CONTENT_HASH_V2: CanonicalHash = CanonicalHash([
     0xcc, 0x59, 0x90, 0x3b, 0xe7, 0x7d, 0xfe, 0x30, 0x10, 0x9d, 0x15, 0xbf, 0xaf, 0x0e, 0x30, 0x22,
@@ -506,6 +512,9 @@ pub struct IntegratedRuntimeStepSummaryV2 {
     pub accepted_batches: u32,
     pub inputs_applied: u32,
     pub action_receipts: Vec<RuntimeInputActionReceiptV1>,
+    /// Unsealed semantic receipts. The Wasm boundary seals these only after it
+    /// has the exact post-step identity and replay hash carried by StepV2.
+    pub semantic_receipts: Vec<RuntimeSemanticActionReceiptV2>,
     pub state_hash: CanonicalHash,
     pub replay_hash: CanonicalHash,
 }
@@ -828,6 +837,8 @@ struct IntegratedRuntimeCoreSnapshotV1 {
     last_input_sequence: Option<u64>,
     last_applied_input: Option<RuntimeInputFrameV1>,
     next_action_sequence: u64,
+    queued_context_commands: VecDeque<RuntimeContextCommandV2>,
+    next_context_command_sequence: Option<u64>,
     mining_state: Option<IntegratedRuntimeMiningStateV1>,
     replay: VecDeque<IntegratedRuntimeReplayEntryV2>,
     command_receipts: BTreeMap<(String, String), IntegratedRuntimeCommandReceiptCacheEntryV1>,
@@ -926,6 +937,8 @@ pub struct IntegratedRuntimeV2 {
     last_input_sequence: Option<u64>,
     last_applied_input: Option<RuntimeInputFrameV1>,
     next_action_sequence: u64,
+    queued_context_commands: VecDeque<RuntimeContextCommandV2>,
+    next_context_command_sequence: Option<u64>,
     mining_state: Option<IntegratedRuntimeMiningStateV1>,
     command_receipts: BTreeMap<(String, String), IntegratedRuntimeCommandReceiptCacheEntryV1>,
     command_receipt_order: VecDeque<(String, String)>,
@@ -1028,6 +1041,8 @@ impl IntegratedRuntimeV2 {
             last_input_sequence: None,
             last_applied_input: None,
             next_action_sequence: 1,
+            queued_context_commands: VecDeque::new(),
+            next_context_command_sequence: Some(1),
             mining_state: None,
             command_receipts: BTreeMap::new(),
             command_receipt_order: VecDeque::new(),
@@ -1543,6 +1558,12 @@ impl IntegratedRuntimeV2 {
             return Err(IntegratedRuntimeError::new(
                 "native-save-incomplete",
                 "runtime cannot checkpoint while content installation is incomplete",
+            ));
+        }
+        if !self.queued_context_commands.is_empty() {
+            return Err(IntegratedRuntimeError::new(
+                "checkpoint-context-pending",
+                "runtime checkpoint requires the semantic context command queue to drain",
             ));
         }
         if !self.queued.is_empty()
@@ -2239,6 +2260,12 @@ impl IntegratedRuntimeV2 {
                 "native save records cannot be built from partial content state",
             ));
         }
+        if !self.queued_context_commands.is_empty() {
+            return Err(IntegratedRuntimeError::new(
+                "native-save-context-pending",
+                "durable native save requires the semantic context command queue to drain",
+            ));
+        }
         self.build_native_bundle_unchecked()
     }
 
@@ -2451,6 +2478,8 @@ impl IntegratedRuntimeV2 {
         candidate.last_input_sequence = core.last_input_sequence;
         candidate.last_applied_input = core.last_applied_input;
         candidate.next_action_sequence = core.next_action_sequence;
+        candidate.queued_context_commands = core.queued_context_commands;
+        candidate.next_context_command_sequence = core.next_context_command_sequence;
         candidate.mining_state = core.mining_state;
         candidate.command_receipts = core.command_receipts;
         candidate.command_receipt_order = core.command_receipt_order;
@@ -2801,6 +2830,8 @@ impl IntegratedRuntimeV2 {
             || self.last_input_sequence.is_some()
             || self.last_applied_input.is_some()
             || self.next_action_sequence != 1
+            || !self.queued_context_commands.is_empty()
+            || self.next_context_command_sequence != Some(1)
             || !self.replay.is_empty()
             || !self.command_receipts.is_empty()
             || !self.command_receipt_order.is_empty()
@@ -3574,6 +3605,12 @@ impl IntegratedRuntimeV2 {
             hasher.write_u16(0);
         }
         hasher.write_u64(self.next_action_sequence);
+        hasher.write_u16(u16::from(self.next_context_command_sequence.is_some()));
+        hasher.write_u64(self.next_context_command_sequence.unwrap_or_default());
+        hasher.write_u32(self.queued_context_commands.len() as u32);
+        for command in &self.queued_context_commands {
+            hasher.write_bytes(&command.command_hash.0);
+        }
         match &self.mining_state {
             Some(mining) => {
                 hasher.write_u16(1);
@@ -3772,8 +3809,32 @@ impl IntegratedRuntimeV2 {
         monotonic_time_us: u64,
         budget_us: u32,
     ) -> Result<IntegratedRuntimeStepSummaryV2, IntegratedRuntimeError> {
+        if !self.queued_context_commands.is_empty() {
+            return Err(IntegratedRuntimeError::new(
+                "context-command-pending",
+                "schema-2 StepV1 cannot cross a queued schema-6 context command",
+            ));
+        }
         let mut candidate = self.clone();
-        let summary = candidate.step_staged(monotonic_time_us, budget_us)?;
+        let summary = candidate.step_staged(monotonic_time_us, budget_us, false)?;
+        *self = candidate;
+        Ok(summary)
+    }
+
+    /// Atomically accepts one schema-6 input/context batch and advances the
+    /// fixed-step clock. Any validation or simulation failure leaves the
+    /// complete runtime untouched.
+    pub fn step_context_v2(
+        &mut self,
+        monotonic_time_us: u64,
+        budget_us: u32,
+        inputs: &[RuntimeInputFrameV1],
+        context_commands: &[RuntimeContextCommandV2],
+    ) -> Result<IntegratedRuntimeStepSummaryV2, IntegratedRuntimeError> {
+        let mut candidate = self.clone();
+        candidate.accept_inputs(inputs)?;
+        candidate.accept_context_commands_v2(context_commands)?;
+        let summary = candidate.step_staged(monotonic_time_us, budget_us, true)?;
         *self = candidate;
         Ok(summary)
     }
@@ -3782,8 +3843,21 @@ impl IntegratedRuntimeV2 {
         &mut self,
         monotonic_time_us: u64,
         budget_us: u32,
+        context_lane_enabled: bool,
     ) -> Result<IntegratedRuntimeStepSummaryV2, IntegratedRuntimeError> {
         self.ensure_running()?;
+        if !context_lane_enabled && !self.queued_context_commands.is_empty() {
+            return Err(IntegratedRuntimeError::new(
+                "context-command-pending",
+                "schema-2 StepV1 cannot cross a queued schema-6 context command",
+            ));
+        }
+        if monotonic_time_us < self.last_monotonic_time_us {
+            return Err(IntegratedRuntimeError::new(
+                "monotonic-time-regression",
+                "runtime step monotonic time cannot move backward",
+            ));
+        }
         self.invalidate_state_hash();
         let delta = if self.last_monotonic_time_us == 0 {
             0
@@ -3798,6 +3872,7 @@ impl IntegratedRuntimeV2 {
         let due_steps = (self.accumulator_us / INTEGRATED_RUNTIME_FIXED_STEP_US).min(u64::from(maximum_steps)) as u32;
         let mut inputs_applied = 0_u32;
         let mut action_receipts = Vec::new();
+        let mut semantic_receipts = Vec::new();
         for _ in 0..due_steps {
             self.tick = self.tick.saturating_add(1);
             self.rng_state = super::xorshift32(self.rng_state);
@@ -3815,6 +3890,9 @@ impl IntegratedRuntimeV2 {
                 self.last_applied_input = Some(input);
                 fixed_input = input;
                 inputs_applied = inputs_applied.saturating_add(1);
+            }
+            if context_lane_enabled {
+                semantic_receipts.extend(self.dispatch_due_context_commands_v2());
             }
             self.advance_authoritative_fixed_step(fixed_input)?;
         }
@@ -3839,6 +3917,7 @@ impl IntegratedRuntimeV2 {
             accepted_batches: accepted,
             inputs_applied,
             action_receipts,
+            semantic_receipts,
             state_hash: self.state_hash(),
             replay_hash: self.replay_hash(),
         })
@@ -4187,6 +4266,32 @@ impl IntegratedRuntimeV2 {
             runtime_player,
             world_view_binding,
             custody,
+        })
+    }
+
+    pub fn context_command_continuity_status_v2(
+        &self,
+        query: &RuntimeContextCommandContinuityQueryWireV2,
+        request_payload_hash: CanonicalHash,
+    ) -> Result<RuntimeContextCommandContinuityReceiptWireV2, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        let identity = self.identity();
+        if query.expected != identity {
+            return Err(IntegratedRuntimeError::new(
+                "context-continuity-stale",
+                "context command continuity query references obsolete runtime authority",
+            ));
+        }
+        Ok(RuntimeContextCommandContinuityReceiptWireV2 {
+            request_payload_hash,
+            identity,
+            last_sequence: self
+                .next_context_command_sequence
+                .map_or(Some(MAX_SAFE_U64), |sequence| {
+                    sequence.checked_sub(1).filter(|value| *value != 0)
+                }),
+            next_sequence: self.next_context_command_sequence,
+            queued_commands_empty: self.queued_context_commands.is_empty(),
         })
     }
 
@@ -7020,6 +7125,136 @@ impl IntegratedRuntimeV2 {
         }
         self.invalidate_state_hash();
         Ok(())
+    }
+
+    /// Accepts a bounded, exactly contiguous schema-6 command tail. Sequence
+    /// ownership transfers at enqueue time; a later semantic rejection still
+    /// consumes that sequence, while a new duplicate submission fails before
+    /// mutating any authority state.
+    pub fn accept_context_commands_v2(
+        &mut self,
+        commands: &[RuntimeContextCommandV2],
+    ) -> Result<(), IntegratedRuntimeError> {
+        self.ensure_running()?;
+        if commands.len() > MAX_CONTEXT_COMMANDS_V2
+            || self.queued_context_commands.len().saturating_add(commands.len()) > MAX_CONTEXT_COMMANDS_V2
+        {
+            return Err(IntegratedRuntimeError::new(
+                "context-command-capacity",
+                "semantic context command queue exceeds its bounded capacity",
+            ));
+        }
+        let mut next_sequence = self.next_context_command_sequence;
+        let mut previous_target = self.queued_context_commands.back().map(|command| command.target_tick);
+        for command in commands {
+            let expected_sequence = next_sequence.ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "context-command-sequence-exhausted",
+                    "semantic context command sequence is exhausted",
+                )
+            })?;
+            if command.sequence != expected_sequence {
+                return Err(IntegratedRuntimeError::new(
+                    "context-command-sequence",
+                    "semantic context command sequence is not the exact next authoritative cursor",
+                ));
+            }
+            let expected_hash = context_command_hash_v2(command)
+                .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+            if command.command_hash != expected_hash {
+                return Err(IntegratedRuntimeError::new(
+                    "context-command-hash",
+                    "semantic context command hash does not match its canonical bytes",
+                ));
+            }
+            if command.target_tick <= self.tick
+                || command.target_tick
+                    > self
+                        .tick
+                        .saturating_add(INTEGRATED_RUNTIME_MAX_CONTEXT_COMMAND_LEAD_TICKS_V2)
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "context-command-target",
+                    "semantic context command target is stale or exceeds the bounded prediction horizon",
+                ));
+            }
+            if previous_target.is_some_and(|target| target > command.target_tick) {
+                return Err(IntegratedRuntimeError::new(
+                    "context-command-order",
+                    "semantic context commands must be ordered by target tick and sequence",
+                ));
+            }
+            next_sequence = command.sequence.checked_add(1).filter(|value| *value <= MAX_SAFE_U64);
+            previous_target = Some(command.target_tick);
+        }
+        if commands.is_empty() {
+            return Ok(());
+        }
+        self.queued_context_commands.extend(commands.iter().cloned());
+        self.next_context_command_sequence = next_sequence;
+        self.invalidate_state_hash();
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn next_context_command_sequence_v2(&self) -> Option<u64> {
+        self.next_context_command_sequence
+    }
+
+    #[must_use]
+    pub fn queued_context_commands_empty_v2(&self) -> bool {
+        self.queued_context_commands.is_empty()
+    }
+
+    fn dispatch_due_context_commands_v2(&mut self) -> Vec<RuntimeSemanticActionReceiptV2> {
+        let mut receipts = Vec::new();
+        while self
+            .queued_context_commands
+            .front()
+            .is_some_and(|command| command.target_tick <= self.tick)
+        {
+            let command = self
+                .queued_context_commands
+                .pop_front()
+                .expect("due context command exists");
+            // No cast, reload, or mounted-ability executor is currently bound
+            // to exact R7/R6 authority. These values therefore echo only the
+            // request-attested revisions and never claim a resolved target.
+            let resolution = match command.action {
+                RuntimeContextCommandActionV2::Cast {
+                    loadout_revision,
+                    learned_revision,
+                    ..
+                } => RuntimeSemanticActionResolutionV2::Cast {
+                    loadout_revision,
+                    learned_revision,
+                },
+                RuntimeContextCommandActionV2::Reload { container_revision, .. } => {
+                    RuntimeSemanticActionResolutionV2::Reload { container_revision }
+                }
+                RuntimeContextCommandActionV2::MountedAbility {
+                    mount_entity_revision, ..
+                } => RuntimeSemanticActionResolutionV2::MountedAbility { mount_entity_revision },
+            };
+            receipts.push(RuntimeSemanticActionReceiptV2 {
+                command_sequence: command.sequence,
+                target_tick: command.target_tick,
+                applied_tick: self.tick,
+                command_hash: command.command_hash,
+                outcome: RuntimeSemanticActionOutcomeV2::Rejected,
+                reason: RuntimeSemanticActionReasonV2::Blocked,
+                resolved_entity: None,
+                resolved_block: None,
+                session: None,
+                effect: None,
+                resolution,
+                receipt_hash: WireHash::default(),
+            });
+        }
+        if !receipts.is_empty() {
+            self.invalidate_state_hash();
+        }
+        receipts
     }
 
     #[must_use]
@@ -9915,7 +10150,7 @@ fn read_compatibility_journal_v1(
 
 fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> IntegratedRuntimeCoreSnapshotV1 {
     IntegratedRuntimeCoreSnapshotV1 {
-        schema: NATIVE_RUNTIME_CORE_SCHEMA_V7,
+        schema: NATIVE_RUNTIME_CORE_SCHEMA_V8,
         config: runtime.config.clone(),
         expected_revision: runtime.revision(),
         tick: runtime.tick,
@@ -9934,6 +10169,8 @@ fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> Integ
         last_input_sequence: runtime.last_input_sequence,
         last_applied_input: runtime.last_applied_input,
         next_action_sequence: runtime.next_action_sequence,
+        queued_context_commands: runtime.queued_context_commands.clone(),
+        next_context_command_sequence: runtime.next_context_command_sequence,
         mining_state: runtime.mining_state.clone(),
         replay: runtime.replay.clone(),
         command_receipts: runtime.command_receipts.clone(),
@@ -9947,6 +10184,155 @@ fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> Integ
     }
 }
 
+fn validate_context_command_checkpoint_v2(
+    commands: &VecDeque<RuntimeContextCommandV2>,
+    next_sequence: Option<u64>,
+    tick: u64,
+) -> Result<(), IntegratedRuntimeError> {
+    if next_sequence.is_some_and(|sequence| sequence == 0 || sequence > MAX_SAFE_U64)
+        || commands.len() > MAX_CONTEXT_COMMANDS_V2
+    {
+        return Err(IntegratedRuntimeError::new(
+            "native-context-command-cursor",
+            "runtime context command cursor or queue is outside its bound",
+        ));
+    }
+    let mut previous_sequence = None;
+    let mut previous_target = None;
+    for command in commands {
+        if command.sequence == 0
+            || command.sequence > MAX_SAFE_U64
+            || command.target_tick <= tick
+            || previous_sequence.is_some_and(|sequence: u64| sequence.checked_add(1) != Some(command.sequence))
+            || previous_target.is_some_and(|target| target > command.target_tick)
+        {
+            return Err(IntegratedRuntimeError::new(
+                "native-context-command-order",
+                "runtime context command checkpoint is not one contiguous ordered tail",
+            ));
+        }
+        let expected_hash =
+            context_command_hash_v2(command).map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+        if command.command_hash != expected_hash {
+            return Err(IntegratedRuntimeError::new(
+                "native-context-command-hash",
+                "runtime context command checkpoint contains a non-canonical hash",
+            ));
+        }
+        previous_sequence = Some(command.sequence);
+        previous_target = Some(command.target_tick);
+    }
+    if commands
+        .back()
+        .is_some_and(|command| command.sequence.checked_add(1).filter(|value| *value <= MAX_SAFE_U64) != next_sequence)
+    {
+        return Err(IntegratedRuntimeError::new(
+            "native-context-command-cursor",
+            "runtime context command queue does not end at its next cursor",
+        ));
+    }
+    Ok(())
+}
+
+fn write_context_command_native_v2(
+    writer: &mut NativeWriterV1,
+    command: &RuntimeContextCommandV2,
+) -> Result<(), IntegratedRuntimeError> {
+    writer.u64(command.sequence);
+    writer.u64(command.target_tick);
+    writer.u8(command.action.kind() as u8);
+    match &command.action {
+        RuntimeContextCommandActionV2::Cast {
+            spell_id,
+            loadout_revision,
+            learned_revision,
+        } => {
+            writer.string(spell_id)?;
+            writer.u64(*loadout_revision);
+            writer.u64(*learned_revision);
+        }
+        RuntimeContextCommandActionV2::Reload {
+            container,
+            selected_slot,
+            container_revision,
+        } => {
+            writer.u8(container.kind as u8);
+            writer.string(&container.id)?;
+            writer.bool(container.owner_id.is_some());
+            if let Some(owner_id) = &container.owner_id {
+                writer.string(owner_id)?;
+            }
+            writer.u8(*selected_slot);
+            writer.u64(*container_revision);
+        }
+        RuntimeContextCommandActionV2::MountedAbility {
+            mount_entity_id,
+            mount_entity_revision,
+            seat_index,
+            ability_slot,
+        } => {
+            writer.u64(*mount_entity_id);
+            writer.u64(*mount_entity_revision);
+            writer.u8(*seat_index);
+            writer.u8(*ability_slot);
+        }
+    }
+    writer.raw(&command.command_hash.0);
+    Ok(())
+}
+
+fn read_context_command_native_v2(
+    reader: &mut NativeReaderV1<'_>,
+) -> Result<RuntimeContextCommandV2, IntegratedRuntimeError> {
+    let sequence = reader.u64()?;
+    let target_tick = reader.u64()?;
+    let action = match reader.u8()? {
+        0 => RuntimeContextCommandActionV2::Cast {
+            spell_id: reader.string()?,
+            loadout_revision: reader.u64()?,
+            learned_revision: reader.u64()?,
+        },
+        1 => {
+            let kind = RuntimeContainerKindV2::from_code(reader.u8()?)
+                .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+            let id = reader.string()?;
+            let owner_id = if reader.bool()? { Some(reader.string()?) } else { None };
+            RuntimeContextCommandActionV2::Reload {
+                container: RuntimeContainerKeyV2 { kind, id, owner_id },
+                selected_slot: reader.u8()?,
+                container_revision: reader.u64()?,
+            }
+        }
+        2 => RuntimeContextCommandActionV2::MountedAbility {
+            mount_entity_id: reader.u64()?,
+            mount_entity_revision: reader.u64()?,
+            seat_index: reader.u8()?,
+            ability_slot: reader.u8()?,
+        },
+        _ => {
+            return Err(IntegratedRuntimeError::new(
+                "native-context-command-kind",
+                "runtime context command checkpoint contains an unknown action kind",
+            ));
+        }
+    };
+    let command = RuntimeContextCommandV2 {
+        sequence,
+        target_tick,
+        action,
+        command_hash: WireHash(reader.take(16)?.try_into().expect("fixed context command hash")),
+    };
+    let expected_hash =
+        context_command_hash_v2(&command).map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+    if command.command_hash != expected_hash {
+        return Err(IntegratedRuntimeError::new(
+            "native-context-command-hash",
+            "runtime context command checkpoint contains a non-canonical hash",
+        ));
+    }
+    Ok(command)
+}
+
 fn encode_runtime_core_snapshot_body_v1(
     core: &IntegratedRuntimeCoreSnapshotV1,
     schema: u16,
@@ -9954,6 +10340,7 @@ fn encode_runtime_core_snapshot_body_v1(
     if core.unknown_extension_bytes.len() > NATIVE_EXTENSION_MAX_BYTES_V1
         || core.effect_events.len() > INTEGRATED_RUNTIME_MAX_EFFECT_EVENTS
         || core.queued_inputs.len() > MAX_INPUT_FRAMES
+        || core.queued_context_commands.len() > MAX_CONTEXT_COMMANDS_V2
         || core.replay.len() > INTEGRATED_RUNTIME_MAX_REPLAY_ENTRIES
     {
         return Err(IntegratedRuntimeError::new(
@@ -9976,6 +10363,11 @@ fn encode_runtime_core_snapshot_body_v1(
         &core.command_receipts,
         &core.command_receipt_order,
         core.command_receipt_bytes,
+    )?;
+    validate_context_command_checkpoint_v2(
+        &core.queued_context_commands,
+        core.next_context_command_sequence,
+        core.tick,
     )?;
     let mut writer = NativeWriterV1::default();
     writer.raw(NATIVE_RUNTIME_MAGIC_V1);
@@ -10061,6 +10453,16 @@ fn encode_runtime_core_snapshot_body_v1(
     if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V7 {
         write_camera_state_native_v1(&mut writer, core.camera)?;
     }
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V8 {
+        writer.bool(core.next_context_command_sequence.is_some());
+        if let Some(sequence) = core.next_context_command_sequence {
+            writer.u64(sequence);
+        }
+        writer.u32(core.queued_context_commands.len() as u32);
+        for command in &core.queued_context_commands {
+            write_context_command_native_v2(&mut writer, command)?;
+        }
+    }
     writer.bytes(&core.unknown_extension_bytes)?;
     Ok(writer.finish())
 }
@@ -10075,7 +10477,12 @@ fn durable_runtime_core_state_proof_v1(
     let mut normalized = core.clone();
     normalized.config.session_id = DURABLE_SESSION_NEUTRAL_ID_V1.into();
     normalized.durable_network_drained_proof = None;
-    let proof_schema = if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V7 {
+    let proof_schema = if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V8 {
+        normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V8;
+        normalized.durable_state_proof = Some(CanonicalHash::default());
+        normalized.durable_replay_proof = Some(CanonicalHash::default());
+        NATIVE_RUNTIME_CORE_SCHEMA_V8
+    } else if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V7 {
         normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V7;
         normalized.durable_state_proof = Some(CanonicalHash::default());
         normalized.durable_replay_proof = Some(CanonicalHash::default());
@@ -10113,7 +10520,7 @@ fn encode_runtime_core_snapshot_v1(runtime: &IntegratedRuntimeV2) -> Result<Vec<
     core.durable_network_drained_proof = runtime.durable_network_save_boundary_proof().ok();
     core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&core)?);
     core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&core));
-    encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V7)
+    encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V8)
 }
 
 fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCoreSnapshotV1, IntegratedRuntimeError> {
@@ -10127,6 +10534,7 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V5
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V6
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V7
+        && schema != NATIVE_RUNTIME_CORE_SCHEMA_V8
     {
         return Err(IntegratedRuntimeError::new(
             "native-runtime-schema",
@@ -10344,6 +10752,18 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
             "legacy player pitch projection contradicts authoritative camera look state",
         ));
     }
+    let (next_context_command_sequence, queued_context_commands) = if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V8 {
+        let next_sequence = if reader.bool()? { Some(reader.u64()?) } else { None };
+        let count = reader.count(MAX_CONTEXT_COMMANDS_V2, "queued context commands")?;
+        let mut commands = VecDeque::with_capacity(count);
+        for _ in 0..count {
+            commands.push_back(read_context_command_native_v2(&mut reader)?);
+        }
+        (next_sequence, commands)
+    } else {
+        (Some(1), VecDeque::new())
+    };
+    validate_context_command_checkpoint_v2(&queued_context_commands, next_context_command_sequence, tick)?;
     let unknown_extension_bytes = reader.bytes(NATIVE_EXTENSION_MAX_BYTES_V1)?;
     reader.finish()?;
     let core = IntegratedRuntimeCoreSnapshotV1 {
@@ -10366,6 +10786,8 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         last_input_sequence,
         last_applied_input,
         next_action_sequence,
+        queued_context_commands,
+        next_context_command_sequence,
         mining_state,
         replay,
         command_receipts,
@@ -12212,7 +12634,7 @@ mod tests {
 
         let core_bytes = encode_runtime_core_snapshot_v1(&runtime).unwrap();
         let decoded_core = decode_runtime_core_snapshot_v1(&core_bytes).unwrap();
-        assert_eq!(decoded_core.schema, NATIVE_RUNTIME_CORE_SCHEMA_V7);
+        assert_eq!(decoded_core.schema, NATIVE_RUNTIME_CORE_SCHEMA_V8);
         assert_eq!(decoded_core.camera, runtime.camera);
         let mut contradictory = runtime_core_snapshot_from_runtime_v1(&runtime);
         contradictory.camera.look_pitch = contradictory.camera.look_pitch.saturating_add(1);
@@ -12527,7 +12949,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_core_v1_through_v6_decode_with_canonical_camera_and_mining_defaults() {
+    fn runtime_core_v1_through_v7_decode_with_canonical_camera_mining_and_context_defaults() {
         let runtime = runtime_with_bound_player();
         for schema in [
             NATIVE_RECORD_SCHEMA_V1,
@@ -12536,6 +12958,7 @@ mod tests {
             NATIVE_RUNTIME_CORE_SCHEMA_V4,
             NATIVE_RUNTIME_CORE_SCHEMA_V5,
             NATIVE_RUNTIME_CORE_SCHEMA_V6,
+            NATIVE_RUNTIME_CORE_SCHEMA_V7,
         ] {
             let mut core = runtime_core_snapshot_from_runtime_v1(&runtime);
             core.schema = schema;
@@ -12556,9 +12979,15 @@ mod tests {
             assert!(decoded.mining_state.is_none(), "schema {schema} must default mining");
             assert_eq!(
                 decoded.camera,
-                IntegratedRuntimeCameraStateV1::default(),
+                if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V7 {
+                    runtime.camera
+                } else {
+                    IntegratedRuntimeCameraStateV1::default()
+                },
                 "schema {schema} must default camera authority"
             );
+            assert_eq!(decoded.next_context_command_sequence, Some(1));
+            assert!(decoded.queued_context_commands.is_empty());
         }
     }
 
@@ -13021,6 +13450,378 @@ mod tests {
         assert_eq!(runtime.gameplay().state.tick, 1);
         assert_eq!(runtime.gameplay().state.combat.tick, 1);
         assert_eq!(runtime.world_view().state.tick, 1);
+    }
+
+    fn sealed_context_command_v2(
+        sequence: u64,
+        target_tick: u64,
+        action: RuntimeContextCommandActionV2,
+    ) -> RuntimeContextCommandV2 {
+        blockwild_runtime_wire::seal_context_command_v2(RuntimeContextCommandV2 {
+            sequence,
+            target_tick,
+            action,
+            command_hash: WireHash::default(),
+        })
+        .expect("test context command seals")
+    }
+
+    #[test]
+    fn context_commands_enqueue_on_zero_step_reject_new_duplicates_and_dispatch_once_in_order() {
+        let mut runtime = runtime_with_bound_player();
+        let commands = [
+            sealed_context_command_v2(
+                1,
+                1,
+                RuntimeContextCommandActionV2::Cast {
+                    spell_id: "spell:test".into(),
+                    loadout_revision: 7,
+                    learned_revision: 11,
+                },
+            ),
+            sealed_context_command_v2(
+                2,
+                3,
+                RuntimeContextCommandActionV2::Reload {
+                    container: RuntimeContainerKeyV2 {
+                        kind: RuntimeContainerKindV2::Equipment,
+                        id: "actor:test:equipment".into(),
+                        owner_id: Some("actor:test".into()),
+                    },
+                    selected_slot: 4,
+                    container_revision: 13,
+                },
+            ),
+        ];
+
+        let primed = runtime.step_context_v2(1_000_000, 8_000, &[], &commands).unwrap();
+        assert_eq!(primed.fixed_steps, 0);
+        assert!(primed.semantic_receipts.is_empty());
+        assert_eq!(runtime.next_context_command_sequence_v2(), Some(3));
+        assert!(!runtime.queued_context_commands_empty_v2());
+
+        let after_enqueue = runtime.identity();
+        let duplicate = runtime
+            .step_context_v2(1_000_001, 8_000, &[], &commands[..1])
+            .unwrap_err();
+        assert_eq!(duplicate.code, "context-command-sequence");
+        assert_eq!(runtime.identity(), after_enqueue, "duplicate rejection is atomic");
+
+        let crossed = runtime.step_context_v2(1_150_000, 8_000, &[], &[]).unwrap();
+        assert_eq!(crossed.fixed_steps, 3);
+        assert_eq!(
+            crossed
+                .semantic_receipts
+                .iter()
+                .map(|receipt| (receipt.target_tick, receipt.command_sequence))
+                .collect::<Vec<_>>(),
+            vec![(1, 1), (3, 2)],
+        );
+        assert!(crossed.semantic_receipts.iter().all(|receipt| {
+            receipt.outcome == RuntimeSemanticActionOutcomeV2::Rejected
+                && receipt.reason == RuntimeSemanticActionReasonV2::Blocked
+                && receipt.resolved_entity.is_none()
+                && receipt.resolved_block.is_none()
+                && receipt.session.is_none()
+                && receipt.effect.is_none()
+        }));
+        assert!(runtime.queued_context_commands_empty_v2());
+        let later = runtime.step_context_v2(1_200_000, 8_000, &[], &[]).unwrap();
+        assert!(later.semantic_receipts.is_empty(), "dispatched commands cannot replay");
+    }
+
+    #[test]
+    fn terminal_context_cursor_and_full_width_entity_id_survive_checkpoint_restore() {
+        let mut runtime = runtime_with_bound_player();
+        runtime.next_context_command_sequence = Some(MAX_SAFE_U64);
+        let command = sealed_context_command_v2(
+            MAX_SAFE_U64,
+            1,
+            RuntimeContextCommandActionV2::MountedAbility {
+                mount_entity_id: u64::MAX,
+                mount_entity_revision: 19,
+                seat_index: 1,
+                ability_slot: 2,
+            },
+        );
+        let primed = runtime
+            .step_context_v2(1_000_000, 8_000, &[], std::slice::from_ref(&command))
+            .unwrap();
+        assert_eq!(primed.fixed_steps, 0);
+        assert_eq!(runtime.next_context_command_sequence_v2(), None);
+        assert!(!runtime.queued_context_commands_empty_v2());
+
+        assert_eq!(
+            runtime.export_runtime_checkpoint().unwrap_err().code,
+            "checkpoint-context-pending"
+        );
+        assert_eq!(
+            runtime.build_native_bundle().unwrap_err().code,
+            "native-save-context-pending"
+        );
+        assert!(!runtime.native_save_ready());
+        let mut core = runtime_core_snapshot_from_runtime_v1(&runtime);
+        core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&core).unwrap());
+        core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&core));
+        let core_bytes = encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V8).unwrap();
+        let decoded = decode_runtime_core_snapshot_v1(&core_bytes).unwrap();
+        assert_eq!(decoded.next_context_command_sequence, None);
+        assert_eq!(decoded.queued_context_commands, VecDeque::from([command.clone()]));
+
+        let dispatched = runtime.step_context_v2(1_050_000, 8_000, &[], &[]).unwrap();
+        assert_eq!(dispatched.semantic_receipts.len(), 1);
+        let receipt = &dispatched.semantic_receipts[0];
+        assert_eq!(receipt.command_sequence, MAX_SAFE_U64);
+        assert_eq!(receipt.command_hash, command.command_hash);
+        assert_eq!(receipt.reason, RuntimeSemanticActionReasonV2::Blocked);
+        assert!(
+            receipt.resolved_entity.is_none(),
+            "unsupported mounted authority must not fabricate a target"
+        );
+        assert!(runtime.queued_context_commands_empty_v2());
+        assert_eq!(runtime.next_context_command_sequence_v2(), None);
+
+        let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+        let checkpoint_hash = integrated_runtime_checkpoint_hash_v1(&checkpoint);
+        let mut restored = IntegratedRuntimeV2::restore_runtime_checkpoint(&checkpoint, checkpoint_hash).unwrap();
+        assert_eq!(restored.identity(), runtime.identity());
+        assert_eq!(restored.next_context_command_sequence_v2(), None);
+        assert!(restored.queued_context_commands_empty_v2());
+
+        let before = restored.identity();
+        let exhausted = restored.accept_context_commands_v2(&[command]).unwrap_err();
+        assert_eq!(exhausted.code, "context-command-sequence-exhausted");
+        assert_eq!(restored.identity(), before);
+    }
+
+    #[test]
+    fn invalid_context_batches_and_step_v1_pending_rejection_are_atomic() {
+        let base = sealed_context_command_v2(
+            1,
+            1,
+            RuntimeContextCommandActionV2::Cast {
+                spell_id: "spell:atomic".into(),
+                loadout_revision: 1,
+                learned_revision: 1,
+            },
+        );
+        let mut runtime = runtime_with_bound_player();
+
+        for (expected_code, commands) in [
+            (
+                "context-command-target",
+                vec![sealed_context_command_v2(1, 0, base.action.clone())],
+            ),
+            (
+                "context-command-target",
+                vec![sealed_context_command_v2(
+                    1,
+                    INTEGRATED_RUNTIME_MAX_CONTEXT_COMMAND_LEAD_TICKS_V2 + 1,
+                    base.action.clone(),
+                )],
+            ),
+            (
+                "context-command-order",
+                vec![
+                    sealed_context_command_v2(1, 2, base.action.clone()),
+                    sealed_context_command_v2(2, 1, base.action.clone()),
+                ],
+            ),
+        ] {
+            let before = runtime.identity();
+            assert_eq!(
+                runtime.accept_context_commands_v2(&commands).unwrap_err().code,
+                expected_code
+            );
+            assert_eq!(runtime.identity(), before);
+            assert_eq!(runtime.next_context_command_sequence_v2(), Some(1));
+        }
+
+        let mut bad_hash = base.clone();
+        bad_hash.command_hash = WireHash([0xaa; 16]);
+        let before = runtime.identity();
+        assert_eq!(
+            runtime.accept_context_commands_v2(&[bad_hash]).unwrap_err().code,
+            "context-command-hash"
+        );
+        assert_eq!(runtime.identity(), before);
+
+        let capacity = (1..=MAX_CONTEXT_COMMANDS_V2 as u64 + 1)
+            .map(|sequence| sealed_context_command_v2(sequence, 1, base.action.clone()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            runtime.accept_context_commands_v2(&capacity).unwrap_err().code,
+            "context-command-capacity"
+        );
+        assert_eq!(runtime.next_context_command_sequence_v2(), Some(1));
+
+        runtime.step_context_v2(1_000_000, 8_000, &[], &[base]).unwrap();
+        let before_v1 = runtime.identity();
+        assert_eq!(
+            runtime.step(1_050_000, 8_000).unwrap_err().code,
+            "context-command-pending"
+        );
+        assert_eq!(runtime.identity(), before_v1);
+        assert!(!runtime.queued_context_commands_empty_v2());
+    }
+
+    #[test]
+    fn schema_v8_decode_rejects_noncanonical_queue_order_and_next_cursor() {
+        let runtime = runtime_with_bound_player();
+        let first = sealed_context_command_v2(
+            1,
+            2,
+            RuntimeContextCommandActionV2::Cast {
+                spell_id: "spell:checkpoint".into(),
+                loadout_revision: 1,
+                learned_revision: 2,
+            },
+        );
+        let second = sealed_context_command_v2(2, 3, first.action.clone());
+        let mut core = runtime_core_snapshot_from_runtime_v1(&runtime);
+        core.queued_context_commands = VecDeque::from([first.clone(), second.clone()]);
+        core.next_context_command_sequence = Some(3);
+        core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&core).unwrap());
+        core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&core));
+        let encoded = encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V8).unwrap();
+        assert!(decode_runtime_core_snapshot_v1(&encoded).is_ok());
+
+        let command_bytes = |command: &RuntimeContextCommandV2| {
+            let mut writer = NativeWriterV1::default();
+            write_context_command_native_v2(&mut writer, command).unwrap();
+            writer.finish()
+        };
+        let first_bytes = command_bytes(&first);
+        let second_bytes = command_bytes(&second);
+        let first_offset = encoded
+            .windows(first_bytes.len())
+            .position(|window| window == first_bytes)
+            .expect("first context command bytes are unique in the core snapshot");
+        let second_offset = encoded
+            .windows(second_bytes.len())
+            .position(|window| window == second_bytes)
+            .expect("second context command bytes are unique in the core snapshot");
+
+        let reordered = sealed_context_command_v2(2, 1, second.action.clone());
+        let reordered_bytes = command_bytes(&reordered);
+        assert_eq!(reordered_bytes.len(), second_bytes.len());
+        let mut invalid_order = encoded.clone();
+        invalid_order[second_offset..second_offset + second_bytes.len()].copy_from_slice(&reordered_bytes);
+        assert_eq!(
+            decode_runtime_core_snapshot_v1(&invalid_order).unwrap_err().code,
+            "native-context-command-order"
+        );
+
+        let mut invalid_cursor = encoded;
+        let next_offset = first_offset
+            .checked_sub(12)
+            .expect("schema8 context prefix precedes queue");
+        invalid_cursor[next_offset..next_offset + 8].copy_from_slice(&4_u64.to_le_bytes());
+        assert_eq!(
+            decode_runtime_core_snapshot_v1(&invalid_cursor).unwrap_err().code,
+            "native-context-command-cursor"
+        );
+    }
+
+    #[test]
+    fn semantic_dispatch_rolls_back_with_the_crossed_fixed_step() {
+        let mut runtime = runtime_with_bound_player();
+        runtime.world_view = WorldViewAuthorityV1::new(runtime.world_view.state.clone());
+        let command = sealed_context_command_v2(
+            1,
+            1,
+            RuntimeContextCommandActionV2::Reload {
+                container: RuntimeContainerKeyV2 {
+                    kind: RuntimeContainerKindV2::Equipment,
+                    id: "actor:test:equipment".into(),
+                    owner_id: Some("actor:test".into()),
+                },
+                selected_slot: 0,
+                container_revision: 1,
+            },
+        );
+        runtime.step_context_v2(1_000_000, 8_000, &[], &[command]).unwrap();
+        let before = runtime.identity();
+        let error = runtime.step_context_v2(1_050_000, 8_000, &[], &[]).unwrap_err();
+        assert_eq!(error.code, "world-view-schedule");
+        assert_eq!(runtime.identity(), before);
+        assert!(!runtime.queued_context_commands_empty_v2());
+        assert_eq!(runtime.next_context_command_sequence_v2(), Some(2));
+    }
+
+    #[test]
+    fn monotonic_time_regression_is_atomic_for_step_v1_and_step_v2() {
+        let mut step_v1_runtime = runtime_with_bound_player();
+        step_v1_runtime.step(1_000_000, 8_000).unwrap();
+        let step_v1_before = step_v1_runtime.identity();
+        assert_eq!(
+            step_v1_runtime.step(999_999, 8_000).unwrap_err().code,
+            "monotonic-time-regression"
+        );
+        assert_eq!(step_v1_runtime.identity(), step_v1_before);
+        assert_eq!(step_v1_runtime.last_monotonic_time_us, 1_000_000);
+
+        let mut step_v2_runtime = runtime_with_bound_player();
+        let command = sealed_context_command_v2(
+            1,
+            1,
+            RuntimeContextCommandActionV2::Cast {
+                spell_id: "spell:monotonic-rollback".into(),
+                loadout_revision: 1,
+                learned_revision: 2,
+            },
+        );
+        step_v2_runtime
+            .step_context_v2(1_000_000, 8_000, &[], &[command])
+            .unwrap();
+        let step_v2_before = step_v2_runtime.identity();
+        let queued_before = step_v2_runtime.queued_context_commands.clone();
+        assert_eq!(
+            step_v2_runtime
+                .step_context_v2(999_999, 8_000, &[], &[])
+                .unwrap_err()
+                .code,
+            "monotonic-time-regression"
+        );
+        assert_eq!(step_v2_runtime.identity(), step_v2_before);
+        assert_eq!(step_v2_runtime.last_monotonic_time_us, 1_000_000);
+        assert_eq!(step_v2_runtime.queued_context_commands, queued_before);
+        assert_eq!(step_v2_runtime.next_context_command_sequence_v2(), Some(2));
+    }
+
+    #[test]
+    fn context_continuity_query_is_exact_nonmutating_and_rejects_stale_identity() {
+        let runtime = runtime_with_bound_player();
+        let expected = runtime.identity();
+        let request_hash = CanonicalHash([0x61; 16]);
+        let receipt = runtime
+            .context_command_continuity_status_v2(
+                &RuntimeContextCommandContinuityQueryWireV2 {
+                    expected: expected.clone(),
+                },
+                request_hash,
+            )
+            .unwrap();
+        assert_eq!(receipt.request_payload_hash, request_hash);
+        assert_eq!(receipt.identity, expected);
+        assert_eq!(receipt.last_sequence, None);
+        assert_eq!(receipt.next_sequence, Some(1));
+        assert!(receipt.queued_commands_empty);
+        assert_eq!(runtime.identity(), expected);
+
+        let mut stale = expected.clone();
+        stale.tick += 1;
+        assert_eq!(
+            runtime
+                .context_command_continuity_status_v2(
+                    &RuntimeContextCommandContinuityQueryWireV2 { expected: stale },
+                    request_hash,
+                )
+                .unwrap_err()
+                .code,
+            "context-continuity-stale"
+        );
+        assert_eq!(runtime.identity(), expected);
     }
 
     #[test]

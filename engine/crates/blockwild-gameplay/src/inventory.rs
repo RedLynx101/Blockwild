@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use blockwild_types::{CanonicalHash, CanonicalHasher};
 
-use crate::{MAX_ITEM_STACK, Rejection, RejectionCode, ResourceDelta, validate_id, write_option_str, write_option_u64};
+use crate::{
+    BlockActionLootErrorCodeV1, GeneratedDropProvenanceV1, MAX_ITEM_STACK, Rejection, RejectionCode, ResourceDelta,
+    validate_id, write_option_str, write_option_u64,
+};
 
 pub const PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1: usize = 9;
 pub const MAX_ITEM_INSTANCE_METADATA_BYTES_V1: usize = 64 * 1024;
@@ -10,6 +13,10 @@ pub const MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1: usize = 64 * 1024;
 pub const MAX_PLAYER_INVENTORY_IMPORT_METADATA_BYTES_V1: usize = 256 * 1024;
 pub const INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG: u16 = 6;
 pub const INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG: u16 = 7;
+pub const INVENTORY_COMMAND_CREATE_GENERATED_DROP_CUSTODY_V1_TAG: u16 = 8;
+pub const MAX_INVENTORY_CONTAINERS_V1: usize = 65_536;
+pub const MAX_GENERATED_DROP_CUSTODY_CONTAINERS_V1: usize = 4_096;
+pub const GENERATED_DROP_RESOURCE_REASON_V1: &str = "block-loot-v1";
 
 pub type ItemCode = u32;
 
@@ -286,6 +293,38 @@ pub struct CreateDropCustodyCommand {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CreateGeneratedDropCustodyV1 {
+    pub custody: ContainerKey,
+    pub stack: ItemStack,
+    pub provenance: GeneratedDropProvenanceV1,
+    pub request_hash: CanonicalHash,
+}
+
+impl CreateGeneratedDropCustodyV1 {
+    #[must_use]
+    pub fn new(custody: ContainerKey, stack: ItemStack, provenance: GeneratedDropProvenanceV1) -> Self {
+        let mut command = Self {
+            custody,
+            stack,
+            provenance,
+            request_hash: CanonicalHash::default(),
+        };
+        command.request_hash = command.calculate_request_hash_v1();
+        command
+    }
+
+    #[must_use]
+    pub fn calculate_request_hash_v1(&self) -> CanonicalHash {
+        let mut hasher = CanonicalHasher::new("blockwild.gameplay.generated-drop-custody-request.v1");
+        hasher.write_u16(1);
+        self.custody.hash_into(&mut hasher);
+        self.stack.hash_into(&mut hasher);
+        hasher.write_bytes(self.provenance.canonical_hash_v1().as_bytes());
+        hasher.finish()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoveEmptyDropCustodyCommand {
     pub custody: ContainerKey,
     pub expected_revision: u64,
@@ -405,6 +444,7 @@ pub enum InventoryCommand {
     CreatePlayerCustody(CreatePlayerCustodyCommand),
     ImportPlayerInventoryV1(ImportPlayerInventoryV1),
     ApplyBlockActionV1(ApplyBlockActionV1),
+    CreateGeneratedDropCustodyV1(CreateGeneratedDropCustodyV1),
 }
 
 impl InventoryCommand {
@@ -518,6 +558,13 @@ impl InventoryCommand {
                     None => hasher.write_u16(0),
                 }
                 hasher.write_str(&command.reason);
+            }
+            Self::CreateGeneratedDropCustodyV1(command) => {
+                hasher.write_u16(INVENTORY_COMMAND_CREATE_GENERATED_DROP_CUSTODY_V1_TAG);
+                command.custody.hash_into(hasher);
+                command.stack.hash_into(hasher);
+                hasher.write_bytes(command.provenance.canonical_hash_v1().as_bytes());
+                hasher.write_bytes(command.request_hash.as_bytes());
             }
         }
     }
@@ -859,6 +906,97 @@ impl InventoryState {
         custody.slots[0] = Some(dropped_stack);
         self.insert_container(custody)?;
         Ok(Vec::new())
+    }
+
+    /// Mints one content-bound generated stack into unowned world-drop
+    /// custody. Authority must separately restrict this command to the system
+    /// actor; this inventory transition validates the complete immutable
+    /// provenance and never inserts into a player inventory.
+    pub fn create_generated_drop_custody_v1(
+        &mut self,
+        command: &CreateGeneratedDropCustodyV1,
+    ) -> Result<Vec<ResourceDelta>, Rejection> {
+        command.custody.validate()?;
+        command.provenance.validate_v1().map_err(|error| {
+            let code = match error.code {
+                BlockActionLootErrorCodeV1::Capacity | BlockActionLootErrorCodeV1::Overflow => RejectionCode::Capacity,
+                BlockActionLootErrorCodeV1::HashMismatch | BlockActionLootErrorCodeV1::Binding => {
+                    RejectionCode::Conflict
+                }
+                _ => RejectionCode::InvalidCommand,
+            };
+            Rejection::new(code, error.message)
+        })?;
+        if command.custody.kind != ContainerKind::Container
+            || command.custody.owner_id.is_some()
+            || command.custody.id != command.provenance.custody_id_v1()
+        {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "generated drop requires its exact derived unowned custody container",
+            ));
+        }
+        if command.request_hash == CanonicalHash::default()
+            || command.request_hash != command.calculate_request_hash_v1()
+        {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "generated-drop custody request hash does not match canonical fields",
+            ));
+        }
+        if self.containers.contains_key(&command.custody) {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "generated-drop custody container already exists",
+            ));
+        }
+        if self.containers.len() >= MAX_INVENTORY_CONTAINERS_V1 {
+            return Err(Rejection::new(
+                RejectionCode::Capacity,
+                "inventory container capacity is exhausted",
+            ));
+        }
+        let generated_drop_custodies = self
+            .containers
+            .keys()
+            .filter(|key| key.id.starts_with("block-loot-custody-v1:"))
+            .count();
+        if generated_drop_custodies >= MAX_GENERATED_DROP_CUSTODY_CONTAINERS_V1 {
+            return Err(Rejection::new(
+                RejectionCode::Capacity,
+                "generated-drop custody capacity is exhausted",
+            ));
+        }
+        let definition = self.items.get(&command.stack.item_code).ok_or_else(|| {
+            Rejection::new(
+                RejectionCode::InvalidCommand,
+                "generated-drop custody references an unknown item",
+            )
+        })?;
+        command.stack.validate(definition.max_stack)?;
+        if command.stack.durability_millionths.is_some() {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "generated block loot cannot fabricate item durability",
+            ));
+        }
+        if command.stack.metadata_hash != CanonicalHash::default()
+            && !self.item_instance_metadata.contains_key(&command.stack.metadata_hash)
+        {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "generated-drop custody metadata descriptor is missing",
+            ));
+        }
+        let mut custody = Container::new(command.custody.clone(), 1);
+        custody.slots[0] = Some(command.stack.clone());
+        self.insert_container(custody)?;
+        Ok(vec![ResourceDelta {
+            item_code: command.stack.item_code,
+            metadata_hash: command.stack.metadata_hash,
+            amount: i64::from(command.stack.count),
+            reason: GENERATED_DROP_RESOURCE_REASON_V1.to_owned(),
+        }])
     }
 
     pub fn remove_empty_drop_custody(

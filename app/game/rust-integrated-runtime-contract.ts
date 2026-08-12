@@ -484,6 +484,10 @@ export type RustIntegratedRuntimeTransferV1 = Readonly<{
 
 export interface RustIntegratedRuntimeTransportV1 {
   request(request: RustIntegratedRuntimeRequestV1): Promise<RustIntegratedRuntimeResponseV1>;
+  /** Dedicated schema-6 lane; absent transports cannot execute StepV2. */
+  requestStepV2?(
+    request: RustIntegratedRuntimeStepRequestV2,
+  ): Promise<RustIntegratedRuntimeStepResultV2 | Extract<RustIntegratedRuntimeResponseV1, { type: "runtime-error-v1" }>>;
   dispose(): void;
 }
 

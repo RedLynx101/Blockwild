@@ -41,6 +41,12 @@ import {
   RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
 } from "../app/game/rust-integrated-runtime-player-status.ts";
 import type { RustIntegratedRuntimeServiceV1 } from "../app/game/rust-integrated-runtime-service.ts";
+import {
+  RUST_CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2,
+  RUST_CONTEXT_COMMAND_CONTINUITY_TYPE_V2,
+  decodeRustIntegratedRuntimeContextContinuityQueryV2,
+  encodeRustIntegratedRuntimeContextContinuityReceiptV2,
+} from "../app/game/rust-integrated-runtime-context-continuity-v2.ts";
 import type { RustWorldRuntimeHostConfigV1 } from "../app/game/rust-world-runtime-host.ts";
 import type { RustWorldRuntimeManagedHostV1 } from "../app/game/rust-world-runtime-manager.ts";
 import { canonicalRustTerrainGenerationOptionsJsonV1 } from "../app/game/rust-world-runtime-live-config.ts";
@@ -443,6 +449,20 @@ class RestoredRuntimeService {
         schema: 1,
         payload: this.statusPayload(operation.payloadHash),
       });
+    } else if (operation.typeId === RUST_CONTEXT_COMMAND_CONTINUITY_TYPE_V2) {
+      assert.deepEqual(decodeRustIntegratedRuntimeContextContinuityQueryV2(operation.payload), { expected: before });
+      response = createRustIntegratedRuntimeDomainOperationV1({
+        domain: "simulation",
+        typeId: RUST_CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2,
+        schema: 2,
+        payload: encodeRustIntegratedRuntimeContextContinuityReceiptV2({
+          requestPayloadHash: operation.payloadHash,
+          identity: before,
+          lastSequence: null,
+          nextSequence: 1,
+          queuedCommandsEmpty: true,
+        }),
+      });
     } else if (operation.typeId === RUST_INTEGRATED_TERRAIN_RESIDENCY_RECONCILE_TYPE_V2) {
       const request = decodeRustIntegratedTerrainResidencyReconcileRequestV2(operation.payload);
       this.worldRevision = Object.freeze({ ...request.expectedWorldRevision, residency: request.expectedWorldRevision.residency + BigInt(1) });
@@ -755,6 +775,7 @@ test("complete restored native player status is accepted without a browser inven
     RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
     RUST_INTEGRATED_TERRAIN_RESIDENCY_RECONCILE_TYPE_V2,
     RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
+    RUST_CONTEXT_COMMAND_CONTINUITY_TYPE_V2,
   ], "a complete restored native graph must not receive BWI/BWF/entity-import overwrite operations");
   await (engine as unknown as { stopRustLivePlayerAuthorityR5(): Promise<void> }).stopRustLivePlayerAuthorityR5();
 });

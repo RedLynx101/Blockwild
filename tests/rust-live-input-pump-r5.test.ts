@@ -527,6 +527,63 @@ test("context commands require explicit continuity and submit once until exact r
   await live.stop();
 });
 
+test("BWO6 activation rejects queued custody or an identity mismatch before stepping", () => {
+  const runtime = new FakeRuntime();
+  const current = runtime.identity();
+  const create = (identityValue = current, queuedCommandsEmpty = true) => new RustLiveInputPumpR5({
+    service: runtime,
+    status: status(continuity(), current.tick),
+    worldGeneration: GENERATION,
+    contextContinuity: Object.freeze({
+      requestPayloadHash: hash(99),
+      identity: identityValue,
+      lastSequence: null,
+      nextSequence: 1,
+      queuedCommandsEmpty,
+    }),
+  });
+  assert.throws(() => create(current, false), /exact idle runtime identity/u);
+  assert.throws(
+    () => create(Object.freeze({ ...current, stateHash: hash(100) })),
+    /exact idle runtime identity/u,
+  );
+  assert.equal(runtime.stepArguments.length, 0);
+});
+
+test("terminal context sequence is accepted once and remains distinguishable from unavailable continuity", async () => {
+  const exhausted = pump(new FakeRuntime(), continuity(), () => 1, null);
+  assert.throws(
+    () => exhausted.queueContextCommand(GENERATION, Object.freeze({
+      kind: "cast", spellId: "spell:after-terminal", loadoutRevision: 1, learnedRevision: 1,
+    })),
+    /sequence is exhausted/u,
+  );
+  await exhausted.stop();
+
+  let now = 1;
+  const runtime = new FakeRuntime();
+  const live = pump(runtime, continuity(), () => now, Number.MAX_SAFE_INTEGER);
+  live.queueContextCommand(GENERATION, Object.freeze({
+    kind: "mounted-ability",
+    mountEntityId: BigInt("0xfedcba9876543210"),
+    mountEntityRevision: 9,
+    seatIndex: 1,
+    abilitySlot: 2,
+  }));
+  await live.advance(GENERATION);
+  now = 50_001;
+  await live.advance(GENERATION);
+  assert.deepEqual(runtime.contextArguments.map((commands) => commands.length), [1, 0]);
+  assert.equal(live.diagnostics().nextContextCommandSequence, null);
+  assert.throws(
+    () => live.queueContextCommand(GENERATION, Object.freeze({
+      kind: "cast", spellId: "spell:after-terminal", loadoutRevision: 1, learnedRevision: 1,
+    })),
+    /sequence is exhausted/u,
+  );
+  await live.stop();
+});
+
 test("rejected semantic receipts consume sequence and omissions fail closed", async () => {
   let now = 1;
   const rejectedRuntime = new FakeRuntime();
