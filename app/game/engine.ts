@@ -674,6 +674,38 @@ import {
   type RustWorldRuntimeManagedHostV1,
 } from "./rust-world-runtime-manager";
 import {
+  RUST_RUNTIME_INPUT_BUTTON_MASK_V1,
+  RUST_RUNTIME_INPUT_BUTTON_V1,
+  RUST_RUNTIME_INPUT_FLAG_MASK_V1,
+  RUST_RUNTIME_INPUT_FLAG_V1,
+  type RustIntegratedRuntimeExtractionV1,
+} from "./rust-integrated-runtime-contract";
+import {
+  executeRustIntegratedPlayerBootstrapV1,
+  type RustIntegratedPlayerBootstrapObservationV1,
+} from "./rust-integrated-runtime-player-bootstrap";
+import {
+  createRustPlayerBootstrapNewWorldCompatibilityV1,
+  deriveRustPlayerBootstrapCompatibilityIdentityV1,
+  migrateRustPlayerBootstrapRichSaveCompatibilityV1,
+  queryRustPlayerBootstrapIdentityStatusV1,
+  type RustPlayerCompatibilityInventorySlotV1,
+  type RustPlayerCompatibilityInventoryV1,
+} from "./rust-player-bootstrap-compatibility";
+import { RustIntegratedTerrainResidencyPortV1 } from "./rust-integrated-runtime-terrain-residency";
+import {
+  createRustLiveInputPumpR5,
+  quantizeRustLiveInputPitchR5,
+  quantizeRustLiveInputYawR5,
+  RUST_LIVE_INPUT_AXIS_DIVISOR_R5,
+  type RustLiveInputIntentR5,
+  type RustLiveInputPumpR5,
+} from "./rust-live-input-pump-r5";
+import {
+  decodeRustLivePlayerViewR10,
+  type RustLivePlayerViewR10,
+} from "./rust-live-player-view-r10";
+import {
   createRustLiveRenderRuntimeR10,
   type RustLiveRenderRuntimeR10,
 } from "./rust-live-render-runtime-r10";
@@ -1697,6 +1729,8 @@ export type VoxelEngineOptions = Readonly<{
    * silently treated as a fresh Rust world while that adapter is unavailable.
    */
   rustWorldHydration?: RustWorldHydrationHookV1;
+  /** Test-only lifecycle seam. Production always uses the exact BWS5/bootstrap/terrain/input gate below. */
+  rustLivePlayerAuthorityActivation?: RustLivePlayerAuthorityActivationHookV1;
 }>;
 
 export type RustWorldHydrationHookV1 = (input: Readonly<{
@@ -1705,6 +1739,24 @@ export type RustWorldHydrationHookV1 = (input: Readonly<{
   save: WorldSave | null;
   host: RustWorldRuntimeManagedHostV1;
 }>) => Promise<void>;
+
+export type RustLivePlayerAuthorityActivationHookV1 = (input: Readonly<{
+  generation: number;
+  kind: "create" | "load";
+  save: WorldSave | null;
+  host: RustWorldRuntimeManagedHostV1;
+}>) => Promise<void>;
+
+export type RustLivePlayerAuthorityStateR5 = "none" | "starting" | "ready" | "blocked";
+
+const RUST_LIVE_RENDER_EXTRACTION_QUEUE_CAP_R10 = 4;
+
+type RustLiveRendererExtractionQueueEntryR10 = Readonly<{
+  generation: number;
+  host: RustWorldRuntimeManagedHostV1;
+  pump: RustLiveInputPumpR5;
+  extraction: RustIntegratedRuntimeExtractionV1;
+}>;
 
 export type RustLiveRuntimeDiagnosticsV1 = Readonly<{
   ready: boolean;
@@ -1717,6 +1769,16 @@ export type RustLiveRuntimeDiagnosticsV1 = Readonly<{
   nativePersistenceWorldId: string | null;
   hydration: "new-world" | "restored" | "guest-bootstrap" | "blocked" | "none";
   manager: ReturnType<RustWorldRuntimeManagerV1["diagnostics"]>;
+  playerAuthority: Readonly<{
+    state: RustLivePlayerAuthorityStateR5;
+    worldGeneration: number | null;
+    entityId: bigint | null;
+    terrainChunkCount: number;
+    advanceInFlight: boolean;
+    pendingRendererExtraction: boolean;
+    lastError: string | null;
+    pump: ReturnType<RustLiveInputPumpR5["diagnostics"]> | null;
+  }>;
   renderer: RustLiveRenderEngineDiagnosticsR10;
   multiplayer: Readonly<{
     authorityDeltaSequence: number;
@@ -4127,6 +4189,39 @@ export class VoxelEngine {
   private rustRenderExtractionRevision = 0;
   private rustRenderFrameSequence = BigInt(0);
   private rustRenderExtractionPoll: Promise<void> | null = null;
+  private readonly rustLivePlayerAuthorityActivation: RustLivePlayerAuthorityActivationHookV1;
+  private readonly rustLivePlayerAuthorityProductionGate: boolean;
+  private rustLivePlayerAuthorityState: RustLivePlayerAuthorityStateR5 = "none";
+  private rustLivePlayerAuthorityGeneration: number | null = null;
+  private rustLivePlayerEntityId: bigint | null = null;
+  private rustLivePlayerTerrainChunkCount = 0;
+  private rustLivePlayerAuthorityLastError: string | null = null;
+  private rustLivePlayerAttestationR10: Readonly<{
+    externalEntityId: string;
+    actorId: string;
+    playerId: bigint;
+    entityId: bigint;
+    creativeMode: boolean;
+    maximumOxygenSeconds: number;
+    maximumHealth: number;
+    radius: number;
+    standingHeight: number;
+    crouchingHeight: number;
+    mass: number;
+  }> | null = null;
+  private rustLivePlayerPresentationViewR10: RustLivePlayerViewR10 | null = null;
+  private rustLivePlayerViewExtractionRevisionR10: bigint | null = null;
+  private rustLivePlayerInitialYawRadiansR10: number | null = null;
+  private rustLiveSelectedSlotIntentR5: number | null = null;
+  private rustLiveSelectedSlotIntentPendingR5 = false;
+  private rustLiveLookIntentR5: Readonly<{ yawRadians: number; pitchRadians: number }> | null = null;
+  private rustLiveLookIntentPendingR5 = false;
+  private rustLiveInputPump: RustLiveInputPumpR5 | null = null;
+  private rustLiveInputAdvance: Promise<void> | null = null;
+  private rustLiveRendererExtractionQueue: RustLiveRendererExtractionQueueEntryR10[] = [];
+  private rustSecondaryUseHeld = false;
+  private rustCreativeFlightTogglePulse = false;
+  private rustDropPulse = false;
   renderExtraction: RendererShellExtractionPublisherR11 | null = null;
   renderExtractionNextAt = 0;
   renderExtractionErrors = 0;
@@ -4160,7 +4255,7 @@ export class VoxelEngine {
   private readonly rustPeerInterestCenters = new Map<string, string>();
   private readonly rustPeerDeltaSequences = new Map<string, number>();
   private readonly rustPeerDeltaInFlight = new Set<string>();
-  private readonly rustAuthorityOperations = new Set<Promise<unknown>>();
+  private rustAuthorityOperations = new Set<Promise<unknown>>();
   private rustAuthorityDeltaApplied = 0;
   private rustAuthorityResyncs = 0;
   private rustAuthorityRejections = 0;
@@ -4597,6 +4692,9 @@ export class VoxelEngine {
     this.worldStorage = options.worldStorage ?? new WorldStorage(undefined, { persistenceCoordinator: null });
     this.rustRuntimeManager = options.rustRuntimeManager ?? new RustWorldRuntimeManagerV1();
     this.rustWorldHydration = options.rustWorldHydration ?? ((input) => this.hydrateRustWorldPersistence(input));
+    this.rustLivePlayerAuthorityActivation = options.rustLivePlayerAuthorityActivation
+      ?? ((input) => this.activateRustLivePlayerAuthorityR5(input));
+    this.rustLivePlayerAuthorityProductionGate = options.rustLivePlayerAuthorityActivation === undefined;
     this.agentMode = options.agentMode === true;
     const rustRenderSink = options.rustRenderSink ?? null;
     const rustRenderEpoch = options.rustRenderEpoch ?? null;
@@ -4804,6 +4902,261 @@ export class VoxelEngine {
     this.renderExtraction?.resize(Math.max(1, this.canvas.width), Math.max(1, this.canvas.height));
   };
 
+  private rustLivePlayerAuthorityEnabledR5() {
+    return !this.rustRuntimeOperationsBlocked
+      && this.rustLivePlayerAuthorityState === "ready"
+      && this.rustLivePlayerAuthorityGeneration === this.rustRuntimeTransitionGeneration
+      && this.rustLiveInputPump?.state === "ready"
+      && this.rustRuntimeHost?.diagnostics().state === "ready";
+  }
+
+  private assertRustLivePlayerViewContextR10(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+    stage: string,
+  ) {
+    this.assertRustLiveGenerationR5(generation, host, stage);
+    if (pump !== this.rustLiveInputPump || pump.state !== "ready") {
+      throw new Error(`Rust live player view lost its exact input pump during ${stage}`);
+    }
+    if (!this.rustLivePlayerAttestationR10) {
+      throw new Error(`Rust live player view lost its bootstrap attestation during ${stage}`);
+    }
+  }
+
+  private projectRustLivePlayerViewR10(view: RustLivePlayerViewR10) {
+    if ((view.authoritativeFlags & ~RUST_RUNTIME_INPUT_FLAG_MASK_V1) !== 0
+      || (view.buttons & ~RUST_RUNTIME_INPUT_BUTTON_MASK_V1) !== 0) {
+      throw new Error("Rust live player view contains unsupported input bits");
+    }
+    if (!Number.isFinite(view.oxygenSeconds) || !Number.isFinite(view.maximumOxygenSeconds)
+      || view.maximumOxygenSeconds <= 0 || view.oxygenSeconds < 0
+      || view.oxygenSeconds > view.maximumOxygenSeconds) {
+      throw new Error("Rust live player view contains an invalid oxygen presentation");
+    }
+    const attestation = this.rustLivePlayerAttestationR10;
+    if (!attestation || view.maximumOxygenSeconds !== attestation.maximumOxygenSeconds
+      || Boolean(view.authoritativeFlags & RUST_RUNTIME_INPUT_FLAG_V1.creative) !== attestation.creativeMode) {
+      throw new Error("Rust live player view contradicts its bootstrapped oxygen or creative-mode contract");
+    }
+    if ((view.authoritativeFlags & RUST_RUNTIME_INPUT_FLAG_V1.mounted) !== 0) {
+      throw new Error("Rust live player view cannot present a native mount without an exact mount-target binding");
+    }
+    if ((view.authoritativeFlags & RUST_RUNTIME_INPUT_FLAG_V1.flying) !== 0 && !attestation.creativeMode) {
+      throw new Error("Rust live player view cannot fly without its authoritative creative permission");
+    }
+    const expectedHeight = view.crouching ? attestation.crouchingHeight : attestation.standingHeight;
+    if (view.radius !== attestation.radius || view.height !== expectedHeight || view.mass !== attestation.mass) {
+      throw new Error("Rust live player view contradicts its bootstrapped collider contract");
+    }
+    if (attestation.maximumHealth !== 10 || view.maximumHealth !== attestation.maximumHealth
+      || !Number.isFinite(view.health)
+      || view.health < 0 || view.health > view.maximumHealth) {
+      throw new Error("Rust live player view does not use the exact 10-heart player-health contract");
+    }
+    const initialYaw = this.rustLivePlayerInitialYawRadiansR10;
+    if ((view.lookYaw === null) !== (view.lastInputSequence === BigInt(0))) {
+      throw new Error("Rust live player view look fields contradict its input continuity");
+    }
+    if (view.lookYaw === null && (initialYaw === null || !Number.isFinite(initialYaw))) {
+      throw new Error("Rust live player view has no exact initial yaw presentation");
+    }
+    const yawRadians = view.lookYaw === null
+      ? initialYaw!
+      : view.lookYaw / RUST_LIVE_INPUT_AXIS_DIVISOR_R5 * Math.PI;
+    const pitchRadians = view.lookPitch / RUST_LIVE_INPUT_AXIS_DIVISOR_R5 * (Math.PI / 2);
+    if (!Number.isFinite(yawRadians) || !Number.isFinite(pitchRadians)) {
+      throw new Error("Rust live player view contains an invalid look presentation");
+    }
+
+    const previousSelected = this.selected;
+    const selectedIntent = this.rustLiveSelectedSlotIntentR5;
+    const selectedAcknowledged = this.rustLiveSelectedSlotIntentPendingR5
+      && selectedIntent === view.selectedSlot;
+    const lookIntent = this.rustLiveLookIntentR5;
+    const lookAcknowledged = this.rustLiveLookIntentPendingR5
+      && lookIntent !== null
+      && view.lookYaw !== null
+      && quantizeRustLiveInputYawR5(lookIntent.yawRadians) === view.lookYaw
+      && quantizeRustLiveInputPitchR5(lookIntent.pitchRadians) === view.lookPitch;
+    this.position.set(view.position.x, view.position.y, view.position.z);
+    this.velocity.set(view.velocity.x, view.velocity.y, view.velocity.z);
+    this.grounded = view.grounded;
+    this.crouching = view.crouching;
+    this.oxygenSeconds = view.oxygenSeconds;
+    this.health = view.health;
+    this.mode = attestation.creativeMode ? "builder" : "survival";
+    this.creativeFlying = (view.authoritativeFlags & RUST_RUNTIME_INPUT_FLAG_V1.flying) !== 0;
+    this.sprinting = (view.buttons & RUST_RUNTIME_INPUT_BUTTON_V1.sprint) !== 0;
+    this.mountedBoatId = null;
+    this.mountedCreatureId = null;
+    this.mountedCreatureSeat = null;
+    this.seatedAt = null;
+    if (!this.rustLiveSelectedSlotIntentPendingR5 || selectedAcknowledged) {
+      this.selected = view.selectedSlot;
+      this.rustLiveSelectedSlotIntentR5 = view.selectedSlot;
+      this.rustLiveSelectedSlotIntentPendingR5 = false;
+    }
+    if (!this.rustLiveLookIntentPendingR5 || lookAcknowledged) {
+      this.yaw = yawRadians;
+      this.pitch = pitchRadians;
+      this.rustLiveLookIntentR5 = Object.freeze({ yawRadians, pitchRadians });
+      this.rustLiveLookIntentPendingR5 = false;
+    }
+    if (previousSelected !== this.selected) this.events.onSelectedSlot?.(this.selected);
+  }
+
+  private applyRustLivePlayerExtractionR10(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+    extraction: RustIntegratedRuntimeExtractionV1,
+  ) {
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "player view decode");
+    const attestation = this.rustLivePlayerAttestationR10!;
+    const view = decodeRustLivePlayerViewR10(extraction, attestation.externalEntityId);
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "player view application");
+    if (view.externalEntityId !== attestation.externalEntityId
+      || view.actorId !== attestation.actorId
+      || view.playerId !== attestation.playerId
+      || view.entityId !== attestation.entityId) {
+      throw new Error("Rust live player view contradicts the bootstrapped player identity");
+    }
+    const priorRevision = this.rustLivePlayerViewExtractionRevisionR10;
+    if (priorRevision !== null && view.extractionRevision <= priorRevision) {
+      throw new Error("Rust live player view extraction revision did not advance");
+    }
+    const priorView = this.rustLivePlayerPresentationViewR10;
+    if (priorView && (view.authorityTick <= priorView.authorityTick
+      || view.entityRevision < priorView.entityRevision
+      || view.inventoryContainer !== priorView.inventoryContainer
+      || view.inventoryContainerRevision < priorView.inventoryContainerRevision
+      || view.equipmentContainer !== priorView.equipmentContainer
+      || view.equipmentContainerRevision < priorView.equipmentContainerRevision
+      || view.backSlot !== priorView.backSlot
+      || view.lastInputSequence < priorView.lastInputSequence)) {
+      throw new Error("Rust live player view regressed its authoritative player or custody continuity");
+    }
+    const diagnostics = pump.diagnostics();
+    if (view.authorityTick !== BigInt(diagnostics.lastAuthorityTick)
+      || view.selectedSlot !== diagnostics.selectedSlot
+      || view.authoritativeFlags !== diagnostics.authoritativeFlags
+      || view.lastInputSequence !== BigInt(diagnostics.nextInputSequence - 1)) {
+      throw new Error("Rust live player view contradicts the exact input-pump continuity");
+    }
+    this.projectRustLivePlayerViewR10(view);
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "player view commit");
+    this.rustLivePlayerPresentationViewR10 = view;
+    this.rustLivePlayerViewExtractionRevisionR10 = view.extractionRevision;
+    return view;
+  }
+
+  private reapplyRustLivePlayerViewR10(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+  ) {
+    const pump = this.rustLiveInputPump;
+    const view = this.rustLivePlayerPresentationViewR10;
+    if (!pump || !view || view.extractionRevision !== this.rustLivePlayerViewExtractionRevisionR10) {
+      throw new Error("Rust live player view is absent before the compatibility mirror can open");
+    }
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "player view reapplication");
+    this.projectRustLivePlayerViewR10(view);
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "player view reapplication commit");
+  }
+
+  private rustLiveInputIntentR5(pump: RustLiveInputPumpR5): RustLiveInputIntentR5 {
+    const flying = (pump.diagnostics().authoritativeFlags & RUST_RUNTIME_INPUT_FLAG_V1.flying) !== 0;
+    const jump = this.keys.has("Space");
+    const down = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
+    const look = this.rustLiveLookIntentR5 ?? Object.freeze({ yawRadians: this.yaw, pitchRadians: this.pitch });
+    return Object.freeze({
+      moveX: (this.keys.has("KeyD") ? 1 : 0) - (this.keys.has("KeyA") ? 1 : 0),
+      moveZ: (this.keys.has("KeyW") ? 1 : 0) - (this.keys.has("KeyS") ? 1 : 0),
+      yawRadians: look.yawRadians,
+      pitchRadians: look.pitchRadians,
+      selectedSlot: this.rustLiveSelectedSlotIntentR5 ?? this.selected,
+      held: Object.freeze({
+        jump: !flying && jump,
+        crouch: !flying && down,
+        sprint: this.keys.has("ControlLeft") || this.keys.has("ControlRight") || this.sprintLatched,
+        ascend: flying && jump,
+        descend: flying && down,
+      }),
+      actions: Object.freeze({
+        primaryAttack: this.mineHeld,
+        secondaryUse: this.rustSecondaryUseHeld,
+        // No existing browser gesture has an independent interact semantic;
+        // right-click is secondary use. Keep this unsupported R5 action
+        // fail-closed instead of dispatching two actions for one gesture.
+        interact: false,
+        // R10 does not expose an exact mount-target binding. Sending this
+        // action would make an applied native mount impossible to present.
+        mountToggle: false,
+        creativeFlightToggle: this.rustCreativeFlightTogglePulse,
+        drop: this.rustDropPulse,
+      }),
+    });
+  }
+
+  private enqueueRustLiveRendererExtractionR10(entry: RustLiveRendererExtractionQueueEntryR10) {
+    if (this.rustLiveRendererExtractionQueue.length >= RUST_LIVE_RENDER_EXTRACTION_QUEUE_CAP_R10) {
+      this.quarantineRustLiveRendererR10(
+        new Error("Rust live renderer extraction queue exceeded its bounded presentation capacity"),
+        this.rustLiveRenderRuntime,
+      );
+      return false;
+    }
+    this.rustLiveRendererExtractionQueue.push(Object.freeze(entry));
+    return true;
+  }
+
+  private scheduleRustLiveInputAdvanceR5() {
+    const pump = this.rustLiveInputPump;
+    const host = this.rustRuntimeHost;
+    const generation = this.rustLivePlayerAuthorityGeneration;
+    if (!pump || !host || generation === null || !this.rustLivePlayerAuthorityEnabledR5()
+      || this.rustLiveInputAdvance) return;
+    try {
+      pump.sample(generation, this.rustLiveInputIntentR5(pump));
+      this.rustCreativeFlightTogglePulse = false;
+      this.rustDropPulse = false;
+    } catch (error) {
+      this.quarantineRustLivePlayerAuthorityR5(error, pump);
+      return;
+    }
+    const operation = (async () => {
+      const result = await pump.advance(generation);
+      if (result.discarded || generation !== this.rustRuntimeTransitionGeneration || this.disposed
+        || pump !== this.rustLiveInputPump || host !== this.rustRuntimeHost
+        || !this.rustLivePlayerAuthorityEnabledR5()) return;
+      if (result.extraction) {
+        this.applyRustLivePlayerExtractionR10(generation, host, pump, result.extraction);
+      }
+      if (result.extraction && this.rustLiveRenderRuntime) {
+        this.enqueueRustLiveRendererExtractionR10({ generation, host, pump, extraction: result.extraction });
+      }
+    })();
+    this.rustLiveInputAdvance = operation;
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error) => this.quarantineRustLivePlayerAuthorityR5(error, pump)).finally(() => {
+      if (this.rustLiveInputAdvance === operation) this.rustLiveInputAdvance = null;
+    });
+  }
+
+  private quarantineRustLivePlayerAuthorityR5(error: unknown, expected: RustLiveInputPumpR5) {
+    if (this.rustLiveInputPump !== expected) return;
+    this.rustRuntimeOperationsBlocked = true;
+    this.rustLivePlayerAuthorityState = "blocked";
+    this.rustLivePlayerAuthorityLastError = error instanceof Error ? error.message : String(error);
+    this.running = false;
+    this.paused = true;
+    this.clearInput();
+    this.rustLiveRendererExtractionQueue.length = 0;
+    void this.trackRustAuthorityOperation(expected.stop());
+  }
+
   /**
    * Copies camera/environment and the world's immutable terrain-page snapshot
    * into Extraction V2. This never traverses `scene`, Three geometry/materials,
@@ -4865,6 +5218,48 @@ export class VoxelEngine {
     });
   }
 
+  private scheduleRustLiveInputExtractionPresentationR10(
+    runtime: RustLiveRenderRuntimeR10,
+    pending: RustLiveRendererExtractionQueueEntryR10,
+    context: Readonly<Pick<RenderEntityFrameContextR10, "animationTimeMicros" | "camera" | "environment">>,
+  ) {
+    if (this.rustRenderExtractionPoll) return;
+    const { generation, host, pump, extraction } = pending;
+    const operation = (async () => {
+      const frameSequence = this.rustRenderFrameSequence + BigInt(1);
+      if (frameSequence > BigInt("0xffffffffffffffff")) {
+        throw new RangeError("Rust renderer extraction frame sequence exhausted u64");
+      }
+      const accepted = await runtime.submitRuntimeExtraction(generation, extraction, Object.freeze({
+        epoch: runtime.epoch,
+        frameSequence,
+        simulationTick: BigInt(extraction.identity.tick),
+        animationTimeMicros: context.animationTimeMicros,
+        camera: context.camera,
+        environment: context.environment,
+      }));
+      if (!accepted) throw new Error("Rust live renderer rejected the input pump extraction");
+      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
+        || runtime !== this.rustLiveRenderRuntime || host !== this.rustRuntimeHost
+        || pump !== this.rustLiveInputPump || this.rustRuntimeOperationsBlocked) return;
+      this.rustRenderExtractionRevision = extraction.extractionRevision;
+      this.rustRenderFrameSequence = frameSequence;
+      if (this.rustLiveRendererExtractionQueue[0] !== pending) {
+        throw new Error("Rust live renderer extraction queue lost canonical order");
+      }
+      this.rustLiveRendererExtractionQueue.shift();
+    })();
+    this.rustRenderExtractionPoll = operation;
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error) => {
+      if (generation === this.rustRuntimeTransitionGeneration && runtime === this.rustLiveRenderRuntime) {
+        this.quarantineRustLiveRendererR10(error, runtime);
+      }
+    }).finally(() => {
+      if (this.rustRenderExtractionPoll === operation) this.rustRenderExtractionPoll = null;
+    });
+  }
+
   publishRendererExtractionR11(now: number) {
     const sink = this.renderExtraction;
     if (!sink || now < this.renderExtractionNextAt) return;
@@ -4905,11 +5300,18 @@ export class VoxelEngine {
       if (runtime && host && generation !== null) {
         const environment = sink.diagnostics().environment;
         if (!environment) throw new Error("Rust terrain publisher did not expose its canonical frame environment");
-        this.scheduleRustRendererExtractionR10(runtime, host, generation, Object.freeze({
+        const context = Object.freeze({
           animationTimeMicros: snapshot.animationTimeMicros,
           camera: snapshot.camera,
           environment,
-        }));
+        });
+        const pending = this.rustLiveRendererExtractionQueue[0];
+        if (pending && pending.generation === generation && pending.host === host
+          && pending.pump === this.rustLiveInputPump) {
+          this.scheduleRustLiveInputExtractionPresentationR10(runtime, pending, context);
+        } else if (!this.rustLiveInputPump) {
+          this.scheduleRustRendererExtractionR10(runtime, host, generation, context);
+        }
       }
       this.renderExtractionLastError = null;
     } catch (error) {
@@ -5040,6 +5442,7 @@ export class VoxelEngine {
     }
     if (event.button === 0) {
       this.mineHeld = true;
+      if (this.rustLivePlayerAuthorityEnabledR5()) return;
       if (ITEMS[this.selectedSlot()?.item ?? -1]?.useKind === "ranged-weapon") {
         this.fireSelectedRangedWeapon();
         this.mineHeld = false;
@@ -5049,6 +5452,10 @@ export class VoxelEngine {
         this.mineHeld = false;
       }
     } else if (event.button === 2) {
+      if (this.rustLivePlayerAuthorityEnabledR5()) {
+        this.rustSecondaryUseHeld = true;
+        return;
+      }
       if (ITEMS[this.selectedSlot()?.item ?? -1]?.useKind === "ranged-weapon") {
         this.aimingRanged = true;
         this.emitHud(true);
@@ -5063,7 +5470,7 @@ export class VoxelEngine {
         this.emitHud(true);
       }
     }
-    else if (event.button === 1) this.pickTarget();
+    else if (event.button === 1 && !this.rustLivePlayerAuthorityEnabledR5()) this.pickTarget();
   };
 
   onMouseUp = (event: MouseEvent) => {
@@ -5072,6 +5479,7 @@ export class VoxelEngine {
       this.miningProgress = 0;
       this.emitHud(true);
     } else if (event.button === 2) {
+      this.rustSecondaryUseHeld = false;
       if (this.aimingRanged) this.aimingRanged = false;
       this.offhandUseHeld = false;
       this.localPlayerModel.setOffhandRaised(false);
@@ -5082,7 +5490,10 @@ export class VoxelEngine {
   onWheel = (event: WheelEvent) => {
     if (!this.running || this.titleMode || this.paused || this.gameplayOverlayOpen) return;
     event.preventDefault();
-    this.selectSlot(this.selected + (event.deltaY > 0 ? 1 : -1));
+    const selected = this.rustLivePlayerAuthorityEnabledR5()
+      ? this.rustLiveSelectedSlotIntentR5 ?? this.selected
+      : this.selected;
+    this.selectSlot(selected + (event.deltaY > 0 ? 1 : -1));
   };
 
   onKeyDown = (event: KeyboardEvent) => {
@@ -5092,6 +5503,32 @@ export class VoxelEngine {
     // multiplayer, where opening a menu intentionally does not pause the host.
     if (this.titleMode || this.paused || this.gameplayOverlayOpen) return;
     if (["KeyW", "KeyA", "KeyS", "KeyD", "Space", "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "KeyF", "KeyQ", "KeyZ", "KeyX", "KeyC"].includes(event.code)) event.preventDefault();
+    if (this.rustLivePlayerAuthorityEnabledR5()) {
+      // Once native player authority is live, unsupported legacy actions are
+      // deliberately inert. Only the exact R5 input vocabulary may proceed.
+      if (event.code === "KeyG" && !event.repeat) this.rustDropPulse = true;
+      else if (event.code === "KeyF") event.preventDefault();
+      else if (event.code === "KeyV" && !event.repeat) this.cycleCameraMode();
+      else if (event.code === "KeyH" && !event.repeat) {
+        this.events.onToast("WASD move · Space jump/swim · Shift crouch · Ctrl sprint · V camera · Left harvest/attack · Right use/build · G drop");
+      } else if (event.code === "F3" && !event.repeat) {
+        event.preventDefault();
+        this.debug = !this.debug;
+        this.emitHud(true);
+      } else if (event.code.startsWith("Digit")) {
+        const slot = Number(event.code.slice(5)) - 1;
+        if (slot >= 0 && slot < 9) this.selectSlot(slot);
+      } else if (["KeyW", "KeyA", "KeyS", "KeyD", "Space", "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight"].includes(event.code)) {
+        if (event.code === "KeyW" && !event.repeat && !this.keys.has("KeyW")) {
+          const now = performance.now();
+          this.sprintLatched = isDoubleForwardTap(this.lastForwardTap, now);
+          this.lastForwardTap = now;
+        }
+        if (event.code === "Space" && !event.repeat && !this.keys.has("Space")) this.recordCreativeFlightTap(performance.now());
+        this.keys.add(event.code);
+      }
+      return;
+    }
     if (event.code === "KeyE" && !event.repeat) {
       this.openOverlay("inventory");
       return;
@@ -5128,7 +5565,10 @@ export class VoxelEngine {
       this.startRangedReload();
       return;
     }
-    if (event.code === "KeyG" && !event.repeat) this.dropSelectedItem();
+    if (event.code === "KeyG" && !event.repeat) {
+      if (this.rustLivePlayerAuthorityEnabledR5()) this.rustDropPulse = true;
+      else this.dropSelectedItem();
+    }
     const mountedDragon = this.mountedCreatureId === null ? null : this.mobs.find((mob) => mob.id === this.mountedCreatureId && mob.dragonState) ?? null;
     if (mountedDragon?.dragonState && !event.repeat && Object.values(DRAGON_RIDER_CONTROLS).includes(event.code as typeof DRAGON_RIDER_CONTROLS[keyof typeof DRAGON_RIDER_CONTROLS])) {
       const plan = riderDragonAttack(mountedDragon.dragonState, this.localPlayerId(), event.code);
@@ -5175,6 +5615,11 @@ export class VoxelEngine {
   };
 
   onKeyUp = (event: KeyboardEvent) => {
+    if (this.rustLivePlayerAuthorityEnabledR5()) {
+      this.keys.delete(event.code);
+      if (event.code === "KeyW") this.sprintLatched = false;
+      return;
+    }
     if (event.code === "KeyQ") {
       const transition = releaseSpellKey(this.spellKeyState, performance.now());
       this.spellKeyState = transition.state;
@@ -5190,11 +5635,16 @@ export class VoxelEngine {
   };
   clearInput = () => {
     this.keys.clear();
+    this.mineHeld = false;
+    this.miningProgress = 0;
     this.sprintLatched = false;
     this.lastCreativeJumpTap = -Infinity;
     this.spellKeyState = createSpellKeyState();
     this.spellWheelOpen = false;
     this.offhandUseHeld = false;
+    this.rustSecondaryUseHeld = false;
+    this.rustCreativeFlightTogglePulse = false;
+    this.rustDropPulse = false;
     this.localPlayerModel.setOffhandRaised(false);
     this.resetLookFrameBudget();
   };
@@ -5221,9 +5671,25 @@ export class VoxelEngine {
     );
     this.lookDeltaXThisFrame = bounded.totalX;
     this.lookDeltaYThisFrame = bounded.totalY;
-    this.yaw -= bounded.deltaX * this.settings.sensitivity;
-    this.pitch -= bounded.deltaY * this.settings.sensitivity;
-    this.pitch = clamp(this.pitch, -Math.PI / 2 + 0.04, Math.PI / 2 - 0.04);
+    const live = this.rustLivePlayerAuthorityEnabledR5();
+    const source = live && this.rustLiveLookIntentR5
+      ? this.rustLiveLookIntentR5
+      : Object.freeze({ yawRadians: this.yaw, pitchRadians: this.pitch });
+    const yawRadians = source.yawRadians - bounded.deltaX * this.settings.sensitivity;
+    const pitchRadians = clamp(
+      source.pitchRadians - bounded.deltaY * this.settings.sensitivity,
+      -Math.PI / 2 + 0.04,
+      Math.PI / 2 - 0.04,
+    );
+    if (live) {
+      this.rustLiveLookIntentR5 = Object.freeze({ yawRadians, pitchRadians });
+      this.rustLiveLookIntentPendingR5 = true;
+      this.yaw = yawRadians;
+      this.pitch = pitchRadians;
+      return;
+    }
+    this.yaw = yawRadians;
+    this.pitch = pitchRadians;
   }
 
   resetLookFrameBudget() {
@@ -5260,6 +5726,8 @@ export class VoxelEngine {
   }
 
   setVirtualKey(code: string, down: boolean) {
+    if (this.rustLivePlayerAuthorityEnabledR5()
+      && !["KeyW", "KeyA", "KeyS", "KeyD", "Space", "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight"].includes(code)) return;
     if (down) {
       if (code === "KeyW" && !this.keys.has(code)) {
         const now = performance.now();
@@ -5276,10 +5744,14 @@ export class VoxelEngine {
 
   setMining(down: boolean) {
     this.mineHeld = down;
-    if (!down) this.miningProgress = 0;
+    if (!down && !this.rustLivePlayerAuthorityEnabledR5()) this.miningProgress = 0;
   }
 
   setOffhandUse(down: boolean) {
+    if (this.rustLivePlayerAuthorityEnabledR5()) {
+      this.rustSecondaryUseHeld = down;
+      return;
+    }
     if (!down) {
       this.offhandUseHeld = false;
       this.localPlayerModel.setOffhandRaised(false);
@@ -5297,6 +5769,12 @@ export class VoxelEngine {
   }
 
   jump() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) {
+      this.recordCreativeFlightTap(performance.now());
+      this.keys.add("Space");
+      window.setTimeout(() => this.keys.delete("Space"), 130);
+      return;
+    }
     if (this.mountedCreatureId !== null) { this.dismountCreature(); return; }
     if (this.mountedBoatId) { this.dismountBoat(); return; }
     this.recordCreativeFlightTap(performance.now());
@@ -5306,6 +5784,14 @@ export class VoxelEngine {
 
   private recordCreativeFlightTap(now: number) {
     if (this.mode !== "builder" || this.mountedCreatureId !== null || this.mountedBoatId !== null || this.seatedAt) return;
+    if (this.rustLivePlayerAuthorityEnabledR5()) {
+      const flying = ((this.rustLiveInputPump?.diagnostics().authoritativeFlags ?? 0)
+        & RUST_RUNTIME_INPUT_FLAG_V1.flying) !== 0;
+      const transition = resolveCreativeFlightTap(flying, this.lastCreativeJumpTap, now);
+      this.lastCreativeJumpTap = transition.previousTap;
+      if (transition.toggled) this.rustCreativeFlightTogglePulse = true;
+      return;
+    }
     const transition = resolveCreativeFlightTap(this.creativeFlying, this.lastCreativeJumpTap, now);
     this.lastCreativeJumpTap = transition.previousTap;
     if (!transition.toggled) return;
@@ -5427,6 +5913,16 @@ export class VoxelEngine {
       nativePersistenceWorldId: this.rustNativePersistenceWorldId,
       hydration: this.rustRuntimeHydrationState,
       manager: this.rustRuntimeManager.diagnostics(),
+      playerAuthority: Object.freeze({
+        state: this.rustLivePlayerAuthorityState,
+        worldGeneration: this.rustLivePlayerAuthorityGeneration,
+        entityId: this.rustLivePlayerEntityId,
+        terrainChunkCount: this.rustLivePlayerTerrainChunkCount,
+        advanceInFlight: this.rustLiveInputAdvance !== null,
+        pendingRendererExtraction: this.rustLiveRendererExtractionQueue.length > 0,
+        lastError: this.rustLivePlayerAuthorityLastError,
+        pump: this.rustLiveInputPump?.diagnostics() ?? null,
+      }),
       renderer: this.getRustLiveRenderDiagnosticsR10(),
       multiplayer: Object.freeze({
         authorityDeltaSequence: Math.max(0, ...this.rustPeerDeltaSequences.values()),
@@ -5457,8 +5953,12 @@ export class VoxelEngine {
   }
 
   private trackRustAuthorityOperation<T>(operation: Promise<T>) {
-    this.rustAuthorityOperations.add(operation);
-    void operation.finally(() => this.rustAuthorityOperations.delete(operation)).catch(() => undefined);
+    // Partial lifecycle harnesses instantiate the prototype without running the
+    // browser constructor. Production initializes this eagerly; tests recover
+    // the same bounded tracker lazily instead of bypassing drain semantics.
+    const operations = this.rustAuthorityOperations ??= new Set<Promise<unknown>>();
+    operations.add(operation);
+    void operation.finally(() => operations.delete(operation)).catch(() => undefined);
     return operation;
   }
 
@@ -5485,6 +5985,290 @@ export class VoxelEngine {
     if (!result.ok) throw new Error(result.error.message);
   }
 
+  private assertRustLiveGenerationR5(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    stage: string,
+  ) {
+    if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
+      || host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") {
+      throw new Error(`Rust player authority was superseded during ${stage}`);
+    }
+  }
+
+  private rustPlayerCompatibilityInventoryR5(
+    inventory: readonly (InventorySlot | null)[],
+    selectedSlot: number,
+    equipment: Partial<Record<EquipmentSlot, InventorySlot | null>> = {},
+    offhand: InventorySlot | null = null,
+    cursor: InventorySlot | null = null,
+    trash: InventorySlot | null = null,
+    craftGrid: readonly (InventorySlot | null)[] = [],
+  ): RustPlayerCompatibilityInventoryV1 {
+    const slot = (value: InventorySlot | null | undefined): RustPlayerCompatibilityInventorySlotV1 | null => value
+      ? Object.freeze({
+        item: value.item,
+        count: value.count,
+        ...(value.durability !== undefined ? { durability: value.durability } : {}),
+        ...(value.metadata !== undefined ? { metadata: value.metadata } : {}),
+      })
+      : null;
+    return Object.freeze({
+      slots: Object.freeze(Array.from({ length: INVENTORY_SIZE }, (_, index) => slot(inventory[index]))),
+      selectedSlot,
+      equipment: Object.freeze({
+        head: slot(equipment.head),
+        chest: slot(equipment.chest),
+        legs: slot(equipment.legs),
+        feet: slot(equipment.feet),
+      }),
+      offhand: slot(offhand),
+      cursor: slot(cursor),
+      trash: slot(trash),
+      craftGrid: Object.freeze(Array.from({ length: 9 }, (_, index) => slot(craftGrid[index]))),
+    });
+  }
+
+  private assertAuthoritativeRustPlayerStatusR5(
+    observation: RustIntegratedPlayerBootstrapObservationV1,
+    expected: ReturnType<typeof deriveRustPlayerBootstrapCompatibilityIdentityV1>,
+  ) {
+    const entity = observation.entity;
+    const runtimePlayer = observation.runtimePlayer;
+    const worldView = observation.worldViewBinding;
+    const custody = observation.custody;
+    if (!entity || !runtimePlayer || !worldView || custody.status !== "present") {
+      throw new Error("Rust player status is partial; native entity, binding, world view, and custody must all be present");
+    }
+    if (entity.residency !== "hot"
+      || entity.record.class !== "player"
+      || entity.record.externalEntityId !== expected.externalEntityId
+      || entity.record.locationId !== expected.locationId
+      || runtimePlayer.entityId !== entity.entityId
+      || runtimePlayer.binding.externalEntityId !== expected.externalEntityId
+      || runtimePlayer.binding.actorId !== expected.actorId
+      || runtimePlayer.binding.playerId !== expected.playerId
+      || worldView.entityId !== entity.entityId
+      || worldView.actorId !== expected.actorId
+      || worldView.playerId !== expected.playerId
+      || worldView.inventoryContainer.kind !== "player"
+      || worldView.inventoryContainer.id !== expected.actorId
+      || worldView.inventoryContainer.ownerId !== expected.actorId
+      || custody.inventoryContainer.kind !== worldView.inventoryContainer.kind
+      || custody.inventoryContainer.id !== worldView.inventoryContainer.id
+      || custody.inventoryContainer.ownerId !== worldView.inventoryContainer.ownerId
+      || custody.equipmentContainer.kind !== worldView.equipmentContainer.kind
+      || custody.equipmentContainer.id !== worldView.equipmentContainer.id
+      || custody.equipmentContainer.ownerId !== worldView.equipmentContainer.ownerId) {
+      throw new Error("Rust player status contradicts the active character identity or native custody graph");
+    }
+    return entity;
+  }
+
+  private async activateRustLivePlayerAuthorityR5(
+    input: Parameters<RustLivePlayerAuthorityActivationHookV1>[0],
+  ) {
+    const { generation, kind, save, host } = input;
+    const service = host.runtimeService();
+    this.rustLivePlayerAuthorityState = "starting";
+    this.rustLivePlayerAuthorityGeneration = generation;
+    this.rustLivePlayerAuthorityLastError = null;
+    this.rustLivePlayerEntityId = null;
+    this.rustLivePlayerTerrainChunkCount = 0;
+    this.rustLivePlayerAttestationR10 = null;
+    this.rustLivePlayerPresentationViewR10 = null;
+    this.rustLivePlayerViewExtractionRevisionR10 = null;
+    this.rustLivePlayerInitialYawRadiansR10 = null;
+    this.rustLiveSelectedSlotIntentR5 = null;
+    this.rustLiveSelectedSlotIntentPendingR5 = false;
+    this.rustLiveLookIntentR5 = null;
+    this.rustLiveLookIntentPendingR5 = false;
+    const diagnostics = service.diagnostics();
+    const capabilities = new Set(diagnostics.capabilities);
+    const required = [
+      "fixed-step-input-v1",
+      "bounded-extraction-v1",
+      "terrain-residency-reconcile-v2",
+      "entity-compatibility-bridge-v1",
+      "gameplay-command-v1",
+    ] as const;
+    if (!diagnostics.authoritative || !diagnostics.contentReady || !diagnostics.liveAuthorityReady
+      || required.some((capability) => !capabilities.has(capability))) {
+      const pendingInput = capabilities.has("fixed-step-input-v1-pending-live-cutover")
+        ? " (the artifact still advertises fixed-step-input-v1-pending-live-cutover)"
+        : "";
+      throw new Error(`Rust player authority capabilities are not promotion-ready${pendingInput}`);
+    }
+    const profile = this.activeCharacterProfile;
+    if (!profile) throw new Error("Rust player authority requires an active character profile");
+    const identitySource = Object.freeze({
+      universeKey: host.config.universeId,
+      locationKey: host.config.locationId,
+      commandActorId: "runtime:bootstrap",
+    });
+    const expected = deriveRustPlayerBootstrapCompatibilityIdentityV1(profile, identitySource);
+    let observation = await queryRustPlayerBootstrapIdentityStatusV1(service, {
+      commandActorId: "runtime:bootstrap-status",
+      externalEntityId: expected.externalEntityId,
+      actorId: expected.actorId,
+      playerId: expected.playerId,
+    });
+    this.assertRustLiveGenerationR5(generation, host, "identity status");
+
+    if (observation.entity === null) {
+      const plan = kind === "create"
+        ? createRustPlayerBootstrapNewWorldCompatibilityV1(profile, Object.freeze({
+          schema: 1 as const,
+          kind: "new-world" as const,
+          ...identitySource,
+          mode: this.mode,
+          position: Object.freeze({ x: this.position.x, y: this.position.y, z: this.position.z }),
+          yaw: this.yaw,
+          inventory: this.rustPlayerCompatibilityInventoryR5(
+            this.inventory, this.selected, this.equipment, this.offhand, this.cursor, this.trash, this.craftGrid,
+          ),
+        }))
+        : migrateRustPlayerBootstrapRichSaveCompatibilityV1(profile, Object.freeze({
+          schema: 1 as const,
+          kind: "rich-save" as const,
+          ...identitySource,
+          mode: save?.mode === "builder" ? "builder" as const : "survival" as const,
+          position: Object.freeze({
+            x: save?.player?.x ?? Number.NaN,
+            y: save?.player?.y ?? Number.NaN,
+            z: save?.player?.z ?? Number.NaN,
+          }),
+          yaw: save?.player?.yaw ?? Number.NaN,
+          inventory: this.rustPlayerCompatibilityInventoryR5(
+            save?.inventory ?? [], save?.selected ?? 0, save?.equipment, save?.offhand,
+            save?.cursor, save?.trash, save?.craftGrid,
+          ),
+          // WorldSave V2 never attested these native continuity fields. Null is
+          // deliberate: an absent restored native player must remain unopened.
+          ownerActorId: null,
+          explorationLevel: null,
+          hasTimedMovementModifiers: null,
+          continuity: Object.freeze({ velocity: null, health: null, ageTicks: null, grounded: null }),
+        }));
+      await executeRustIntegratedPlayerBootstrapV1(service, observation, plan.intent);
+      this.assertRustLiveGenerationR5(generation, host, "player bootstrap");
+      observation = await queryRustPlayerBootstrapIdentityStatusV1(service, {
+        commandActorId: "runtime:bootstrap-status",
+        externalEntityId: expected.externalEntityId,
+        actorId: expected.actorId,
+        playerId: expected.playerId,
+      });
+      this.assertRustLiveGenerationR5(generation, host, "post-bootstrap status");
+    }
+
+    let entity = this.assertAuthoritativeRustPlayerStatusR5(observation, expected);
+    const centerX = Math.floor(entity.record.position.x / CHUNK_SIZE);
+    const centerZ = Math.floor(entity.record.position.z / CHUNK_SIZE);
+    const desiredChunks = Object.freeze(Array.from({ length: 25 }, (_, index) => Object.freeze({
+      chunkX: centerX + Math.floor(index / 5) - 2,
+      chunkZ: centerZ + index % 5 - 2,
+    })));
+    const terrain = new RustIntegratedTerrainResidencyPortV1(service);
+    const reconciled = await terrain.reconcile({
+      expectedWorldRevision: observation.worldAuthorityRevision,
+      generationOptionsJson: host.config.generationOptionsJson,
+      desiredChunks,
+    });
+    this.assertRustLiveGenerationR5(generation, host, "terrain reconciliation");
+    if (reconciled.desiredChunkCount !== 25 || reconciled.residentSections !== 25 * 12) {
+      throw new Error("Rust terrain reconciliation did not attest the complete 5x5 player ring");
+    }
+
+    observation = await queryRustPlayerBootstrapIdentityStatusV1(service, {
+      commandActorId: "runtime:bootstrap-status",
+      externalEntityId: expected.externalEntityId,
+      actorId: expected.actorId,
+      playerId: expected.playerId,
+    });
+    this.assertRustLiveGenerationR5(generation, host, "post-terrain player status");
+    entity = this.assertAuthoritativeRustPlayerStatusR5(observation, expected);
+    const worldView = observation.worldViewBinding!;
+    const lastInput = observation.continuity.lastAppliedInput;
+    const yawRadians = lastInput
+      ? lastInput.lookYaw / RUST_LIVE_INPUT_AXIS_DIVISOR_R5 * Math.PI
+      : entity.record.yaw;
+    const pitchRadians = lastInput
+      ? lastInput.lookPitch / RUST_LIVE_INPUT_AXIS_DIVISOR_R5 * (Math.PI / 2)
+      : 0;
+    if (!Number.isFinite(entity.record.yaw) || !Number.isFinite(yawRadians) || !Number.isFinite(pitchRadians)) {
+      throw new Error("Rust player status contains no exact look-intent baseline");
+    }
+    this.rustLivePlayerAttestationR10 = Object.freeze({
+      externalEntityId: expected.externalEntityId,
+      actorId: expected.actorId,
+      playerId: expected.playerId,
+      entityId: entity.entityId,
+      creativeMode: observation.runtimePlayer!.binding.creativeMode,
+      maximumOxygenSeconds: observation.runtimePlayer!.binding.maximumOxygenSeconds,
+      maximumHealth: entity.record.maximumHealth,
+      radius: observation.runtimePlayer!.binding.radius,
+      standingHeight: observation.runtimePlayer!.binding.standingHeight,
+      crouchingHeight: observation.runtimePlayer!.binding.crouchingHeight,
+      mass: observation.runtimePlayer!.binding.mass,
+    });
+    this.rustLivePlayerInitialYawRadiansR10 = entity.record.yaw;
+    this.rustLiveSelectedSlotIntentR5 = worldView.selectedSlot;
+    this.rustLiveLookIntentR5 = Object.freeze({ yawRadians, pitchRadians });
+    const pump = createRustLiveInputPumpR5({ service, status: observation, worldGeneration: generation });
+    this.rustLiveInputPump = pump;
+    try {
+      // Seed the first fixed step from exact BWS5 continuity/entity state. This
+      // preserves a restored native yaw and selected slot instead of sampling
+      // compatibility-mirror fields that have not opened yet.
+      pump.sample(generation, this.rustLiveInputIntentR5(pump));
+      const initial = await pump.syncInitial(generation);
+      this.assertRustLiveGenerationR5(generation, host, "initial input synchronization");
+      if (initial.discarded || !initial.step || !initial.extraction) {
+        throw new Error("Rust initial input synchronization did not return an authoritative extraction");
+      }
+      this.applyRustLivePlayerExtractionR10(generation, host, pump, initial.extraction);
+      this.enqueueRustLiveRendererExtractionR10({
+        generation,
+        host,
+        pump,
+        extraction: initial.extraction,
+      });
+      this.rustLivePlayerEntityId = entity.entityId;
+      this.rustLivePlayerTerrainChunkCount = reconciled.desiredChunkCount;
+      this.rustLivePlayerAuthorityState = "ready";
+    } catch (error) {
+      await pump.stop().catch(() => undefined);
+      if (this.rustLiveInputPump === pump) this.rustLiveInputPump = null;
+      throw error;
+    }
+  }
+
+  private async stopRustLivePlayerAuthorityR5() {
+    const pump = this.rustLiveInputPump;
+    this.rustLiveInputPump = null;
+    this.rustLiveRendererExtractionQueue.length = 0;
+    this.rustLivePlayerAuthorityState = "none";
+    this.rustLivePlayerAuthorityGeneration = null;
+    this.rustLivePlayerEntityId = null;
+    this.rustLivePlayerTerrainChunkCount = 0;
+    this.rustLivePlayerAttestationR10 = null;
+    this.rustLivePlayerPresentationViewR10 = null;
+    this.rustLivePlayerViewExtractionRevisionR10 = null;
+    this.rustLivePlayerInitialYawRadiansR10 = null;
+    this.rustLiveSelectedSlotIntentR5 = null;
+    this.rustLiveSelectedSlotIntentPendingR5 = false;
+    this.rustLiveLookIntentR5 = null;
+    this.rustLiveLookIntentPendingR5 = false;
+    this.rustSecondaryUseHeld = false;
+    this.rustCreativeFlightTogglePulse = false;
+    this.rustDropPulse = false;
+    this.mineHeld = false;
+    this.miningProgress = 0;
+    if (pump) await pump.stop();
+    if (this.rustLiveInputAdvance) await Promise.allSettled([this.rustLiveInputAdvance]);
+    this.rustLiveInputAdvance = null;
+  }
+
   private async shutdownBoundNativePersistence() {
     this.rustNativePersistenceWorldId = null;
     // Optional only for deliberately partial lifecycle harnesses; every real
@@ -5507,6 +6291,7 @@ export class VoxelEngine {
     this.rustRenderFrameSequence = BigInt(0);
     this.rustRenderExtractionPoll = null;
     this.renderExtractionNextAt = 0;
+    this.rustLiveRendererExtractionQueue.length = 0;
     if (!runtime) return;
     try {
       await runtime.drain();
@@ -5525,6 +6310,7 @@ export class VoxelEngine {
     if (expected && this.rustLiveRenderRuntime !== expected) return;
     const runtime = this.rustLiveRenderRuntime;
     this.rustLiveRenderRuntime = null;
+    this.rustLiveRendererExtractionQueue.length = 0;
     this.renderExtraction = null;
     this.rustRenderWorldGeneration = null;
     this.rustRenderWorldEpoch = null;
@@ -5602,6 +6388,7 @@ export class VoxelEngine {
     this.running = false;
     this.paused = true;
     this.clearInput();
+    await this.stopRustLivePlayerAuthorityR5();
     if (this.persistent && this.activeWorldId) this.saveNow(false);
     await this.worldStorage.flushPersistence();
     await this.closeMultiplayerForRustTransition(reason);
@@ -5637,15 +6424,32 @@ export class VoxelEngine {
       }
       this.rustRuntimeHost = host;
       this.rustRuntimeHydrationState = kind === "create" ? "new-world" : "restored";
+      // Object.create-based lifecycle harnesses predate the production player
+      // authority gate and intentionally omit this injected member. Every real
+      // engine instance installs the strict production hook in the constructor.
+      await this.rustLivePlayerAuthorityActivation?.({ generation, kind, save, host });
+      this.assertRustLiveGenerationR5(generation, host, "player authority activation");
+      if (this.rustLivePlayerAuthorityProductionGate === true
+        && this.rustLivePlayerAuthorityState !== "ready") {
+        throw new Error("Rust player authority did not attest its complete production gate");
+      }
       await this.trackRustAuthorityOperation(this.activateRustLiveRendererR10(generation, host));
       if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
         || host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") {
         throw new Error("Rust world activation was superseded during renderer composition startup");
       }
+      // Extraction validation remains owned by the pump even when no native
+      // composer was configured. Do not let a presentation-only backlog stall
+      // the sole fixed-step producer.
+      if (!this.rustLiveRenderRuntime) this.rustLiveRendererExtractionQueue.length = 0;
       return host;
     } catch (error) {
       this.rustRuntimeHost = null;
       this.rustRuntimeHydrationState = "blocked";
+      this.rustLivePlayerAuthorityState = "blocked";
+      this.rustLivePlayerAuthorityLastError = error instanceof Error ? error.message : String(error);
+      await this.stopRustLivePlayerAuthorityR5().catch(() => undefined);
+      this.rustLivePlayerAuthorityState = "blocked";
       await this.disposeRustLiveRendererR10();
       await this.shutdownBoundNativePersistence().catch(() => undefined);
       await this.rustRuntimeManager.shutdown().catch(() => undefined);
@@ -5706,7 +6510,7 @@ export class VoxelEngine {
     if (!worldId) throw new Error("A durable world ID is required before Rust save hydration");
     const generation = ++this.rustRuntimeTransitionGeneration;
     await this.prepareRustWorldTransition("world-load");
-    await this.activateRustWorldRuntime(
+    const host = await this.activateRustWorldRuntime(
       generation,
       "load",
       worldId,
@@ -5720,11 +6524,13 @@ export class VoxelEngine {
     }
     try {
       this.loadWorld(save, options, worldId);
+      this.reapplyRustLivePlayerViewR10(generation, host);
       this.rustRuntimeOperationsBlocked = false;
       return true;
     } catch (error) {
       this.rustRuntimeOperationsBlocked = true;
       this.rustRuntimeHydrationState = "blocked";
+      await this.stopRustLivePlayerAuthorityR5().catch(() => undefined);
       await this.drainRustAuthorityOperations();
       await this.disposeRustLiveRendererR10();
       await this.shutdownBoundNativePersistence().catch(() => undefined);
@@ -5745,7 +6551,7 @@ export class VoxelEngine {
     // Recover and hydrate before parsing or presenting the compatibility
     // document. A legacy-only rich save therefore remains byte-for-byte
     // protected when no lossless native migration adapter exists.
-    await this.activateRustWorldRuntime(generation, "load", id, metadata.seed, null, metadata.generationIdentity);
+    const host = await this.activateRustWorldRuntime(generation, "load", id, metadata.seed, null, metadata.generationIdentity);
     if (generation !== this.rustRuntimeTransitionGeneration || this.disposed) {
       this.rustRuntimeOperationsBlocked = true;
       throw new Error("Rust world load was superseded before the browser mirror could open");
@@ -5754,11 +6560,13 @@ export class VoxelEngine {
       const loaded = this.worldStorage.loadWorld(id);
       if (!loaded.ok) throw new Error(loaded.error.message);
       this.loadWorld(loaded.value.save, loaded.value.options, id);
+      this.reapplyRustLivePlayerViewR10(generation, host);
       this.rustRuntimeOperationsBlocked = false;
       return loaded;
     } catch (error) {
       this.rustRuntimeOperationsBlocked = true;
       this.rustRuntimeHydrationState = "blocked";
+      await this.stopRustLivePlayerAuthorityR5().catch(() => undefined);
       await this.drainRustAuthorityOperations();
       await this.disposeRustLiveRendererR10();
       await this.shutdownBoundNativePersistence().catch(() => undefined);
@@ -12384,13 +13192,14 @@ export class VoxelEngine {
   async quitToTitleAsync() {
     this.rustRuntimeOperationsBlocked = true;
     this.rustRuntimeTransitionGeneration += 1;
-    this.closeContainer();
-    this.saveNow();
     this.running = false;
     this.paused = true;
     this.titleMode = true;
     this.clearInput();
     if (document.pointerLockElement) document.exitPointerLock();
+    await this.stopRustLivePlayerAuthorityR5();
+    this.closeContainer();
+    this.saveNow();
     await this.worldStorage.flushPersistence();
     await this.disconnectMultiplayer("quit-to-title");
     await this.drainRustAuthorityOperations();
@@ -12916,7 +13725,7 @@ export class VoxelEngine {
     this.sleepVotes.clear();
     this.audio.play("ui");
     const wardedRest = this.isInsideHearthward(this.position.x, this.position.z);
-    if (wardedRest) this.health = Math.min(10, this.health + 3.5);
+    if (wardedRest && !this.rustLivePlayerAuthorityEnabledR5()) this.health = Math.min(10, this.health + 3.5);
     this.events.onToast(`${target === "morning" ? `You wake at dawn on day ${this.day}.` : `You rest until dusk on day ${this.day}.`}${wardedRest ? " The Hearthward returns warmth and steadies your recovery." : ""}`);
     this.saveSoon();
     this.emitHud(true);
@@ -13499,7 +14308,18 @@ export class VoxelEngine {
   }
 
   selectSlot(slot: number) {
-    this.selected = (slot + 9) % 9;
+    const selected = (slot + 9) % 9;
+    if (this.rustLivePlayerAuthorityEnabledR5()) {
+      this.rustLiveSelectedSlotIntentR5 = selected;
+      this.rustLiveSelectedSlotIntentPendingR5 = true;
+      if (this.selected !== selected) {
+        this.selected = selected;
+        this.events.onSelectedSlot?.(selected);
+        this.emitHud(true);
+      }
+      return;
+    }
+    this.selected = selected;
     const selectedItem = this.inventory?.[this.selected]?.item;
     if (selectedItem !== undefined && DRACONIC_PLAYER_GEAR.has(selectedItem)) this.dispatchQuestEvent({ type: "custom", eventId: "draconic-gear-equipped", at: Date.now() });
     this.events.onSelectedSlot?.(this.selected);
@@ -16169,6 +16989,7 @@ export class VoxelEngine {
   }
 
   pickTarget() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return;
     if (!this.target) return;
     const blockItem = isTorchBlock(this.target.type) ? BlockId.Torch
       : this.isBed(this.target.type) ? Item.WildwoodBed
@@ -17456,6 +18277,10 @@ export class VoxelEngine {
   }
 
   useSelected() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) {
+      this.rustSecondaryUseHeld = true;
+      return true;
+    }
     const before = JSON.stringify({
       placeCooldown: this.placeCooldown,
       heldUse: this.heldUse,
@@ -20244,6 +21069,7 @@ export class VoxelEngine {
   }
 
   breakTarget() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return;
     if (!this.target || this.target.type === BlockId.Bedrock || Boolean(BLOCKS[this.target.type]?.liquid)) return;
     const { x, y, z, type } = this.target;
     const veinHeart = type === BlockId.LivingVein ? this.nearbyVeinmetalHeart(x, y, z) : null;
@@ -20526,6 +21352,7 @@ export class VoxelEngine {
   }
 
   updateMining(dt: number) {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return;
     if (this.targetBoat && this.mineHeld) {
       if (this.packTargetBoat()) {
         this.mineHeld = false;
@@ -20723,6 +21550,7 @@ export class VoxelEngine {
   }
 
   updatePlayer(dt: number) {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return;
     if (this.mode !== "builder") this.creativeFlying = false;
     if (this.mode === "builder") {
       this.health = 10;
@@ -21286,6 +22114,7 @@ export class VoxelEngine {
   }
 
   damagePlayer(amount: number, source: string, bypassArmor = false, feedback: "direct" | "ambient" = "direct") {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return;
     if (this.mode !== "survival" || this.playerInvulnerability > 0 || this.spawnProtection > 0) return;
     this.mobs ??= [];
     const sourceName = source.toLocaleLowerCase();
@@ -21366,6 +22195,7 @@ export class VoxelEngine {
   }
 
   respawn(announce: boolean) {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return;
     announce = announce && this.mode === "survival";
     const deathPosition = this.position.clone().add(new THREE.Vector3(0, 0.55, 0));
     this.seatedAt = null;
@@ -22308,6 +23138,7 @@ export class VoxelEngine {
   }
 
   castSelectedMagicSpell() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return false;
     const magicLevel = this.skillState.skills.magic.level;
     if (this.magicState.selectedSpellId === "stormstep" && !this.grounded && this.stormstepAirUsed) {
       this.events.onToast("Stormstep can be used only once in the air before you find ground or water again.");
@@ -24753,6 +25584,7 @@ export class VoxelEngine {
   }
 
   dismountBoat() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return;
     if (!this.mountedBoatId) return;
     const boat = this.boats.get(this.mountedBoatId);
     const playerId = this.localPlayerId();
@@ -24772,6 +25604,7 @@ export class VoxelEngine {
   }
 
   packTargetBoat() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return false;
     const boat = this.targetBoat;
     if (!boat || !this.crouching) return false;
     if (this.multiplayer?.role === "guest") {
@@ -24889,6 +25722,7 @@ export class VoxelEngine {
   }
 
   private beginLocalCreatureRide(mob: MobEntity) {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return false;
     const seat = this.boardCreatureMount(mob, this.localPlayerId());
     if (seat < 0) {
       this.events.onToast(`Every fitted seat on ${mob.name} is occupied.`);
@@ -24902,6 +25736,7 @@ export class VoxelEngine {
   }
 
   dismountCreature() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return;
     if (this.mountedCreatureId === null) return;
     const mob = this.mobs.find((candidate) => candidate.id === this.mountedCreatureId);
     if (mob) {
@@ -25191,11 +26026,12 @@ export class VoxelEngine {
   }
 
   updateBoats(dt: number) {
+    const rustLivePlayerAuthority = this.rustLivePlayerAuthorityEnabledR5();
     const playerId = this.localPlayerId();
     for (const boat of this.boats.values()) {
       const localSeat = boat.save.passengers.indexOf(playerId);
       const driverId = boat.save.passengers[0];
-      const localDriver = localSeat === 0 && this.multiplayer?.role !== "guest";
+      const localDriver = !rustLivePlayerAuthority && localSeat === 0 && this.multiplayer?.role !== "guest";
       const remoteInput = this.multiplayer?.role === "host" && driverId && driverId !== playerId
         ? this.multiplayerBoatInputs.get(driverId) : null;
       const freshRemoteInput = remoteInput?.boatId === boat.save.id && performance.now() - remoteInput.updatedAt <= 400
@@ -25217,7 +26053,7 @@ export class VoxelEngine {
       }
       boat.group.position.set(boat.save.x, boat.save.y + Math.sin(performance.now() * 0.0018 + boat.save.x) * 0.025, boat.save.z);
       boat.group.rotation.set(Math.sin(performance.now() * 0.0013 + boat.save.z) * 0.018, boat.save.yaw, Math.sin(performance.now() * 0.0016 + boat.save.x) * 0.025);
-      if (localSeat >= 0) {
+      if (localSeat >= 0 && !rustLivePlayerAuthority) {
         this.mountedBoatId = boat.save.id;
         const seat = sailboatSeatOffset(localSeat, boat.save.yaw);
         this.position.set(boat.save.x + seat.x, boat.save.y + seat.y, boat.save.z + seat.z);
@@ -25228,7 +26064,7 @@ export class VoxelEngine {
         this.grounded = true;
       }
     }
-    if (this.mountedBoatId) {
+    if (this.mountedBoatId && !rustLivePlayerAuthority) {
       const boat = this.boats.get(this.mountedBoatId);
       if (!boat || !boat.save.passengers.includes(playerId)) this.mountedBoatId = null;
     }
@@ -26167,6 +27003,7 @@ export class VoxelEngine {
   }
 
   applyPlayerKnockback(origin: Readonly<{ x: number; z: number }>, strength: number) {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return 0;
     if (this.mountedCreatureId || this.mountedBoatId || this.seatedAt) return 0;
     let dx = this.position.x - origin.x;
     let dz = this.position.z - origin.z;
@@ -27843,8 +28680,10 @@ export class VoxelEngine {
       mob.group.position.y += (this.position.y + this.cameraEyeHeight * 0.72 - mob.group.position.y) * Math.min(1, dt * 4.5);
       const sting = beeStingProfile(bee);
       if (distance <= mob.definition.attackRange + 0.45 && mob.attackCooldown <= 0) {
-        this.damagePlayer(sting.damage, mob.name);
-        this.potionBuffs["venom-poison"] = Math.max(this.potionBuffs["venom-poison"] ?? 0, this.worldSimulationSeconds() + 6);
+        if (!this.rustLivePlayerAuthorityEnabledR5()) {
+          this.damagePlayer(sting.damage, mob.name);
+          this.potionBuffs["venom-poison"] = Math.max(this.potionBuffs["venom-poison"] ?? 0, this.worldSimulationSeconds() + 6);
+        }
         mob.attackCooldown = sting.cooldownSeconds;
         this.engageCombat();
       }
@@ -27950,8 +28789,10 @@ export class VoxelEngine {
       mob.desiredAngle = Math.atan2(dz, dx);
       mob.awarenessTimer = Math.max(mob.awarenessTimer, 2.5);
       if (distance < creatureMeleeReach(mob.definition, this.mobBaseScale(mob)) && mob.attackCooldown <= 0) {
-        this.damagePlayer(mob.damage, mob.name);
-        if (mob.kind === "dreadcoil") this.potionBuffs["venom-poison"] = Math.max(this.potionBuffs["venom-poison"] ?? 0, this.worldSimulationSeconds() + 8);
+        if (!this.rustLivePlayerAuthorityEnabledR5()) {
+          this.damagePlayer(mob.damage, mob.name);
+          if (mob.kind === "dreadcoil") this.potionBuffs["venom-poison"] = Math.max(this.potionBuffs["venom-poison"] ?? 0, this.worldSimulationSeconds() + 8);
+        }
         mob.attackCooldown = 1.45;
         this.engageCombat();
         this.audio.play("mob");
@@ -28171,6 +29012,7 @@ export class VoxelEngine {
   }
 
   private applyCombatEventToLocalPlayer(event: CombatEvent, source: string) {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return false;
     if (this.mode !== "survival" || !event.legal) return false;
     let resultingHealth = this.health;
     for (const mutation of event.mutations) {
@@ -28381,6 +29223,7 @@ export class VoxelEngine {
   }
 
   private triggerMountedCreatureMove(mob: MobEntity, key: "KeyZ" | "KeyX" | "KeyC") {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return false;
     const profile = MOUNT_PROFILES[mob.kind];
     if (!profile || profile.mountedMoveSlots <= 0 || mob.activeMove) return false;
     const slot = key === "KeyZ" ? 0 : key === "KeyX" ? 1 : 2;
@@ -28563,6 +29406,7 @@ export class VoxelEngine {
   }
 
   performDragonAttack(mob: MobEntity, plan: DragonAttackPlan, target: THREE.Vector3, targetMob: MobEntity | null = null) {
+    if (this.rustLivePlayerAuthorityEnabledR5() && mob.id === this.mountedCreatureId) return false;
     const state = mob.dragonState;
     if (!state || mob.dragonAttackCooldowns[plan.kind] > 0) return false;
     const origin = this.dragonAttackOrigin(mob, plan.kind);
@@ -28657,16 +29501,18 @@ export class VoxelEngine {
           }
         } else if (!effect.hitPlayer && dragonEffectHits(effect, playerCenter, PLAYER_RADIUS)) {
           effect.hitPlayer = true;
-          this.damagePlayer(Math.max(1, Math.round(effect.damage / 4)), `${owner?.name ?? "dragon"} ${effect.attack}`);
-          const statusKey = effect.status === "burning" ? "dragon-burning"
-            : effect.status === "slowed" ? "dragon-slowed"
-              : effect.status === "scalded" ? "dragon-scalded" : null;
-          if (statusKey) this.potionBuffs[statusKey] = this.worldSimulationSeconds() + effect.statusSeconds;
-          if (effect.status === "knockback" || effect.status === "scalded") {
-            const push = effect.velocity.clone().setY(0);
-            if (push.lengthSq() > 0.001) {
-              const origin = this.position.clone().sub(push.normalize());
-              this.applyPlayerKnockback(origin, effect.status === "scalded" ? 2.2 : 4.2);
+          if (!this.rustLivePlayerAuthorityEnabledR5()) {
+            this.damagePlayer(Math.max(1, Math.round(effect.damage / 4)), `${owner?.name ?? "dragon"} ${effect.attack}`);
+            const statusKey = effect.status === "burning" ? "dragon-burning"
+              : effect.status === "slowed" ? "dragon-slowed"
+                : effect.status === "scalded" ? "dragon-scalded" : null;
+            if (statusKey) this.potionBuffs[statusKey] = this.worldSimulationSeconds() + effect.statusSeconds;
+            if (effect.status === "knockback" || effect.status === "scalded") {
+              const push = effect.velocity.clone().setY(0);
+              if (push.lengthSq() > 0.001) {
+                const origin = this.position.clone().sub(push.normalize());
+                this.applyPlayerKnockback(origin, effect.status === "scalded" ? 2.2 : 4.2);
+              }
             }
           }
           if (effect.attack === "projectile") collided = true;
@@ -29288,6 +30134,7 @@ export class VoxelEngine {
   }
 
   startRangedReload() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return false;
     const slot = this.selectedSlot();
     const definition = slot ? ITEMS[slot.item] : null;
     if (!slot || definition?.useKind !== "ranged-weapon" || !definition.ammoItem) return false;
@@ -29336,6 +30183,7 @@ export class VoxelEngine {
   }
 
   private fireSelectedRangedWeapon() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return false;
     const slot = this.selectedSlot();
     const definition = slot ? ITEMS[slot.item] : null;
     if (!slot || definition?.useKind !== "ranged-weapon" || !definition.ammoItem || this.attackCooldown > 0) return false;
@@ -29399,23 +30247,27 @@ export class VoxelEngine {
       if (result.kind === "target") {
         if (projectile.owner.kind === "mob" && result.targetId === "local") {
           const owner = this.mobs.find((mob) => mob.id === projectile.owner.id);
-          const now = this.worldSimulationSeconds();
-          const ironwake = consumeIronwakeFragment(this.ironwakeWard, now);
-          const intercepted = ironwake.intercepted;
-          if (intercepted) {
-            this.ironwakeWard = ironwake.ward ? { ...ironwake.ward } : null;
-            this.spawnParticles(projectile.visual.position.x, projectile.visual.position.y, projectile.visual.position.z, BlockId.IronOre, 7);
-            const remaining = this.ironwakeWard?.fragments ?? 0;
-            this.events.onToast(`Ironwake catches a physical projectile (${remaining} fragment${remaining === 1 ? "" : "s"} remain).`);
-            if (!this.ironwakeWard) {
-              delete this.potionBuffs["ironwake-guard"];
+          if (!this.rustLivePlayerAuthorityEnabledR5()) {
+            const now = this.worldSimulationSeconds();
+            const ironwake = consumeIronwakeFragment(this.ironwakeWard, now);
+            const intercepted = ironwake.intercepted;
+            if (intercepted) {
+              this.ironwakeWard = ironwake.ward ? { ...ironwake.ward } : null;
+              this.spawnParticles(projectile.visual.position.x, projectile.visual.position.y, projectile.visual.position.z, BlockId.IronOre, 7);
+              const remaining = this.ironwakeWard?.fragments ?? 0;
+              this.events.onToast(`Ironwake catches a physical projectile (${remaining} fragment${remaining === 1 ? "" : "s"} remain).`);
+              if (!this.ironwakeWard) {
+                delete this.potionBuffs["ironwake-guard"];
+              }
+            } else {
+              this.applyProjectileHitToPlayer(projectile, owner ?? null);
+              if (projectile.effect?.kind === "verdant-root" || projectile.effect?.kind === "webspinner-bind") {
+                this.potionBuffs["dragon-slowed"] = Math.max(
+                  this.potionBuffs["dragon-slowed"] ?? 0,
+                  this.worldSimulationSeconds() + projectile.effect.seconds,
+                );
+              }
             }
-          } else this.applyProjectileHitToPlayer(projectile, owner ?? null);
-          if (!intercepted && (projectile.effect?.kind === "verdant-root" || projectile.effect?.kind === "webspinner-bind")) {
-            this.potionBuffs["dragon-slowed"] = Math.max(
-              this.potionBuffs["dragon-slowed"] ?? 0,
-              this.worldSimulationSeconds() + projectile.effect.seconds,
-            );
           }
         }
         else {
@@ -29653,7 +30505,8 @@ export class VoxelEngine {
   }
 
   updateMobs(dt: number) {
-    this.updateTemporaryMagic();
+    const rustLivePlayerAuthority = this.rustLivePlayerAuthorityEnabledR5();
+    if (!rustLivePlayerAuthority) this.updateTemporaryMagic();
     this.updateCapturePacification(dt);
     this.wakeSleepingCreatures(dt);
     this.passiveMobSpawnTimer -= dt;
@@ -30318,7 +31171,7 @@ export class VoxelEngine {
         if (mob.seesPlayer && distance >= 3.2 && mob.attackCooldown <= 0 && Math.abs(this.position.y - mob.group.position.y) < 5) this.fireSkeletonArrow(mob);
       } else if (mob.state === "windup") {
         if (mob.stateTimer <= 0) {
-          if (distance < creatureMeleeReach(mob.definition, this.mobBaseScale(mob)) + 0.35 && Math.abs(this.position.y - mob.group.position.y) < 2) {
+          if (!rustLivePlayerAuthority && distance < creatureMeleeReach(mob.definition, this.mobBaseScale(mob)) + 0.35 && Math.abs(this.position.y - mob.group.position.y) < 2) {
             this.damagePlayer(mob.damage, mob.name);
             this.applyLegendaryEventForMob(mob, "survive-phase");
             if (mob.kind === "shadecrawler") this.potionBuffs["venom-poison"] = Math.max(this.potionBuffs["venom-poison"] ?? 0, this.worldSimulationSeconds() + 7);
@@ -30441,6 +31294,7 @@ export class VoxelEngine {
   }
 
   attackTargetMob() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) return;
     const mob = this.targetMob;
     if (!mob || this.attackCooldown > 0) return;
     const slot = this.selectedSlot();
@@ -31113,6 +31967,10 @@ export class VoxelEngine {
   }
 
   dropSelectedItem() {
+    if (this.rustLivePlayerAuthorityEnabledR5()) {
+      this.rustDropPulse = true;
+      return;
+    }
     if (this.mode === "builder") return;
     const slot = this.selectedSlot();
     if (!slot) return;
@@ -32346,6 +33204,7 @@ export class VoxelEngine {
     const activeFrameStartedAt = performance.now();
     const rawDt = (now - this.previousTime) / 1000;
     const dt = Math.min(0.08, Math.max(0, rawDt));
+    const rustLivePlayerAuthority = this.rustLivePlayerAuthorityEnabledR5();
     this.performancePhaseFrame += 1;
     const phaseSampled = this.performancePhaseFrame % 12 === 0
       || (rawDt * 1000 >= 50 && this.performancePhaseFrame % 3 === 0);
@@ -32373,7 +33232,7 @@ export class VoxelEngine {
       installationSlices: 0,
     };
 
-    if (this.running && !this.titleMode && !this.paused) {
+    if (this.running && !this.titleMode && !this.paused && !rustLivePlayerAuthority) {
       this.magicState = regenerateMana(this.magicState, dt, this.skillState.skills.magic.level);
       const spellTransition = advanceSpellKey(this.spellKeyState, now);
       this.spellKeyState = spellTransition.state;
@@ -32400,11 +33259,15 @@ export class VoxelEngine {
       chunkWorkMilliseconds = performance.now() - chunkWorkStartedAt;
       if (this.running && !this.paused) this.updateBoats(dt);
       if (this.running && !this.paused && (this.locked || this.touchMode)) {
-        this.accumulator = Math.min(this.accumulator + dt, PHYSICS_STEP * 4);
-        while (this.accumulator >= PHYSICS_STEP) {
-          this.updatePlayer(PHYSICS_STEP);
-          this.updateMining(PHYSICS_STEP);
-          this.accumulator -= PHYSICS_STEP;
+        if (rustLivePlayerAuthority) {
+          this.scheduleRustLiveInputAdvanceR5();
+        } else {
+          this.accumulator = Math.min(this.accumulator + dt, PHYSICS_STEP * 4);
+          while (this.accumulator >= PHYSICS_STEP) {
+            this.updatePlayer(PHYSICS_STEP);
+            this.updateMining(PHYSICS_STEP);
+            this.accumulator -= PHYSICS_STEP;
+          }
         }
       }
       this.updatePlayerModels(dt);
@@ -32437,9 +33300,11 @@ export class VoxelEngine {
       this.updatePersistentMachines(dt);
     }
     if (this.running && !this.titleMode && !this.paused) {
-      this.updateRangedWeapon(dt);
-      this.updateFastTravelChannel();
-      this.updateMapDiscovery(dt);
+      if (!rustLivePlayerAuthority) {
+        this.updateRangedWeapon(dt);
+        this.updateFastTravelChannel();
+        this.updateMapDiscovery(dt);
+      }
       if (!multiplayerGuest) this.updateHearthroadsSimulation(dt);
       if (multiplayerGuest) {
         const simulationRadius = this.settings.simulationDistance * CHUNK_SIZE + 10;
@@ -33520,24 +34385,28 @@ export class VoxelEngine {
   advanceSimulation(milliseconds: number) {
     const duration = clamp(Number(milliseconds) || 0, 0, 10_000) / 1000;
     const steps = Math.ceil(duration / PHYSICS_STEP);
+    const rustLivePlayerAuthority = this.rustLivePlayerAuthorityEnabledR5();
     for (let index = 0; index < steps; index += 1) {
       const dt = Math.min(PHYSICS_STEP, duration - index * PHYSICS_STEP);
       if (dt <= 0 || !this.running || this.paused || this.titleMode) break;
       this.updateBoats(dt);
-      this.updatePlayer(dt);
+      if (!rustLivePlayerAuthority) this.updatePlayer(dt);
       this.updateMobs(dt);
       this.updateProjectiles(dt);
       this.updateLiquids(dt);
       this.updateDynamicWeather(dt);
       this.updatePersistentMachines(dt);
-      this.updateRangedWeapon(dt);
-      this.updateFastTravelChannel();
-      this.updateMapDiscovery(dt);
+      if (!rustLivePlayerAuthority) {
+        this.updateRangedWeapon(dt);
+        this.updateFastTravelChannel();
+        this.updateMapDiscovery(dt);
+        this.magicState = regenerateMana(this.magicState, dt, this.skillState.skills.magic.level);
+      }
       this.updateHearthroadsSimulation(dt);
-      this.magicState = regenerateMana(this.magicState, dt, this.skillState.skills.magic.level);
     }
     this.updateGameplayCamera(Math.min(duration, 0.1));
     this.updateTarget();
+    if (rustLivePlayerAuthority) this.scheduleRustLiveInputAdvanceR5();
     this.renderer.render(this.scene, this.camera);
     this.publishRendererExtractionR11(performance.now());
     this.lastPresentedFrameTime = performance.now();
@@ -34136,6 +35005,8 @@ export class VoxelEngine {
       cancelAnimationFrame(this.animationFrame);
       this.unbindEvents();
       let failure: unknown = null;
+      try { await this.stopRustLivePlayerAuthorityR5(); }
+      catch (error) { failure = error; }
       try { this.saveNow(false); }
       catch (error) { failure = error; }
       try { await this.worldStorage.flushPersistence(); }
