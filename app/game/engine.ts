@@ -679,6 +679,7 @@ import {
   RUST_RUNTIME_INPUT_FLAG_MASK_V1,
   RUST_RUNTIME_INPUT_FLAG_V1,
   type RustIntegratedRuntimeExtractionV1,
+  type RustIntegratedRuntimeExtractionViewV1,
 } from "./rust-integrated-runtime-contract";
 import {
   executeRustIntegratedPlayerBootstrapV1,
@@ -706,10 +707,14 @@ import {
   type RustLivePlayerViewR10,
 } from "./rust-live-player-view-r10";
 import {
+  decodeRustLiveCameraViewR10,
+  type RustLiveCameraViewR10,
+} from "./rust-live-camera-view-r10";
+import {
   createRustLiveRenderRuntimeR10,
   type RustLiveRenderRuntimeR10,
 } from "./rust-live-render-runtime-r10";
-import type { RenderEntityFrameContextR10 } from "./rust-render-entity-extraction-r10";
+import type { RenderEnvironmentV2 } from "./rust-render-extraction-v2";
 import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow";
 import { TCG_CATALOG } from "./tcg/catalog";
 import {
@@ -1755,6 +1760,7 @@ type RustLiveRendererExtractionQueueEntryR10 = Readonly<{
   generation: number;
   host: RustWorldRuntimeManagedHostV1;
   pump: RustLiveInputPumpR5;
+  viewRevision: number;
   extraction: RustIntegratedRuntimeExtractionV1;
 }>;
 
@@ -4211,6 +4217,10 @@ export class VoxelEngine {
   }> | null = null;
   private rustLivePlayerPresentationViewR10: RustLivePlayerViewR10 | null = null;
   private rustLivePlayerViewExtractionRevisionR10: bigint | null = null;
+  private rustLiveCameraPresentationViewR10: RustLiveCameraViewR10 | null = null;
+  private rustLiveCameraExtractionRevisionR10: bigint | null = null;
+  private rustLiveRenderViewR10: RustIntegratedRuntimeExtractionViewV1 | null = null;
+  private rustLiveRenderViewRevisionR10 = 0;
   private rustLivePlayerInitialYawRadiansR10: number | null = null;
   private rustLiveSelectedSlotIntentR5: number | null = null;
   private rustLiveSelectedSlotIntentPendingR5 = false;
@@ -4218,6 +4228,7 @@ export class VoxelEngine {
   private rustLiveLookIntentPendingR5 = false;
   private rustLiveInputPump: RustLiveInputPumpR5 | null = null;
   private rustLiveInputAdvance: Promise<void> | null = null;
+  private rustLiveViewRefresh: Promise<void> | null = null;
   private rustLiveRendererExtractionQueue: RustLiveRendererExtractionQueueEntryR10[] = [];
   private rustSecondaryUseHeld = false;
   private rustCreativeFlightTogglePulse = false;
@@ -4897,10 +4908,39 @@ export class VoxelEngine {
     const width = Math.max(1, this.canvas.clientWidth);
     const height = Math.max(1, this.canvas.clientHeight);
     this.renderer.setSize(width, height, false);
-    this.camera.aspect = width / height;
-    this.camera.updateProjectionMatrix();
-    this.renderExtraction?.resize(Math.max(1, this.canvas.width), Math.max(1, this.canvas.height));
+    if (!this.rustLivePlayerAuthorityEnabledR5()) {
+      this.camera.aspect = width / height;
+      this.camera.updateProjectionMatrix();
+    }
+    const view = this.ensureRustLiveRenderViewR10();
+    if (view && this.rustLivePlayerAuthorityEnabledR5()) this.scheduleRustLiveViewRefreshR10(view);
   };
+
+  /** The native camera contract is expressed in actual drawing-buffer pixels. */
+  private ensureRustLiveRenderViewR10(force = false) {
+    const pump = this.rustLiveInputPump;
+    if (!pump) return null;
+    const viewportWidth = Math.floor(this.canvas.width);
+    const viewportHeight = Math.floor(this.canvas.height);
+    if (!Number.isSafeInteger(viewportWidth) || viewportWidth < 1 || viewportWidth > 16_384
+      || !Number.isSafeInteger(viewportHeight) || viewportHeight < 1 || viewportHeight > 16_384) {
+      throw new RangeError("Rust live camera drawing buffer is outside the exact 1..16384 viewport contract");
+    }
+    const current = this.rustLiveRenderViewR10;
+    if (!force && current && current.viewportWidth === viewportWidth && current.viewportHeight === viewportHeight) {
+      return current;
+    }
+    const viewRevision = this.rustLiveRenderViewRevisionR10 + 1;
+    if (!Number.isSafeInteger(viewRevision) || viewRevision <= 0) {
+      throw new RangeError("Rust live camera view revision exhausted its exact integer range");
+    }
+    const view = Object.freeze({ viewportWidth, viewportHeight, viewRevision });
+    this.rustLiveRenderViewRevisionR10 = viewRevision;
+    this.rustLiveRenderViewR10 = view;
+    return view;
+  }
+
+  private currentRustLiveRenderViewR10() { return this.rustLiveRenderViewR10; }
 
   private rustLivePlayerAuthorityEnabledR5() {
     return !this.rustRuntimeOperationsBlocked
@@ -5007,7 +5047,7 @@ export class VoxelEngine {
     if (previousSelected !== this.selected) this.events.onSelectedSlot?.(this.selected);
   }
 
-  private applyRustLivePlayerExtractionR10(
+  private stageRustLivePlayerExtractionR10(
     generation: number,
     host: RustWorldRuntimeManagedHostV1,
     pump: RustLiveInputPumpR5,
@@ -5045,11 +5085,103 @@ export class VoxelEngine {
       || view.lastInputSequence !== BigInt(diagnostics.nextInputSequence - 1)) {
       throw new Error("Rust live player view contradicts the exact input-pump continuity");
     }
-    this.projectRustLivePlayerViewR10(view);
-    this.assertRustLivePlayerViewContextR10(generation, host, pump, "player view commit");
-    this.rustLivePlayerPresentationViewR10 = view;
-    this.rustLivePlayerViewExtractionRevisionR10 = view.extractionRevision;
     return view;
+  }
+
+  private stageRustLiveCameraExtractionR10(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+    extraction: RustIntegratedRuntimeExtractionV1,
+    requestedView: RustIntegratedRuntimeExtractionViewV1,
+    pumpCamera: RustLiveCameraViewR10,
+  ) {
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "camera view decode");
+    const attestation = this.rustLivePlayerAttestationR10!;
+    const view = decodeRustLiveCameraViewR10(extraction, attestation.externalEntityId, requestedView);
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "camera view staging");
+    if (view.externalEntityId !== attestation.externalEntityId
+      || view.actorId !== attestation.actorId
+      || view.playerId !== attestation.playerId
+      || view.entityId !== attestation.entityId) {
+      throw new Error("Rust live camera view contradicts the bootstrapped player identity");
+    }
+    if (view.extractionRevision !== pumpCamera.extractionRevision
+      || view.cameraRevision !== pumpCamera.cameraRevision
+      || view.poseHash !== pumpCamera.poseHash
+      || view.viewRevision !== pumpCamera.viewRevision) {
+      throw new Error("Rust live camera decoder disagrees with the serialized input pump");
+    }
+    const priorRevision = this.rustLiveCameraExtractionRevisionR10;
+    if (priorRevision !== null && view.extractionRevision <= priorRevision) {
+      throw new Error("Rust live camera extraction revision did not advance");
+    }
+    const prior = this.rustLiveCameraPresentationViewR10;
+    if (prior && (view.authorityTick < prior.authorityTick || view.cameraRevision < prior.cameraRevision
+      || view.viewRevision < prior.viewRevision)) {
+      throw new Error("Rust live camera view regressed its authority, camera, or viewport continuity");
+    }
+    return view;
+  }
+
+  private projectRustLiveCameraViewR10(view: RustLiveCameraViewR10) {
+    const aspect = view.viewport.width / view.viewport.height;
+    if (!Number.isFinite(aspect) || aspect <= 0) throw new Error("Rust live camera viewport has no finite aspect ratio");
+    this.camera.position.set(view.position.x, view.position.y, view.position.z);
+    this.camera.quaternion.set(view.orientation.x, view.orientation.y, view.orientation.z, view.orientation.w);
+    this.camera.fov = THREE.MathUtils.radToDeg(view.projection.verticalFovRadians);
+    this.camera.near = view.projection.near;
+    this.camera.far = view.projection.far;
+    this.camera.aspect = aspect;
+    this.camera.updateProjectionMatrix();
+    this.cameraMode = view.mode;
+    this.localPlayerModel.group.visible = view.mode !== "first" && !this.titleMode;
+    this.heldRoot.visible = view.mode === "first";
+    this.offhandRoot.visible = view.mode === "first";
+  }
+
+  /** Decode both authority projections completely before either enters presentation or renderer queues. */
+  private applyRustLiveAuthorityExtractionR10(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+    extraction: RustIntegratedRuntimeExtractionV1,
+    requestedView: RustIntegratedRuntimeExtractionViewV1,
+    pumpCamera: RustLiveCameraViewR10,
+  ) {
+    const player = this.stageRustLivePlayerExtractionR10(generation, host, pump, extraction);
+    const camera = this.stageRustLiveCameraExtractionR10(
+      generation, host, pump, extraction, requestedView, pumpCamera,
+    );
+    if (player.authorityTick !== camera.authorityTick) {
+      throw new Error("Rust live player and camera views do not share one authority tick");
+    }
+    this.projectRustLivePlayerViewR10(player);
+    this.projectRustLiveCameraViewR10(camera);
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "player and camera view commit");
+    this.rustLivePlayerPresentationViewR10 = player;
+    this.rustLivePlayerViewExtractionRevisionR10 = player.extractionRevision;
+    this.rustLiveCameraPresentationViewR10 = camera;
+    this.rustLiveCameraExtractionRevisionR10 = camera.extractionRevision;
+    return Object.freeze({ player, camera });
+  }
+
+  private applyRustLiveCameraExtractionR10(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+    extraction: RustIntegratedRuntimeExtractionV1,
+    requestedView: RustIntegratedRuntimeExtractionViewV1,
+    pumpCamera: RustLiveCameraViewR10,
+  ) {
+    const camera = this.stageRustLiveCameraExtractionR10(
+      generation, host, pump, extraction, requestedView, pumpCamera,
+    );
+    this.projectRustLiveCameraViewR10(camera);
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "camera-only view commit");
+    this.rustLiveCameraPresentationViewR10 = camera;
+    this.rustLiveCameraExtractionRevisionR10 = camera.extractionRevision;
+    return camera;
   }
 
   private reapplyRustLivePlayerViewR10(
@@ -5063,6 +5195,11 @@ export class VoxelEngine {
     }
     this.assertRustLivePlayerViewContextR10(generation, host, pump, "player view reapplication");
     this.projectRustLivePlayerViewR10(view);
+    const camera = this.rustLiveCameraPresentationViewR10;
+    if (!camera || camera.extractionRevision !== this.rustLiveCameraExtractionRevisionR10) {
+      throw new Error("Rust live camera view is absent before the compatibility mirror can open");
+    }
+    this.projectRustLiveCameraViewR10(camera);
     this.assertRustLivePlayerViewContextR10(generation, host, pump, "player view reapplication commit");
   }
 
@@ -5116,7 +5253,8 @@ export class VoxelEngine {
     const pump = this.rustLiveInputPump;
     const host = this.rustRuntimeHost;
     const generation = this.rustLivePlayerAuthorityGeneration;
-    if (!pump || !host || generation === null || !this.rustLivePlayerAuthorityEnabledR5()
+    const requestedView = this.rustLiveRenderViewR10;
+    if (!pump || !host || generation === null || !requestedView || !this.rustLivePlayerAuthorityEnabledR5()
       || this.rustLiveInputAdvance) return;
     try {
       pump.sample(generation, this.rustLiveInputIntentR5(pump));
@@ -5127,22 +5265,157 @@ export class VoxelEngine {
       return;
     }
     const operation = (async () => {
-      const result = await pump.advance(generation);
+      let result = await pump.advance(generation, { view: requestedView });
       if (result.discarded || generation !== this.rustRuntimeTransitionGeneration || this.disposed
         || pump !== this.rustLiveInputPump || host !== this.rustRuntimeHost
         || !this.rustLivePlayerAuthorityEnabledR5()) return;
-      if (result.extraction) {
-        this.applyRustLivePlayerExtractionR10(generation, host, pump, result.extraction);
+      let acceptedView = requestedView;
+      while (this.rustLiveRenderViewR10?.viewRevision !== acceptedView.viewRevision) {
+        const latest = this.rustLiveRenderViewR10;
+        if (!latest) return;
+        const refreshed = await pump.refreshView(generation, latest);
+        if (refreshed.discarded || generation !== this.rustRuntimeTransitionGeneration || this.disposed
+          || pump !== this.rustLiveInputPump || host !== this.rustRuntimeHost
+          || !this.rustLivePlayerAuthorityEnabledR5()) return;
+        if (!refreshed.extraction || !refreshed.camera || refreshed.cause !== "viewport") {
+          throw new Error("Rust in-flight authority resize did not return its latest camera extraction");
+        }
+        result = Object.freeze({ ...result, extraction: refreshed.extraction, camera: refreshed.camera });
+        acceptedView = latest;
       }
-      if (result.extraction && this.rustLiveRenderRuntime) {
-        this.enqueueRustLiveRendererExtractionR10({ generation, host, pump, extraction: result.extraction });
+      if (result.extraction) {
+        if (!result.camera || !result.cause) throw new Error("Rust input extraction omitted its authoritative camera cause");
+        if (result.cause === "authority" || result.cause === "initial") {
+          this.applyRustLiveAuthorityExtractionR10(
+            generation, host, pump, result.extraction, acceptedView, result.camera,
+          );
+        } else {
+          this.applyRustLiveCameraExtractionR10(
+            generation, host, pump, result.extraction, acceptedView, result.camera,
+          );
+        }
+      }
+      if (result.extraction && this.rustLiveRenderRuntime
+        && this.rustLiveRenderViewR10?.viewRevision === acceptedView.viewRevision) {
+        this.enqueueRustLiveRendererExtractionR10({
+          generation, host, pump, viewRevision: acceptedView.viewRevision, extraction: result.extraction,
+        });
       }
     })();
     this.rustLiveInputAdvance = operation;
     this.trackRustAuthorityOperation(operation);
     void operation.catch((error) => this.quarantineRustLivePlayerAuthorityR5(error, pump)).finally(() => {
-      if (this.rustLiveInputAdvance === operation) this.rustLiveInputAdvance = null;
+      if (this.rustLiveInputAdvance !== operation) return;
+      this.rustLiveInputAdvance = null;
+      const latest = this.rustLiveRenderViewR10;
+      const accepted = pump.diagnostics().lastView;
+      if (latest && this.rustLivePlayerAuthorityEnabledR5()
+        && (!accepted || accepted.viewRevision !== latest.viewRevision)) {
+        this.scheduleRustLiveViewRefreshR10(latest);
+      }
     });
+  }
+
+  private armRustLiveRenderViewR10(view: RustIntegratedRuntimeExtractionViewV1) {
+    const runtime = this.rustLiveRenderRuntime;
+    const generation = this.rustLivePlayerAuthorityGeneration;
+    const externalEntityId = this.rustLivePlayerAttestationR10?.externalEntityId;
+    if (!runtime || generation === null || !externalEntityId) return;
+    try {
+      runtime.armRequiredView(generation, externalEntityId, view);
+      for (let index = this.rustLiveRendererExtractionQueue.length - 1; index >= 0; index -= 1) {
+        if (this.rustLiveRendererExtractionQueue[index].viewRevision < view.viewRevision) {
+          this.rustLiveRendererExtractionQueue.splice(index, 1);
+        }
+      }
+    } catch (error) {
+      this.quarantineRustLiveRendererR10(error, runtime);
+    }
+  }
+
+  /** Resize authority is coalesced on top of the pump's single serialized service tail. */
+  private scheduleRustLiveViewRefreshR10(view: RustIntegratedRuntimeExtractionViewV1) {
+    this.armRustLiveRenderViewR10(view);
+    if (this.rustLiveInputAdvance || this.rustLiveViewRefresh) return;
+    const pump = this.rustLiveInputPump;
+    const host = this.rustRuntimeHost;
+    const generation = this.rustLivePlayerAuthorityGeneration;
+    if (!pump || !host || generation === null) return;
+    const operation = (async () => {
+      let requested = view;
+      for (;;) {
+        const result = await pump.refreshView(generation, requested);
+        if (result.discarded || generation !== this.rustRuntimeTransitionGeneration || this.disposed
+          || pump !== this.rustLiveInputPump || host !== this.rustRuntimeHost
+          || !this.rustLivePlayerAuthorityEnabledR5()) return;
+        const latestBeforeApply = this.rustLiveRenderViewR10;
+        if (latestBeforeApply?.viewRevision === requested.viewRevision && result.extraction) {
+          if (!result.camera || result.cause !== "viewport") {
+            throw new Error("Rust viewport refresh omitted its authoritative camera extraction");
+          }
+          this.applyRustLiveCameraExtractionR10(
+            generation, host, pump, result.extraction, requested, result.camera,
+          );
+          if (this.rustLiveRenderRuntime
+            && this.rustLiveRenderViewR10?.viewRevision === requested.viewRevision) {
+            this.enqueueRustLiveRendererExtractionR10({
+              generation, host, pump, viewRevision: requested.viewRevision, extraction: result.extraction,
+            });
+          }
+        }
+        const latest = this.rustLiveRenderViewR10;
+        if (!latest || latest.viewRevision === requested.viewRevision) return;
+        requested = latest;
+      }
+    })();
+    this.rustLiveViewRefresh = operation;
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error) => this.quarantineRustLivePlayerAuthorityR5(error, pump)).finally(() => {
+      if (this.rustLiveViewRefresh !== operation) return;
+      this.rustLiveViewRefresh = null;
+      const latest = this.rustLiveRenderViewR10;
+      const accepted = pump.diagnostics().lastView;
+      if (latest && this.rustLivePlayerAuthorityEnabledR5()
+        && (!accepted || accepted.viewRevision !== latest.viewRevision)) {
+        this.scheduleRustLiveViewRefreshR10(latest);
+      }
+    });
+  }
+
+  private scheduleRustLiveCameraModeCycleR10() {
+    const pump = this.rustLiveInputPump;
+    const host = this.rustRuntimeHost;
+    const generation = this.rustLivePlayerAuthorityGeneration;
+    const view = this.rustLiveRenderViewR10;
+    if (!pump || !host || generation === null || !view || !this.rustLivePlayerAuthorityEnabledR5()) return;
+    const operation = (async () => {
+      const result = await pump.applyCameraConfig(generation, (current) => ({
+        mode: current.mode === "first" ? "third-rear" : current.mode === "third-rear" ? "third-front" : "first",
+      }), view);
+      if (result.discarded || generation !== this.rustRuntimeTransitionGeneration || this.disposed
+        || pump !== this.rustLiveInputPump || host !== this.rustRuntimeHost
+        || !this.rustLivePlayerAuthorityEnabledR5()) return;
+      if (this.rustLiveRenderViewR10?.viewRevision !== view.viewRevision) return;
+      if (result.extraction) {
+        if (!result.camera) throw new Error("Rust camera command omitted its authoritative camera extraction");
+        const camera = this.applyRustLiveCameraExtractionR10(
+          generation, host, pump, result.extraction, view, result.camera,
+        );
+        if (this.rustLiveRenderRuntime && this.rustLiveRenderViewR10?.viewRevision === view.viewRevision) {
+          this.enqueueRustLiveRendererExtractionR10({
+            generation, host, pump, viewRevision: view.viewRevision, extraction: result.extraction,
+          });
+        }
+        if (result.changed) {
+          const label = camera.mode === "first" ? "First person"
+            : camera.mode === "third-rear" ? "Third person — rear" : "Third person — front";
+          this.events.onToast(`${label}. Press V to cycle the camera.`);
+          this.emitHud(true);
+        }
+      }
+    })();
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error) => this.quarantineRustLivePlayerAuthorityR5(error, pump));
   }
 
   private quarantineRustLivePlayerAuthorityR5(error: unknown, expected: RustLiveInputPumpR5) {
@@ -5157,71 +5430,10 @@ export class VoxelEngine {
     void this.trackRustAuthorityOperation(expected.stop());
   }
 
-  /**
-   * Copies camera/environment and the world's immutable terrain-page snapshot
-   * into Extraction V2. This never traverses `scene`, Three geometry/materials,
-   * or voxel storage, and does not claim entity/model/particle parity.
-   */
-  private scheduleRustRendererExtractionR10(
-    runtime: RustLiveRenderRuntimeR10,
-    host: RustWorldRuntimeManagedHostV1,
-    generation: number,
-    context: Readonly<Pick<RenderEntityFrameContextR10, "animationTimeMicros" | "camera" | "environment">>,
-  ) {
-    if (this.rustRenderExtractionPoll) return;
-    const operation = (async () => {
-      const afterRevision = this.rustRenderExtractionRevision;
-      const extraction = await host.runtimeService().extract(afterRevision);
-      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
-        || runtime !== this.rustLiveRenderRuntime || host !== this.rustRuntimeHost
-        || this.rustRuntimeOperationsBlocked) return;
-      if (extraction.extractionRevision < afterRevision) {
-        throw new Error("Rust renderer extraction revision regressed");
-      }
-      const hasPayload = extraction.render.byteLength > 0 || extraction.hud.byteLength > 0
-        || extraction.audio.byteLength > 0 || extraction.platformRequests.byteLength > 0
-        || extraction.diagnostics.byteLength > 0;
-      if (!hasPayload) {
-        this.rustRenderExtractionRevision = extraction.extractionRevision;
-        return;
-      }
-      if (extraction.extractionRevision <= afterRevision) {
-        throw new Error("Rust renderer extraction repeated a consumed revision with payload");
-      }
-      const frameSequence = this.rustRenderFrameSequence + BigInt(1);
-      if (frameSequence > BigInt("0xffffffffffffffff")) {
-        throw new RangeError("Rust renderer extraction frame sequence exhausted u64");
-      }
-      const accepted = await runtime.submitRuntimeExtraction(generation, extraction, Object.freeze({
-        epoch: runtime.epoch,
-        frameSequence,
-        simulationTick: BigInt(extraction.identity.tick),
-        animationTimeMicros: context.animationTimeMicros,
-        camera: context.camera,
-        environment: context.environment,
-      }));
-      if (!accepted) throw new Error("Rust live renderer rejected an authoritative extraction");
-      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
-        || runtime !== this.rustLiveRenderRuntime || host !== this.rustRuntimeHost
-        || this.rustRuntimeOperationsBlocked) return;
-      this.rustRenderExtractionRevision = extraction.extractionRevision;
-      this.rustRenderFrameSequence = frameSequence;
-    })();
-    this.rustRenderExtractionPoll = operation;
-    this.trackRustAuthorityOperation(operation);
-    void operation.catch((error) => {
-      if (generation === this.rustRuntimeTransitionGeneration && runtime === this.rustLiveRenderRuntime) {
-        this.quarantineRustLiveRendererR10(error, runtime);
-      }
-    }).finally(() => {
-      if (this.rustRenderExtractionPoll === operation) this.rustRenderExtractionPoll = null;
-    });
-  }
-
   private scheduleRustLiveInputExtractionPresentationR10(
     runtime: RustLiveRenderRuntimeR10,
     pending: RustLiveRendererExtractionQueueEntryR10,
-    context: Readonly<Pick<RenderEntityFrameContextR10, "animationTimeMicros" | "camera" | "environment">>,
+    context: Readonly<{ animationTimeMicros: bigint; environment: RenderEnvironmentV2 }>,
   ) {
     if (this.rustRenderExtractionPoll) return;
     const { generation, host, pump, extraction } = pending;
@@ -5235,7 +5447,6 @@ export class VoxelEngine {
         frameSequence,
         simulationTick: BigInt(extraction.identity.tick),
         animationTimeMicros: context.animationTimeMicros,
-        camera: context.camera,
         environment: context.environment,
       }));
       if (!accepted) throw new Error("Rust live renderer rejected the input pump extraction");
@@ -5260,6 +5471,36 @@ export class VoxelEngine {
     });
   }
 
+  private rustRendererShellSnapshotR11(now: number, simulationTick: bigint): RendererShellSnapshotR11 {
+    return Object.freeze({
+      simulationTick,
+      animationTimeMicros: BigInt(Math.max(0, Math.floor(now * 1_000))),
+      camera: Object.freeze({
+        position: [this.camera.position.x, this.camera.position.y, this.camera.position.z] as const,
+        orientation: [
+          this.camera.quaternion.x, this.camera.quaternion.y, this.camera.quaternion.z, this.camera.quaternion.w,
+        ] as const,
+        verticalFovRadians: THREE.MathUtils.degToRad(this.camera.fov),
+        near: this.camera.near,
+        far: this.camera.far,
+        viewport: [Math.max(1, this.canvas.width), Math.max(1, this.canvas.height)] as const,
+      }),
+      environment: Object.freeze({
+        daylight: this.daylightAmount(),
+        worldTime: this.visualWorldTime,
+        weather: this.weatherState.kind,
+        underwater: this.headSubmerged ? 1 : 0,
+        caveOcclusion: this.cameraEnvironment.caveBackdropBlend,
+        ...this.rendererEnvironmentR11,
+      }),
+      terrain: this.world.rendererTerrainSnapshotR11(this.camera.position.x, this.camera.position.z, {
+        maxChunks: 64,
+        maxPages: 512,
+        maxBytes: 64 * 1024 * 1024,
+      }),
+    });
+  }
+
   publishRendererExtractionR11(now: number) {
     const sink = this.renderExtraction;
     if (!sink || now < this.renderExtractionNextAt) return;
@@ -5271,48 +5512,22 @@ export class VoxelEngine {
       const authoritativeTick = runtime && host && generation !== null
         ? BigInt(host.runtimeService().identity().tick)
         : BigInt(Math.max(0, Math.floor(this.worldSimulationSeconds() * 1_000_000)));
-      const snapshot: RendererShellSnapshotR11 = Object.freeze({
-        simulationTick: authoritativeTick,
-        animationTimeMicros: BigInt(Math.max(0, Math.floor(now * 1_000))),
-        camera: Object.freeze({
-          position: [this.camera.position.x, this.camera.position.y, this.camera.position.z] as const,
-          orientation: [this.camera.quaternion.x, this.camera.quaternion.y, this.camera.quaternion.z, this.camera.quaternion.w] as const,
-          verticalFovRadians: THREE.MathUtils.degToRad(this.camera.fov),
-          near: this.camera.near,
-          far: this.camera.far,
-          viewport: [Math.max(1, this.canvas.width), Math.max(1, this.canvas.height)] as const,
-        }),
-        environment: Object.freeze({
-          daylight: this.daylightAmount(),
-          worldTime: this.visualWorldTime,
-          weather: this.weatherState.kind,
-          underwater: this.headSubmerged ? 1 : 0,
-          caveOcclusion: this.cameraEnvironment.caveBackdropBlend,
-          ...this.rendererEnvironmentR11,
-        }),
-        terrain: this.world.rendererTerrainSnapshotR11(this.camera.position.x, this.camera.position.z, {
-          maxChunks: 64,
-          maxPages: 512,
-          maxBytes: 64 * 1024 * 1024,
-        }),
-      });
-      if (!sink.present(snapshot)) throw new Error("Rust terrain publisher rejected the composed shadow frame");
+      const snapshot = this.rustRendererShellSnapshotR11(now, authoritativeTick);
       if (runtime && host && generation !== null) {
-        const environment = sink.diagnostics().environment;
-        if (!environment) throw new Error("Rust terrain publisher did not expose its canonical frame environment");
-        const context = Object.freeze({
-          animationTimeMicros: snapshot.animationTimeMicros,
-          camera: snapshot.camera,
-          environment,
-        });
         const pending = this.rustLiveRendererExtractionQueue[0];
         if (pending && pending.generation === generation && pending.host === host
-          && pending.pump === this.rustLiveInputPump) {
-          this.scheduleRustLiveInputExtractionPresentationR10(runtime, pending, context);
-        } else if (!this.rustLiveInputPump) {
-          this.scheduleRustRendererExtractionR10(runtime, host, generation, context);
+          && pending.pump === this.rustLiveInputPump
+          && pending.viewRevision === this.rustLiveRenderViewR10?.viewRevision) {
+          const environment = sink.diagnostics().environment;
+          if (!environment) throw new Error("Rust terrain publisher has no canonical environment before extraction");
+          this.scheduleRustLiveInputExtractionPresentationR10(runtime, pending, Object.freeze({
+            animationTimeMicros: snapshot.animationTimeMicros,
+            environment,
+          }));
+          return;
         }
       }
+      if (!sink.present(snapshot)) throw new Error("Rust terrain publisher rejected the composed shadow frame");
       this.renderExtractionLastError = null;
     } catch (error) {
       // Shadow presentation is diagnostic-only and must never interrupt the
@@ -5508,7 +5723,10 @@ export class VoxelEngine {
       // deliberately inert. Only the exact R5 input vocabulary may proceed.
       if (event.code === "KeyG" && !event.repeat) this.rustDropPulse = true;
       else if (event.code === "KeyF") event.preventDefault();
-      else if (event.code === "KeyV" && !event.repeat) this.cycleCameraMode();
+      else if (event.code === "KeyV" && !event.repeat) {
+        event.preventDefault();
+        this.scheduleRustLiveCameraModeCycleR10();
+      }
       else if (event.code === "KeyH" && !event.repeat) {
         this.events.onToast("WASD move · Space jump/swim · Shift crouch · Ctrl sprint · V camera · Left harvest/attack · Right use/build · G drop");
       } else if (event.code === "F3" && !event.repeat) {
@@ -6078,6 +6296,10 @@ export class VoxelEngine {
     this.rustLivePlayerAttestationR10 = null;
     this.rustLivePlayerPresentationViewR10 = null;
     this.rustLivePlayerViewExtractionRevisionR10 = null;
+    this.rustLiveCameraPresentationViewR10 = null;
+    this.rustLiveCameraExtractionRevisionR10 = null;
+    this.rustLiveRenderViewR10 = null;
+    this.rustLiveRenderViewRevisionR10 = 0;
     this.rustLivePlayerInitialYawRadiansR10 = null;
     this.rustLiveSelectedSlotIntentR5 = null;
     this.rustLiveSelectedSlotIntentPendingR5 = false;
@@ -6221,17 +6443,37 @@ export class VoxelEngine {
       // preserves a restored native yaw and selected slot instead of sampling
       // compatibility-mirror fields that have not opened yet.
       pump.sample(generation, this.rustLiveInputIntentR5(pump));
-      const initial = await pump.syncInitial(generation);
+      const requestedView = this.ensureRustLiveRenderViewR10();
+      if (!requestedView) throw new Error("Rust initial camera view could not bind to its input pump");
+      const initial = await pump.syncInitial(generation, requestedView);
       this.assertRustLiveGenerationR5(generation, host, "initial input synchronization");
-      if (initial.discarded || !initial.step || !initial.extraction) {
-        throw new Error("Rust initial input synchronization did not return an authoritative extraction");
+      if (initial.discarded || !initial.step || !initial.extraction || !initial.camera || initial.cause !== "initial") {
+        throw new Error("Rust initial input synchronization did not return an authoritative player-camera extraction");
       }
-      this.applyRustLivePlayerExtractionR10(generation, host, pump, initial.extraction);
+      let acceptedView = requestedView;
+      let acceptedExtraction = initial.extraction;
+      let acceptedCamera = initial.camera;
+      while (this.currentRustLiveRenderViewR10()?.viewRevision !== acceptedView.viewRevision) {
+        const latest = this.currentRustLiveRenderViewR10();
+        if (!latest) throw new Error("Rust initial camera view disappeared during activation");
+        const refreshed = await pump.refreshView(generation, latest);
+        this.assertRustLiveGenerationR5(generation, host, "initial camera view refresh");
+        if (refreshed.discarded || !refreshed.extraction || !refreshed.camera || refreshed.cause !== "viewport") {
+          throw new Error("Rust initial camera refresh did not return the latest drawing-buffer extraction");
+        }
+        acceptedExtraction = refreshed.extraction;
+        acceptedCamera = refreshed.camera;
+        acceptedView = latest;
+      }
+      this.applyRustLiveAuthorityExtractionR10(
+        generation, host, pump, acceptedExtraction, acceptedView, acceptedCamera,
+      );
       this.enqueueRustLiveRendererExtractionR10({
         generation,
         host,
         pump,
-        extraction: initial.extraction,
+        viewRevision: acceptedView.viewRevision,
+        extraction: acceptedExtraction,
       });
       this.rustLivePlayerEntityId = entity.entityId;
       this.rustLivePlayerTerrainChunkCount = reconciled.desiredChunkCount;
@@ -6254,6 +6496,10 @@ export class VoxelEngine {
     this.rustLivePlayerAttestationR10 = null;
     this.rustLivePlayerPresentationViewR10 = null;
     this.rustLivePlayerViewExtractionRevisionR10 = null;
+    this.rustLiveCameraPresentationViewR10 = null;
+    this.rustLiveCameraExtractionRevisionR10 = null;
+    this.rustLiveRenderViewR10 = null;
+    this.rustLiveRenderViewRevisionR10 = 0;
     this.rustLivePlayerInitialYawRadiansR10 = null;
     this.rustLiveSelectedSlotIntentR5 = null;
     this.rustLiveSelectedSlotIntentPendingR5 = false;
@@ -6266,7 +6512,9 @@ export class VoxelEngine {
     this.miningProgress = 0;
     if (pump) await pump.stop();
     if (this.rustLiveInputAdvance) await Promise.allSettled([this.rustLiveInputAdvance]);
+    if (this.rustLiveViewRefresh) await Promise.allSettled([this.rustLiveViewRefresh]);
     this.rustLiveInputAdvance = null;
+    this.rustLiveViewRefresh = null;
   }
 
   private async shutdownBoundNativePersistence() {
@@ -6322,9 +6570,134 @@ export class VoxelEngine {
     if (runtime) void this.trackRustAuthorityOperation(runtime.dispose());
   }
 
+  private rejectRustLiveCameraActivationR10(
+    error: unknown,
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+  ): never {
+    if (generation === this.rustRuntimeTransitionGeneration && !this.disposed
+      && host === this.rustRuntimeHost && host.diagnostics().state === "ready"
+      && pump === this.rustLiveInputPump) {
+      this.quarantineRustLivePlayerAuthorityR5(error, pump);
+    }
+    throw error;
+  }
+
+  /**
+   * Activation owns no resize callback yet, so it must join the pump's latest
+   * view itself. One terrain frame seeds the composer; later resize races only
+   * re-arm and submit a newer authoritative extraction against that held frame.
+   */
+  private async acceptRustLiveRendererActivationR10(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+    externalEntityId: string,
+    runtime: RustLiveRenderRuntimeR10,
+    epoch: bigint,
+  ) {
+    let publisher: RendererShellExtractionPublisherR11 | null = null;
+    let environment: RenderEnvironmentV2 | null = null;
+    let animationTimeMicros = BigInt(0);
+    let frameSequence = BigInt(0);
+    for (;;) {
+      this.assertRustLivePlayerViewContextR10(generation, host, pump, "renderer activation view join");
+      if (runtime.state !== "ready") throw new Error("Rust live renderer lost readiness during activation");
+      const view = this.currentRustLiveRenderViewR10();
+      let pending = this.rustLiveRendererExtractionQueue[0];
+      if (!view || !pending || pending.generation !== generation || pending.host !== host || pending.pump !== pump) {
+        throw new Error("Rust live renderer has no exact initial player-camera extraction");
+      }
+      if (pending.viewRevision > view.viewRevision) {
+        throw new Error("Rust live renderer initial extraction is ahead of the current drawing-buffer view");
+      }
+      if (pending.viewRevision !== view.viewRevision) {
+        let refreshed: Awaited<ReturnType<RustLiveInputPumpR5["refreshView"]>>;
+        try {
+          refreshed = await pump.refreshView(generation, view);
+        } catch (error) {
+          this.rejectRustLiveCameraActivationR10(error, generation, host, pump);
+        }
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "renderer activation view refresh");
+        if (runtime.state !== "ready") throw new Error("Rust live renderer lost readiness during camera refresh");
+        const latest = this.currentRustLiveRenderViewR10();
+        if (!latest) {
+          this.rejectRustLiveCameraActivationR10(
+            new Error("Rust live renderer drawing-buffer view disappeared during activation"),
+            generation,
+            host,
+            pump,
+          );
+        }
+        if (latest.viewRevision !== view.viewRevision) continue;
+        if (refreshed.discarded || !refreshed.extraction || !refreshed.camera || refreshed.cause !== "viewport") {
+          this.rejectRustLiveCameraActivationR10(
+            new Error("Rust live renderer activation refresh omitted its authoritative camera extraction"),
+            generation,
+            host,
+            pump,
+          );
+        }
+        try {
+          this.applyRustLiveCameraExtractionR10(
+            generation, host, pump, refreshed.extraction, view, refreshed.camera,
+          );
+        } catch (error) {
+          this.rejectRustLiveCameraActivationR10(error, generation, host, pump);
+        }
+        if (this.rustLiveRendererExtractionQueue[0] !== pending) {
+          throw new Error("Rust live renderer initial extraction queue lost canonical order during refresh");
+        }
+        pending = Object.freeze({
+          generation,
+          host,
+          pump,
+          viewRevision: view.viewRevision,
+          extraction: refreshed.extraction,
+        });
+        this.rustLiveRendererExtractionQueue[0] = pending;
+      }
+
+      runtime.armRequiredView(generation, externalEntityId, view);
+      if (!publisher) {
+        publisher = new RendererShellExtractionPublisherR11(runtime.terrain, epoch);
+        const snapshot = this.rustRendererShellSnapshotR11(
+          performance.now(), BigInt(pending.extraction.identity.tick),
+        );
+        if (!publisher.present(snapshot)) {
+          throw new Error("Rust live renderer rejected its held initial terrain frame");
+        }
+        environment = publisher.diagnostics().environment;
+        if (!environment) throw new Error("Rust live renderer did not canonicalize its initial environment");
+        animationTimeMicros = snapshot.animationTimeMicros;
+      }
+      frameSequence += BigInt(1);
+      const submissionEnvironment = environment;
+      if (!submissionEnvironment) throw new Error("Rust live renderer activation has no canonical environment");
+      const accepted = await runtime.submitRuntimeExtraction(generation, pending.extraction, Object.freeze({
+        epoch: runtime.epoch,
+        frameSequence,
+        simulationTick: BigInt(pending.extraction.identity.tick),
+        animationTimeMicros,
+        environment: submissionEnvironment,
+      }));
+      this.assertRustLivePlayerViewContextR10(generation, host, pump, "renderer activation camera acceptance");
+      if (runtime.state !== "ready") throw new Error("Rust live renderer lost readiness during camera acceptance");
+      if (!accepted) throw new Error("Rust live renderer rejected its initial player-camera extraction");
+      if (this.currentRustLiveRenderViewR10()?.viewRevision !== view.viewRevision) continue;
+      if (this.rustLiveRendererExtractionQueue[0] !== pending) {
+        throw new Error("Rust live renderer initial extraction queue lost canonical order");
+      }
+      this.rustLiveRendererExtractionQueue.shift();
+      return Object.freeze({ publisher, pending, frameSequence });
+    }
+  }
+
   private async activateRustLiveRendererR10(
     generation: number,
     host: RustWorldRuntimeManagedHostV1,
+    factory: typeof createRustLiveRenderRuntimeR10 = createRustLiveRenderRuntimeR10,
   ) {
     const sink = this.rustRenderSink;
     const baseEpoch = this.rustRenderBaseEpoch;
@@ -6342,37 +6715,38 @@ export class VoxelEngine {
       this.quarantineRustLiveRendererR10(new Error("The renderer sink rejected the new world epoch"), null);
       return;
     }
+    const pump = this.rustLiveInputPump;
     let runtime: RustLiveRenderRuntimeR10 | null = null;
     try {
-      runtime = await createRustLiveRenderRuntimeR10({
+      const externalEntityId = this.rustLivePlayerAttestationR10?.externalEntityId;
+      if (!pump || pump.state !== "ready" || !externalEntityId) {
+        throw new Error("Rust live renderer has no exact initial player-camera authority");
+      }
+      runtime = await factory({
         sink,
         epoch,
         worldGeneration: generation,
         expectedContentManifestHash: contentHash,
       });
-      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
-        || host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") {
-        throw new Error("Rust live renderer activation was superseded before presentation");
-      }
-      const publisher = new RendererShellExtractionPublisherR11(runtime.terrain, epoch);
-      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
-        || host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") {
-        throw new Error("Rust live renderer publisher was superseded before presentation");
-      }
+      this.assertRustLivePlayerViewContextR10(generation, host, pump, "renderer runtime creation");
+      const accepted = await this.acceptRustLiveRendererActivationR10(
+        generation, host, pump, externalEntityId, runtime, epoch,
+      );
+      this.assertRustLivePlayerViewContextR10(generation, host, pump, "renderer activation attachment");
       this.rustLiveRenderRuntime = runtime;
-      this.renderExtraction = publisher;
+      this.renderExtraction = accepted.publisher;
       this.rustRenderWorldGeneration = generation;
       this.rustRenderWorldEpoch = epoch;
-      this.rustRenderExtractionRevision = 0;
-      this.rustRenderFrameSequence = BigInt(0);
+      this.rustRenderExtractionRevision = accepted.pending.extraction.extractionRevision;
+      this.rustRenderFrameSequence = accepted.frameSequence;
       this.renderExtractionNextAt = 0;
       this.renderExtractionLastError = null;
-      publisher.resize(Math.max(1, this.canvas.width), Math.max(1, this.canvas.height));
     } catch (error) {
       await runtime?.dispose().catch(() => undefined);
-      if (generation === this.rustRuntimeTransitionGeneration && !this.disposed) {
-        this.quarantineRustLiveRendererR10(error, null);
-      }
+      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
+        || host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") return;
+      if (pump === this.rustLiveInputPump && this.rustLivePlayerAuthorityState === "blocked") throw error;
+      if (pump === this.rustLiveInputPump && pump?.state === "ready") this.quarantineRustLiveRendererR10(error, null);
     }
   }
 
@@ -33271,7 +33645,7 @@ export class VoxelEngine {
         }
       }
       this.updatePlayerModels(dt);
-      this.updateGameplayCamera(dt);
+      if (!rustLivePlayerAuthority) this.updateGameplayCamera(dt);
       this.updateTarget();
     }
 
@@ -34404,7 +34778,7 @@ export class VoxelEngine {
       }
       this.updateHearthroadsSimulation(dt);
     }
-    this.updateGameplayCamera(Math.min(duration, 0.1));
+    if (!rustLivePlayerAuthority) this.updateGameplayCamera(Math.min(duration, 0.1));
     this.updateTarget();
     if (rustLivePlayerAuthority) this.scheduleRustLiveInputAdvanceR5();
     this.renderer.render(this.scene, this.camera);

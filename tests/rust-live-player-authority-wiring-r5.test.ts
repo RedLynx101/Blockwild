@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import * as THREE from "three";
 
 import { createCharacterProfile } from "../app/game/character-profiles.ts";
 import { Item } from "../app/game/data.ts";
@@ -18,6 +19,7 @@ import type {
   RustIntegratedRuntimeCommandBatchV1,
   RustIntegratedRuntimeCommandReceiptV1,
   RustIntegratedRuntimeExtractionV1,
+  RustIntegratedRuntimeExtractionViewV1,
   RustIntegratedRuntimeIdentityV1,
   RustIntegratedRuntimeInputFrameV1,
 } from "../app/game/rust-integrated-runtime-contract.ts";
@@ -43,6 +45,11 @@ import type { RustWorldRuntimeHostConfigV1 } from "../app/game/rust-world-runtim
 import type { RustWorldRuntimeManagedHostV1 } from "../app/game/rust-world-runtime-manager.ts";
 import { canonicalRustTerrainGenerationOptionsJsonV1 } from "../app/game/rust-world-runtime-live-config.ts";
 import { RUST_LIVE_INPUT_AXIS_DIVISOR_R5 } from "../app/game/rust-live-input-pump-r5.ts";
+import {
+  rustIntegratedCameraStateHashR10,
+  type RustIntegratedCameraProfileR10,
+} from "../app/game/rust-integrated-runtime-camera-r10.ts";
+import { rustLiveCameraPoseHashR10 } from "../app/game/rust-live-camera-view-r10.ts";
 import { TypeScriptCanonicalHasher } from "../app/game/rust-kernel-shadow.ts";
 
 const ZERO_HASH = "0".repeat(32);
@@ -96,6 +103,9 @@ const i64Field = (value: bigint | number) => new Writer().u8(2).u64(BigInt.asUin
 const f64Field = (value: number) => new Writer().u8(3).f64(value).finish();
 const stringField = (value: string) => new Writer().u8(4).string(value).finish();
 const boolField = (value: boolean) => new Writer().u8(0).u8(value ? 1 : 0).finish();
+const hashField = (value: string) => new Writer().u8(5).raw(Uint8Array.from(
+  value.match(/../gu)!.map((part) => Number.parseInt(part, 16)),
+)).finish();
 const compareText = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
 
 function domainRow(kind: number, key: string, unorderedFields: readonly DomainField[]) {
@@ -127,6 +137,21 @@ type PlayerExtractionState = {
   lookPitch: number;
 };
 
+const CAMERA_PROFILE: RustIntegratedCameraProfileR10 = Object.freeze({
+  eyeHeight: 1.62,
+  thirdPersonTargetHeight: 1.34,
+  thirdPersonDistance: 4.35,
+  thirdPersonPitchScale: 0.72,
+  rearShoulderOffset: 0.22,
+  collisionRadius: 0.18,
+  collisionPadding: 0.16,
+  minimumDistance: 0.28,
+  baseVerticalFovRadians: Math.PI * 0.4,
+  aimVerticalFovRadians: Math.PI * 0.272,
+  near: 0.05,
+  far: 512,
+});
+
 function playerDomainBundle(
   state: Readonly<PlayerExtractionState>,
   authorityTick: number,
@@ -134,6 +159,7 @@ function playerDomainBundle(
   actorId: string,
   playerId: bigint,
   entityId: bigint,
+  view: RustIntegratedRuntimeExtractionViewV1,
 ) {
   const runtimeFields: DomainField[] = [
     ["buttons", u64Field(state.buttons)],
@@ -161,6 +187,65 @@ function playerDomainBundle(
   }
   const inventoryContainer = "container-key-v1/00";
   const equipmentContainer = "container-key-v1/01";
+  const cameraPosition = Object.freeze({
+    x: Math.fround(state.position.x),
+    y: Math.fround(state.position.y) + CAMERA_PROFILE.eyeHeight,
+    z: Math.fround(state.position.z),
+  });
+  const cameraOrientation = Object.freeze({ x: 0, y: 0, z: 0, w: 1 });
+  const cameraProjection = Object.freeze({
+    verticalFovRadians: CAMERA_PROFILE.baseVerticalFovRadians,
+    near: CAMERA_PROFILE.near,
+    far: CAMERA_PROFILE.far,
+  });
+  const cameraRevision = BigInt(1);
+  const cameraFields: DomainField[] = [
+    ["actorId", stringField(actorId)],
+    ["aiming", boolField(false)],
+    ["cameraRevision", u64Field(cameraRevision)],
+    ["cameraStateHash", hashField(rustIntegratedCameraStateHashR10(cameraRevision, "first", CAMERA_PROFILE))],
+    ["collided", boolField(false)],
+    ["entityId", u64Field(entityId)],
+    ["externalEntityId", stringField(externalEntityId)],
+    ["mode", stringField("first")],
+    ["orientation.w", f64Field(cameraOrientation.w)],
+    ["orientation.x", f64Field(cameraOrientation.x)],
+    ["orientation.y", f64Field(cameraOrientation.y)],
+    ["orientation.z", f64Field(cameraOrientation.z)],
+    ["playerId", u64Field(playerId)],
+    ["poseHash", hashField(rustLiveCameraPoseHashR10({
+      mode: "first",
+      aiming: false,
+      position: cameraPosition,
+      orientation: cameraOrientation,
+      projection: cameraProjection,
+      viewport: Object.freeze({ width: view.viewportWidth, height: view.viewportHeight }),
+      collided: false,
+      resolvedDistance: 0,
+    }))],
+    ["position.x", f64Field(cameraPosition.x)],
+    ["position.y", f64Field(cameraPosition.y)],
+    ["position.z", f64Field(cameraPosition.z)],
+    ["profile.aimVerticalFovRadians", f64Field(CAMERA_PROFILE.aimVerticalFovRadians)],
+    ["profile.baseVerticalFovRadians", f64Field(CAMERA_PROFILE.baseVerticalFovRadians)],
+    ["profile.collisionPadding", f64Field(CAMERA_PROFILE.collisionPadding)],
+    ["profile.collisionRadius", f64Field(CAMERA_PROFILE.collisionRadius)],
+    ["profile.eyeHeight", f64Field(CAMERA_PROFILE.eyeHeight)],
+    ["profile.far", f64Field(CAMERA_PROFILE.far)],
+    ["profile.minimumDistance", f64Field(CAMERA_PROFILE.minimumDistance)],
+    ["profile.near", f64Field(CAMERA_PROFILE.near)],
+    ["profile.rearShoulderOffset", f64Field(CAMERA_PROFILE.rearShoulderOffset)],
+    ["profile.thirdPersonDistance", f64Field(CAMERA_PROFILE.thirdPersonDistance)],
+    ["profile.thirdPersonPitchScale", f64Field(CAMERA_PROFILE.thirdPersonPitchScale)],
+    ["profile.thirdPersonTargetHeight", f64Field(CAMERA_PROFILE.thirdPersonTargetHeight)],
+    ["projection.far", f64Field(cameraProjection.far)],
+    ["projection.near", f64Field(cameraProjection.near)],
+    ["projection.verticalFovRadians", f64Field(cameraProjection.verticalFovRadians)],
+    ["resolvedDistance", f64Field(0)],
+    ["viewRevision", u64Field(view.viewRevision)],
+    ["viewport.height", u64Field(view.viewportHeight)],
+    ["viewport.width", u64Field(view.viewportWidth)],
+  ];
   const rows = new Writer()
     .raw(domainRow(1, externalEntityId, runtimeFields))
     .raw(domainRow(2, `binding:${playerId}`, [
@@ -176,12 +261,13 @@ function playerDomainBundle(
       ["inventoryContainerRevision", u64Field(1)],
       ["playerId", u64Field(playerId)],
       ["selectedSlot", u64Field(state.selectedSlot)],
-    ])).finish();
+    ]))
+    .raw(domainRow(3, "camera", cameraFields)).finish();
   const writer = new Writer().raw(encoder.encode("BWX0")).u16(1)
     .u64(state.extractionRevision).u64(authorityTick).raw(ZERO_BYTES).raw(ZERO_BYTES).u8(0).u16(8);
   for (let domain = 1; domain <= 8; domain += 1) {
     const payload = domain === 2 ? rows : new Uint8Array();
-    const count = domain === 2 ? 2 : 0;
+    const count = domain === 2 ? 3 : 0;
     const payloadHash = new TypeScriptCanonicalHasher("blockwild.r10.domain-view-payload.v1")
       .writeBytes(payload).finish();
     writer.u8(domain).u16(1).u8(0).u64(state.entityRevision)
@@ -446,8 +532,13 @@ class RestoredRuntimeService {
     });
   }
 
-  async extract(): Promise<RustIntegratedRuntimeExtractionV1> {
+  async extract(
+    _afterRevision?: number,
+    _maxBytes?: number,
+    view?: RustIntegratedRuntimeExtractionViewV1,
+  ): Promise<RustIntegratedRuntimeExtractionV1> {
     this.extractCalls += 1;
+    if (!view) throw new Error("test runtime requires the engine drawing-buffer view");
     const actorId = this.desired.identity.actorId;
     const externalEntityId = this.desired.identity.externalEntityId;
     const entityId = PLAYER_ENTITY_ID;
@@ -512,6 +603,7 @@ class RestoredRuntimeService {
         actorId,
         this.desired.identity.playerId,
         entityId,
+        view,
       ),
       audio: new Uint8Array(),
       platformRequests: new Uint8Array(),
@@ -574,6 +666,10 @@ function engineHarness(service: RestoredRuntimeService) {
     rustLivePlayerAttestationR10: null,
     rustLivePlayerPresentationViewR10: null,
     rustLivePlayerViewExtractionRevisionR10: null,
+    rustLiveCameraPresentationViewR10: null,
+    rustLiveCameraExtractionRevisionR10: null,
+    rustLiveRenderViewR10: null,
+    rustLiveRenderViewRevisionR10: 0,
     rustLivePlayerInitialYawRadiansR10: null,
     rustLiveSelectedSlotIntentR5: null,
     rustLiveSelectedSlotIntentPendingR5: false,
@@ -600,6 +696,13 @@ function engineHarness(service: RestoredRuntimeService) {
     lookDeltaXThisFrame: 0,
     lookDeltaYThisFrame: 0,
     settings: { sensitivity: 0.0024 },
+    canvas: { width: 1280, height: 720 },
+    camera: new THREE.PerspectiveCamera(),
+    cameraMode: "first",
+    localPlayerModel: { group: new THREE.Group() },
+    heldRoot: new THREE.Group(),
+    offhandRoot: new THREE.Group(),
+    titleMode: false,
     events: { onSelectedSlot: () => undefined },
     emitHud: () => undefined,
     running: true,
@@ -749,14 +852,14 @@ test("accepted pump extraction advances only the native presentation mirror and 
   const beforeStale = { x: state.position.x, y: state.position.y, z: state.position.z };
   assert.throws(
     () => (engine as unknown as {
-      applyRustLivePlayerExtractionR10(
+      stageRustLivePlayerExtractionR10(
         generation: number,
         host: RustWorldRuntimeManagedHostV1,
         pump: unknown,
         extraction: RustIntegratedRuntimeExtractionV1,
       ): void;
       rustLiveInputPump: unknown;
-    }).applyRustLivePlayerExtractionR10(
+    }).stageRustLivePlayerExtractionR10(
       6,
       activeHost,
       (engine as unknown as { rustLiveInputPump: unknown }).rustLiveInputPump,
@@ -966,18 +1069,18 @@ test("engine source orders the exact player gate before composer and suppresses 
   assert.match(source, /if \(localSeat >= 0 && !rustLivePlayerAuthority\)/u);
   assert.match(source, /updateMobs\(dt: number\) \{\s*\n\s*const rustLivePlayerAuthority = this\.rustLivePlayerAuthorityEnabledR5\(\);\s*\n\s*if \(!rustLivePlayerAuthority\) this\.updateTemporaryMagic\(\)/u);
   assert.match(source, /if \(!this\.rustLivePlayerAuthorityEnabledR5\(\)\) \{\s*\n\s*const now = this\.worldSimulationSeconds\(\);\s*\n\s*const ironwake = consumeIronwakeFragment/u);
-  assert.match(source, /else if \(!this\.rustLiveInputPump\) \{\s*\n\s*this\.scheduleRustRendererExtractionR10/u);
+  assert.doesNotMatch(source, /scheduleRustRendererExtractionR10|runtimeService\(\)\.extract\(/u);
   assert.match(source, /\|\| this\.rustLiveInputAdvance\) return;/u);
   assert.match(source, /decodeRustLivePlayerViewR10\(extraction, attestation\.externalEntityId\)/u);
   const pumpAdvance = source.slice(
     source.indexOf("  private scheduleRustLiveInputAdvanceR5()"),
     source.indexOf("\n  private quarantineRustLivePlayerAuthorityR5", source.indexOf("  private scheduleRustLiveInputAdvanceR5()")),
   );
-  assert.ok(pumpAdvance.indexOf("await pump.advance(generation)")
-    < pumpAdvance.indexOf("this.applyRustLivePlayerExtractionR10(generation, host, pump, result.extraction)"));
-  assert.ok(pumpAdvance.indexOf("this.applyRustLivePlayerExtractionR10(generation, host, pump, result.extraction)")
-    < pumpAdvance.indexOf("this.enqueueRustLiveRendererExtractionR10({ generation, host, pump, extraction: result.extraction })"),
-  "the player mirror must decode before the extraction can enter composer submission");
+  assert.ok(pumpAdvance.indexOf("await pump.advance(generation, { view: requestedView })")
+    < pumpAdvance.indexOf("this.applyRustLiveAuthorityExtractionR10("));
+  assert.ok(pumpAdvance.indexOf("this.applyRustLiveAuthorityExtractionR10(")
+    < pumpAdvance.indexOf("this.enqueueRustLiveRendererExtractionR10({"),
+  "the player and camera mirrors must decode before extraction enters composer submission");
   assert.doesNotMatch(pumpAdvance, /rustLiveRendererExtractionQueue[^\n]*return/u,
     "renderer backpressure cannot stop the fixed-step player pump");
   const rendererQueue = source.slice(
@@ -997,11 +1100,11 @@ test("engine source orders the exact player gate before composer and suppresses 
     source.indexOf("  private async activateRustLivePlayerAuthorityR5("),
     source.indexOf("\n  private async stopRustLivePlayerAuthorityR5", source.indexOf("  private async activateRustLivePlayerAuthorityR5(")),
   );
-  assert.ok(playerActivation.indexOf("await pump.syncInitial(generation)")
-    < playerActivation.indexOf("this.applyRustLivePlayerExtractionR10(generation, host, pump, initial.extraction)"));
+  assert.ok(playerActivation.indexOf("await pump.syncInitial(generation, requestedView)")
+    < playerActivation.indexOf("this.applyRustLiveAuthorityExtractionR10("));
   assert.ok(playerActivation.indexOf("this.assertRustLiveGenerationR5(generation, host, \"initial input synchronization\")")
-    < playerActivation.indexOf("this.applyRustLivePlayerExtractionR10(generation, host, pump, initial.extraction)"));
-  assert.ok(playerActivation.indexOf("this.applyRustLivePlayerExtractionR10(generation, host, pump, initial.extraction)")
+    < playerActivation.indexOf("this.applyRustLiveAuthorityExtractionR10("));
+  assert.ok(playerActivation.indexOf("this.applyRustLiveAuthorityExtractionR10(")
     < playerActivation.indexOf("this.enqueueRustLiveRendererExtractionR10({"));
   const playerProjection = source.slice(
     source.indexOf("  private projectRustLivePlayerViewR10("),

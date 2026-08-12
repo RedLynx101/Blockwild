@@ -24,23 +24,26 @@ test("React shell transfers the cutover sink and epoch without constructing a pa
 
 test("each activated world switches epoch before creating one composer and one terrain publisher", async () => {
   const engine = await gameSource("engine.ts");
+  const acceptance = method(engine, "  private async acceptRustLiveRendererActivationR10(", "\n  private async activateRustLiveRendererR10");
   const activation = method(engine, "  private async activateRustLiveRendererR10(", "\n  private async closeMultiplayerForRustTransition");
   const epochSwitch = activation.indexOf("sink.switchEpoch(epoch)");
-  const composer = activation.indexOf("createRustLiveRenderRuntimeR10({");
-  const publisher = activation.indexOf("new RendererShellExtractionPublisherR11(runtime.terrain, epoch)");
-  assert.ok(epochSwitch >= 0 && epochSwitch < composer && composer < publisher);
-  assert.equal((activation.match(/createRustLiveRenderRuntimeR10\(\{/gu) ?? []).length, 1);
-  assert.equal((activation.match(/new RendererShellExtractionPublisherR11/gu) ?? []).length, 1);
+  const composer = activation.indexOf("runtime = await factory({");
+  const publisher = acceptance.indexOf("new RendererShellExtractionPublisherR11(runtime.terrain, epoch)");
+  assert.ok(epochSwitch >= 0 && epochSwitch < composer);
+  assert.ok(publisher >= 0);
+  assert.equal((activation.match(/runtime = await factory\(\{/gu) ?? []).length, 1);
+  assert.equal((acceptance.match(/new RendererShellExtractionPublisherR11/gu) ?? []).length, 1);
   assert.match(activation, /expectedContentManifestHash:\s*contentHash/u);
   assert.match(activation, /worldGeneration:\s*generation/u);
-  assert.match(activation, /generation !== this\.rustRuntimeTransitionGeneration/u);
+  assert.match(activation, /assertRustLivePlayerViewContextR10\(generation, host, pump, "renderer runtime creation"\)/u);
+  assert.match(acceptance, /for \(;;\)/u);
+  assert.equal((acceptance.match(/publisher\.present\(snapshot\)/gu) ?? []).length, 1);
 });
 
-test("authoritative extraction polling is bounded, serialized, tracked, and generation guarded", async () => {
+test("the input pump is the sole extraction producer and composer submission stays serialized", async () => {
   const engine = await gameSource("engine.ts");
-  const poll = method(engine, "  private scheduleRustRendererExtractionR10(", "\n  publishRendererExtractionR11(now: number)");
+  const poll = method(engine, "  private scheduleRustLiveInputExtractionPresentationR10(", "\n  private rustRendererShellSnapshotR11");
   assert.match(poll, /if \(this\.rustRenderExtractionPoll\) return/u);
-  assert.match(poll, /host\.runtimeService\(\)\.extract\(afterRevision\)/u);
   assert.match(poll, /simulationTick:\s*BigInt\(extraction\.identity\.tick\)/u);
   assert.match(poll, /runtime\.submitRuntimeExtraction\(generation, extraction/u);
   assert.match(poll, /this\.trackRustAuthorityOperation\(operation\)/u);
@@ -48,17 +51,21 @@ test("authoritative extraction polling is bounded, serialized, tracked, and gene
   assert.match(poll, /host !== this\.rustRuntimeHost/u);
   assert.match(poll, /this\.rustRuntimeOperationsBlocked/u);
   assert.match(poll, /this\.rustRenderFrameSequence \+ BigInt\(1\)/u);
+  assert.doesNotMatch(engine, /runtimeService\(\)\.extract\(/u);
 });
 
-test("terrain cadence uses current Rust identity and the extraction context reuses its camera and environment", async () => {
+test("terrain cadence uses current Rust identity after queued camera extraction and reuses canonical environment", async () => {
   const engine = await gameSource("engine.ts");
   const publish = method(engine, "  publishRendererExtractionR11(now: number)", "\n  /** Holds presentation time");
   assert.match(publish, /BigInt\(host\.runtimeService\(\)\.identity\(\)\.tick\)/u);
-  assert.match(publish, /simulationTick:\s*authoritativeTick/u);
   assert.match(publish, /const environment = sink\.diagnostics\(\)\.environment/u);
-  assert.match(publish, /camera:\s*snapshot\.camera/u);
   assert.match(publish, /animationTimeMicros:\s*snapshot\.animationTimeMicros/u);
-  assert.match(publish, /this\.world\.rendererTerrainSnapshotR11/u);
+  assert.ok(publish.indexOf("this.scheduleRustLiveInputExtractionPresentationR10(runtime, pending")
+    < publish.indexOf("if (!sink.present(snapshot))"));
+  assert.doesNotMatch(publish, /camera:\s*snapshot\.camera/u);
+  const snapshot = method(engine, "  private rustRendererShellSnapshotR11(", "\n  publishRendererExtractionR11(now: number)");
+  assert.match(snapshot, /simulationTick,/u);
+  assert.match(snapshot, /this\.world\.rendererTerrainSnapshotR11/u);
 });
 
 test("world transition, quit, and shutdown drain work then dispose the composer before the worker", async () => {
