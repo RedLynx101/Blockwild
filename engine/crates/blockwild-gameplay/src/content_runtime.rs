@@ -22,8 +22,16 @@ pub const MAX_RENDER_PRESENTATION_PROFILES: usize = 4_096;
 pub const MAX_MISSING_RENDER_PRESENTATION_PROFILES: usize = 4_096;
 pub const MAX_RENDER_PRESENTATION_REFS: usize = 4_096;
 pub const MAX_RENDER_PRESENTATION_SOURCE_IDS: usize = 4_096;
+pub const MAX_WORLD_PROP_SOURCE_BLOCKS: usize = 4_096;
+pub const MAX_WORLD_PROP_DYNAMIC_FAMILIES: usize = 64;
+pub const MAX_WORLD_PROP_STATE_OWNERS: usize = 16;
+pub const MAX_WORLD_PROP_RESIDUAL_KINDS: usize = 64;
 pub const BLOCK_ACTION_CATALOG_ID: &str = "block-actions";
 pub const RENDER_PRESENTATION_CATALOG_ID: &str = "render-presentations";
+pub const WORLD_PROP_OWNERSHIP_POLICY_ID: &str = "terrain-pages-and-domain-attachments-v1";
+pub const WORLD_PROP_TERRAIN_REGISTRY_HASH: &str = "d8954db79caaa89938015b183130d246";
+pub const WORLD_PROP_SOURCE_INVENTORY_HASH: &str = "cebd5d90170bdc1ec85a273cebafd4f6";
+pub const WORLD_PROP_OWNERSHIP_POLICY_HASH: &str = "5b7eb831ff3ed23dc8ba117cbea72d5c";
 pub const CONTENT_ACTION_FIXED_SCALE: u64 = 1_000_000;
 
 pub const BLOCK_TOPOLOGY_DIRECTIONAL: u16 = 1 << 0;
@@ -121,6 +129,7 @@ pub enum ContentSchema {
     MachineProfileV1,
     MachineProfileV2,
     RenderPresentationCatalog,
+    RenderPresentationCatalogV2,
     SpellDefinition,
     CreatureMove,
     CreatureStatus,
@@ -163,6 +172,7 @@ impl ContentSchema {
             Self::MachineProfileV1 => "machine-profile@1",
             Self::MachineProfileV2 => "machine-profile@2",
             Self::RenderPresentationCatalog => "render-presentation-catalog@1",
+            Self::RenderPresentationCatalogV2 => "render-presentation-catalog@2",
             Self::SpellDefinition => "spell-definition@1",
             Self::CreatureMove => "creature-move@1",
             Self::CreatureStatus => "creature-status@1",
@@ -712,6 +722,108 @@ pub struct ContentMissingRenderPresentationProfile {
     pub reason: String,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentWorldPropMaterialKind {
+    Air,
+    Material,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentWorldPropSourceBlockTupleV1 {
+    pub block_id: u16,
+    pub registry_slot: u16,
+    pub material_kind: ContentWorldPropMaterialKind,
+    pub geometry_revision: Option<u16>,
+    pub renderable: bool,
+    pub specialty: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentWorldPropOwnershipOwnerV1 {
+    Bwr2TerrainPage,
+    MachineChild,
+    R4Cell,
+    R7Machine,
+    ResidentR6Entity,
+    Session,
+    SessionUi,
+    TerrainEffect,
+}
+
+impl ContentWorldPropOwnershipOwnerV1 {
+    #[must_use]
+    pub const fn as_id(self) -> &'static str {
+        match self {
+            Self::Bwr2TerrainPage => "bwr2-terrain-page",
+            Self::MachineChild => "machine-child",
+            Self::R4Cell => "r4-cell",
+            Self::R7Machine => "r7-machine",
+            Self::ResidentR6Entity => "resident-r6-entity",
+            Self::Session => "session",
+            Self::SessionUi => "session-ui",
+            Self::TerrainEffect => "terrain-effect",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentWorldPropOwnershipStatusV1 {
+    Exact,
+    Missing,
+    Partial,
+}
+
+impl ContentWorldPropOwnershipStatusV1 {
+    #[must_use]
+    pub const fn as_id(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::Missing => "missing",
+            Self::Partial => "partial",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentWorldPropDynamicFamilyOwnershipV1 {
+    pub id: String,
+    pub base_owner: ContentWorldPropOwnershipOwnerV1,
+    pub state_owners: Vec<ContentWorldPropOwnershipOwnerV1>,
+    pub overlay_owner: ContentWorldPropOwnershipOwnerV1,
+    pub status: ContentWorldPropOwnershipStatusV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentWorldPropTerrainOwnershipV1 {
+    pub protocol: String,
+    pub registry_schema_version: u16,
+    pub registry_content_hash: String,
+    pub geometry_revision: u16,
+    pub registry_slot_count: u32,
+    pub biome_tint_slot_count: u32,
+    pub block_definition_count: u32,
+    pub renderable_block_count: u32,
+    pub specialty_block_count: u32,
+    pub specialty_policy: String,
+    pub mesher_artifact_hash: Option<String>,
+    pub renderer_artifact_hash: Option<String>,
+    pub accepted_producer: Option<String>,
+    pub selection_policy: Option<String>,
+    pub authority_blockers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentWorldPropOwnershipPolicyV1 {
+    pub schema: u16,
+    pub id: String,
+    pub policy_hash: String,
+    pub source_inventory_hash: String,
+    pub source_inventory: Vec<ContentWorldPropSourceBlockTupleV1>,
+    pub terrain: ContentWorldPropTerrainOwnershipV1,
+    pub dynamic_families: Vec<ContentWorldPropDynamicFamilyOwnershipV1>,
+    pub residual_persistent_kinds: Vec<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContentRenderPresentationCatalogRecord {
     pub core: ContentRecordCore,
@@ -726,6 +838,8 @@ pub struct ContentRenderPresentationCatalogRecord {
     pub profiles: BTreeMap<String, ContentRenderPresentationProfile>,
     pub missing_profiles: BTreeMap<String, ContentMissingRenderPresentationProfile>,
     pub integration_blockers: Vec<String>,
+    /// `None` is the explicit loadable-but-unproven meaning of legacy catalog schema v1.
+    pub world_prop_ownership_policy: Option<ContentWorldPropOwnershipPolicyV1>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1042,6 +1156,7 @@ struct RenderPresentationFacts {
     profiles: BTreeMap<String, ContentRenderPresentationProfile>,
     missing_profiles: BTreeMap<String, ContentMissingRenderPresentationProfile>,
     integration_blockers: Vec<String>,
+    world_prop_ownership_policy: Option<ContentWorldPropOwnershipPolicyV1>,
 }
 
 #[derive(Clone, Debug)]
@@ -1858,6 +1973,7 @@ fn resolve_schema(
         (ContentDomain::MachineProfile, "machine-profile", 1) => ContentSchema::MachineProfileV1,
         (ContentDomain::MachineProfile, "machine-profile", 2) => ContentSchema::MachineProfileV2,
         (ContentDomain::MachineProfile, "render-presentation-catalog", 1) => ContentSchema::RenderPresentationCatalog,
+        (ContentDomain::MachineProfile, "render-presentation-catalog", 2) => ContentSchema::RenderPresentationCatalogV2,
         (ContentDomain::AbilitySpell, "spell-definition", 1) => ContentSchema::SpellDefinition,
         (ContentDomain::AbilitySpell, "creature-move", 1) => ContentSchema::CreatureMove,
         (ContentDomain::AbilitySpell, "creature-status", 1) => ContentSchema::CreatureStatus,
@@ -1925,7 +2041,7 @@ fn validate_record(record: &DecodedRecord, blockers: &mut Vec<ContentRuntimeBloc
         ContentSchema::MachineProfileV1 | ContentSchema::MachineProfileV2 => {
             validate_machine_profile(record, object, &mut facts, blockers);
         }
-        ContentSchema::RenderPresentationCatalog => {
+        ContentSchema::RenderPresentationCatalog | ContentSchema::RenderPresentationCatalogV2 => {
             validate_render_presentation_catalog(record, object, &mut facts, blockers);
         }
         ContentSchema::SpellDefinition => validate_spell(record, object, &mut facts, blockers),
@@ -3321,13 +3437,617 @@ fn parse_render_model(
     })
 }
 
+fn parse_world_prop_owner_v1(
+    record: &DecodedRecord,
+    path: &str,
+    value: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentWorldPropOwnershipOwnerV1> {
+    let owner = match value {
+        "bwr2-terrain-page" => ContentWorldPropOwnershipOwnerV1::Bwr2TerrainPage,
+        "machine-child" => ContentWorldPropOwnershipOwnerV1::MachineChild,
+        "r4-cell" => ContentWorldPropOwnershipOwnerV1::R4Cell,
+        "r7-machine" => ContentWorldPropOwnershipOwnerV1::R7Machine,
+        "resident-r6-entity" => ContentWorldPropOwnershipOwnerV1::ResidentR6Entity,
+        "session" => ContentWorldPropOwnershipOwnerV1::Session,
+        "session-ui" => ContentWorldPropOwnershipOwnerV1::SessionUi,
+        "terrain-effect" => ContentWorldPropOwnershipOwnerV1::TerrainEffect,
+        _ => {
+            enum_value(
+                record,
+                path,
+                value,
+                &[
+                    "bwr2-terrain-page",
+                    "machine-child",
+                    "r4-cell",
+                    "r7-machine",
+                    "resident-r6-entity",
+                    "session",
+                    "session-ui",
+                    "terrain-effect",
+                ],
+                blockers,
+            );
+            return None;
+        }
+    };
+    Some(owner)
+}
+
+fn parse_world_prop_status_v1(
+    record: &DecodedRecord,
+    path: &str,
+    value: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentWorldPropOwnershipStatusV1> {
+    let status = match value {
+        "exact" => ContentWorldPropOwnershipStatusV1::Exact,
+        "missing" => ContentWorldPropOwnershipStatusV1::Missing,
+        "partial" => ContentWorldPropOwnershipStatusV1::Partial,
+        _ => {
+            enum_value(record, path, value, &["exact", "missing", "partial"], blockers);
+            return None;
+        }
+    };
+    Some(status)
+}
+
+fn require_world_prop_unproven_null_v1(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    field: &str,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) {
+    let path = field_path(base, field);
+    match object.get(field) {
+        Some(CanonicalJson::Null) => {}
+        Some(value) => invalid_type(record, &path, "explicit null until attested", value, blockers),
+        None => missing_field(record, &path, "explicit null until attested", blockers),
+    }
+}
+
+fn canonical_world_prop_source_inventory_hash_v1(inventory: &[ContentWorldPropSourceBlockTupleV1]) -> CanonicalHash {
+    let mut hasher = CanonicalHasher::new("blockwild.render.world-prop-source-inventory.v1");
+    hasher.write_u32(u32::try_from(inventory.len()).expect("source inventory bound fits u32"));
+    for tuple in inventory {
+        hasher.write_u16(tuple.block_id);
+        hasher.write_u16(tuple.registry_slot);
+        hasher.write_str(match tuple.material_kind {
+            ContentWorldPropMaterialKind::Air => "air",
+            ContentWorldPropMaterialKind::Material => "material",
+        });
+        match tuple.geometry_revision {
+            None => hasher.write_u16(0),
+            Some(revision) => {
+                hasher.write_u16(1);
+                hasher.write_u16(revision);
+            }
+        }
+        hasher.write_u16(u16::from(tuple.renderable));
+        hasher.write_u16(u16::from(tuple.specialty));
+    }
+    hasher.finish()
+}
+
+fn canonical_world_prop_ownership_policy_hash_v1(policy: &ContentWorldPropOwnershipPolicyV1) -> CanonicalHash {
+    let mut hasher = CanonicalHasher::new("blockwild.render.world-prop-ownership-policy.v1");
+    hasher.write_u16(policy.schema);
+    hasher.write_str(&policy.id);
+    hasher.write_str(&policy.source_inventory_hash);
+    let terrain = &policy.terrain;
+    hasher.write_str(&terrain.protocol);
+    hasher.write_u16(terrain.registry_schema_version);
+    hasher.write_str(&terrain.registry_content_hash);
+    hasher.write_u16(terrain.geometry_revision);
+    hasher.write_u32(terrain.registry_slot_count);
+    hasher.write_u32(terrain.biome_tint_slot_count);
+    hasher.write_u32(terrain.block_definition_count);
+    hasher.write_u32(terrain.renderable_block_count);
+    hasher.write_u32(terrain.specialty_block_count);
+    hasher.write_str(&terrain.specialty_policy);
+    for value in [
+        &terrain.mesher_artifact_hash,
+        &terrain.renderer_artifact_hash,
+        &terrain.accepted_producer,
+        &terrain.selection_policy,
+    ] {
+        match value {
+            None => hasher.write_u16(0),
+            Some(value) => {
+                hasher.write_u16(1);
+                hasher.write_str(value);
+            }
+        }
+    }
+    hasher.write_u32(u32::try_from(terrain.authority_blockers.len()).expect("blocker bound fits u32"));
+    for blocker in &terrain.authority_blockers {
+        hasher.write_str(blocker);
+    }
+    hasher.write_u32(u32::try_from(policy.dynamic_families.len()).expect("dynamic family bound fits u32"));
+    for family in &policy.dynamic_families {
+        hasher.write_str(&family.id);
+        hasher.write_str(family.base_owner.as_id());
+        hasher.write_u32(u32::try_from(family.state_owners.len()).expect("state owner bound fits u32"));
+        for owner in &family.state_owners {
+            hasher.write_str(owner.as_id());
+        }
+        hasher.write_str(family.overlay_owner.as_id());
+        hasher.write_str(family.status.as_id());
+    }
+    hasher.write_u32(u32::try_from(policy.residual_persistent_kinds.len()).expect("residual kind bound fits u32"));
+    for kind in &policy.residual_persistent_kinds {
+        hasher.write_str(kind);
+    }
+    hasher.finish()
+}
+
+fn parse_world_prop_ownership_policy_v1(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentWorldPropOwnershipPolicyV1> {
+    const BASE: &str = "$.worldPropOwnershipPolicy";
+    let schema = required_u32_at(record, object, "schema", BASE, 1, 1, blockers)?;
+    let id = required_exact_string_at(record, object, "id", BASE, WORLD_PROP_OWNERSHIP_POLICY_ID, blockers)?;
+    let policy_hash = required_lowercase_hex_at(record, object, "policyHash", BASE, 32, blockers)?;
+    let source_inventory_hash = required_lowercase_hex_at(record, object, "sourceInventoryHash", BASE, 32, blockers)?;
+    if policy_hash != WORLD_PROP_OWNERSHIP_POLICY_HASH {
+        invalid_value(
+            record,
+            &field_path(BASE, "policyHash"),
+            WORLD_PROP_OWNERSHIP_POLICY_HASH,
+            policy_hash,
+            blockers,
+        );
+    }
+    if source_inventory_hash != WORLD_PROP_SOURCE_INVENTORY_HASH {
+        invalid_value(
+            record,
+            &field_path(BASE, "sourceInventoryHash"),
+            WORLD_PROP_SOURCE_INVENTORY_HASH,
+            source_inventory_hash,
+            blockers,
+        );
+    }
+    let inventory_values = required_array_at(record, object, "sourceInventory", BASE, blockers)?;
+    if inventory_values.len() != 313 || inventory_values.len() > MAX_WORLD_PROP_SOURCE_BLOCKS {
+        invalid_value(
+            record,
+            &field_path(BASE, "sourceInventory"),
+            "exactly 313 bounded canonical block tuples",
+            &inventory_values.len().to_string(),
+            blockers,
+        );
+    }
+    let mut source_inventory = Vec::new();
+    let mut previous_block_id = None;
+    for (index, value) in inventory_values.iter().take(MAX_WORLD_PROP_SOURCE_BLOCKS).enumerate() {
+        let base = format!("{BASE}.sourceInventory[{index}]");
+        let Some(tuple) = value.as_object() else {
+            invalid_type(record, &base, "source block tuple object", value, blockers);
+            continue;
+        };
+        let block_id = required_u32_at(record, tuple, "blockId", &base, 0, u16::MAX.into(), blockers);
+        let registry_slot = required_u32_at(record, tuple, "registrySlot", &base, 0, u16::MAX.into(), blockers);
+        let kind_value = required_nonempty_string_at(record, tuple, "materialKind", &base, blockers);
+        let material_kind = match kind_value {
+            Some("air") => Some(ContentWorldPropMaterialKind::Air),
+            Some("material") => Some(ContentWorldPropMaterialKind::Material),
+            Some(value) => {
+                enum_value(
+                    record,
+                    &field_path(&base, "materialKind"),
+                    value,
+                    &["air", "material"],
+                    blockers,
+                );
+                None
+            }
+            None => None,
+        };
+        let geometry_revision = match tuple.get("geometryRevision") {
+            Some(CanonicalJson::Null) => Some(None),
+            Some(value) => match json_u32(value, 1, 1) {
+                Some(value) => Some(Some(u16::try_from(value).expect("geometry revision bounded"))),
+                None => {
+                    invalid_type(
+                        record,
+                        &field_path(&base, "geometryRevision"),
+                        "integer 1 or null",
+                        value,
+                        blockers,
+                    );
+                    None
+                }
+            },
+            None => {
+                missing_field(
+                    record,
+                    &field_path(&base, "geometryRevision"),
+                    "integer 1 or null",
+                    blockers,
+                );
+                None
+            }
+        };
+        let renderable = required_bool_at(record, tuple, "renderable", &base, blockers);
+        let specialty = required_bool_at(record, tuple, "specialty", &base, blockers);
+        let (
+            Some(block_id),
+            Some(registry_slot),
+            Some(material_kind),
+            Some(geometry_revision),
+            Some(renderable),
+            Some(specialty),
+        ) = (
+            block_id,
+            registry_slot,
+            material_kind,
+            geometry_revision,
+            renderable,
+            specialty,
+        )
+        else {
+            continue;
+        };
+        if previous_block_id.is_some_and(|previous| previous >= block_id) {
+            invalid_value(
+                record,
+                &field_path(&base, "blockId"),
+                "strictly sorted unique block id",
+                &block_id.to_string(),
+                blockers,
+            );
+        }
+        previous_block_id = Some(block_id);
+        if registry_slot != block_id {
+            invalid_value(
+                record,
+                &field_path(&base, "registrySlot"),
+                "slot equal to blockId",
+                &registry_slot.to_string(),
+                blockers,
+            );
+        }
+        let tuple_shape_valid = match material_kind {
+            ContentWorldPropMaterialKind::Air => !renderable && geometry_revision.is_none() && !specialty,
+            ContentWorldPropMaterialKind::Material => renderable && geometry_revision == Some(1),
+        };
+        if !tuple_shape_valid {
+            invalid_value(
+                record,
+                &base,
+                "air tuple or renderable geometry revision 1 material tuple",
+                "inconsistent tuple",
+                blockers,
+            );
+        }
+        source_inventory.push(ContentWorldPropSourceBlockTupleV1 {
+            block_id: u16::try_from(block_id).expect("block id bounded"),
+            registry_slot: u16::try_from(registry_slot).expect("registry slot bounded"),
+            material_kind,
+            geometry_revision,
+            renderable,
+            specialty,
+        });
+    }
+
+    let terrain = required_object_at(record, object, "terrain", BASE, blockers)?;
+    const TERRAIN_BASE: &str = "$.worldPropOwnershipPolicy.terrain";
+    let protocol = required_exact_string_at(record, terrain, "protocol", TERRAIN_BASE, "BWR2", blockers)?;
+    let registry_schema_version =
+        required_u32_at(record, terrain, "registrySchemaVersion", TERRAIN_BASE, 2, 2, blockers)?;
+    let registry_content_hash =
+        required_lowercase_hex_at(record, terrain, "registryContentHash", TERRAIN_BASE, 32, blockers)?;
+    if registry_content_hash != WORLD_PROP_TERRAIN_REGISTRY_HASH {
+        invalid_value(
+            record,
+            &field_path(TERRAIN_BASE, "registryContentHash"),
+            WORLD_PROP_TERRAIN_REGISTRY_HASH,
+            registry_content_hash,
+            blockers,
+        );
+    }
+    let geometry_revision = required_u32_at(record, terrain, "geometryRevision", TERRAIN_BASE, 1, 1, blockers)?;
+    let registry_slot_count = required_u32_at(record, terrain, "registrySlotCount", TERRAIN_BASE, 601, 601, blockers)?;
+    let biome_tint_slot_count = required_u32_at(record, terrain, "biomeTintSlotCount", TERRAIN_BASE, 24, 24, blockers)?;
+    let block_definition_count = required_u32_at(
+        record,
+        terrain,
+        "blockDefinitionCount",
+        TERRAIN_BASE,
+        313,
+        313,
+        blockers,
+    )?;
+    let renderable_block_count = required_u32_at(
+        record,
+        terrain,
+        "renderableBlockCount",
+        TERRAIN_BASE,
+        312,
+        312,
+        blockers,
+    )?;
+    let specialty_block_count =
+        required_u32_at(record, terrain, "specialtyBlockCount", TERRAIN_BASE, 218, 218, blockers)?;
+    let specialty_policy = required_exact_string_at(
+        record,
+        terrain,
+        "specialtyPolicy",
+        TERRAIN_BASE,
+        "bwr1-non-opaque-cube-or-furnace-v1",
+        blockers,
+    )?;
+    for field in [
+        "mesherArtifactHash",
+        "rendererArtifactHash",
+        "acceptedProducer",
+        "selectionPolicy",
+    ] {
+        require_world_prop_unproven_null_v1(record, terrain, field, TERRAIN_BASE, blockers);
+    }
+    let authority_blockers = parse_string_array(
+        record,
+        required_array_at(record, terrain, "authorityBlockers", TERRAIN_BASE, blockers),
+        &field_path(TERRAIN_BASE, "authorityBlockers"),
+        blockers,
+    );
+    const EXPECTED_AUTHORITY_BLOCKERS: [&str; 4] = [
+        "accepted-producer-identity-unproven",
+        "mesher-artifact-hash-unproven",
+        "renderer-artifact-hash-unproven",
+        "selection-policy-unproven",
+    ];
+    if authority_blockers.iter().map(String::as_str).collect::<Vec<_>>() != EXPECTED_AUTHORITY_BLOCKERS {
+        invalid_value(
+            record,
+            &field_path(TERRAIN_BASE, "authorityBlockers"),
+            "exact sorted blockers for four null fields",
+            &authority_blockers.join(","),
+            blockers,
+        );
+    }
+
+    let family_values = required_array_at(record, object, "dynamicFamilies", BASE, blockers)?;
+    if family_values.len() != 7 || family_values.len() > MAX_WORLD_PROP_DYNAMIC_FAMILIES {
+        invalid_value(
+            record,
+            &field_path(BASE, "dynamicFamilies"),
+            "exactly seven bounded dynamic families",
+            &family_values.len().to_string(),
+            blockers,
+        );
+    }
+    let mut dynamic_families = Vec::new();
+    let mut previous_family_id = None::<String>;
+    for (index, value) in family_values.iter().take(MAX_WORLD_PROP_DYNAMIC_FAMILIES).enumerate() {
+        let base = format!("{BASE}.dynamicFamilies[{index}]");
+        let Some(family) = value.as_object() else {
+            invalid_type(record, &base, "dynamic ownership family object", value, blockers);
+            continue;
+        };
+        let id = required_nonempty_string_at(record, family, "id", &base, blockers);
+        let base_owner = required_nonempty_string_at(record, family, "baseOwner", &base, blockers)
+            .and_then(|value| parse_world_prop_owner_v1(record, &field_path(&base, "baseOwner"), value, blockers));
+        let overlay_owner = required_nonempty_string_at(record, family, "overlayOwner", &base, blockers)
+            .and_then(|value| parse_world_prop_owner_v1(record, &field_path(&base, "overlayOwner"), value, blockers));
+        let status = required_nonempty_string_at(record, family, "status", &base, blockers)
+            .and_then(|value| parse_world_prop_status_v1(record, &field_path(&base, "status"), value, blockers));
+        let state_values = required_array_at(record, family, "stateOwners", &base, blockers)?;
+        if state_values.is_empty() || state_values.len() > MAX_WORLD_PROP_STATE_OWNERS {
+            invalid_value(
+                record,
+                &field_path(&base, "stateOwners"),
+                "1..16 sorted state owners",
+                &state_values.len().to_string(),
+                blockers,
+            );
+        }
+        let mut state_owners = Vec::new();
+        let mut previous_owner = None::<String>;
+        for (owner_index, value) in state_values.iter().take(MAX_WORLD_PROP_STATE_OWNERS).enumerate() {
+            let path = format!("{base}.stateOwners[{owner_index}]");
+            let Some(value) = value.as_str() else {
+                invalid_type(record, &path, "world prop owner string", value, blockers);
+                continue;
+            };
+            if previous_owner
+                .as_ref()
+                .is_some_and(|previous| previous.as_str() >= value)
+            {
+                invalid_value(record, &path, "strictly sorted unique owner", value, blockers);
+            }
+            previous_owner = Some(value.to_owned());
+            if let Some(owner) = parse_world_prop_owner_v1(record, &path, value, blockers) {
+                state_owners.push(owner);
+            }
+        }
+        let (Some(id), Some(base_owner), Some(overlay_owner), Some(status)) = (id, base_owner, overlay_owner, status)
+        else {
+            continue;
+        };
+        if previous_family_id
+            .as_ref()
+            .is_some_and(|previous| previous.as_str() >= id)
+        {
+            invalid_value(
+                record,
+                &field_path(&base, "id"),
+                "strictly sorted unique family id",
+                id,
+                blockers,
+            );
+        }
+        previous_family_id = Some(id.to_owned());
+        if base_owner != ContentWorldPropOwnershipOwnerV1::Bwr2TerrainPage
+            || !matches!(
+                overlay_owner,
+                ContentWorldPropOwnershipOwnerV1::MachineChild
+                    | ContentWorldPropOwnershipOwnerV1::SessionUi
+                    | ContentWorldPropOwnershipOwnerV1::TerrainEffect
+            )
+        {
+            invalid_value(
+                record,
+                &base,
+                "BWR2 base and typed overlay owner",
+                "unsupported owner assignment",
+                blockers,
+            );
+        }
+        dynamic_families.push(ContentWorldPropDynamicFamilyOwnershipV1 {
+            id: id.to_owned(),
+            base_owner,
+            state_owners,
+            overlay_owner,
+            status,
+        });
+    }
+    const EXPECTED_FAMILIES: [(&str, &[&str], &str, &str); 7] = [
+        ("active-chest-articulation", &["session"], "session-ui", "partial"),
+        (
+            "aquarium",
+            &["r7-machine", "resident-r6-entity"],
+            "terrain-effect",
+            "missing",
+        ),
+        (
+            "butterfly-exhibit",
+            &["r7-machine", "resident-r6-entity"],
+            "terrain-effect",
+            "missing",
+        ),
+        (
+            "capture-orb-rack-and-healer-contents",
+            &["r7-machine"],
+            "machine-child",
+            "partial",
+        ),
+        ("fireplace-flame", &["r4-cell"], "terrain-effect", "missing"),
+        ("morph-loom-contents", &["r7-machine"], "machine-child", "missing"),
+        ("tome-display", &["r4-cell", "r7-machine"], "machine-child", "missing"),
+    ];
+    for (index, (id, state_owners, overlay_owner, status)) in EXPECTED_FAMILIES.iter().enumerate() {
+        let Some(actual) = dynamic_families.get(index) else {
+            continue;
+        };
+        if actual.id != *id
+            || actual
+                .state_owners
+                .iter()
+                .map(|owner| owner.as_id())
+                .collect::<Vec<_>>()
+                != *state_owners
+            || actual.overlay_owner.as_id() != *overlay_owner
+            || actual.status.as_id() != *status
+        {
+            invalid_value(
+                record,
+                &format!("{BASE}.dynamicFamilies[{index}]"),
+                "audited world prop ownership tuple",
+                &actual.id,
+                blockers,
+            );
+        }
+    }
+
+    let residual_persistent_kinds = parse_string_array(
+        record,
+        required_array_at(record, object, "residualPersistentKinds", BASE, blockers),
+        &field_path(BASE, "residualPersistentKinds"),
+        blockers,
+    );
+    if residual_persistent_kinds.len() > MAX_WORLD_PROP_RESIDUAL_KINDS || !residual_persistent_kinds.is_empty() {
+        invalid_value(
+            record,
+            &field_path(BASE, "residualPersistentKinds"),
+            "explicit empty array",
+            &residual_persistent_kinds.join(","),
+            blockers,
+        );
+    }
+
+    let terrain = ContentWorldPropTerrainOwnershipV1 {
+        protocol: protocol.to_owned(),
+        registry_schema_version: u16::try_from(registry_schema_version).expect("registry schema bounded"),
+        registry_content_hash: registry_content_hash.to_owned(),
+        geometry_revision: u16::try_from(geometry_revision).expect("geometry revision bounded"),
+        registry_slot_count,
+        biome_tint_slot_count,
+        block_definition_count,
+        renderable_block_count,
+        specialty_block_count,
+        specialty_policy: specialty_policy.to_owned(),
+        mesher_artifact_hash: None,
+        renderer_artifact_hash: None,
+        accepted_producer: None,
+        selection_policy: None,
+        authority_blockers,
+    };
+    let policy = ContentWorldPropOwnershipPolicyV1 {
+        schema: u16::try_from(schema).expect("policy schema bounded"),
+        id: id.to_owned(),
+        policy_hash: policy_hash.to_owned(),
+        source_inventory_hash: source_inventory_hash.to_owned(),
+        source_inventory,
+        terrain,
+        dynamic_families,
+        residual_persistent_kinds,
+    };
+    let actual_inventory_hash = canonical_world_prop_source_inventory_hash_v1(&policy.source_inventory).to_hex();
+    if actual_inventory_hash != policy.source_inventory_hash {
+        invalid_value(
+            record,
+            &field_path(BASE, "sourceInventoryHash"),
+            &actual_inventory_hash,
+            &policy.source_inventory_hash,
+            blockers,
+        );
+    }
+    let actual_policy_hash = canonical_world_prop_ownership_policy_hash_v1(&policy).to_hex();
+    if actual_policy_hash != policy.policy_hash {
+        invalid_value(
+            record,
+            &field_path(BASE, "policyHash"),
+            &actual_policy_hash,
+            &policy.policy_hash,
+            blockers,
+        );
+    }
+    let renderable_count = policy.source_inventory.iter().filter(|tuple| tuple.renderable).count() as u32;
+    let specialty_count = policy.source_inventory.iter().filter(|tuple| tuple.specialty).count() as u32;
+    if renderable_count != policy.terrain.renderable_block_count
+        || specialty_count != policy.terrain.specialty_block_count
+    {
+        invalid_value(
+            record,
+            BASE,
+            "declared counts recomputed from source inventory",
+            &format!("renderable={renderable_count},specialty={specialty_count}"),
+            blockers,
+        );
+    }
+    Some(policy)
+}
+
 fn validate_render_presentation_catalog(
     record: &DecodedRecord,
     object: &BTreeMap<String, CanonicalJson>,
     facts: &mut RecordFacts,
     blockers: &mut Vec<ContentRuntimeBlocker>,
 ) {
-    required_u32(record, object, "schema", 1, 1, blockers);
+    let is_v2 = record.schema == ContentSchema::RenderPresentationCatalogV2;
+    required_u32(
+        record,
+        object,
+        "schema",
+        u32::from(is_v2) + 1,
+        u32::from(is_v2) + 1,
+        blockers,
+    );
     if record.id != RENDER_PRESENTATION_CATALOG_ID {
         invalid_value(record, "$.id", RENDER_PRESENTATION_CATALOG_ID, &record.id, blockers);
     }
@@ -3554,6 +4274,14 @@ fn validate_render_presentation_catalog(
             blockers,
         );
     }
+    let world_prop_ownership_policy = if is_v2 {
+        required_object(record, object, "worldPropOwnershipPolicy", blockers)
+            .and_then(|policy| parse_world_prop_ownership_policy_v1(record, policy, blockers))
+    } else {
+        // Schema v1 remains loadable for old saves/manifests, but absence is never
+        // interpreted as an empty or promoted world-prop ownership assertion.
+        None
+    };
 
     if let (
         Some(catalog_schema),
@@ -3586,6 +4314,7 @@ fn validate_render_presentation_catalog(
             profiles,
             missing_profiles,
             integration_blockers,
+            world_prop_ownership_policy,
         });
     }
 }
@@ -4067,7 +4796,10 @@ fn insert_record(registry: &mut ContentRuntimeRegistry, record: DecodedRecord, f
             registry.machine_recipes.insert(id, ContentRecipeRecord { core });
         }
         ContentDomain::MachineProfile => {
-            if record.schema == ContentSchema::RenderPresentationCatalog {
+            if matches!(
+                record.schema,
+                ContentSchema::RenderPresentationCatalog | ContentSchema::RenderPresentationCatalogV2
+            ) {
                 let render = facts
                     .render_presentation
                     .expect("validated render presentation catalog has typed facts");
@@ -4086,6 +4818,7 @@ fn insert_record(registry: &mut ContentRuntimeRegistry, record: DecodedRecord, f
                         profiles: render.profiles,
                         missing_profiles: render.missing_profiles,
                         integration_blockers: render.integration_blockers,
+                        world_prop_ownership_policy: render.world_prop_ownership_policy,
                     },
                 );
             } else {
@@ -6518,6 +7251,87 @@ mod tests {
         artifacts
     }
 
+    fn world_prop_ownership_policy_fixture_v1() -> String {
+        const BLOCK_IDS: &[u16] = &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+            29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55,
+            56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82,
+            83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107,
+            108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128,
+            129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149,
+            150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170,
+            171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191,
+            192, 193, 194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 217, 218,
+            219, 220, 221, 222, 223, 224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 240, 241, 242, 243, 244,
+            245, 246, 247, 248, 249, 250, 251, 252, 253, 254, 255, 256, 257, 258, 259, 260, 261, 262, 263, 264, 265,
+            266, 267, 268, 269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 279, 280, 281, 282, 283, 284, 285, 286,
+            287, 288, 289, 290, 291, 292, 293, 294, 295, 296, 535, 536, 537, 538, 539, 540, 541, 544, 546, 547, 548,
+            549, 550, 551, 552, 565, 566, 567, 568, 569, 570, 571, 572, 597, 598, 599, 600,
+        ];
+        const SPECIALTY_IDS: &[u16] = &[
+            6, 7, 12, 13, 18, 20, 28, 31, 32, 37, 38, 41, 44, 45, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 58, 59,
+            60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 74, 75, 76, 77, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89,
+            90, 92, 93, 94, 95, 96, 100, 101, 104, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+            120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 140, 142, 143, 144,
+            145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 159, 160, 161, 162, 163, 167, 170, 171, 172,
+            173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 193, 195,
+            196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 221, 222, 223, 224, 225, 226,
+            227, 228, 229, 230, 231, 232, 233, 234, 240, 241, 242, 243, 244, 245, 247, 248, 249, 250, 251, 252, 253,
+            257, 258, 260, 262, 263, 264, 265, 266, 267, 269, 270, 271, 272, 273, 279, 281, 282, 284, 285, 288, 289,
+            290, 291, 292, 293, 539, 540, 541, 544, 551, 565, 566, 567, 569, 570, 571, 572,
+        ];
+        let specialty = SPECIALTY_IDS.iter().copied().collect::<BTreeSet<_>>();
+        let source_inventory = BLOCK_IDS
+            .iter()
+            .map(|id| {
+                if *id == 0 {
+                    r#"{"blockId":0,"geometryRevision":null,"materialKind":"air","registrySlot":0,"renderable":false,"specialty":false}"#.to_owned()
+                } else {
+                    format!(
+                        r#"{{"blockId":{id},"geometryRevision":1,"materialKind":"material","registrySlot":{id},"renderable":true,"specialty":{}}}"#,
+                        specialty.contains(id)
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut output = concat!(
+            r#"{"dynamicFamilies":["#,
+            r#"{"baseOwner":"bwr2-terrain-page","id":"active-chest-articulation","overlayOwner":"session-ui","stateOwners":["session"],"status":"partial"},"#,
+            r#"{"baseOwner":"bwr2-terrain-page","id":"aquarium","overlayOwner":"terrain-effect","stateOwners":["r7-machine","resident-r6-entity"],"status":"missing"},"#,
+            r#"{"baseOwner":"bwr2-terrain-page","id":"butterfly-exhibit","overlayOwner":"terrain-effect","stateOwners":["r7-machine","resident-r6-entity"],"status":"missing"},"#,
+            r#"{"baseOwner":"bwr2-terrain-page","id":"capture-orb-rack-and-healer-contents","overlayOwner":"machine-child","stateOwners":["r7-machine"],"status":"partial"},"#,
+            r#"{"baseOwner":"bwr2-terrain-page","id":"fireplace-flame","overlayOwner":"terrain-effect","stateOwners":["r4-cell"],"status":"missing"},"#,
+            r#"{"baseOwner":"bwr2-terrain-page","id":"morph-loom-contents","overlayOwner":"machine-child","stateOwners":["r7-machine"],"status":"missing"},"#,
+            r#"{"baseOwner":"bwr2-terrain-page","id":"tome-display","overlayOwner":"machine-child","stateOwners":["r4-cell","r7-machine"],"status":"missing"}],"#,
+            r#""id":"terrain-pages-and-domain-attachments-v1","policyHash":"5b7eb831ff3ed23dc8ba117cbea72d5c","residualPersistentKinds":[],"schema":1,"sourceInventory":["#,
+        )
+        .to_owned();
+        output.push_str(&source_inventory);
+        output.push_str(
+            r#"],"sourceInventoryHash":"cebd5d90170bdc1ec85a273cebafd4f6","terrain":{"acceptedProducer":null,"authorityBlockers":["accepted-producer-identity-unproven","mesher-artifact-hash-unproven","renderer-artifact-hash-unproven","selection-policy-unproven"],"biomeTintSlotCount":24,"blockDefinitionCount":313,"geometryRevision":1,"mesherArtifactHash":null,"protocol":"BWR2","registryContentHash":"d8954db79caaa89938015b183130d246","registrySchemaVersion":2,"registrySlotCount":601,"renderableBlockCount":312,"rendererArtifactHash":null,"selectionPolicy":null,"specialtyBlockCount":218,"specialtyPolicy":"bwr1-non-opaque-cube-or-furnace-v1"}}"#,
+        );
+        output
+    }
+
+    fn render_presentation_v2_fixture() -> Vec<ContentArtifact> {
+        let mut artifacts = render_presentation_fixture();
+        let catalog = artifacts
+            .iter_mut()
+            .find(|artifact| artifact.schema_id == "render-presentation-catalog")
+            .expect("render presentation fixture");
+        let legacy = String::from_utf8(catalog.canonical_bytes.clone()).expect("legacy fixture UTF-8");
+        let prefix = legacy.strip_suffix(",\"schema\":1}").expect("canonical legacy suffix");
+        catalog.schema_version = 2;
+        catalog.content_version = 2;
+        let mut current = prefix.to_owned();
+        current.push_str(",\"schema\":2,\"worldPropOwnershipPolicy\":");
+        current.push_str(&world_prop_ownership_policy_fixture_v1());
+        current.push('}');
+        catalog.canonical_bytes = current.into_bytes();
+        artifacts
+    }
+
     fn action_fixture() -> Vec<ContentArtifact> {
         let item = artifact(
             ContentDomain::Item,
@@ -6988,6 +7802,128 @@ mod tests {
                 .contains_key(RENDER_PRESENTATION_CATALOG_ID)
         );
         assert!(!registry.machine_profiles.contains_key(RENDER_PRESENTATION_CATALOG_ID));
+    }
+
+    #[test]
+    fn render_presentation_v1_is_loadable_but_world_prop_unproven() {
+        let (manifest, store) = installed(render_presentation_fixture());
+        let (registry, _) = materialize_content_runtime(&manifest, &store).expect("legacy presentations materialize");
+        let catalog = &registry.render_presentation_catalogs[RENDER_PRESENTATION_CATALOG_ID];
+        assert_eq!(catalog.core.schema, ContentSchema::RenderPresentationCatalog);
+        assert_eq!(catalog.core.content_version, 1);
+        assert_eq!(catalog.world_prop_ownership_policy, None);
+    }
+
+    #[test]
+    fn render_presentation_v2_materializes_exact_world_prop_policy() {
+        let (manifest, store) = installed(render_presentation_v2_fixture());
+        let (registry, _) = materialize_content_runtime(&manifest, &store).expect("v2 presentations materialize");
+        let catalog = &registry.render_presentation_catalogs[RENDER_PRESENTATION_CATALOG_ID];
+        assert_eq!(catalog.core.schema, ContentSchema::RenderPresentationCatalogV2);
+        assert_eq!(catalog.core.content_version, 2);
+        let policy = catalog
+            .world_prop_ownership_policy
+            .as_ref()
+            .expect("v2 policy is typed");
+        assert_eq!(policy.id, WORLD_PROP_OWNERSHIP_POLICY_ID);
+        assert_eq!(policy.source_inventory_hash, WORLD_PROP_SOURCE_INVENTORY_HASH);
+        assert_eq!(policy.policy_hash, WORLD_PROP_OWNERSHIP_POLICY_HASH);
+        assert_eq!(policy.source_inventory.len(), 313);
+        assert_eq!(
+            policy.source_inventory.iter().filter(|tuple| tuple.renderable).count(),
+            312
+        );
+        assert_eq!(
+            policy.source_inventory.iter().filter(|tuple| tuple.specialty).count(),
+            218
+        );
+        assert_eq!(policy.terrain.registry_slot_count, 601);
+        assert_eq!(policy.terrain.registry_content_hash, WORLD_PROP_TERRAIN_REGISTRY_HASH);
+        assert_eq!(policy.dynamic_families.len(), 7);
+        assert!(policy.residual_persistent_kinds.is_empty());
+        assert_eq!(policy.terrain.mesher_artifact_hash, None);
+        assert_eq!(policy.terrain.renderer_artifact_hash, None);
+        assert_eq!(policy.terrain.accepted_producer, None);
+        assert_eq!(policy.terrain.selection_policy, None);
+    }
+
+    #[test]
+    fn render_presentation_v2_policy_drift_fails_atomically() {
+        let (manifest, store) = installed(render_presentation_v2_fixture());
+        let mut registry = ContentRuntimeRegistry::default();
+        registry
+            .install(&manifest, &store)
+            .expect("exact v2 presentation install");
+        let original = registry.clone();
+
+        for (needle, replacement, expected_path) in [
+            (
+                WORLD_PROP_SOURCE_INVENTORY_HASH,
+                "00000000000000000000000000000000",
+                "sourceInventoryHash",
+            ),
+            (
+                WORLD_PROP_OWNERSHIP_POLICY_HASH,
+                "00000000000000000000000000000000",
+                "policyHash",
+            ),
+            (
+                WORLD_PROP_TERRAIN_REGISTRY_HASH,
+                "00000000000000000000000000000000",
+                "registryContentHash",
+            ),
+            (
+                r#""mesherArtifactHash":null"#,
+                r#""mesherArtifactHash":"fabricated""#,
+                "mesherArtifactHash",
+            ),
+            (
+                r#""residualPersistentKinds":[]"#,
+                r#""residualPersistentKinds":["omitted"]"#,
+                "residualPersistentKinds",
+            ),
+        ] {
+            let mut invalid = render_presentation_v2_fixture();
+            let artifact = invalid
+                .iter_mut()
+                .find(|artifact| artifact.schema_id == "render-presentation-catalog")
+                .expect("v2 presentation fixture");
+            artifact.canonical_bytes = String::from_utf8(artifact.canonical_bytes.clone())
+                .expect("v2 fixture UTF-8")
+                .replacen(needle, replacement, 1)
+                .into_bytes();
+            let (bad_manifest, bad_store) = installed(invalid);
+            let blockers = registry
+                .install(&bad_manifest, &bad_store)
+                .expect_err("policy drift rejected");
+            assert!(
+                blockers.iter().any(|blocker| blocker.path.contains(expected_path)),
+                "missing typed blocker for {expected_path}: {blockers:?}"
+            );
+            assert_eq!(
+                registry, original,
+                "failed policy install is transactional for {expected_path}"
+            );
+        }
+
+        let mut reordered = render_presentation_v2_fixture();
+        let artifact = reordered
+            .iter_mut()
+            .find(|artifact| artifact.schema_id == "render-presentation-catalog")
+            .expect("v2 presentation fixture");
+        artifact.canonical_bytes = String::from_utf8(artifact.canonical_bytes.clone())
+            .expect("v2 fixture UTF-8")
+            .replace(
+                r#""stateOwners":["r4-cell","r7-machine"]"#,
+                r#""stateOwners":["r7-machine","r4-cell"]"#,
+            )
+            .into_bytes();
+        let (bad_manifest, bad_store) = installed(reordered);
+        let blockers = registry
+            .install(&bad_manifest, &bad_store)
+            .expect_err("owner order rejected");
+        assert!(blockers.iter().any(|blocker| blocker.path.contains("stateOwners")));
+        assert_eq!(registry, original);
     }
 
     #[test]

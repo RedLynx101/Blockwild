@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
-import { ITEMS, BlockId, Item } from "../app/game/data.ts";
+import { BLOCKS, ITEMS, BlockId, Item } from "../app/game/data.ts";
 import {
   blockwildProductionContentSources,
   compileBlockwildProductionContent,
@@ -11,9 +11,19 @@ import {
 import {
   attestRenderPresentationCatalogV1,
   BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1,
+  BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
+  BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1,
+  canonicalWorldPropOwnershipPolicyHashV1,
+  canonicalWorldPropSourceInventoryHashV1,
   loadAttestedRenderPresentationCatalogV1,
+  createRenderPresentationRegistryV1,
+  renderPresentationWorldPropOwnershipPolicyV1,
   RENDER_PRESENTATION_CATALOG_ID_V1,
+  RENDER_PRESENTATION_CATALOG_SCHEMA_V1,
+  RENDER_PRESENTATION_CATALOG_SCHEMA_V2,
+  WORLD_PROP_OWNERSHIP_POLICY_ID_V1,
 } from "../app/game/rust-render-presentation-profile.ts";
+import { canonicalTerrainMaterialRegistryV1, canonicalTerrainMaterialRegistryV2 } from "../app/game/terrain-material-registry.ts";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const decoder = new TextDecoder();
@@ -86,7 +96,7 @@ test("render presentation catalog pins exact role-specific production model iden
 });
 
 test("missing render profiles enumerate exact sorted source IDs without fabricated models", () => {
-  const catalog = BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1;
+  const catalog = BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2;
   assert.deepEqual(catalog.profiles.map((profile) => profile.id), [...catalog.profiles.map((profile) => profile.id)].sort());
   assert.deepEqual(catalog.missingProfiles.map((profile) => profile.id), [...catalog.missingProfiles.map((profile) => profile.id)].sort());
   assert.equal(catalog.missingProfiles.reduce((sum, profile) => sum + profile.contentRefs.length, 0), 277);
@@ -101,6 +111,102 @@ test("missing render profiles enumerate exact sorted source IDs without fabricat
   assert.equal(catalog.profiles.some((profile) => profile.model.id === "skeleton-arrow"), false);
   const specialBlocks = catalog.missingProfiles.find((profile) => profile.id === "missing:world-prop:special-block-shapes");
   assert.equal(specialBlocks?.sourcePresentationIds.length, 172);
+});
+
+test("world prop policy attests complete BWR2 terrain ownership and all bounded dynamic families", () => {
+  const policy = BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1;
+  const registry = canonicalTerrainMaterialRegistryV2();
+  const specialtyRegistry = canonicalTerrainMaterialRegistryV1();
+  assert.equal(BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2.schema, RENDER_PRESENTATION_CATALOG_SCHEMA_V2);
+  assert.equal(policy.id, WORLD_PROP_OWNERSHIP_POLICY_ID_V1);
+  assert.equal(policy.sourceInventoryHash, "cebd5d90170bdc1ec85a273cebafd4f6");
+  assert.equal(policy.policyHash, "5b7eb831ff3ed23dc8ba117cbea72d5c");
+  assert.equal(canonicalWorldPropSourceInventoryHashV1(policy.sourceInventory), policy.sourceInventoryHash);
+  assert.equal(canonicalWorldPropOwnershipPolicyHashV1(policy), policy.policyHash);
+
+  assert.equal(policy.sourceInventory.length, 313);
+  assert.deepEqual(policy.sourceInventory.map((tuple) => tuple.blockId),
+    Object.values(BLOCKS).sort((left, right) => left.id - right.id).map((definition) => definition.id));
+  assert.equal(new Set(policy.sourceInventory.map((tuple) => tuple.blockId)).size, 313);
+  assert.equal(policy.sourceInventory[0].blockId, BlockId.Air);
+  for (const tuple of policy.sourceInventory) {
+    assert.equal(tuple.registrySlot, tuple.blockId);
+    assert.equal(tuple.materialKind, registry.blocks[tuple.blockId]?.kind);
+    assert.equal(tuple.renderable, tuple.blockId !== BlockId.Air);
+    assert.equal(tuple.geometryRevision, tuple.renderable ? 1 : null);
+    assert.equal(tuple.specialty, specialtyRegistry.blocks[tuple.blockId]?.kind === "specialty");
+  }
+  assert.deepEqual(policy.terrain, {
+    protocol: "BWR2",
+    registrySchemaVersion: 2,
+    registryContentHash: "d8954db79caaa89938015b183130d246",
+    geometryRevision: 1,
+    registrySlotCount: 601,
+    biomeTintSlotCount: 24,
+    blockDefinitionCount: 313,
+    renderableBlockCount: 312,
+    specialtyBlockCount: 218,
+    specialtyPolicy: "bwr1-non-opaque-cube-or-furnace-v1",
+    mesherArtifactHash: null,
+    rendererArtifactHash: null,
+    acceptedProducer: null,
+    selectionPolicy: null,
+    authorityBlockers: [
+      "accepted-producer-identity-unproven",
+      "mesher-artifact-hash-unproven",
+      "renderer-artifact-hash-unproven",
+      "selection-policy-unproven",
+    ],
+  });
+  assert.equal(policy.dynamicFamilies.length, 7);
+  assert.deepEqual(policy.dynamicFamilies.map((family) => family.id),
+    [...policy.dynamicFamilies.map((family) => family.id)].sort());
+  assert.deepEqual(policy.dynamicFamilies.map((family) => family.status),
+    ["partial", "missing", "missing", "partial", "missing", "missing", "missing"]);
+  assert.deepEqual(policy.dynamicFamilies.find((family) => family.id === "tome-display")?.stateOwners,
+    ["r4-cell", "r7-machine"]);
+  assert.deepEqual(policy.residualPersistentKinds, [], "absence is represented explicitly, never inferred from omission");
+});
+
+test("browser catalog materialization keeps real schema v1 loadable but world-prop-unproven", () => {
+  assert.equal(BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1.schema, RENDER_PRESENTATION_CATALOG_SCHEMA_V1);
+  assert.equal("worldPropOwnershipPolicy" in BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1, false);
+  const legacy = createRenderPresentationRegistryV1(BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1);
+  assert.equal(legacy.catalog.schema, 1);
+  assert.equal(renderPresentationWorldPropOwnershipPolicyV1(legacy.catalog), null);
+
+  const current = createRenderPresentationRegistryV1(BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2);
+  assert.equal(current.catalog.schema, 2);
+  assert.equal(renderPresentationWorldPropOwnershipPolicyV1(current.catalog), BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1);
+  const dishonestLegacy = {
+    ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1,
+    worldPropOwnershipPolicy: BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1,
+  } as unknown as Parameters<typeof createRenderPresentationRegistryV1>[0];
+  assert.throws(() => createRenderPresentationRegistryV1(dishonestLegacy),
+    /legacy render presentation schema v1 cannot claim/u);
+});
+
+test("world prop policy hashes are domain-separated and every audited field is tamper-evident", () => {
+  const policy = BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1;
+  const mutatedInventory = policy.sourceInventory.map((tuple, index) => index === 1
+    ? { ...tuple, specialty: !tuple.specialty }
+    : tuple);
+  assert.notEqual(canonicalWorldPropSourceInventoryHashV1(mutatedInventory), policy.sourceInventoryHash);
+  const hashInput = policy;
+  assert.notEqual(canonicalWorldPropOwnershipPolicyHashV1({
+    ...hashInput,
+    terrain: { ...hashInput.terrain, mesherArtifactHash: "fabricated" },
+  }), policy.policyHash);
+  assert.notEqual(canonicalWorldPropOwnershipPolicyHashV1({
+    ...hashInput,
+    dynamicFamilies: hashInput.dynamicFamilies.map((family, index) => index === 0
+      ? { ...family, status: "exact" as const }
+      : family),
+  }), policy.policyHash);
+  assert.notEqual(canonicalWorldPropOwnershipPolicyHashV1({
+    ...hashInput,
+    residualPersistentKinds: ["unattested-prop"],
+  }), policy.policyHash);
 });
 
 test("presentation registry resolves exact, explicit missing, and unmapped role refs without fallback", async () => {
@@ -139,10 +245,11 @@ test("production content carries the distinct attested catalog and retains block
     candidate.domain === "machine-profile" && candidate.id === RENDER_PRESENTATION_CATALOG_ID_V1);
   assert.ok(artifact);
   assert.equal(artifact.schemaId, "render-presentation-catalog");
-  assert.equal(artifact.schemaVersion, 1);
-  assert.equal(artifact.canonicalBytes.byteLength, 36_302);
-  assert.equal(artifact.blobHash, "9343a3e34fc5c032c83a571e32b3e97f");
-  assert.deepEqual(JSON.parse(decoder.decode(artifact.canonicalBytes)), BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1);
+  assert.equal(artifact.schemaVersion, 2);
+  assert.equal(artifact.contentVersion, 2);
+  assert.equal(artifact.canonicalBytes.byteLength, 74_655);
+  assert.equal(artifact.blobHash, "9cf7e945678eb2eec83a571eb2c8f56d");
+  assert.deepEqual(JSON.parse(decoder.decode(artifact.canonicalBytes)), BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2);
 });
 
 test("render presentation attestation fails closed on manifest, bytes and profile drift", async () => {
@@ -154,24 +261,54 @@ test("render presentation attestation fails closed on manifest, bytes and profil
   const corrupt = Uint8Array.from(bytes);
   corrupt[256] ^= 0x80;
   await assert.rejects(() => attestRenderPresentationCatalogV1(manifest, corrupt), /SHA-256/u);
-  const first = BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1.profiles[0];
+  const first = BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2.profiles[0];
   await assert.rejects(
     () => attestRenderPresentationCatalogV1(manifest, bytes, {
-      ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1,
-      profiles: [{ ...first, model: { ...first.model, nodeCount: first.model.nodeCount + 1 } }, ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1.profiles.slice(1)],
+      ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
+      profiles: [{ ...first, model: { ...first.model, nodeCount: first.model.nodeCount + 1 } }, ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2.profiles.slice(1)],
     }),
     /model identity/u,
   );
   await assert.rejects(
     () => attestRenderPresentationCatalogV1(manifest, bytes, {
-      ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1,
+      ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
       profiles: [
-        BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1.profiles[0],
-        { ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1.profiles[1], id: BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1.profiles[0].id },
-        ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1.profiles.slice(2),
+        BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2.profiles[0],
+        { ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2.profiles[1], id: BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2.profiles[0].id },
+        ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2.profiles.slice(2),
       ],
     }),
     /canonical and unique/u,
+  );
+  await assert.rejects(
+    () => attestRenderPresentationCatalogV1(manifest, bytes, {
+      ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
+      worldPropOwnershipPolicy: {
+        ...BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1,
+        terrain: { ...BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1.terrain, mesherArtifactHash: "fabricated" },
+      },
+    }),
+    /must not invent unproven/u,
+  );
+  await assert.rejects(
+    () => attestRenderPresentationCatalogV1(manifest, bytes, {
+      ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
+      worldPropOwnershipPolicy: {
+        ...BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1,
+        dynamicFamilies: [...BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1.dynamicFamilies].reverse(),
+      },
+    }),
+    /not strictly sorted/u,
+  );
+  await assert.rejects(
+    () => attestRenderPresentationCatalogV1(manifest, bytes, {
+      ...BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
+      worldPropOwnershipPolicy: {
+        ...BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1,
+        residualPersistentKinds: ["omitted-source"],
+      },
+    }),
+    /explicitly present and empty/u,
   );
 });
 

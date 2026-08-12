@@ -86,12 +86,12 @@ test("production compiler covers all eleven canonical domains without blockers o
   assert.deepEqual(bundle.blockers, []);
   assert.ok(bundle.manifest);
   assert.equal(bundle.artifacts.length, 3_248);
-  assert.equal(bundle.manifest.manifestHash, "afc11da2995d3e3790284a7b66cd64fc");
+  assert.equal(bundle.manifest.manifestHash, "e1fdb93aa0bd804e90284a7b66cd64fc");
   const expected = {
     item: { count: 538, hash: "68b1935aeb931b6248d0f4dcc74913c1" },
     "crafting-recipe": { count: 198, hash: "d1d9d49ba264b18cc83a527d0fca8a83" },
     "machine-recipe": { count: 46, hash: "ed2dd1f09fc42315c85a98f1da201cdf" },
-    "machine-profile": { count: 15, hash: "6a384d4257f35db5c81a2845cbc5ab14" },
+    "machine-profile": { count: 15, hash: "c3e5e2294cbbb8cdc81a2845cbc5ab14" },
     "ability-spell": { count: 698, hash: "4b6e9337787c42b4c8ba6f426602f3cd" },
     "creature-profile": { count: 233, hash: "39350a2a0924329cc862d4a931cbf04a" },
     "creature-type-chart": { count: 42, hash: "dc45e95703ba3221c89afaa5f421f6e0" },

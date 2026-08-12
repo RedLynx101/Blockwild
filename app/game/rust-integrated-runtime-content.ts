@@ -45,10 +45,10 @@ import {
   PLAYER_RENDER_PROFILE_SCHEMA_V1,
 } from "./rust-player-render-profile.ts";
 import {
-  BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1,
+  BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
   RENDER_PRESENTATION_CATALOG_ID_V1,
   RENDER_PRESENTATION_CATALOG_SCHEMA_ID_V1,
-  RENDER_PRESENTATION_CATALOG_SCHEMA_V1,
+  RENDER_PRESENTATION_CATALOG_SCHEMA_V2,
 } from "./rust-render-presentation-profile.ts";
 
 export const RUST_CONTENT_MANIFEST_SCHEMA = 1 as const;
@@ -912,9 +912,9 @@ export function blockwildProductionContentSources(): readonly RustContentSourceE
     domain: "machine-profile",
     id: RENDER_PRESENTATION_CATALOG_ID_V1,
     schemaId: RENDER_PRESENTATION_CATALOG_SCHEMA_ID_V1,
-    schemaVersion: RENDER_PRESENTATION_CATALOG_SCHEMA_V1,
-    contentVersion: 1,
-    value: BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1,
+    schemaVersion: RENDER_PRESENTATION_CATALOG_SCHEMA_V2,
+    contentVersion: 2,
+    value: BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
     aliases: Object.freeze(["render-presentation-catalog:production"]),
   });
   for (const spell of SPELLS) entries.push(source("ability-spell", `spell:${spell.id}`, "spell-definition", 1, spell));

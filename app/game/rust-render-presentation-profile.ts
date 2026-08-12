@@ -19,11 +19,75 @@ import {
   parsePublishedRenderModelCatalogManifestV1,
   type PublishedRenderModelCatalogManifestV1,
 } from "./rust-player-render-profile.ts";
+import {
+  canonicalTerrainMaterialRegistryV1,
+  canonicalTerrainMaterialRegistryV2,
+} from "./terrain-material-registry.ts";
 
 export const RENDER_PRESENTATION_CATALOG_ID_V1 = "render-presentations" as const;
 export const RENDER_PRESENTATION_CATALOG_SCHEMA_ID_V1 = "render-presentation-catalog" as const;
 export const RENDER_PRESENTATION_CATALOG_SCHEMA_V1 = 1 as const;
+export const RENDER_PRESENTATION_CATALOG_SCHEMA_V2 = 2 as const;
+export const RENDER_PRESENTATION_CATALOG_SCHEMA_CURRENT = RENDER_PRESENTATION_CATALOG_SCHEMA_V2;
 export const RENDER_PRESENTATION_CATALOG_REVISION_V1 = 1 as const;
+
+export const WORLD_PROP_OWNERSHIP_POLICY_ID_V1 = "terrain-pages-and-domain-attachments-v1" as const;
+
+export type WorldPropSourceBlockTupleV1 = Readonly<{
+  blockId: number;
+  registrySlot: number;
+  materialKind: "air" | "material";
+  geometryRevision: 1 | null;
+  renderable: boolean;
+  specialty: boolean;
+}>;
+
+export type WorldPropOwnershipOwnerV1 =
+  | "bwr2-terrain-page"
+  | "machine-child"
+  | "r4-cell"
+  | "r7-machine"
+  | "resident-r6-entity"
+  | "session"
+  | "session-ui"
+  | "terrain-effect";
+
+export type WorldPropOwnershipStatusV1 = "exact" | "missing" | "partial";
+
+export type WorldPropDynamicFamilyOwnershipV1 = Readonly<{
+  id: string;
+  baseOwner: "bwr2-terrain-page";
+  stateOwners: readonly WorldPropOwnershipOwnerV1[];
+  overlayOwner: "machine-child" | "session-ui" | "terrain-effect";
+  status: WorldPropOwnershipStatusV1;
+}>;
+
+export type WorldPropOwnershipPolicyV1 = Readonly<{
+  schema: 1;
+  id: typeof WORLD_PROP_OWNERSHIP_POLICY_ID_V1;
+  policyHash: string;
+  sourceInventoryHash: string;
+  sourceInventory: readonly WorldPropSourceBlockTupleV1[];
+  terrain: Readonly<{
+    protocol: "BWR2";
+    registrySchemaVersion: 2;
+    registryContentHash: string;
+    geometryRevision: 1;
+    registrySlotCount: number;
+    biomeTintSlotCount: number;
+    blockDefinitionCount: number;
+    renderableBlockCount: number;
+    specialtyBlockCount: number;
+    specialtyPolicy: "bwr1-non-opaque-cube-or-furnace-v1";
+    mesherArtifactHash: string | null;
+    rendererArtifactHash: string | null;
+    acceptedProducer: string | null;
+    selectionPolicy: string | null;
+    authorityBlockers: readonly string[];
+  }>;
+  dynamicFamilies: readonly WorldPropDynamicFamilyOwnershipV1[];
+  residualPersistentKinds: readonly string[];
+}>;
 
 export type RenderPresentationRoleV1 =
   | "dropped-item"
@@ -68,8 +132,7 @@ export type MissingRenderPresentationProfileV1 = Readonly<{
   reason: string;
 }>;
 
-export type RenderPresentationCatalogV1 = Readonly<{
-  schema: 1;
+type RenderPresentationCatalogFieldsV1 = Readonly<{
   catalog: Readonly<{
     schema: 2;
     format: "blockwild-compiled-model-catalog-v2";
@@ -86,8 +149,20 @@ export type RenderPresentationCatalogV1 = Readonly<{
   integrationBlockers: readonly string[];
 }>;
 
+export type RenderPresentationCatalogV1 = RenderPresentationCatalogFieldsV1 & Readonly<{
+  schema: 1;
+}>;
+
+export type RenderPresentationCatalogV2 = RenderPresentationCatalogFieldsV1 & Readonly<{
+  schema: 2;
+  worldPropOwnershipPolicy: WorldPropOwnershipPolicyV1;
+}>;
+
+export type RenderPresentationCatalogCurrent = RenderPresentationCatalogV2;
+export type AnyRenderPresentationCatalog = RenderPresentationCatalogV1 | RenderPresentationCatalogV2;
+
 export type AttestedRenderPresentationCatalogV1 = Readonly<{
-  profileCatalog: RenderPresentationCatalogV1;
+  profileCatalog: RenderPresentationCatalogCurrent;
   modelCatalog: RenderEntityCompiledModelCatalogR10;
   modelsByProfileId: ReadonlyMap<string, RenderEntityCompiledModelR10>;
   registry: RenderPresentationRegistryV1;
@@ -316,8 +391,222 @@ const MISSING_PROFILES = Object.freeze([
   }),
 ].sort((left, right) => left.id.localeCompare(right.id)));
 
-export const BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1: RenderPresentationCatalogV1 = Object.freeze({
-  schema: RENDER_PRESENTATION_CATALOG_SCHEMA_V1,
+const HASH_MASK_64 = BigInt("0xffffffffffffffff");
+const HASH_FNV_64_OFFSET = BigInt("14695981039346656037");
+const HASH_FNV_64_PRIME = BigInt("1099511628211");
+const HASH_HIGH_SEED_XOR = BigInt("0xa0761d6478bd642f");
+const HASH_HIGH_PRIME = HASH_FNV_64_PRIME ^ BigInt("0x13b");
+const hashEncoder = new TextEncoder();
+
+/** Matches blockwild_types::CanonicalHasher; the explicit domains make the two policy hashes non-interchangeable. */
+class WorldPropPolicyHasherV1 {
+  private low = HASH_FNV_64_OFFSET;
+  private high = HASH_FNV_64_OFFSET ^ HASH_HIGH_SEED_XOR;
+
+  constructor(domain: string) { this.string(domain); }
+
+  private raw(bytes: Uint8Array) {
+    for (const byte of bytes) {
+      this.low = ((this.low ^ BigInt(byte)) * HASH_FNV_64_PRIME) & HASH_MASK_64;
+      this.high = ((this.high ^ (BigInt(byte) * BigInt(2) + BigInt(1))) * HASH_HIGH_PRIME) & HASH_MASK_64;
+    }
+  }
+
+  private bytes(bytes: Uint8Array) {
+    this.u64(BigInt(bytes.byteLength));
+    for (const byte of bytes) {
+      this.low = ((this.low ^ BigInt(byte)) * HASH_FNV_64_PRIME) & HASH_MASK_64;
+      this.high = ((this.high ^ (BigInt(byte) * BigInt(2))) * HASH_HIGH_PRIME) & HASH_MASK_64;
+    }
+  }
+
+  u16(value: number) {
+    const bytes = new Uint8Array(2);
+    new DataView(bytes.buffer).setUint16(0, value, true);
+    this.raw(bytes);
+  }
+
+  u32(value: number) {
+    const bytes = new Uint8Array(4);
+    new DataView(bytes.buffer).setUint32(0, value, true);
+    this.raw(bytes);
+  }
+
+  u64(value: bigint) {
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setBigUint64(0, value, true);
+    this.raw(bytes);
+  }
+
+  string(value: string) { this.bytes(hashEncoder.encode(value)); }
+
+  nullableString(value: string | null) {
+    this.u16(value === null ? 0 : 1);
+    if (value !== null) this.string(value);
+  }
+
+  finish() {
+    const bytes = new Uint8Array(16);
+    new DataView(bytes.buffer).setBigUint64(0, this.low, true);
+    new DataView(bytes.buffer).setBigUint64(8, this.high, true);
+    return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  }
+}
+
+export function canonicalWorldPropSourceInventoryHashV1(
+  inventory: readonly WorldPropSourceBlockTupleV1[],
+) {
+  const hasher = new WorldPropPolicyHasherV1("blockwild.render.world-prop-source-inventory.v1");
+  hasher.u32(inventory.length);
+  for (const tuple of inventory) {
+    hasher.u16(tuple.blockId);
+    hasher.u16(tuple.registrySlot);
+    hasher.string(tuple.materialKind);
+    hasher.u16(tuple.geometryRevision === null ? 0 : 1);
+    if (tuple.geometryRevision !== null) hasher.u16(tuple.geometryRevision);
+    hasher.u16(tuple.renderable ? 1 : 0);
+    hasher.u16(tuple.specialty ? 1 : 0);
+  }
+  return hasher.finish();
+}
+
+type WorldPropPolicyHashInputV1 = Omit<WorldPropOwnershipPolicyV1, "policyHash">;
+
+export function canonicalWorldPropOwnershipPolicyHashV1(
+  policy: WorldPropPolicyHashInputV1 | WorldPropOwnershipPolicyV1,
+) {
+  const hasher = new WorldPropPolicyHasherV1("blockwild.render.world-prop-ownership-policy.v1");
+  hasher.u16(policy.schema);
+  hasher.string(policy.id);
+  hasher.string(policy.sourceInventoryHash);
+  const terrain = policy.terrain;
+  hasher.string(terrain.protocol);
+  hasher.u16(terrain.registrySchemaVersion);
+  hasher.string(terrain.registryContentHash);
+  hasher.u16(terrain.geometryRevision);
+  hasher.u32(terrain.registrySlotCount);
+  hasher.u32(terrain.biomeTintSlotCount);
+  hasher.u32(terrain.blockDefinitionCount);
+  hasher.u32(terrain.renderableBlockCount);
+  hasher.u32(terrain.specialtyBlockCount);
+  hasher.string(terrain.specialtyPolicy);
+  hasher.nullableString(terrain.mesherArtifactHash);
+  hasher.nullableString(terrain.rendererArtifactHash);
+  hasher.nullableString(terrain.acceptedProducer);
+  hasher.nullableString(terrain.selectionPolicy);
+  hasher.u32(terrain.authorityBlockers.length);
+  for (const blocker of terrain.authorityBlockers) hasher.string(blocker);
+  hasher.u32(policy.dynamicFamilies.length);
+  for (const family of policy.dynamicFamilies) {
+    hasher.string(family.id);
+    hasher.string(family.baseOwner);
+    hasher.u32(family.stateOwners.length);
+    for (const owner of family.stateOwners) hasher.string(owner);
+    hasher.string(family.overlayOwner);
+    hasher.string(family.status);
+  }
+  hasher.u32(policy.residualPersistentKinds.length);
+  for (const kind of policy.residualPersistentKinds) hasher.string(kind);
+  return hasher.finish();
+}
+
+function worldPropSourceInventoryV1() {
+  const registry = canonicalTerrainMaterialRegistryV2();
+  const specialtyRegistry = canonicalTerrainMaterialRegistryV1();
+  return Object.freeze(Object.values(BLOCKS).sort((left, right) => left.id - right.id).map((definition) => {
+    const material = registry.blocks[definition.id];
+    invariant(material !== null && material !== undefined, `BWR2 has no slot for block ${definition.id}`);
+    const renderable = definition.id !== BlockId.Air;
+    invariant((material.kind === "material") === renderable, `BWR2 renderability drifted for block ${definition.id}`);
+    const specialty = specialtyRegistry.blocks[definition.id]?.kind === "specialty";
+    return Object.freeze({
+      blockId: definition.id,
+      registrySlot: definition.id,
+      materialKind: material.kind,
+      geometryRevision: material.kind === "material" ? material.geometryRevision : null,
+      renderable,
+      specialty,
+    } satisfies WorldPropSourceBlockTupleV1);
+  }));
+}
+
+const WORLD_PROP_SOURCE_INVENTORY_V1 = worldPropSourceInventoryV1();
+const WORLD_PROP_SOURCE_INVENTORY_HASH_V1 = canonicalWorldPropSourceInventoryHashV1(WORLD_PROP_SOURCE_INVENTORY_V1);
+
+const WORLD_PROP_TERRAIN_AUTHORITY_BLOCKERS_V1 = Object.freeze([
+  "accepted-producer-identity-unproven",
+  "mesher-artifact-hash-unproven",
+  "renderer-artifact-hash-unproven",
+  "selection-policy-unproven",
+]);
+
+const WORLD_PROP_DYNAMIC_FAMILIES_V1 = Object.freeze([
+  Object.freeze({
+    id: "active-chest-articulation", baseOwner: "bwr2-terrain-page" as const,
+    stateOwners: Object.freeze(["session"] as const), overlayOwner: "session-ui" as const, status: "partial" as const,
+  }),
+  Object.freeze({
+    id: "aquarium", baseOwner: "bwr2-terrain-page" as const,
+    stateOwners: Object.freeze(["r7-machine", "resident-r6-entity"] as const),
+    overlayOwner: "terrain-effect" as const, status: "missing" as const,
+  }),
+  Object.freeze({
+    id: "butterfly-exhibit", baseOwner: "bwr2-terrain-page" as const,
+    stateOwners: Object.freeze(["r7-machine", "resident-r6-entity"] as const),
+    overlayOwner: "terrain-effect" as const, status: "missing" as const,
+  }),
+  Object.freeze({
+    id: "capture-orb-rack-and-healer-contents", baseOwner: "bwr2-terrain-page" as const,
+    stateOwners: Object.freeze(["r7-machine"] as const), overlayOwner: "machine-child" as const, status: "partial" as const,
+  }),
+  Object.freeze({
+    id: "fireplace-flame", baseOwner: "bwr2-terrain-page" as const,
+    stateOwners: Object.freeze(["r4-cell"] as const), overlayOwner: "terrain-effect" as const, status: "missing" as const,
+  }),
+  Object.freeze({
+    id: "morph-loom-contents", baseOwner: "bwr2-terrain-page" as const,
+    stateOwners: Object.freeze(["r7-machine"] as const), overlayOwner: "machine-child" as const, status: "missing" as const,
+  }),
+  Object.freeze({
+    id: "tome-display", baseOwner: "bwr2-terrain-page" as const,
+    stateOwners: Object.freeze(["r4-cell", "r7-machine"] as const),
+    overlayOwner: "machine-child" as const, status: "missing" as const,
+  }),
+] satisfies readonly WorldPropDynamicFamilyOwnershipV1[]);
+
+const terrainRegistryV2 = canonicalTerrainMaterialRegistryV2();
+const WORLD_PROP_OWNERSHIP_POLICY_WITHOUT_HASH_V1 = Object.freeze({
+  schema: 1 as const,
+  id: WORLD_PROP_OWNERSHIP_POLICY_ID_V1,
+  sourceInventoryHash: WORLD_PROP_SOURCE_INVENTORY_HASH_V1,
+  sourceInventory: WORLD_PROP_SOURCE_INVENTORY_V1,
+  terrain: Object.freeze({
+    protocol: "BWR2" as const,
+    registrySchemaVersion: terrainRegistryV2.schemaVersion,
+    registryContentHash: terrainRegistryV2.contentHash,
+    geometryRevision: 1 as const,
+    registrySlotCount: terrainRegistryV2.blocks.length,
+    biomeTintSlotCount: terrainRegistryV2.biomeTints.length,
+    blockDefinitionCount: WORLD_PROP_SOURCE_INVENTORY_V1.length,
+    renderableBlockCount: WORLD_PROP_SOURCE_INVENTORY_V1.filter((tuple) => tuple.renderable).length,
+    specialtyBlockCount: WORLD_PROP_SOURCE_INVENTORY_V1.filter((tuple) => tuple.specialty).length,
+    specialtyPolicy: "bwr1-non-opaque-cube-or-furnace-v1" as const,
+    mesherArtifactHash: null,
+    rendererArtifactHash: null,
+    acceptedProducer: null,
+    selectionPolicy: null,
+    authorityBlockers: WORLD_PROP_TERRAIN_AUTHORITY_BLOCKERS_V1,
+  }),
+  dynamicFamilies: WORLD_PROP_DYNAMIC_FAMILIES_V1,
+  residualPersistentKinds: Object.freeze([]),
+} satisfies WorldPropPolicyHashInputV1);
+
+export const BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1: WorldPropOwnershipPolicyV1 = Object.freeze({
+  ...WORLD_PROP_OWNERSHIP_POLICY_WITHOUT_HASH_V1,
+  policyHash: canonicalWorldPropOwnershipPolicyHashV1(WORLD_PROP_OWNERSHIP_POLICY_WITHOUT_HASH_V1),
+});
+
+const RENDER_PRESENTATION_CATALOG_FIELDS_V1: RenderPresentationCatalogFieldsV1 = Object.freeze({
   catalog: Object.freeze({
     schema: 2,
     format: "blockwild-compiled-model-catalog-v2",
@@ -339,6 +628,18 @@ export const BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1: RenderPresentationCatalog
   ]),
 });
 
+/** The actual legacy schema: loadable, but it contains no world-prop ownership proof. */
+export const BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1: RenderPresentationCatalogV1 = Object.freeze({
+  schema: RENDER_PRESENTATION_CATALOG_SCHEMA_V1,
+  ...RENDER_PRESENTATION_CATALOG_FIELDS_V1,
+});
+
+export const BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2: RenderPresentationCatalogV2 = Object.freeze({
+  schema: RENDER_PRESENTATION_CATALOG_SCHEMA_V2,
+  ...RENDER_PRESENTATION_CATALOG_FIELDS_V1,
+  worldPropOwnershipPolicy: BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1,
+});
+
 function invariant(condition: unknown, message: string): asserts condition {
   if (!condition) throw new TypeError(message);
 }
@@ -350,11 +651,89 @@ function f32Bits(value: number | null) {
   return view.getUint32(0, true);
 }
 
-function canonicalProfileText(profileCatalog: RenderPresentationCatalogV1) {
+function canonicalProfileText(profileCatalog: AnyRenderPresentationCatalog) {
   return JSON.stringify(profileCatalog);
 }
 
-function validateProfileShape(profileCatalog: RenderPresentationCatalogV1) {
+function validateWorldPropOwnershipPolicyV1(policy: WorldPropOwnershipPolicyV1) {
+  invariant(policy.schema === 1, "world prop ownership policy schema is unsupported");
+  invariant(policy.id === WORLD_PROP_OWNERSHIP_POLICY_ID_V1, "world prop ownership policy id is unsupported");
+  invariant(/^[0-9a-f]{32}$/u.test(policy.sourceInventoryHash), "world prop source inventory hash is invalid");
+  invariant(/^[0-9a-f]{32}$/u.test(policy.policyHash), "world prop ownership policy hash is invalid");
+  invariant(policy.sourceInventory.length === 313, "world prop source inventory does not cover 313 canonical blocks");
+  const expectedInventory = WORLD_PROP_SOURCE_INVENTORY_V1;
+  for (let index = 0; index < policy.sourceInventory.length; index += 1) {
+    const tuple = policy.sourceInventory[index];
+    invariant(index === 0 || policy.sourceInventory[index - 1].blockId < tuple.blockId,
+      "world prop source inventory is not strictly sorted and unique");
+    invariant(Number.isInteger(tuple.blockId) && tuple.blockId >= 0 && tuple.blockId <= 0xffff,
+      "world prop source inventory block id is out of range");
+    invariant(Number.isInteger(tuple.registrySlot) && tuple.registrySlot === tuple.blockId,
+      "world prop source inventory registry slot does not match its block id");
+    invariant(JSON.stringify(tuple) === JSON.stringify(expectedInventory[index]),
+      `world prop source inventory drifted at block ${tuple.blockId}`);
+  }
+  invariant(canonicalWorldPropSourceInventoryHashV1(policy.sourceInventory) === policy.sourceInventoryHash,
+    "world prop source inventory hash does not match its canonical tuples");
+
+  const terrain = policy.terrain;
+  invariant(terrain.protocol === "BWR2" && terrain.registrySchemaVersion === 2,
+    "world prop terrain protocol is unsupported");
+  invariant(terrain.registryContentHash === terrainRegistryV2.contentHash,
+    "world prop terrain registry identity drifted from production");
+  invariant(terrain.geometryRevision === 1 && terrain.registrySlotCount === terrainRegistryV2.blocks.length
+    && terrain.biomeTintSlotCount === terrainRegistryV2.biomeTints.length,
+  "world prop terrain registry dimensions drifted from production");
+  const renderableCount = policy.sourceInventory.filter((tuple) => tuple.renderable).length;
+  const specialtyCount = policy.sourceInventory.filter((tuple) => tuple.specialty).length;
+  invariant(terrain.blockDefinitionCount === policy.sourceInventory.length
+    && terrain.renderableBlockCount === renderableCount && terrain.specialtyBlockCount === specialtyCount,
+  "world prop terrain coverage counts do not match the canonical source inventory");
+  invariant(terrain.blockDefinitionCount === 313 && terrain.renderableBlockCount === 312
+    && terrain.specialtyBlockCount === 218,
+  "world prop terrain coverage counts drifted from the audited production inventory");
+  invariant(terrain.specialtyPolicy === "bwr1-non-opaque-cube-or-furnace-v1",
+    "world prop specialty classification policy is unsupported");
+  invariant(terrain.mesherArtifactHash === null && terrain.rendererArtifactHash === null
+    && terrain.acceptedProducer === null && terrain.selectionPolicy === null,
+  "world prop policy must not invent unproven artifact or producer identities");
+  invariant(JSON.stringify(terrain.authorityBlockers) === JSON.stringify(WORLD_PROP_TERRAIN_AUTHORITY_BLOCKERS_V1),
+    "world prop terrain authority blockers do not match the unproven fields");
+
+  const owners = new Set<WorldPropOwnershipOwnerV1>([
+    "bwr2-terrain-page", "machine-child", "r4-cell", "r7-machine", "resident-r6-entity",
+    "session", "session-ui", "terrain-effect",
+  ]);
+  const statuses = new Set<WorldPropOwnershipStatusV1>(["exact", "missing", "partial"]);
+  invariant(policy.dynamicFamilies.length === 7, "world prop policy must assign all seven dynamic families");
+  for (let index = 0; index < policy.dynamicFamilies.length; index += 1) {
+    const family = policy.dynamicFamilies[index];
+    invariant(index === 0 || policy.dynamicFamilies[index - 1].id < family.id,
+      "world prop dynamic families are not strictly sorted and unique");
+    invariant(family.baseOwner === "bwr2-terrain-page" && owners.has(family.overlayOwner)
+      && statuses.has(family.status), `world prop dynamic family ${family.id} has an unsupported owner or status`);
+    invariant(family.stateOwners.length > 0 && family.stateOwners.every((owner, ownerIndex, values) =>
+      owners.has(owner) && (ownerIndex === 0 || values[ownerIndex - 1] < owner)),
+    `world prop dynamic family ${family.id} state owners are not canonical`);
+  }
+  invariant(JSON.stringify(policy.dynamicFamilies) === JSON.stringify(WORLD_PROP_DYNAMIC_FAMILIES_V1),
+    "world prop dynamic ownership assignments drifted from the audited source families");
+  invariant(Array.isArray(policy.residualPersistentKinds) && policy.residualPersistentKinds.length === 0,
+    "world prop residual persistent kinds must be explicitly present and empty");
+  invariant(canonicalWorldPropOwnershipPolicyHashV1(policy) === policy.policyHash,
+    "world prop ownership policy hash does not match its canonical fields");
+}
+
+function validateProfileShape(profileCatalog: AnyRenderPresentationCatalog) {
+  invariant(profileCatalog.schema === RENDER_PRESENTATION_CATALOG_SCHEMA_V1
+    || profileCatalog.schema === RENDER_PRESENTATION_CATALOG_SCHEMA_V2,
+  "render presentation catalog schema is unsupported");
+  if (profileCatalog.schema === RENDER_PRESENTATION_CATALOG_SCHEMA_V2) {
+    validateWorldPropOwnershipPolicyV1(profileCatalog.worldPropOwnershipPolicy);
+  } else {
+    invariant(!("worldPropOwnershipPolicy" in profileCatalog),
+      "legacy render presentation schema v1 cannot claim a world prop ownership policy");
+  }
   let previousProfile = "";
   const profileIds = new Set<string>();
   const roleRefs = new Set<string>();
@@ -406,7 +785,7 @@ export class RenderPresentationRegistryV1 {
   private readonly bindings: ReadonlyMap<string, RenderPresentationBindingV1>;
   private readonly profileBindings: ReadonlyMap<string, RenderPresentationProfileIdBindingV1>;
 
-  constructor(readonly catalog: RenderPresentationCatalogV1) {
+  constructor(readonly catalog: AnyRenderPresentationCatalog) {
     validateProfileShape(catalog);
     const bindings = new Map<string, RenderPresentationBindingV1>();
     const profileBindings = new Map<string, RenderPresentationProfileIdBindingV1>();
@@ -479,13 +858,19 @@ export class RenderPresentationRegistryV1 {
   }
 }
 
-export function createRenderPresentationRegistryV1(catalog: RenderPresentationCatalogV1) {
+export function createRenderPresentationRegistryV1(catalog: AnyRenderPresentationCatalog) {
   return new RenderPresentationRegistryV1(catalog);
+}
+
+/** Returns null for schema v1; legacy absence is unproven and never promoted to an empty policy. */
+export function renderPresentationWorldPropOwnershipPolicyV1(catalog: AnyRenderPresentationCatalog) {
+  validateProfileShape(catalog);
+  return catalog.schema === RENDER_PRESENTATION_CATALOG_SCHEMA_V2 ? catalog.worldPropOwnershipPolicy : null;
 }
 
 function decoderManifest(
   manifest: PublishedRenderModelCatalogManifestV1,
-  expected: RenderPresentationCatalogV1,
+  expected: RenderPresentationCatalogCurrent,
 ): RenderEntityModelCatalogManifestR10 {
   return {
     schema: manifest.schema,
@@ -504,7 +889,7 @@ function decoderManifest(
 export async function attestRenderPresentationCatalogV1(
   manifestValue: unknown,
   catalogBytes: Uint8Array,
-  expected: RenderPresentationCatalogV1 = BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1,
+  expected: RenderPresentationCatalogCurrent = BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
 ): Promise<AttestedRenderPresentationCatalogV1> {
   validateProfileShape(expected);
   const manifest = parsePublishedRenderModelCatalogManifestV1(manifestValue);
@@ -531,7 +916,7 @@ export async function attestRenderPresentationCatalogV1(
     `published BWM2 model identity does not match render presentation '${profile.id}'`);
     modelsByProfileId.set(profile.id, candidate);
   }
-  invariant(canonicalProfileText(expected) === canonicalProfileText(BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1),
+  invariant(canonicalProfileText(expected) === canonicalProfileText(BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2),
     "render presentation catalog expectation drifted from production");
   const registry = createRenderPresentationRegistryV1(expected);
   return Object.freeze({ profileCatalog: expected, modelCatalog, modelsByProfileId, registry });
@@ -541,7 +926,7 @@ export async function attestRenderPresentationCatalogV1(
 export async function loadAttestedRenderPresentationCatalogV1(input: Readonly<{
   manifestUrl?: string;
   fetch?: typeof globalThis.fetch;
-  expected?: RenderPresentationCatalogV1;
+  expected?: RenderPresentationCatalogCurrent;
 }> = {}): Promise<AttestedRenderPresentationCatalogV1> {
   const fetchImplementation = input.fetch ?? globalThis.fetch;
   invariant(typeof fetchImplementation === "function", "fetch is unavailable for render presentation attestation");
