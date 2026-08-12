@@ -423,6 +423,89 @@ fn action_raycast_unknown_boundary_and_caps_fail_closed() {
 }
 
 #[test]
+fn camera_pose_matches_first_rear_front_and_collision_contracts() {
+    let mut window = fixture::canonical_fixture().physics.window;
+    let wall = CellPos::new(0, 2, 3);
+    let index = window.index(wall).expect("rear-camera wall is inside fixture window");
+    window.blocks[index] = 8;
+    window = window.seal();
+    let base = CameraPoseInputV1 {
+        body_position: Vec3::new(0.0, 0.5, 1.0),
+        look_yaw: 0.0,
+        look_pitch: 0.0,
+        mode: CameraModeV1::FirstPerson,
+        aiming: false,
+        viewport: [1_280, 720],
+        profile: CameraProfileV1 {
+            third_person_distance: 2.0,
+            ..CameraProfileV1::default()
+        },
+    };
+    let first = derive_camera_pose_v1(None, base).expect("first-person needs no collision window");
+    assert_eq!(first.position, Vec3::new(0.0, 2.12, 1.0));
+    assert_eq!(first.orientation, [0.0, 0.0, -0.0, 1.0]);
+    assert!(!first.collided);
+
+    let rear = derive_camera_pose_v1(
+        Some(&window),
+        CameraPoseInputV1 {
+            mode: CameraModeV1::ThirdRear,
+            ..base
+        },
+    )
+    .expect("rear camera");
+    assert!(rear.collided);
+    assert!(rear.position.z < 3.0 && rear.position.z > 1.0);
+    assert_eq!(rear.viewport, [1_280, 720]);
+
+    let front = derive_camera_pose_v1(
+        Some(&window),
+        CameraPoseInputV1 {
+            mode: CameraModeV1::ThirdFront,
+            aiming: true,
+            ..base
+        },
+    )
+    .expect("front camera");
+    assert!(!front.collided);
+    assert!(front.position.z < base.body_position.z);
+    assert_eq!(front.vertical_fov_radians, base.profile.aim_vertical_fov_radians);
+    assert_ne!(front.pose_hash, first.pose_hash);
+}
+
+#[test]
+fn camera_pose_fails_closed_on_missing_window_unknown_cells_and_hostile_viewport() {
+    let base = CameraPoseInputV1 {
+        body_position: Vec3::new(0.0, 0.5, 1.0),
+        look_yaw: 0.0,
+        look_pitch: 0.0,
+        mode: CameraModeV1::ThirdRear,
+        aiming: false,
+        viewport: [800, 600],
+        profile: CameraProfileV1::default(),
+    };
+    assert_eq!(derive_camera_pose_v1(None, base), Err(ContractError::InvalidFlags));
+    let mut window = fixture::canonical_fixture().physics.window;
+    let unknown = CellPos::new(0, 2, 2);
+    let index = window.index(unknown).expect("unknown camera cell in range");
+    window.loaded_mask[index] = 0;
+    window = window.seal();
+    let blocked = derive_camera_pose_v1(Some(&window), base).expect("unknown boundary is collision");
+    assert!(blocked.collided);
+    assert!(blocked.resolved_distance < 1.0);
+    assert_eq!(
+        derive_camera_pose_v1(
+            Some(&window),
+            CameraPoseInputV1 {
+                viewport: [0, CAMERA_MAX_VIEWPORT_V1 + 1],
+                ..base
+            }
+        ),
+        Err(ContractError::InvalidNumber)
+    );
+}
+
+#[test]
 fn swept_axis_property_never_commits_a_colliding_body() {
     let fixture = fixture::canonical_fixture();
     for index in 0..160_u32 {

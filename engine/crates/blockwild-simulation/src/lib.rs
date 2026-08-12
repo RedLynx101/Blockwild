@@ -6,6 +6,7 @@
 mod air;
 mod batch;
 mod broadphase;
+mod camera;
 mod collision;
 mod contract;
 pub mod fixture;
@@ -22,6 +23,7 @@ mod swimming;
 pub use air::*;
 pub use batch::*;
 pub use broadphase::*;
+pub use camera::*;
 pub use collision::*;
 pub use contract::*;
 pub use gas::*;
