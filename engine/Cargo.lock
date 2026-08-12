@@ -185,6 +185,7 @@ dependencies = [
  "blockwild-protocol",
  "blockwild-render",
  "blockwild-runtime-wire",
+ "blockwild-simulation",
  "blockwild-types",
  "blockwild-world",
  "wasm-bindgen",

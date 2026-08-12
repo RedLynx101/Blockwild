@@ -17,26 +17,28 @@ use blockwild_engine::{
     IntegratedRuntimeError, IntegratedRuntimeIdentityV2, IntegratedRuntimeLegacyMigrationV1,
     IntegratedRuntimeReceiptV2, IntegratedRuntimeV2, PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
     PLAYER_BOOTSTRAP_STATUS_TYPE_V1, PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1, PLAYER_INVENTORY_IMPORT_TYPE_V1,
-    RuntimeCommandCacheLookupV1, SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3, SIMULATION_PLAYER_BIND_TYPE_V3,
-    TERRAIN_RESIDENCY_BATCH_TYPE_V1, TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2,
+    RuntimeCommandCacheLookupV1, SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1, SIMULATION_CAMERA_CONFIG_TYPE_V1,
+    SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3, SIMULATION_PLAYER_BIND_TYPE_V3, TERRAIN_RESIDENCY_BATCH_TYPE_V1,
+    TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2,
     TERRAIN_RESIDENCY_RECONCILE_RECEIPT_TYPE_V2, WorldViewExtractionInputV1, decode_content_install_page_v1,
     decode_entity_authority_export_v1, decode_entity_authority_import_v2, decode_entity_command_batch_v1,
     decode_entity_compatibility_export_v1, decode_entity_compatibility_import_v1, decode_gameplay_actor_grant_v1,
     decode_gameplay_batch_v1, decode_network_agent_grant_v1, decode_network_command_release_v1,
     decode_network_delta_build_request_v1, decode_network_peer_grant_v1, decode_network_peer_release_v1,
     decode_network_reconnect_request_v1, decode_network_replication_record_v1, decode_player_bootstrap_status_query_v1,
-    decode_player_inventory_import_v1, decode_runtime_persistence_dispatch_v1, decode_runtime_player_binding_v1,
-    decode_terrain_residency_batch_v1, decode_terrain_residency_reconcile_batch_v2, encode_content_install_receipt_v1,
-    encode_entity_authority_import_receipt_v1, encode_entity_event_batch_v1, encode_gameplay_receipt_v1,
-    encode_player_bootstrap_status_v1, encode_player_inventory_import_receipt_v1,
-    encode_runtime_persistence_dispatch_receipt_v1, encode_terrain_residency_receipt_v1,
-    encode_terrain_residency_reconcile_receipt_v2, integrated_runtime_checkpoint_hash_v1,
+    decode_player_inventory_import_v1, decode_runtime_camera_config_v1, decode_runtime_persistence_dispatch_v1,
+    decode_runtime_player_binding_v1, decode_terrain_residency_batch_v1, decode_terrain_residency_reconcile_batch_v2,
+    encode_content_install_receipt_v1, encode_entity_authority_import_receipt_v1, encode_entity_event_batch_v1,
+    encode_gameplay_receipt_v1, encode_player_bootstrap_status_v1, encode_player_inventory_import_receipt_v1,
+    encode_runtime_camera_config_receipt_v1, encode_runtime_persistence_dispatch_receipt_v1,
+    encode_terrain_residency_receipt_v1, encode_terrain_residency_reconcile_receipt_v2,
+    integrated_runtime_checkpoint_hash_v1, runtime_camera_config_state_hash_v1,
 };
 use blockwild_network::{InterestSelectionStatsV1, encode_network_checkpoint_v1, encode_network_delta_v1};
 use blockwild_persistence::{PersistenceDispatchOutcomeV1, PersistenceDispatchStatusV1, PersistenceRetryDirectiveV1};
 use blockwild_runtime_wire::{
     ENTITY_COMMAND_TYPE_V1, ENTITY_RECEIPT_TYPE_V1, GAMEPLAY_ACTOR_GRANT_RECEIPT_TYPE_V1, GAMEPLAY_ACTOR_GRANT_TYPE_V1,
-    GAMEPLAY_COMMAND_TYPE_V1, GAMEPLAY_RECEIPT_TYPE_V1, NETWORK_AGENT_GRANT_TYPE_V1,
+    GAMEPLAY_COMMAND_TYPE_V1, GAMEPLAY_RECEIPT_TYPE_V1, MAX_SAFE_U64, NETWORK_AGENT_GRANT_TYPE_V1,
     NETWORK_COMMAND_RELEASE_RECEIPT_TYPE_V1, NETWORK_COMMAND_RELEASE_TYPE_V1, NETWORK_DELTA_BUILD_RESPONSE_TYPE_V1,
     NETWORK_DELTA_BUILD_TYPE_V1, NETWORK_GRANT_RECEIPT_TYPE_V1, NETWORK_PEER_GRANT_TYPE_V1,
     NETWORK_PEER_RELEASE_RECEIPT_TYPE_V1, NETWORK_PEER_RELEASE_TYPE_V1, NETWORK_RECONNECT_RESPONSE_TYPE_V1,
@@ -51,6 +53,7 @@ use blockwild_runtime_wire::{
     WireHash, command_receipt_hash_v1, decode_bulk_request_v1, decode_request_v1, encode_bulk_response_v1,
     encode_response_v1, extraction_checksum_v1, wire_checksum_v1,
 };
+use blockwild_simulation::{CameraModeV1, CameraPoseV1, CameraProfileV1};
 use blockwild_types::{CanonicalHash, CanonicalHasher};
 use wasm_bindgen::prelude::*;
 
@@ -87,11 +90,33 @@ const CAPABILITIES: [&str; 15] = [
     "terrain-residency-reconcile-v2",
 ];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuntimeExtractionViewV1 {
+    viewport: [u32; 2],
+    view_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeExtractionContextV1 {
+    Legacy,
+    View(RuntimeExtractionViewV1),
+}
+
+#[derive(Clone, Debug, Default)]
+struct RuntimeExtractionCursorV1 {
+    cursor: u64,
+    last_authority: Option<RuntimeIdentityV1>,
+    last_context: Option<RuntimeExtractionContextV1>,
+    highest_view: Option<RuntimeExtractionViewV1>,
+    last_full: Option<RuntimeExtractionV1>,
+}
+
 #[derive(Default)]
 struct IntegratedRuntimeStoreV2 {
     next_handle: u32,
     runtimes: BTreeMap<u32, IntegratedRuntimeV2>,
     bulk_attachments: BTreeMap<(u32, u64), Vec<u8>>,
+    extraction_cursors: BTreeMap<u32, RuntimeExtractionCursorV1>,
 }
 
 impl IntegratedRuntimeStoreV2 {
@@ -101,6 +126,7 @@ impl IntegratedRuntimeStoreV2 {
             self.next_handle = self.next_handle.wrapping_add(1).max(1);
         }
         let handle = self.next_handle;
+        self.extraction_cursors.remove(&handle);
         self.runtimes.insert(handle, runtime);
         handle
     }
@@ -428,24 +454,53 @@ pub fn blockwild_runtime_extract_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8
     let Ok(request) = decode_request_v1(request_bytes) else {
         return Vec::new();
     };
-    let RuntimeRequestV1::Extract {
-        request_id,
-        client_epoch,
-        expected,
-        after_revision,
-        max_bytes,
-    } = request
-    else {
-        return encode_error(
-            request.request_id(),
-            request.client_epoch(),
-            "wrong-operation",
-            "extract export requires an extraction request",
-            None,
-        );
+    let (request_id, client_epoch, expected, after_revision, max_bytes, context) = match request {
+        RuntimeRequestV1::Extract {
+            request_id,
+            client_epoch,
+            expected,
+            after_revision,
+            max_bytes,
+        } => (
+            request_id,
+            client_epoch,
+            expected,
+            after_revision,
+            max_bytes,
+            RuntimeExtractionContextV1::Legacy,
+        ),
+        RuntimeRequestV1::ExtractView {
+            request_id,
+            client_epoch,
+            expected,
+            after_revision,
+            max_bytes,
+            viewport_width,
+            viewport_height,
+            view_revision,
+        } => (
+            request_id,
+            client_epoch,
+            expected,
+            after_revision,
+            max_bytes,
+            RuntimeExtractionContextV1::View(RuntimeExtractionViewV1 {
+                viewport: [viewport_width, viewport_height],
+                view_revision,
+            }),
+        ),
+        request => {
+            return encode_error(
+                request.request_id(),
+                request.client_epoch(),
+                "wrong-operation",
+                "extract export requires an extraction request",
+                None,
+            );
+        }
     };
     INTEGRATED_RUNTIMES.with(|store| {
-        let store = store.borrow();
+        let mut store = store.borrow_mut();
         let Some(runtime) = store.runtimes.get(&handle) else {
             return encode_error(
                 request_id,
@@ -465,25 +520,112 @@ pub fn blockwild_runtime_extract_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8
                 Some(identity),
             );
         }
-        let extraction_revision = runtime_extraction_revision(runtime);
-        let (render, hud, audio, platform_requests, diagnostics) = if extraction_revision > after_revision {
-            (
-                encode_render_extraction(runtime),
-                encode_hud_extraction(runtime),
-                encode_audio_extraction(runtime),
-                encode_platform_extraction(runtime),
-                encode_diagnostics(runtime),
-            )
-        } else {
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        let cursor = store.extraction_cursors.get(&handle).cloned().unwrap_or_default();
+        if after_revision > cursor.cursor {
+            return encode_error(
+                request_id,
+                client_epoch,
+                "extraction-revision-ahead",
+                "extraction request references a presentation cursor the Worker has not emitted",
+                Some(identity),
+            );
+        }
+        if let RuntimeExtractionContextV1::View(view) = context
+            && let Some(highest) = cursor.highest_view
+        {
+            if view.view_revision < highest.view_revision {
+                return encode_error(
+                    request_id,
+                    client_epoch,
+                    "view-revision-regression",
+                    "view-aware extraction revision regressed below the last emitted browser view",
+                    Some(identity),
+                );
+            }
+            if view.view_revision == highest.view_revision && view.viewport != highest.viewport {
+                return encode_error(
+                    request_id,
+                    client_epoch,
+                    "view-revision-conflict",
+                    "one browser view revision cannot identify two different viewports",
+                    Some(identity),
+                );
+            }
+        }
+        let changed = cursor.last_authority.as_ref() != Some(&identity) || cursor.last_context != Some(context);
+        if !changed {
+            if after_revision < cursor.cursor {
+                let Some(extraction) = cursor.last_full else {
+                    return encode_error(
+                        request_id,
+                        client_epoch,
+                        "extraction-cache-invariant",
+                        "the current presentation cursor has no complete cached extraction",
+                        Some(identity),
+                    );
+                };
+                if extraction_channel_bytes(&extraction) > max_bytes as usize {
+                    return encode_error(
+                        request_id,
+                        client_epoch,
+                        "extraction-capacity",
+                        "cached extraction exceeds the requested byte budget",
+                        Some(identity),
+                    );
+                }
+                return encode_extraction_response(request_id, client_epoch, extraction, identity);
+            }
+            let mut extraction = RuntimeExtractionV1 {
+                identity: identity.clone(),
+                extraction_revision: cursor.cursor,
+                render: Vec::new(),
+                hud: Vec::new(),
+                audio: Vec::new(),
+                platform_requests: Vec::new(),
+                diagnostics: Vec::new(),
+                extraction_hash: WireHash::default(),
+            };
+            extraction.extraction_hash = match extraction_checksum_v1(&extraction) {
+                Ok(hash) => hash,
+                Err(error) => {
+                    return encode_error(request_id, client_epoch, error.code, error.message, Some(identity));
+                }
+            };
+            return encode_extraction_response(request_id, client_epoch, extraction, identity);
+        }
+        let Some(extraction_revision) = cursor
+            .cursor
+            .checked_add(1)
+            .filter(|revision| *revision <= MAX_SAFE_U64)
+        else {
+            return encode_error(
+                request_id,
+                client_epoch,
+                "extraction-revision-exhausted",
+                "the Worker presentation cursor cannot advance within the browser-safe range",
+                Some(identity),
+            );
         };
-        let total_bytes = render
-            .len()
-            .saturating_add(hud.len())
-            .saturating_add(audio.len())
-            .saturating_add(platform_requests.len())
-            .saturating_add(diagnostics.len());
-        if total_bytes > max_bytes as usize {
+        let camera = match context {
+            RuntimeExtractionContextV1::Legacy => None,
+            RuntimeExtractionContextV1::View(view) => match camera_extraction(runtime, view) {
+                Ok(camera) => Some(camera),
+                Err(error) => {
+                    return encode_error(request_id, client_epoch, error.code, error.message, Some(identity));
+                }
+            },
+        };
+        let mut extraction = RuntimeExtractionV1 {
+            identity: identity.clone(),
+            extraction_revision,
+            render: encode_render_extraction_at(runtime, extraction_revision),
+            hud: encode_hud_extraction_at(runtime, extraction_revision, camera.as_ref()),
+            audio: encode_audio_extraction(runtime),
+            platform_requests: encode_platform_extraction(runtime),
+            diagnostics: encode_diagnostics(runtime),
+            extraction_hash: WireHash::default(),
+        };
+        if extraction_channel_bytes(&extraction) > max_bytes as usize {
             return encode_error(
                 request_id,
                 client_epoch,
@@ -492,34 +634,39 @@ pub fn blockwild_runtime_extract_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8
                 Some(identity),
             );
         }
-        let mut extraction = RuntimeExtractionV1 {
-            identity,
-            extraction_revision,
-            render,
-            hud,
-            audio,
-            platform_requests,
-            diagnostics,
-            extraction_hash: WireHash::default(),
-        };
         extraction.extraction_hash = match extraction_checksum_v1(&extraction) {
             Ok(hash) => hash,
             Err(error) => {
-                return encode_error(
-                    request_id,
-                    client_epoch,
-                    error.code,
-                    error.message,
-                    Some(extraction.identity),
-                );
+                return encode_error(request_id, client_epoch, error.code, error.message, Some(identity));
             }
         };
-        encode(RuntimeResponseV1::Extraction {
+        let response = RuntimeResponseV1::Extraction {
             request_id,
             client_epoch,
             worker_epoch: WORKER_EPOCH,
-            extraction,
-        })
+            extraction: extraction.clone(),
+        };
+        let encoded = match encode_response_v1(&response) {
+            Ok(encoded) => encoded,
+            Err(error) => {
+                return encode_error(request_id, client_epoch, error.code, error.message, Some(identity));
+            }
+        };
+        let highest_view = match context {
+            RuntimeExtractionContextV1::Legacy => cursor.highest_view,
+            RuntimeExtractionContextV1::View(view) => Some(view),
+        };
+        store.extraction_cursors.insert(
+            handle,
+            RuntimeExtractionCursorV1 {
+                cursor: extraction_revision,
+                last_authority: Some(identity),
+                last_context: Some(context),
+                highest_view,
+                last_full: Some(extraction),
+            },
+        );
+        encoded
     })
 }
 
@@ -1039,6 +1186,7 @@ pub fn blockwild_runtime_destroy_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8
         store
             .bulk_attachments
             .retain(|(runtime_handle, _), _| *runtime_handle != handle);
+        store.extraction_cursors.remove(&handle);
         runtime.shutdown();
         encode(RuntimeResponseV1::Shutdown {
             request_id,
@@ -1149,6 +1297,19 @@ fn dispatch_command(
                     SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3,
                     3,
                     final_bind_ack(operation.payload_hash, &candidate),
+                )
+            }
+            (RuntimeDomainV1::Simulation, SIMULATION_CAMERA_CONFIG_TYPE_V1) => {
+                let request = decode_runtime_camera_config_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let receipt = candidate
+                    .apply_camera_config(request, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1,
+                    encode_runtime_camera_config_receipt_v1(&receipt)
+                        .map_err(|error| (error.code.into(), error.message))?,
                 )
             }
             (RuntimeDomainV1::Simulation, PLAYER_BOOTSTRAP_STATUS_TYPE_V1) => {
@@ -1623,6 +1784,35 @@ fn wire_identity(identity: &IntegratedRuntimeIdentityV2) -> RuntimeIdentityV1 {
     }
 }
 
+fn extraction_channel_bytes(extraction: &RuntimeExtractionV1) -> usize {
+    [
+        &extraction.render,
+        &extraction.hud,
+        &extraction.audio,
+        &extraction.platform_requests,
+        &extraction.diagnostics,
+    ]
+    .into_iter()
+    .fold(0_usize, |total, bytes| total.saturating_add(bytes.len()))
+}
+
+fn encode_extraction_response(
+    request_id: u32,
+    client_epoch: u32,
+    extraction: RuntimeExtractionV1,
+    current: RuntimeIdentityV1,
+) -> Vec<u8> {
+    match encode_response_v1(&RuntimeResponseV1::Extraction {
+        request_id,
+        client_epoch,
+        worker_epoch: WORKER_EPOCH,
+        extraction,
+    }) {
+        Ok(encoded) => encoded,
+        Err(error) => encode_error(request_id, client_epoch, error.code, error.message, Some(current)),
+    }
+}
+
 fn encode_diagnostics(runtime: &IntegratedRuntimeV2) -> Vec<u8> {
     let revision = runtime.revision();
     let dispatcher = runtime.persistence_dispatcher().diagnostics();
@@ -1708,6 +1898,69 @@ fn runtime_extraction_revision(runtime: &IntegratedRuntimeV2) -> u64 {
     .fold(0_u64, u64::saturating_add)
 }
 
+#[derive(Clone, Debug)]
+struct CameraExtractionV1 {
+    view: RuntimeExtractionViewV1,
+    bound_external_entity_id: String,
+    bound_entity_id: u64,
+    bound_actor_id: String,
+    bound_player_id: u64,
+    camera_revision: u64,
+    camera_state_hash: CanonicalHash,
+    mode: CameraModeV1,
+    profile: CameraProfileV1,
+    aiming: bool,
+    pose: CameraPoseV1,
+}
+
+fn camera_extraction(
+    runtime: &IntegratedRuntimeV2,
+    view: RuntimeExtractionViewV1,
+) -> Result<CameraExtractionV1, IntegratedRuntimeError> {
+    let state = runtime.camera_state();
+    let pose = runtime.camera_pose(view.viewport)?;
+    if [
+        pose.position.x,
+        pose.position.y,
+        pose.position.z,
+        pose.orientation[0],
+        pose.orientation[1],
+        pose.orientation[2],
+        pose.orientation[3],
+        pose.vertical_fov_radians,
+        pose.near,
+        pose.far,
+        pose.resolved_distance,
+    ]
+    .into_iter()
+    .any(|value| !value.is_finite())
+    {
+        return Err(IntegratedRuntimeError::new(
+            "camera-pose-number",
+            "authoritative camera pose contains a non-finite renderer value",
+        ));
+    }
+    let player = runtime.player().ok_or_else(|| {
+        IntegratedRuntimeError::new(
+            "camera-player-binding",
+            "camera extraction requires a complete authoritative player binding",
+        )
+    })?;
+    Ok(CameraExtractionV1 {
+        view,
+        bound_external_entity_id: player.binding.external_entity_id.clone(),
+        bound_entity_id: player.entity_id.packed(),
+        bound_actor_id: player.binding.actor_id.clone(),
+        bound_player_id: player.binding.player_id.packed(),
+        camera_revision: state.revision,
+        camera_state_hash: runtime_camera_config_state_hash_v1(state.revision, state.mode, state.profile),
+        mode: state.mode,
+        profile: state.profile,
+        aiming: runtime.camera_aiming(),
+        pose,
+    })
+}
+
 struct RenderEntityExtractionSourceV3<'a> {
     entity_id: u64,
     residency: u8,
@@ -1718,7 +1971,7 @@ struct RenderEntityExtractionSourceV3<'a> {
     components: &'a blockwild_entity::EntityComponents,
 }
 
-fn encode_render_extraction(runtime: &IntegratedRuntimeV2) -> Vec<u8> {
+fn encode_render_extraction_at(runtime: &IntegratedRuntimeV2, extraction_revision: u64) -> Vec<u8> {
     let entities = runtime.entities();
     let total = entities.len();
     let mut records = Vec::with_capacity(total.min(MAX_ENTITY_EXTRACTION_RECORDS_V3).saturating_mul(256));
@@ -1767,7 +2020,7 @@ fn encode_render_extraction(runtime: &IntegratedRuntimeV2) -> Vec<u8> {
     let mut output = Vec::with_capacity(ENTITY_EXTRACTION_HEADER_BYTES_V3 + records.len());
     output.extend_from_slice(b"BWR6");
     output.extend_from_slice(&ENTITY_EXTRACTION_SCHEMA_V3.to_le_bytes());
-    output.extend_from_slice(&runtime_extraction_revision(runtime).to_le_bytes());
+    output.extend_from_slice(&extraction_revision.to_le_bytes());
     output.extend_from_slice(&runtime.tick().to_le_bytes());
     output.extend_from_slice(runtime.content_manifest_hash().as_bytes());
     output.push(u8::from(runtime.content_ready()));
@@ -2262,7 +2515,71 @@ fn runtime_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
     }
 }
 
-fn player_domain_view(runtime: &IntegratedRuntimeV2, world_view: Option<&WorldViewExtractionInputV1>) -> DomainViewV1 {
+fn camera_domain_row(camera: &CameraExtractionV1) -> DomainViewRowV1 {
+    let mut row = domain_row(3, "camera", camera.view.view_revision);
+    bool_field(&mut row, "aiming", camera.aiming);
+    string_field(&mut row, "actorId", &camera.bound_actor_id);
+    u64_field(&mut row, "entityId", camera.bound_entity_id);
+    string_field(&mut row, "externalEntityId", &camera.bound_external_entity_id);
+    u64_field(&mut row, "playerId", camera.bound_player_id);
+    u64_field(&mut row, "cameraRevision", camera.camera_revision);
+    hash_field(&mut row, "cameraStateHash", camera.camera_state_hash);
+    bool_field(&mut row, "collided", camera.pose.collided);
+    string_field(
+        &mut row,
+        "mode",
+        match camera.mode {
+            CameraModeV1::FirstPerson => "first",
+            CameraModeV1::ThirdRear => "third-rear",
+            CameraModeV1::ThirdFront => "third-front",
+        },
+    );
+    for (key, value) in [
+        ("orientation.x", camera.pose.orientation[0]),
+        ("orientation.y", camera.pose.orientation[1]),
+        ("orientation.z", camera.pose.orientation[2]),
+        ("orientation.w", camera.pose.orientation[3]),
+        ("position.x", camera.pose.position.x),
+        ("position.y", camera.pose.position.y),
+        ("position.z", camera.pose.position.z),
+        ("profile.aimVerticalFovRadians", camera.profile.aim_vertical_fov_radians),
+        (
+            "profile.baseVerticalFovRadians",
+            camera.profile.base_vertical_fov_radians,
+        ),
+        ("profile.collisionPadding", camera.profile.collision_padding),
+        ("profile.collisionRadius", camera.profile.collision_radius),
+        ("profile.eyeHeight", camera.profile.eye_height),
+        ("profile.far", camera.profile.far),
+        ("profile.minimumDistance", camera.profile.minimum_distance),
+        ("profile.near", camera.profile.near),
+        ("profile.rearShoulderOffset", camera.profile.rear_shoulder_offset),
+        ("profile.thirdPersonDistance", camera.profile.third_person_distance),
+        ("profile.thirdPersonPitchScale", camera.profile.third_person_pitch_scale),
+        (
+            "profile.thirdPersonTargetHeight",
+            camera.profile.third_person_target_height,
+        ),
+        ("projection.far", camera.pose.far),
+        ("projection.near", camera.pose.near),
+        ("projection.verticalFovRadians", camera.pose.vertical_fov_radians),
+        ("resolvedDistance", camera.pose.resolved_distance),
+    ] {
+        f64_field(&mut row, key, value);
+    }
+    hash_field(&mut row, "poseHash", camera.pose.pose_hash);
+    u64_field(&mut row, "viewRevision", camera.view.view_revision);
+    u64_field(&mut row, "viewport.height", u64::from(camera.pose.viewport[1]));
+    u64_field(&mut row, "viewport.width", u64::from(camera.pose.viewport[0]));
+    row
+}
+
+fn player_domain_view(
+    runtime: &IntegratedRuntimeV2,
+    world_view: Option<&WorldViewExtractionInputV1>,
+    extraction_revision: u64,
+    camera: Option<&CameraExtractionV1>,
+) -> DomainViewV1 {
     let mut rows = Vec::new();
     if let Some(player) = runtime.player() {
         let body = &player.body;
@@ -2351,7 +2668,12 @@ fn player_domain_view(runtime: &IntegratedRuntimeV2, world_view: Option<&WorldVi
             rows.push(row);
         }
     }
-    let mut blockers = vec!["camera-projection-and-orientation-not-authoritative".into()];
+    let mut blockers = Vec::new();
+    if let Some(camera) = camera {
+        rows.push(camera_domain_row(camera));
+    } else {
+        blockers.push("camera-projection-and-orientation-not-authoritative".into());
+    }
     if world_view.is_none() {
         blockers.extend([
             "player-inventory-container-binding-not-explicit".into(),
@@ -2360,8 +2682,12 @@ fn player_domain_view(runtime: &IntegratedRuntimeV2, world_view: Option<&WorldVi
     }
     DomainViewV1 {
         domain: 2,
-        revision: runtime_extraction_revision(runtime),
-        status: DomainViewStatusV1::Partial,
+        revision: extraction_revision,
+        status: if blockers.is_empty() {
+            DomainViewStatusV1::Complete
+        } else {
+            DomainViewStatusV1::Partial
+        },
         rows,
         blockers,
     }
@@ -3149,16 +3475,31 @@ fn domain_views_with_world_view_result(
     runtime: &IntegratedRuntimeV2,
     world_view: Result<WorldViewExtractionInputV1, IntegratedRuntimeError>,
 ) -> Vec<DomainViewV1> {
-    domain_views_with_world_view(runtime, world_view.as_ref().ok())
+    domain_views_with_context(
+        runtime,
+        world_view.as_ref().ok(),
+        runtime_extraction_revision(runtime),
+        None,
+    )
 }
 
+#[cfg(test)]
 fn domain_views_with_world_view(
     runtime: &IntegratedRuntimeV2,
     world_view: Option<&WorldViewExtractionInputV1>,
 ) -> Vec<DomainViewV1> {
+    domain_views_with_context(runtime, world_view, runtime_extraction_revision(runtime), None)
+}
+
+fn domain_views_with_context(
+    runtime: &IntegratedRuntimeV2,
+    world_view: Option<&WorldViewExtractionInputV1>,
+    extraction_revision: u64,
+    camera: Option<&CameraExtractionV1>,
+) -> Vec<DomainViewV1> {
     vec![
         runtime_domain_view(runtime),
-        player_domain_view(runtime, world_view),
+        player_domain_view(runtime, world_view, extraction_revision, camera),
         inventory_domain_view(runtime, world_view),
         machine_domain_view(runtime, world_view),
         combat_domain_view(runtime),
@@ -3168,14 +3509,24 @@ fn domain_views_with_world_view(
     ]
 }
 
+#[cfg(test)]
 fn encode_hud_extraction(runtime: &IntegratedRuntimeV2) -> Vec<u8> {
+    encode_hud_extraction_at(runtime, runtime_extraction_revision(runtime), None)
+}
+
+fn encode_hud_extraction_at(
+    runtime: &IntegratedRuntimeV2,
+    extraction_revision: u64,
+    camera: Option<&CameraExtractionV1>,
+) -> Vec<u8> {
     let identity = runtime.identity();
-    let views = domain_views(runtime);
+    let world_view = runtime.world_view_extraction();
+    let views = domain_views_with_context(runtime, world_view.as_ref().ok(), extraction_revision, camera);
     assert_eq!(views.len(), usize::from(DOMAIN_VIEW_COUNT_V1));
     let mut output = Vec::with_capacity(512);
     output.extend_from_slice(b"BWX0");
     output.extend_from_slice(&DOMAIN_VIEW_SCHEMA_V1.to_le_bytes());
-    output.extend_from_slice(&runtime_extraction_revision(runtime).to_le_bytes());
+    output.extend_from_slice(&extraction_revision.to_le_bytes());
     output.extend_from_slice(&identity.tick.to_le_bytes());
     output.extend_from_slice(identity.state_hash.as_bytes());
     output.extend_from_slice(runtime.content_manifest_hash().as_bytes());
@@ -3486,12 +3837,12 @@ mod tests {
     use blockwild_engine::{
         ContainerKey, EntityAuthorityExportWireV1, EntityAuthorityImportWireV2, EntityCompatibilityExportWireV1,
         EntityCompatibilityImportWireV1, ImportPlayerInventoryV1, ItemStack, LEGACY_STATE_PLAYER_V1,
-        PlayerBootstrapStatusQueryWireV1, PlayerInventoryImportWireV1, RuntimePersistenceDispatchWireV1,
-        RuntimePlayerBindingWireV1, decode_entity_authority_import_receipt_v1, decode_entity_event_batch_v1,
-        decode_player_bootstrap_status_v1, decode_player_inventory_import_receipt_v1,
-        encode_entity_authority_export_v1, encode_entity_authority_import_v2, encode_entity_command_batch_v1,
-        encode_entity_compatibility_export_v1, encode_entity_compatibility_import_v1,
-        encode_player_bootstrap_status_query_v1, encode_player_inventory_import_v1,
+        PlayerBootstrapStatusQueryWireV1, PlayerInventoryImportWireV1, RuntimeCameraConfigWireV1,
+        RuntimePersistenceDispatchWireV1, RuntimePlayerBindingWireV1, decode_entity_authority_import_receipt_v1,
+        decode_entity_event_batch_v1, decode_player_bootstrap_status_v1, decode_player_inventory_import_receipt_v1,
+        decode_runtime_camera_config_receipt_v1, encode_entity_authority_export_v1, encode_entity_authority_import_v2,
+        encode_entity_command_batch_v1, encode_entity_compatibility_export_v1, encode_entity_compatibility_import_v1,
+        encode_player_bootstrap_status_query_v1, encode_player_inventory_import_v1, encode_runtime_camera_config_v1,
         encode_runtime_persistence_dispatch_v1, encode_runtime_player_binding_v1,
     };
     use blockwild_entity::{
@@ -3500,11 +3851,12 @@ mod tests {
         Vec3 as EntityVec3,
     };
     use blockwild_runtime_wire::{
-        DEFAULT_GENERATION_OPTIONS_JSON_V1, DEFAULT_TERRAIN_CONTENT_HASH_V2, RuntimeBulkRequestV1,
-        RuntimeBulkResponseV1, RuntimeBulkStateV1, RuntimeInputFrameV1, RuntimeRequestV1, RuntimeRevisionV1,
-        decode_bulk_response_v1, decode_response_v1, encode_bulk_request_v1, encode_request_v1,
+        DEFAULT_GENERATION_OPTIONS_JSON_V1, DEFAULT_TERRAIN_CONTENT_HASH_V2, MAX_EXTRACTION_BYTES,
+        RuntimeBulkRequestV1, RuntimeBulkResponseV1, RuntimeBulkStateV1, RuntimeInputFrameV1, RuntimeRequestV1,
+        RuntimeRevisionV1, decode_bulk_response_v1, decode_response_v1, encode_bulk_request_v1, encode_request_v1,
         seal_runtime_command_batch_v1,
     };
+    use blockwild_simulation::CameraProfileV1;
 
     use super::*;
 
@@ -3625,6 +3977,67 @@ mod tests {
         }
     }
 
+    fn insert_test_runtime(runtime: IntegratedRuntimeV2) -> (u32, RuntimeIdentityV1) {
+        let identity = wire_identity(&runtime.identity());
+        let handle = INTEGRATED_RUNTIMES.with(|store| store.borrow_mut().insert(runtime));
+        (handle, identity)
+    }
+
+    fn extract_view_request(
+        request_id: u32,
+        expected: RuntimeIdentityV1,
+        after_revision: u64,
+        viewport: [u32; 2],
+        view_revision: u64,
+        max_bytes: u32,
+    ) -> RuntimeRequestV1 {
+        RuntimeRequestV1::ExtractView {
+            request_id,
+            client_epoch: 1,
+            expected,
+            after_revision,
+            max_bytes,
+            viewport_width: viewport[0],
+            viewport_height: viewport[1],
+            view_revision,
+        }
+    }
+
+    fn extract_response(handle: u32, request: RuntimeRequestV1) -> RuntimeResponseV1 {
+        decode_response_v1(&blockwild_runtime_extract_v2(
+            handle,
+            &encode_request_v1(&request).expect("valid extraction request"),
+        ))
+        .expect("valid extraction response")
+    }
+
+    fn extraction_from(response: RuntimeResponseV1) -> RuntimeExtractionV1 {
+        let RuntimeResponseV1::Extraction { extraction, .. } = response else {
+            panic!("expected extraction response: {response:?}")
+        };
+        extraction
+    }
+
+    fn response_error_code(response: RuntimeResponseV1) -> String {
+        let RuntimeResponseV1::Error { code, .. } = response else {
+            panic!("expected error response: {response:?}")
+        };
+        code
+    }
+
+    fn camera_config_operation(expected_camera_revision: u64, mode: CameraModeV1) -> RuntimeDomainOperationV1 {
+        domain_operation(
+            RuntimeDomainV1::Simulation,
+            SIMULATION_CAMERA_CONFIG_TYPE_V1,
+            encode_runtime_camera_config_v1(&RuntimeCameraConfigWireV1 {
+                expected_camera_revision,
+                mode,
+                profile: CameraProfileV1::default(),
+            })
+            .expect("valid camera configuration"),
+        )
+    }
+
     #[test]
     fn create_extract_and_destroy_use_one_live_generational_handle() {
         let request = create_request(1);
@@ -3682,6 +4095,86 @@ mod tests {
         ))
         .unwrap();
         assert!(matches!(missing, RuntimeResponseV1::Error { .. }));
+    }
+
+    #[test]
+    fn camera_config_dispatch_returns_exact_bwr5_and_rolls_back_the_outer_candidate() {
+        let (handle, identity) =
+            insert_test_runtime(IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap());
+        let operation = camera_config_operation(0, CameraModeV1::ThirdRear);
+        let request_payload_hash = CanonicalHash(operation.payload_hash.0);
+        let (after, receipt) = dispatch_single_operation(handle, 801, identity, "camera-config:first", operation);
+        assert_eq!(receipt.domain, RuntimeDomainV1::Simulation);
+        assert_eq!(receipt.type_id, SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1);
+        assert_eq!(receipt.schema, 1);
+        assert_eq!(receipt.payload_hash, WireHash(wire_checksum_v1(&receipt.payload)));
+        let decoded = decode_runtime_camera_config_receipt_v1(&receipt.payload).unwrap();
+        assert_eq!(decoded.request_payload_hash, request_payload_hash);
+        assert_eq!(
+            (decoded.previous_camera_revision, decoded.resulting_camera_revision),
+            (0, 1)
+        );
+        assert_eq!(decoded.mode, CameraModeV1::ThirdRear);
+
+        let (idempotent_after, idempotent_receipt) = dispatch_single_operation(
+            handle,
+            802,
+            after.clone(),
+            "camera-config:idempotent",
+            camera_config_operation(1, CameraModeV1::ThirdRear),
+        );
+        assert_eq!(idempotent_after, after);
+        let idempotent = decode_runtime_camera_config_receipt_v1(&idempotent_receipt.payload).unwrap();
+        assert_eq!(
+            (
+                idempotent.previous_camera_revision,
+                idempotent.resulting_camera_revision
+            ),
+            (1, 1)
+        );
+
+        let (rollback_handle, rollback_identity) =
+            insert_test_runtime(IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap());
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "camera-config:rollback".into(),
+            idempotency_key: "camera-config:rollback".into(),
+            actor_id: "platform:test".into(),
+            expected: rollback_identity,
+            operations: vec![
+                camera_config_operation(0, CameraModeV1::ThirdFront),
+                domain_operation(
+                    RuntimeDomainV1::Simulation,
+                    "blockwild.simulation.unsupported.v1",
+                    Vec::new(),
+                ),
+            ],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let response = decode_response_v1(&blockwild_runtime_command_v2(
+            rollback_handle,
+            &encode_request_v1(&RuntimeRequestV1::Command {
+                request_id: 803,
+                client_epoch: 1,
+                batch,
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        let RuntimeResponseV1::CommandReceipt {
+            receipt: RuntimeCommandReceiptV1::Rejected { code, .. },
+            ..
+        } = response
+        else {
+            panic!("expected rejected camera transaction: {response:?}")
+        };
+        assert_eq!(code, "unsupported-domain-codec");
+        INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let runtime = store.runtimes.get(&rollback_handle).unwrap();
+            assert_eq!(runtime.camera_state().revision, 0);
+            assert_eq!(runtime.camera_state().mode, CameraModeV1::FirstPerson);
+        });
     }
 
     #[test]
@@ -5554,6 +6047,437 @@ mod tests {
     }
 
     #[test]
+    fn view_aware_extraction_cursor_is_worker_owned_retry_exact_and_context_sensitive() {
+        let baseline = runtime_with_bound_extraction_player();
+        let (handle, identity) = insert_test_runtime(baseline.clone());
+        let view = RuntimeExtractionViewV1 {
+            viewport: [1_280, 720],
+            view_revision: 11,
+        };
+        let first = extraction_from(extract_response(
+            handle,
+            extract_view_request(
+                1_001,
+                identity.clone(),
+                0,
+                view.viewport,
+                view.view_revision,
+                MAX_EXTRACTION_BYTES as u32,
+            ),
+        ));
+        assert_eq!(first.extraction_revision, 1);
+        assert!(!first.render.is_empty());
+        let camera = camera_extraction(&baseline, view).unwrap();
+        assert_eq!(first.hud, encode_hud_extraction_at(&baseline, 1, Some(&camera)));
+
+        let retry = extraction_from(extract_response(
+            handle,
+            extract_view_request(
+                1_002,
+                identity.clone(),
+                0,
+                view.viewport,
+                view.view_revision,
+                MAX_EXTRACTION_BYTES as u32,
+            ),
+        ));
+        assert_eq!(
+            retry, first,
+            "a lost-response retry must replay the exact cached extraction"
+        );
+        let empty = extraction_from(extract_response(
+            handle,
+            extract_view_request(
+                1_003,
+                identity.clone(),
+                1,
+                view.viewport,
+                view.view_revision,
+                MAX_EXTRACTION_BYTES as u32,
+            ),
+        ));
+        assert_eq!(empty.extraction_revision, 1);
+        assert_eq!(extraction_channel_bytes(&empty), 0);
+
+        let resized_view = RuntimeExtractionViewV1 {
+            viewport: [1_920, 1_080],
+            view_revision: 12,
+        };
+        let resized = extraction_from(extract_response(
+            handle,
+            extract_view_request(
+                1_004,
+                identity.clone(),
+                1,
+                resized_view.viewport,
+                resized_view.view_revision,
+                MAX_EXTRACTION_BYTES as u32,
+            ),
+        ));
+        assert_eq!(resized.extraction_revision, 2);
+        assert_ne!(resized.hud, first.hud);
+        assert_eq!(
+            response_error_code(extract_response(
+                handle,
+                extract_view_request(1_005, identity.clone(), 2, [800, 600], 12, MAX_EXTRACTION_BYTES as u32),
+            )),
+            "view-revision-conflict"
+        );
+        assert_eq!(
+            response_error_code(extract_response(
+                handle,
+                extract_view_request(
+                    1_006,
+                    identity.clone(),
+                    2,
+                    [1_280, 720],
+                    11,
+                    MAX_EXTRACTION_BYTES as u32
+                ),
+            )),
+            "view-revision-regression"
+        );
+
+        assert_eq!(
+            response_error_code(extract_response(
+                handle,
+                extract_view_request(1_007, identity.clone(), 2, [1_920, 1_080], 13, 1),
+            )),
+            "extraction-capacity"
+        );
+        INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let cursor = store.extraction_cursors.get(&handle).unwrap();
+            assert_eq!(cursor.cursor, 2);
+            assert_eq!(cursor.highest_view, Some(resized_view));
+        });
+        let next_view = RuntimeExtractionViewV1 {
+            viewport: [1_920, 1_080],
+            view_revision: 13,
+        };
+        let next = extraction_from(extract_response(
+            handle,
+            extract_view_request(
+                1_008,
+                identity.clone(),
+                2,
+                next_view.viewport,
+                next_view.view_revision,
+                MAX_EXTRACTION_BYTES as u32,
+            ),
+        ));
+        assert_eq!(next.extraction_revision, 3);
+
+        let legacy = extraction_from(extract_response(
+            handle,
+            RuntimeRequestV1::Extract {
+                request_id: 1_009,
+                client_epoch: 1,
+                expected: identity.clone(),
+                after_revision: 3,
+                max_bytes: MAX_EXTRACTION_BYTES as u32,
+            },
+        ));
+        assert_eq!(legacy.extraction_revision, 4);
+        assert_eq!(legacy.hud, encode_hud_extraction_at(&baseline, 4, None));
+        let legacy_player =
+            domain_views_with_context(&baseline, baseline.world_view_extraction().as_ref().ok(), 4, None).remove(1);
+        assert_eq!(legacy_player.status, DomainViewStatusV1::Partial);
+        assert_eq!(
+            legacy_player.blockers,
+            ["camera-projection-and-orientation-not-authoritative"]
+        );
+        assert!(!legacy_player.rows.iter().any(|row| row.kind == 3));
+
+        let resumed = extraction_from(extract_response(
+            handle,
+            extract_view_request(
+                1_010,
+                identity.clone(),
+                4,
+                next_view.viewport,
+                next_view.view_revision,
+                MAX_EXTRACTION_BYTES as u32,
+            ),
+        ));
+        assert_eq!(resumed.extraction_revision, 5);
+        let cached = extraction_from(extract_response(
+            handle,
+            extract_view_request(
+                1_011,
+                identity.clone(),
+                4,
+                next_view.viewport,
+                next_view.view_revision,
+                MAX_EXTRACTION_BYTES as u32,
+            ),
+        ));
+        assert_eq!(cached, resumed);
+        assert_eq!(
+            response_error_code(extract_response(
+                handle,
+                extract_view_request(
+                    1_012,
+                    identity.clone(),
+                    4,
+                    next_view.viewport,
+                    next_view.view_revision,
+                    1
+                ),
+            )),
+            "extraction-capacity"
+        );
+        assert_eq!(
+            response_error_code(extract_response(
+                handle,
+                extract_view_request(
+                    1_013,
+                    identity,
+                    6,
+                    next_view.viewport,
+                    next_view.view_revision,
+                    MAX_EXTRACTION_BYTES as u32,
+                ),
+            )),
+            "extraction-revision-ahead"
+        );
+    }
+
+    #[test]
+    fn view_aware_pose_and_capacity_failures_do_not_advance_the_sidecar() {
+        let runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        let (handle, identity) = insert_test_runtime(runtime);
+        assert_eq!(
+            response_error_code(extract_response(
+                handle,
+                extract_view_request(1_101, identity.clone(), 0, [800, 600], 1, MAX_EXTRACTION_BYTES as u32),
+            )),
+            "camera-player-binding"
+        );
+        INTEGRATED_RUNTIMES.with(|store| {
+            assert!(!store.borrow().extraction_cursors.contains_key(&handle));
+        });
+
+        let legacy = extraction_from(extract_response(
+            handle,
+            RuntimeRequestV1::Extract {
+                request_id: 1_102,
+                client_epoch: 1,
+                expected: identity.clone(),
+                after_revision: 0,
+                max_bytes: MAX_EXTRACTION_BYTES as u32,
+            },
+        ));
+        assert_eq!(legacy.extraction_revision, 1);
+        assert_eq!(
+            response_error_code(extract_response(
+                handle,
+                extract_view_request(1_103, identity, 1, [800, 600], 1, MAX_EXTRACTION_BYTES as u32),
+            )),
+            "camera-player-binding"
+        );
+        INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let cursor = store.extraction_cursors.get(&handle).unwrap();
+            assert_eq!(cursor.cursor, 1);
+            assert_eq!(cursor.last_context, Some(RuntimeExtractionContextV1::Legacy));
+            assert!(cursor.highest_view.is_none());
+        });
+    }
+
+    #[test]
+    fn camera_row_is_complete_for_every_mode_and_carries_authoritative_aiming() {
+        let mut runtime = runtime_with_bound_extraction_player();
+        let player = runtime.player().unwrap().clone();
+        let world_view = runtime.world_view_extraction().unwrap();
+        let world_player = world_view
+            .players
+            .iter()
+            .find(|value| value.binding.player_id == player.binding.player_id)
+            .unwrap();
+        assert_eq!(world_player.binding.actor_id, player.binding.actor_id);
+        assert_eq!(world_player.binding.entity_id, player.entity_id);
+        assert_eq!(
+            runtime
+                .entities()
+                .hot()
+                .get(&player.entity_id)
+                .unwrap()
+                .record
+                .external_entity_id,
+            player.binding.external_entity_id
+        );
+        let render = encode_render_extraction_at(&runtime, 1);
+        let mut render_reader = ExtractionReader::new(&render);
+        assert_eq!(render_reader.take(4), b"BWR6");
+        assert_eq!(render_reader.u16(), ENTITY_EXTRACTION_SCHEMA_V3);
+        render_reader.u64();
+        render_reader.u64();
+        render_reader.take(16);
+        render_reader.u8();
+        assert_eq!(
+            (render_reader.u32(), render_reader.u32(), render_reader.u32()),
+            (1, 1, 0)
+        );
+        assert_eq!(render_reader.u64(), player.entity_id.packed());
+        render_reader.take(1 + 1 + 2 + 8 + 8);
+        assert_eq!(render_reader.string(), player.binding.external_entity_id);
+        let mut expected_camera_revision = 0;
+        for (index, (mode, label)) in [
+            (CameraModeV1::FirstPerson, "first"),
+            (CameraModeV1::ThirdRear, "third-rear"),
+            (CameraModeV1::ThirdFront, "third-front"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if runtime.camera_state().mode != mode {
+                let receipt = runtime
+                    .apply_camera_config(
+                        RuntimeCameraConfigWireV1 {
+                            expected_camera_revision,
+                            mode,
+                            profile: CameraProfileV1::default(),
+                        },
+                        CanonicalHash([index as u8; 16]),
+                    )
+                    .unwrap();
+                expected_camera_revision = receipt.resulting_camera_revision;
+            }
+            let view = RuntimeExtractionViewV1 {
+                viewport: [1_280, 720],
+                view_revision: index as u64 + 1,
+            };
+            let mut camera = camera_extraction(&runtime, view).unwrap();
+            camera.aiming = index == 2;
+            let row = camera_domain_row(&camera);
+            assert_eq!((row.kind, row.key.as_str(), row.fields.len()), (3, "camera", 36));
+            assert!(
+                matches!(row.fields.get("aiming"), Some(DomainViewValueV1::Bool(value)) if *value == camera.aiming)
+            );
+            assert!(
+                matches!(row.fields.get("actorId"), Some(DomainViewValueV1::String(value)) if value == "player:extraction")
+            );
+            assert!(
+                matches!(row.fields.get("externalEntityId"), Some(DomainViewValueV1::String(value)) if value == "player:extraction")
+            );
+            assert!(
+                matches!(row.fields.get("entityId"), Some(DomainViewValueV1::U64(value)) if *value == camera.bound_entity_id)
+            );
+            assert!(
+                matches!(row.fields.get("playerId"), Some(DomainViewValueV1::U64(value)) if *value == blockwild_types::PlayerId::new(7, 3).packed())
+            );
+            assert!(matches!(row.fields.get("mode"), Some(DomainViewValueV1::String(value)) if value == label));
+            assert!(
+                matches!(row.fields.get("cameraRevision"), Some(DomainViewValueV1::U64(value)) if *value == expected_camera_revision)
+            );
+            assert!(
+                matches!(row.fields.get("viewRevision"), Some(DomainViewValueV1::U64(value)) if *value == view.view_revision)
+            );
+            assert!(matches!(
+                row.fields.get("viewport.width"),
+                Some(DomainViewValueV1::U64(1_280))
+            ));
+            assert!(matches!(
+                row.fields.get("viewport.height"),
+                Some(DomainViewValueV1::U64(720))
+            ));
+            assert!(
+                matches!(row.fields.get("poseHash"), Some(DomainViewValueV1::Hash(value)) if *value == camera.pose.pose_hash)
+            );
+            for (key, expected) in [
+                ("profile.eyeHeight", camera.profile.eye_height),
+                (
+                    "profile.thirdPersonTargetHeight",
+                    camera.profile.third_person_target_height,
+                ),
+                ("profile.thirdPersonDistance", camera.profile.third_person_distance),
+                ("profile.thirdPersonPitchScale", camera.profile.third_person_pitch_scale),
+                ("profile.rearShoulderOffset", camera.profile.rear_shoulder_offset),
+                ("profile.collisionRadius", camera.profile.collision_radius),
+                ("profile.collisionPadding", camera.profile.collision_padding),
+                ("profile.minimumDistance", camera.profile.minimum_distance),
+                (
+                    "profile.baseVerticalFovRadians",
+                    camera.profile.base_vertical_fov_radians,
+                ),
+                ("profile.aimVerticalFovRadians", camera.profile.aim_vertical_fov_radians),
+                ("profile.near", camera.profile.near),
+                ("profile.far", camera.profile.far),
+            ] {
+                assert!(
+                    matches!(row.fields.get(key), Some(DomainViewValueV1::F64(value)) if value.to_bits() == expected.to_bits())
+                );
+            }
+            for key in [
+                "orientation.w",
+                "orientation.x",
+                "orientation.y",
+                "orientation.z",
+                "position.x",
+                "position.y",
+                "position.z",
+                "profile.aimVerticalFovRadians",
+                "profile.baseVerticalFovRadians",
+                "profile.collisionPadding",
+                "profile.collisionRadius",
+                "profile.eyeHeight",
+                "profile.far",
+                "profile.minimumDistance",
+                "profile.near",
+                "profile.rearShoulderOffset",
+                "profile.thirdPersonDistance",
+                "profile.thirdPersonPitchScale",
+                "profile.thirdPersonTargetHeight",
+                "projection.far",
+                "projection.near",
+                "projection.verticalFovRadians",
+                "resolvedDistance",
+            ] {
+                match row.fields.get(key) {
+                    Some(DomainViewValueV1::F64(value)) if value.is_finite() => {}
+                    value => panic!("camera field {key} is not a finite f64: {value:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn view_sidecar_is_checkpoint_neutral_and_resets_on_restore_handle() {
+        let runtime = runtime_with_bound_extraction_player();
+        let before_identity = runtime.identity();
+        let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+        let checkpoint_hash = integrated_runtime_checkpoint_hash_v1(&checkpoint);
+        let (handle, identity) = insert_test_runtime(runtime);
+        let extraction = extraction_from(extract_response(
+            handle,
+            extract_view_request(1_201, identity, 0, [16_384, 16_384], 77, MAX_EXTRACTION_BYTES as u32),
+        ));
+        assert_eq!(extraction.extraction_revision, 1);
+        INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let resident = store.runtimes.get(&handle).unwrap();
+            assert_eq!(resident.identity(), before_identity);
+            assert_eq!(resident.export_runtime_checkpoint().unwrap(), checkpoint);
+        });
+
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(&checkpoint, checkpoint_hash).unwrap();
+        let (restored_handle, restored_identity) = insert_test_runtime(restored);
+        let restored_extraction = extraction_from(extract_response(
+            restored_handle,
+            extract_view_request(
+                1_202,
+                restored_identity,
+                0,
+                [16_384, 16_384],
+                77,
+                MAX_EXTRACTION_BYTES as u32,
+            ),
+        ));
+        assert_eq!(restored_extraction.extraction_revision, 1);
+    }
+
+    #[test]
     fn world_view_domains_close_only_serialized_authority_and_stay_pending() {
         let runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
         let views = domain_views(&runtime);
@@ -5696,11 +6620,37 @@ mod tests {
             .collect()
     }
 
+    fn bound_camera_view_bwx0_fixture_hex() -> String {
+        let runtime = runtime_with_bound_extraction_player();
+        let camera = camera_extraction(
+            &runtime,
+            RuntimeExtractionViewV1 {
+                viewport: [1_280, 720],
+                view_revision: 11,
+            },
+        )
+        .unwrap();
+        encode_hud_extraction_at(&runtime, 1, Some(&camera))
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
+    }
+
     #[test]
     fn bound_world_view_bwx0_matches_shared_typescript_fixture() {
         let actual = bound_world_view_bwx0_fixture_hex();
         let expected = include_str!(
             "../../../../tests/fixtures/rust-engine/r10-authoritative-extraction/bound-world-view-bwx0-v1.hex"
+        )
+        .trim();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn bound_camera_view_bwx0_matches_shared_typescript_fixture() {
+        let actual = bound_camera_view_bwx0_fixture_hex();
+        let expected = include_str!(
+            "../../../../tests/fixtures/rust-engine/r10-authoritative-extraction/bound-camera-view-bwx0-v1.hex"
         )
         .trim();
         assert_eq!(actual, expected);
@@ -5718,6 +6668,20 @@ mod tests {
         );
         std::fs::write(&target, format!("{}\n", bound_world_view_bwx0_fixture_hex()))
             .expect("write canonical BWX0 fixture");
+    }
+
+    #[test]
+    #[ignore = "maintainer-only fixture regeneration"]
+    fn regenerate_bound_camera_view_bwx0_fixture() {
+        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tests/fixtures/rust-engine/r10-authoritative-extraction/bound-camera-view-bwx0-v1.hex");
+        assert!(
+            target.is_file(),
+            "fixture path must already exist: {}",
+            target.display()
+        );
+        std::fs::write(&target, format!("{}\n", bound_camera_view_bwx0_fixture_hex()))
+            .expect("write canonical view-aware BWX0 fixture");
     }
 
     #[test]

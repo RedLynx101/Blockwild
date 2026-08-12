@@ -20,6 +20,10 @@ const BOUND_WORLD_VIEW_BWX0 = readFileSync(
   new URL("./fixtures/rust-engine/r10-authoritative-extraction/bound-world-view-bwx0-v1.hex", import.meta.url),
   "utf8",
 ).trim();
+const BOUND_CAMERA_VIEW_BWX0 = readFileSync(
+  new URL("./fixtures/rust-engine/r10-authoritative-extraction/bound-camera-view-bwx0-v1.hex", import.meta.url),
+  "utf8",
+).trim();
 
 class Writer {
   readonly bytes: number[] = [];
@@ -107,6 +111,44 @@ test("Rust-produced bound-player BWX0 decodes end to end in TypeScript", () => {
   assert.equal(decoded.views[7].status, "complete");
   assert.equal(decoded.views[7].rows.find((row) => row.kind === 4)?.fields.find(([name]) => name === "bodyCount")?.[1], BigInt(0));
   assert.equal(decoded.promotion.ready, false, "remaining presentation blockers stay explicit");
+});
+
+test("Rust-produced view-aware camera BWX0 is complete and identity joined", () => {
+  const decoded = decodeRustDomainBundleR10(Uint8Array.from(Buffer.from(BOUND_CAMERA_VIEW_BWX0, "hex")));
+  assert.equal(decoded.extractionRevision, BigInt(1));
+  const player = decoded.views[1].rows.find((row) => row.kind === 1);
+  const binding = decoded.views[1].rows.find((row) => row.kind === 2);
+  const camera = decoded.views[1].rows.find((row) => row.kind === 3 && row.key === "camera");
+  assert.ok(player && binding && camera);
+  const playerFields = new Map(player.fields);
+  const bindingFields = new Map(binding.fields);
+  const fields = new Map(camera.fields);
+  assert.equal(decoded.views[1].status, "complete");
+  assert.deepEqual(decoded.views[1].blockers, []);
+  assert.equal(fields.size, 36);
+  assert.equal(fields.get("externalEntityId"), player.key);
+  assert.equal(fields.get("externalEntityId"), fields.get("actorId"));
+  assert.equal(fields.get("entityId"), playerFields.get("entityId"));
+  assert.equal(fields.get("entityId"), bindingFields.get("entityId"));
+  assert.equal(fields.get("playerId"), bindingFields.get("playerId"));
+  assert.equal(fields.get("viewRevision"), BigInt(11));
+  assert.equal(fields.get("viewport.width"), BigInt(1_280));
+  assert.equal(fields.get("viewport.height"), BigInt(720));
+  assert.equal(fields.get("mode"), "first");
+  assert.equal(fields.get("aiming"), false);
+  assert.equal(fields.get("collided"), false);
+  for (const key of [
+    "orientation.w", "orientation.x", "orientation.y", "orientation.z",
+    "position.x", "position.y", "position.z",
+    "profile.aimVerticalFovRadians", "profile.baseVerticalFovRadians",
+    "profile.collisionPadding", "profile.collisionRadius", "profile.eyeHeight", "profile.far",
+    "profile.minimumDistance", "profile.near", "profile.rearShoulderOffset",
+    "profile.thirdPersonDistance", "profile.thirdPersonPitchScale", "profile.thirdPersonTargetHeight",
+    "projection.far", "projection.near", "projection.verticalFovRadians", "resolvedDistance",
+  ]) assert.equal(Number.isFinite(fields.get(key)), true, `${key} must be a finite f64`);
+  assert.ok(fields.get("cameraStateHash") instanceof Uint8Array);
+  assert.ok(fields.get("poseHash") instanceof Uint8Array);
+  assert.equal(decoded.promotion.ready, false, "unrelated presentation blockers remain explicit");
 });
 
 test("R10 canonical text order is Rust UTF-8 byte order for BMP and non-BMP values", () => {
