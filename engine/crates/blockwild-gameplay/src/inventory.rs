@@ -533,6 +533,100 @@ pub struct InventoryState {
 }
 
 impl InventoryState {
+    /// Plan an all-or-nothing canonical transfer of a complete drop-custody
+    /// stack. Compatible partial stacks are filled before empty slots,
+    /// matching [`Self::add_stack`], and no state is mutated while the caller
+    /// stages the enclosing cross-domain pickup transaction.
+    pub fn canonical_pickup_transfers_v1(
+        &self,
+        source: &SlotRef,
+        destination: &ContainerKey,
+    ) -> Result<Option<Vec<(u16, u32)>>, Rejection> {
+        source.container.validate()?;
+        destination.validate()?;
+        if source.container.kind != ContainerKind::Container
+            || source.container.owner_id.is_some()
+            || destination.kind != ContainerKind::Player
+            || destination.owner_id.is_none()
+            || source.container == *destination
+        {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "pickup requires unowned drop custody and an owned player inventory",
+            ));
+        }
+        let source_container = self
+            .containers
+            .get(&source.container)
+            .ok_or_else(|| Rejection::new(RejectionCode::InvalidTarget, "drop custody container does not exist"))?;
+        check_container_revision(source_container, source.expected_container_revision)?;
+        let stack = source_container
+            .slots
+            .get(usize::from(source.slot))
+            .and_then(Option::as_ref)
+            .ok_or_else(|| Rejection::new(RejectionCode::InsufficientResource, "drop custody slot is empty"))?;
+        if source_container.slots.iter().flatten().count() != 1 {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "drop custody must contain exactly one occupied slot",
+            ));
+        }
+        if stack.metadata_hash != CanonicalHash::default()
+            && !self.item_instance_metadata.contains_key(&stack.metadata_hash)
+        {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "drop custody metadata descriptor is missing",
+            ));
+        }
+        let definition = self
+            .items
+            .get(&stack.item_code)
+            .ok_or_else(|| Rejection::new(RejectionCode::InvalidCommand, "drop custody item definition is missing"))?;
+        stack.validate(definition.max_stack)?;
+        let destination = self
+            .containers
+            .get(destination)
+            .ok_or_else(|| Rejection::new(RejectionCode::InvalidTarget, "player inventory does not exist"))?;
+
+        let mut remaining = stack.count;
+        let mut transfers = Vec::new();
+        for (index, existing) in destination.slots.iter().enumerate() {
+            let Some(existing) = existing.as_ref() else {
+                continue;
+            };
+            if existing.compatible_with(stack) && existing.count < definition.max_stack {
+                let moved = remaining.min(definition.max_stack - existing.count);
+                if moved > 0 {
+                    transfers.push((
+                        u16::try_from(index)
+                            .map_err(|_| Rejection::new(RejectionCode::Capacity, "pickup slot index exceeds u16"))?,
+                        moved,
+                    ));
+                    remaining -= moved;
+                    if remaining == 0 {
+                        return Ok(Some(transfers));
+                    }
+                }
+            }
+        }
+        for (index, existing) in destination.slots.iter().enumerate() {
+            if existing.is_none() && destination.equipment_tags[index].is_none() {
+                let moved = remaining.min(definition.max_stack);
+                transfers.push((
+                    u16::try_from(index)
+                        .map_err(|_| Rejection::new(RejectionCode::Capacity, "pickup slot index exceeds u16"))?,
+                    moved,
+                ));
+                remaining -= moved;
+                if remaining == 0 {
+                    return Ok(Some(transfers));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Applies exact held-stack cost and authored loot/placement custody as a
     /// single staged inventory mutation. A caller receives no partial slot or
     /// durability update when loot capacity, identity, or revision is stale.

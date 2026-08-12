@@ -30,6 +30,10 @@ pub const WORLD_VIEW_FRACTION_SCALE_V1: u32 = 1_000_000;
 pub const WORLD_VIEW_MAX_PRESSURE_MILLIPASCALS_V1: u64 = 10_000_000_000;
 pub const WORLD_VIEW_MAX_TEMPERATURE_MILLIKELVIN_V1: u32 = 10_000_000;
 pub const WORLD_VIEW_MAX_GRAVITY_MICROMETRES_PER_SECOND_SQUARED_V1: u64 = 1_000_000_000;
+/// Pickup locks are deliberately short-lived presentation/gameplay guards,
+/// not durable ownership leases. Keeping the deadline bounded prevents a
+/// malformed command from making ordinary item custody unreachable forever.
+pub const WORLD_VIEW_MAX_PICKUP_LOCK_TICKS_V1: u64 = 1_200;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FixedWorldVec3V1 {
@@ -272,7 +276,11 @@ pub struct DroppedItemSpatialV1 {
     pub rotation: RotationMicroturnsV1,
     pub created_tick: u64,
     pub expires_tick: Option<u64>,
+    /// Legacy descriptive provenance retained in state/snapshot hashes. It is
+    /// not a pickup capability; current native drops use `None` and the global
+    /// [`Self::pickup_unlock_tick`] deadline is the only eligibility lock.
     pub pickup_lock_actor_id: Option<String>,
+    pub pickup_unlock_tick: u64,
 }
 
 impl DroppedItemSpatialV1 {
@@ -287,6 +295,16 @@ impl DroppedItemSpatialV1 {
         self.rotation.validate()?;
         if self.expires_tick.is_some_and(|tick| tick <= self.created_tick) {
             return Err(invalid("dropped item expiry must follow creation"));
+        }
+        if self.pickup_unlock_tick < self.created_tick
+            || self.pickup_unlock_tick.saturating_sub(self.created_tick) > WORLD_VIEW_MAX_PICKUP_LOCK_TICKS_V1
+            || self
+                .expires_tick
+                .is_some_and(|expires_tick| self.pickup_unlock_tick > expires_tick)
+        {
+            return Err(invalid(
+                "dropped item pickup unlock must be bounded between creation and expiry",
+            ));
         }
         if let Some(actor_id) = &self.pickup_lock_actor_id {
             validate_id("dropped item pickup lock", actor_id)?;
@@ -307,6 +325,13 @@ impl DroppedItemSpatialV1 {
         hasher.write_u64(self.created_tick);
         hash_option_u64(hasher, self.expires_tick);
         hash_option_str(hasher, self.pickup_lock_actor_id.as_deref());
+        // A legacy BWVWSP/1 record had no explicit deadline. Its canonical
+        // meaning is immediate unlock at `created_tick`, and omitting that
+        // default preserves historical state/replay hashes exactly.
+        if self.pickup_unlock_tick != self.created_tick {
+            hasher.write_str("pickup-unlock-tick-v1");
+            hasher.write_u64(self.pickup_unlock_tick);
+        }
     }
 }
 
@@ -938,7 +963,9 @@ pub struct PlayerDropStageRequestV1 {
     pub velocity_milli_per_second: FixedWorldVec3V1,
     pub rotation: RotationMicroturnsV1,
     pub expires_tick: Option<u64>,
+    /// Legacy descriptive provenance only; it does not grant or deny pickup.
     pub pickup_lock_actor_id: Option<String>,
+    pub pickup_unlock_tick: u64,
 }
 
 impl PlayerDropStageRequestV1 {
@@ -969,6 +996,10 @@ impl PlayerDropStageRequestV1 {
         self.rotation.hash_into(&mut hasher);
         hash_option_u64(&mut hasher, self.expires_tick);
         hash_option_str(&mut hasher, self.pickup_lock_actor_id.as_deref());
+        if self.pickup_unlock_tick != 0 {
+            hasher.write_str("pickup-unlock-tick-v1");
+            hasher.write_u64(self.pickup_unlock_tick);
+        }
         hasher.finish()
     }
 }
@@ -1020,6 +1051,16 @@ pub fn stage_player_drop_v1(
     request.rotation.validate()?;
     if let Some(actor_id) = &request.pickup_lock_actor_id {
         validate_id("player-drop pickup lock", actor_id)?;
+    }
+    if request.pickup_unlock_tick < world_view.tick
+        || request.pickup_unlock_tick.saturating_sub(world_view.tick) > WORLD_VIEW_MAX_PICKUP_LOCK_TICKS_V1
+        || request
+            .expires_tick
+            .is_some_and(|expires_tick| request.pickup_unlock_tick > expires_tick)
+    {
+        return Err(invalid(
+            "player-drop pickup unlock must be bounded between creation and expiry",
+        ));
     }
     if world_view.dropped_items.contains_key(&request.drop_id)
         || world_view
@@ -1108,6 +1149,7 @@ pub fn stage_player_drop_v1(
         created_tick: world_view.tick,
         expires_tick: request.expires_tick,
         pickup_lock_actor_id: request.pickup_lock_actor_id.clone(),
+        pickup_unlock_tick: request.pickup_unlock_tick,
     };
     drop.validate_shape()?;
     validate_drop_inventory_link(&drop, &staged.state)?;
@@ -1282,6 +1324,7 @@ pub enum WorldViewCommandV1 {
         drop_id: String,
         expected_revision: u64,
         pickup_lock_actor_id: Option<String>,
+        pickup_unlock_tick: u64,
     },
     RemoveDrop {
         drop_id: String,
@@ -1375,11 +1418,13 @@ impl WorldViewCommandV1 {
                 drop_id,
                 expected_revision,
                 pickup_lock_actor_id,
+                pickup_unlock_tick,
             } => {
                 hasher.write_u16(6);
                 hasher.write_str(drop_id);
                 hasher.write_u64(*expected_revision);
                 hash_option_str(hasher, pickup_lock_actor_id.as_deref());
+                hasher.write_u64(*pickup_unlock_tick);
             }
             Self::RemoveDrop {
                 drop_id,
@@ -2048,6 +2093,7 @@ fn dispatch_world_view_command(
             drop_id,
             expected_revision,
             pickup_lock_actor_id,
+            pickup_unlock_tick,
         } => {
             if let Some(actor_id) = pickup_lock_actor_id {
                 validate_id("dropped-item pickup lock", actor_id)?;
@@ -2057,7 +2103,18 @@ fn dispatch_world_view_command(
                 .get_mut(drop_id)
                 .ok_or_else(|| Rejection::new(RejectionCode::InvalidTarget, "dropped item does not exist"))?;
             require_revision(drop.revision, *expected_revision, "dropped item")?;
+            if *pickup_unlock_tick < state.tick
+                || pickup_unlock_tick.saturating_sub(drop.created_tick) > WORLD_VIEW_MAX_PICKUP_LOCK_TICKS_V1
+                || drop
+                    .expires_tick
+                    .is_some_and(|expires_tick| *pickup_unlock_tick > expires_tick)
+            {
+                return Err(invalid(
+                    "dropped-item pickup unlock must be current, bounded, and precede expiry",
+                ));
+            }
             drop.pickup_lock_actor_id.clone_from(pickup_lock_actor_id);
+            drop.pickup_unlock_tick = *pickup_unlock_tick;
             drop.revision = next_revision(drop.revision, "dropped item")?;
             let revision = drop.revision;
             touched.insert(WorldViewDomainV1::DroppedItems);

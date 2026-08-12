@@ -594,6 +594,7 @@ fn staged_player_drop_conserves_items_and_creates_explicit_custody() {
         rotation: RotationMicroturnsV1::default(),
         expires_tick: Some(1_200),
         pickup_lock_actor_id: Some(ACTOR_ID.into()),
+        pickup_unlock_tick: 0,
     };
     let first = stage_player_drop_v1(&gameplay, &authority.state, &request).unwrap();
     let second = stage_player_drop_v1(&gameplay, &authority.state, &request).unwrap();
@@ -699,6 +700,7 @@ fn staged_player_drop_rejects_stale_or_duplicate_ownership_without_mutation() {
         rotation: RotationMicroturnsV1::default(),
         expires_tick: None,
         pickup_lock_actor_id: None,
+        pickup_unlock_tick: 0,
     };
     assert_eq!(
         stage_player_drop_v1(&gameplay, &authority.state, &request)
@@ -752,6 +754,7 @@ fn drop_spatial_ownership_cannot_outlive_nonempty_custody() {
             rotation: RotationMicroturnsV1::default(),
             expires_tick: None,
             pickup_lock_actor_id: None,
+            pickup_unlock_tick: 0,
         },
     )
     .unwrap();
@@ -947,6 +950,7 @@ fn snapshot_roundtrip_preserves_authority_retry_replay_and_extensions() {
     );
     let expected_receipt = accepted(authority.apply_batch(&select, &gameplay));
     let bytes = authority.encode_snapshot_v1(&gameplay, &[0, 0x80, 0xff]).unwrap();
+    assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 1);
     assert_eq!(
         format!(
             "schema=1\nstate_hash={}\nreplay_hash={}\nsnapshot_hash={}\nsnapshot_bytes={}\n",
@@ -958,6 +962,7 @@ fn snapshot_roundtrip_preserves_authority_retry_replay_and_extensions() {
         include_str!("../fixtures/world-view-snapshot-v1.txt")
     );
     let decoded = decode_world_view_authority_snapshot_v1(&bytes, &gameplay).unwrap();
+    assert_eq!(decoded.schema_version, WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V1);
     assert_eq!(decoded.authority.state, authority.state);
     assert_eq!(decoded.authority.replay_hash(), authority.replay_hash());
     assert_eq!(decoded.unknown_extension_bytes, vec![0, 0x80, 0xff]);
@@ -970,6 +975,67 @@ fn snapshot_roundtrip_preserves_authority_retry_replay_and_extensions() {
         decoded
             .authority
             .encode_snapshot_v1(&gameplay, &[0, 0x80, 0xff])
+            .unwrap(),
+        bytes
+    );
+}
+
+#[test]
+fn delayed_pickup_deadline_uses_v2_and_restores_exact_replay() {
+    let gameplay = fixture_gameplay_authority();
+    let mut authority = create_authority(&gameplay.state);
+    let request = PlayerDropStageRequestV1 {
+        batch_id: "drop-v2-gameplay".into(),
+        idempotency_key: "drop-v2-gameplay-key".into(),
+        actor: player_actor(),
+        expected_gameplay_identity: gameplay.state.identity(),
+        expected_world_view_identity: authority.state.identity(),
+        player_id: PLAYER_ID,
+        expected_binding_revision: 0,
+        expected_source_container_revision: 0,
+        expected_stack: ExpectedStack {
+            item_code: 42,
+            metadata_hash: CanonicalHash::default(),
+            minimum_count: 1,
+        },
+        drop_id: "drop-v2".into(),
+        drop_entity_id: DROP_ENTITY_ID,
+        custody_container_id: "drop-v2-custody".into(),
+        position: FixedWorldVec3V1::default(),
+        velocity_milli_per_second: FixedWorldVec3V1::default(),
+        rotation: RotationMicroturnsV1::default(),
+        expires_tick: Some(200),
+        pickup_lock_actor_id: Some(ACTOR_ID.into()),
+        pickup_unlock_tick: 7,
+    };
+    let staged = stage_player_drop_v1(&gameplay, &authority.state, &request).unwrap();
+    let register = WorldViewBatchV1::new(
+        "register-v2",
+        "register-v2-key",
+        system_actor(),
+        authority.state.identity(),
+        vec![WorldViewCommandV1::RegisterDrop {
+            drop: staged.drop.clone(),
+        }],
+    );
+    let accepted_register = accepted(authority.apply_batch(&register, &staged.gameplay.state));
+    let bytes = authority
+        .encode_snapshot_v1(&staged.gameplay.state, &[0x80, 0xff, 2])
+        .unwrap();
+    assert_eq!(u16::from_le_bytes([bytes[8], bytes[9]]), 2);
+    let decoded = decode_world_view_authority_snapshot_v1(&bytes, &staged.gameplay.state).unwrap();
+    assert_eq!(decoded.schema_version, WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V2);
+    assert_eq!(decoded.authority.state, authority.state);
+    assert_eq!(decoded.authority.replay_hash(), authority.replay_hash());
+    assert_eq!(decoded.authority.state.dropped_items["drop-v2"].pickup_unlock_tick, 7);
+    assert_eq!(
+        accepted(decoded.authority.clone().apply_batch(&register, &staged.gameplay.state)),
+        accepted_register
+    );
+    assert_eq!(
+        decoded
+            .authority
+            .encode_snapshot_v1(&staged.gameplay.state, &[0x80, 0xff, 2])
             .unwrap(),
         bytes
     );

@@ -275,6 +275,84 @@ fn block_action_inventory_fixture() -> (InventoryState, ContainerKey, ItemStack)
 }
 
 #[test]
+fn canonical_pickup_plan_merges_then_uses_empty_slots_without_partial_mutation() {
+    let mut state = InventoryState::default();
+    state
+        .register_item(ItemDefinition {
+            code: 42,
+            content_id: "pickup-crystal".into(),
+            max_stack: 64,
+            tags: BTreeSet::new(),
+        })
+        .unwrap();
+    let custody_key = ContainerKey {
+        kind: ContainerKind::Container,
+        id: "drop-custody-plan".into(),
+        owner_id: None,
+    };
+    let mut custody = Container::new(custody_key.clone(), 1);
+    custody.slots[0] = Some(ItemStack::simple(42, 5));
+    state.insert_container(custody).unwrap();
+    let inventory_key = ContainerKey::player("pickup-player");
+    let mut inventory = Container::new(inventory_key.clone(), 3);
+    inventory.slots[0] = Some(ItemStack::simple(42, 62));
+    state.insert_container(inventory).unwrap();
+    let before = state.clone();
+    let plan = state
+        .canonical_pickup_transfers_v1(
+            &SlotRef {
+                container: custody_key,
+                slot: 0,
+                expected_container_revision: Some(0),
+            },
+            &inventory_key,
+        )
+        .unwrap();
+    assert_eq!(plan, Some(vec![(0, 2), (1, 3)]));
+    assert_eq!(state, before, "planning cannot expose a partial merge");
+}
+
+#[test]
+fn canonical_pickup_plan_reports_full_capacity_without_mutation() {
+    let mut state = InventoryState::default();
+    state
+        .register_item(ItemDefinition {
+            code: 42,
+            content_id: "pickup-crystal".into(),
+            max_stack: 64,
+            tags: BTreeSet::new(),
+        })
+        .unwrap();
+    let custody_key = ContainerKey {
+        kind: ContainerKind::Container,
+        id: "drop-custody-full".into(),
+        owner_id: None,
+    };
+    let mut custody = Container::new(custody_key.clone(), 1);
+    custody.slots[0] = Some(ItemStack::simple(42, 1));
+    state.insert_container(custody).unwrap();
+    let inventory_key = ContainerKey::player("pickup-player-full");
+    let mut inventory = Container::new(inventory_key.clone(), 2);
+    inventory.slots.fill(Some(ItemStack::simple(42, 64)));
+    state.insert_container(inventory).unwrap();
+    let before = state.clone();
+    assert_eq!(
+        state
+            .canonical_pickup_transfers_v1(
+                &SlotRef {
+                    container: custody_key,
+                    slot: 0,
+                    expected_container_revision: Some(0),
+                },
+                &inventory_key,
+            )
+            .unwrap(),
+        None
+    );
+    assert_eq!(state, before);
+}
+
+#[test]
 fn block_action_combines_tool_damage_and_loot_with_one_revision() {
     let (mut state, key, held) = block_action_inventory_fixture();
     let deltas = state

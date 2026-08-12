@@ -19,7 +19,7 @@ use blockwild_authority::{
     decode_compatibility_save_binary_v1, decode_world_authority_snapshot_r4_v1, encode_world_authority_snapshot_r4_v1,
 };
 use blockwild_entity::{
-    ActionState, ENTITY_COMMAND_SCHEMA, EcologyJobQueue, EntityAuthority, EntityClass, EntityCommand,
+    ActionState, DespawnReason, ENTITY_COMMAND_SCHEMA, EcologyJobQueue, EntityAuthority, EntityClass, EntityCommand,
     EntityCommandBatch, EntityCompatibilityRecord, EntityEventBatch, EntityResidency, EntityScheduler, MovementMode,
     PathJobQueue, PathJobSubmission, SimulationTier, Vec3 as EntityVec3, decode_compatibility_record,
     decode_entity_authority_snapshot, ecology_sector_key, encode_compatibility_record,
@@ -28,12 +28,13 @@ use blockwild_entity::{
 use blockwild_gameplay::{
     ActorGrant, ActorRole, ApplyBlockActionV1, CombatCommand, ContainerKey, ContainerKind, ContentActionToolKind,
     ContentArtifact, ContentDomain, ContentDomainDigest, ContentRuntimeRegistry, CreatePlayerCustodyCommand,
-    ExpectedStack, FixedVec3, FixedWorldVec3V1, GameplayActor, GameplayAuthority, GameplayBatch, GameplayCommand,
-    GameplayReceipt, GameplayScheduleAdvanceV1, GameplayState, InventoryCommand, ItemDefinition,
-    ItemInstanceMetadataV1, ItemStack, MetadataBlobStore, PlayerDropStageRequestV1, PlayerInventoryBindingV1,
-    RotationMicroturnsV1, WorldKey, WorldViewAcceptedReceiptV1, WorldViewAuthorityV1, WorldViewBatchV1,
-    WorldViewCommandV1, WorldViewReceiptV1, compile_content_bundle, decode_gameplay_authority_snapshot,
-    install_content_bundle, materialize_content_runtime, stage_player_drop_v1,
+    DropRemovalReasonV1, DroppedItemSpatialV1, ExpectedStack, FixedVec3, FixedWorldVec3V1, GameplayActor,
+    GameplayAuthority, GameplayBatch, GameplayCommand, GameplayReceipt, GameplayScheduleAdvanceV1, GameplayState,
+    InventoryCommand, ItemDefinition, ItemInstanceMetadataV1, ItemStack, MetadataBlobStore, PlayerDropStageRequestV1,
+    PlayerInventoryBindingV1, RejectionCode, RemoveEmptyDropCustodyCommand, RotationMicroturnsV1, SlotRef,
+    TransferCommand, WorldKey, WorldViewAcceptedReceiptV1, WorldViewAuthorityV1, WorldViewBatchV1, WorldViewCommandV1,
+    WorldViewReceiptV1, compile_content_bundle, decode_gameplay_authority_snapshot, install_content_bundle,
+    materialize_content_runtime, stage_player_drop_v1,
 };
 use blockwild_generation::{
     Block as GeneratedBlock, ChunkPayloadV2, GENERATOR_VERSION, GenerateChunkRequestV2, GenerationDiagnostics,
@@ -117,6 +118,14 @@ pub const INTEGRATED_RUNTIME_MAX_PATH_SCHEDULE_JOBS_V1: usize = 64;
 pub const INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1: usize = 25;
 pub const INTEGRATED_RUNTIME_MAX_TERRAIN_RECONCILE_EVICTED_CHUNKS_V2: usize = 65_536;
 pub const INTEGRATED_RUNTIME_ECOLOGY_CADENCE_TICKS_V1: u64 = 20;
+pub const INTEGRATED_RUNTIME_DROP_PICKUP_DELAY_TICKS_V1: u64 = 7;
+pub const INTEGRATED_RUNTIME_MAX_DROP_MOTION_PER_STEP_V1: usize = 128;
+pub const INTEGRATED_RUNTIME_MAX_DROP_PICKUPS_PER_STEP_V1: usize = 16;
+pub const INTEGRATED_RUNTIME_DROP_PICKUP_RADIUS_MILLI_V1: i64 = 1_450;
+const INTEGRATED_RUNTIME_DROP_RADIUS_MILLI_V1: i64 = 150;
+const INTEGRATED_RUNTIME_DROP_GRAVITY_PER_STEP_V1: i64 = 600;
+const INTEGRATED_RUNTIME_DROP_TERMINAL_VELOCITY_MILLI_V1: i64 = -30_000;
+const INTEGRATED_RUNTIME_DROP_ROTATION_MICROTURNS_PER_STEP_V1: u32 = 19_894;
 pub const INTEGRATED_RUNTIME_NATIVE_DOMAIN_COUNT_V1: u16 = 6;
 const NATIVE_WORLD_RECORD_ID_V1: &str = "rust-world-r4-v1";
 const NATIVE_ENTITY_RECORD_ID_V2: &str = "rust-entity-r6-v2";
@@ -3938,6 +3947,7 @@ impl IntegratedRuntimeV2 {
             self.advance_held_primary_mining(input)?;
             self.advance_bound_player(input)?;
         }
+        self.advance_dropped_items_v1()?;
         self.advance_entity_and_gameplay_schedules()?;
         self.simulation_revision = self.simulation_revision.saturating_add(1);
         self.invalidate_state_hash();
@@ -4409,7 +4419,15 @@ impl IntegratedRuntimeV2 {
                 roll: 0,
             },
             expires_tick: None,
-            pickup_lock_actor_id: Some(player.binding.actor_id),
+            // Native drops use a global pickup delay. The actor field remains
+            // only for exact legacy snapshot compatibility and is never an
+            // eligibility capability in this runtime.
+            pickup_lock_actor_id: None,
+            pickup_unlock_tick: self
+                .world_view
+                .state
+                .tick
+                .saturating_add(INTEGRATED_RUNTIME_DROP_PICKUP_DELAY_TICKS_V1),
         };
         let staged_drop = stage_player_drop_v1(&self.gameplay, &self.world_view.state, &request).map_err(|error| {
             IntegratedRuntimeError::new("input-drop-custody", format!("{:?}: {}", error.code, error.message))
@@ -5553,6 +5571,536 @@ impl IntegratedRuntimeV2 {
         self.gameplay = staged_gameplay;
         self.world_view = staged_world_view;
         Ok(())
+    }
+
+    /// Advance the bounded canonical prefix of dropped items and resolve
+    /// pickups on the already-private candidate owned by [`Self::step`]. A
+    /// corrupt link, stale revision, or R4 read failure rejects that candidate,
+    /// so this path does not need another full runtime clone every 50 ms.
+    fn advance_dropped_items_v1(&mut self) -> Result<(), IntegratedRuntimeError> {
+        if self.world_view.state.dropped_items.is_empty() {
+            return Ok(());
+        }
+        let drop_ids = self.canonical_drop_scan_v1();
+        let mut entity_commands = Vec::with_capacity(drop_ids.len());
+        let mut world_view_commands = Vec::with_capacity(drop_ids.len());
+        for drop_id in &drop_ids {
+            let drop = self
+                .world_view
+                .state
+                .dropped_items
+                .get(drop_id)
+                .expect("canonical drop key remains present")
+                .clone();
+            self.validate_drop_runtime_link_v1(&drop)?;
+            let (position, velocity, rotation) = self.integrate_drop_motion_v1(&drop)?;
+            if position == drop.position && velocity == drop.velocity_milli_per_second && rotation == drop.rotation {
+                continue;
+            }
+            world_view_commands.push(WorldViewCommandV1::UpdateDropTransform {
+                drop_id: drop.drop_id.clone(),
+                expected_revision: drop.revision,
+                position,
+                velocity_milli_per_second: velocity,
+                rotation,
+            });
+            entity_commands.push(EntityCommand::UpdateMotion {
+                id: drop.entity_id,
+                position: drop_position_to_entity_v1(position),
+                yaw: drop_yaw_to_radians_v1(rotation.yaw),
+                velocity: drop_position_to_entity_v1(velocity),
+            });
+        }
+        self.apply_drop_transform_batch_v1(entity_commands, world_view_commands)?;
+
+        // Scan after motion so pickup reach is evaluated against the exact
+        // transform presented by both R6 and world-view in this tick.
+        let pickup_drop_ids = drop_ids;
+        let player_bindings = self
+            .world_view
+            .state
+            .player_bindings
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut pickups = 0_usize;
+        for drop_id in pickup_drop_ids {
+            if pickups >= INTEGRATED_RUNTIME_MAX_DROP_PICKUPS_PER_STEP_V1 {
+                break;
+            }
+            let Some(mut drop) = self.world_view.state.dropped_items.get(&drop_id).cloned() else {
+                continue;
+            };
+            self.validate_drop_runtime_link_v1(&drop)?;
+            if drop.expires_tick.is_some_and(|expires_tick| self.tick >= expires_tick) {
+                // Expiry is a policy hint, never authority to delete nonempty
+                // custody. Stop motion but keep every ownership link intact.
+                self.freeze_expired_drop_v1(&drop)?;
+                drop = self
+                    .world_view
+                    .state
+                    .dropped_items
+                    .get(&drop_id)
+                    .expect("expired custody remains spatially owned")
+                    .clone();
+            }
+            if self.tick < drop.pickup_unlock_tick {
+                continue;
+            }
+            for binding in &player_bindings {
+                let Some(player_record) = self.entities.hot().get(&binding.entity_id).map(|entity| &entity.record)
+                else {
+                    return Err(IntegratedRuntimeError::new(
+                        "drop-player-orphan",
+                        "world-view pickup binding must reference a hot R6 player entity",
+                    ));
+                };
+                if !drop_within_pickup_radius_v1(drop.position, player_record.position) {
+                    continue;
+                }
+                match self.pickup_drop_for_player_v1(&drop, binding) {
+                    Ok(true) => {
+                        pickups = pickups.saturating_add(1);
+                        break;
+                    }
+                    Ok(false) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+        validate_world_view_runtime_links_v1(&self.world_view.state, &self.gameplay.state, &self.entities)
+            .map_err(|error| IntegratedRuntimeError::new("drop-step-links", error.to_string()))?;
+        Ok(())
+    }
+
+    fn canonical_drop_scan_v1(&self) -> Vec<String> {
+        let count = self.world_view.state.dropped_items.len();
+        if count <= INTEGRATED_RUNTIME_MAX_DROP_MOTION_PER_STEP_V1 {
+            return self.world_view.state.dropped_items.keys().cloned().collect();
+        }
+        // Advance by one full budget through the sorted ring each tick. Using
+        // the exact item count (rather than page count) keeps a short final
+        // page from biasing the lowest IDs while remaining replay-stable.
+        let start = usize::try_from(
+            u128::from(self.tick.saturating_sub(1))
+                .saturating_mul(INTEGRATED_RUNTIME_MAX_DROP_MOTION_PER_STEP_V1 as u128)
+                % count as u128,
+        )
+        .expect("drop scan offset is bounded by the in-memory item count");
+        self.world_view
+            .state
+            .dropped_items
+            .keys()
+            .skip(start)
+            .chain(self.world_view.state.dropped_items.keys().take(start))
+            .take(INTEGRATED_RUNTIME_MAX_DROP_MOTION_PER_STEP_V1)
+            .cloned()
+            .collect()
+    }
+
+    fn validate_drop_runtime_link_v1(&self, drop: &DroppedItemSpatialV1) -> Result<(), IntegratedRuntimeError> {
+        let record = self
+            .entities
+            .hot()
+            .get(&drop.entity_id)
+            .map(|entity| &entity.record)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "drop-entity-orphan",
+                    "world-view dropped item must reference a hot R6 entity",
+                )
+            })?;
+        if record.class != EntityClass::Construct || record.kind_key != "dropped-item" {
+            return Err(IntegratedRuntimeError::new(
+                "drop-entity-kind",
+                "world-view dropped item references an R6 entity of another kind",
+            ));
+        }
+        let custody = self
+            .gameplay
+            .state
+            .inventory
+            .containers
+            .get(&drop.container)
+            .ok_or_else(|| IntegratedRuntimeError::new("drop-custody-orphan", "drop custody container is absent"))?;
+        if custody.revision != drop.bound_container_revision
+            || custody.slots.get(usize::from(drop.slot)).is_none_or(Option::is_none)
+            || custody.slots.iter().flatten().count() != 1
+        {
+            return Err(IntegratedRuntimeError::new(
+                "drop-custody-link",
+                "drop custody revision or one-item slot invariant is stale",
+            ));
+        }
+        if !drop_entity_transform_matches_v1(drop, record) {
+            return Err(IntegratedRuntimeError::new(
+                "drop-transform-link",
+                "world-view and R6 dropped-item transforms disagree",
+            ));
+        }
+        Ok(())
+    }
+
+    fn integrate_drop_motion_v1(
+        &self,
+        drop: &DroppedItemSpatialV1,
+    ) -> Result<(FixedWorldVec3V1, FixedWorldVec3V1, RotationMicroturnsV1), IntegratedRuntimeError> {
+        if drop.expires_tick.is_some_and(|expires_tick| self.tick >= expires_tick) {
+            return Ok((drop.position, FixedWorldVec3V1::default(), drop.rotation));
+        }
+        let mut velocity = drop.velocity_milli_per_second;
+        velocity.y_milli = velocity
+            .y_milli
+            .saturating_sub(INTEGRATED_RUNTIME_DROP_GRAVITY_PER_STEP_V1)
+            .max(INTEGRATED_RUNTIME_DROP_TERMINAL_VELOCITY_MILLI_V1);
+        let displacement = |component: i64| component / 20;
+        let mut position = drop.position;
+        let mut horizontal_collision = false;
+        for (axis, delta) in [
+            (0_u8, displacement(velocity.x_milli)),
+            (1_u8, displacement(velocity.y_milli)),
+            (2_u8, displacement(velocity.z_milli)),
+        ] {
+            if delta == 0 {
+                continue;
+            }
+            let mut candidate = position;
+            match axis {
+                0 => candidate.x_milli = candidate.x_milli.saturating_add(delta),
+                1 => candidate.y_milli = candidate.y_milli.saturating_add(delta),
+                _ => candidate.z_milli = candidate.z_milli.saturating_add(delta),
+            }
+            if self.drop_position_collides_v1(candidate)? {
+                match axis {
+                    0 => {
+                        velocity.x_milli = -(velocity.x_milli * 28 / 100);
+                        horizontal_collision = true;
+                    }
+                    1 => {
+                        velocity.y_milli = if velocity.y_milli < 0 {
+                            -(velocity.y_milli * 28 / 100)
+                        } else {
+                            0
+                        };
+                        velocity.x_milli = velocity.x_milli * 72 / 100;
+                        velocity.z_milli = velocity.z_milli * 72 / 100;
+                    }
+                    _ => {
+                        velocity.z_milli = -(velocity.z_milli * 28 / 100);
+                        horizontal_collision = true;
+                    }
+                }
+            } else {
+                position = candidate;
+            }
+        }
+        if horizontal_collision {
+            velocity.y_milli = velocity.y_milli * 90 / 100;
+        }
+        let mut rotation = drop.rotation;
+        rotation.yaw = rotation
+            .yaw
+            .wrapping_add(INTEGRATED_RUNTIME_DROP_ROTATION_MICROTURNS_PER_STEP_V1)
+            % 1_000_000;
+        Ok((position, velocity, rotation))
+    }
+
+    fn drop_position_collides_v1(&self, position: FixedWorldVec3V1) -> Result<bool, IntegratedRuntimeError> {
+        let coordinate = |milli: i64| -> Result<i32, IntegratedRuntimeError> {
+            let rounded = milli.saturating_add(500).div_euclid(1_000);
+            i32::try_from(rounded).map_err(|_| {
+                IntegratedRuntimeError::new("drop-position", "dropped item left the supported R4 coordinate range")
+            })
+        };
+        for (x_offset, y_offset, z_offset) in [
+            (0_i64, -INTEGRATED_RUNTIME_DROP_RADIUS_MILLI_V1, 0_i64),
+            (INTEGRATED_RUNTIME_DROP_RADIUS_MILLI_V1, 0, 0),
+            (-INTEGRATED_RUNTIME_DROP_RADIUS_MILLI_V1, 0, 0),
+            (0, 0, INTEGRATED_RUNTIME_DROP_RADIUS_MILLI_V1),
+            (0, 0, -INTEGRATED_RUNTIME_DROP_RADIUS_MILLI_V1),
+        ] {
+            let cell_position = CellPositionV1 {
+                x: coordinate(position.x_milli.saturating_add(x_offset))?,
+                y: coordinate(position.y_milli.saturating_add(y_offset))?,
+                z: coordinate(position.z_milli.saturating_add(z_offset))?,
+            };
+            let cell = match self.world.read_cell(cell_position) {
+                WorldCellReadV1::Unloaded { .. } => return Ok(true),
+                WorldCellReadV1::Loaded { cell, .. } => cell,
+            };
+            if cell.block_id == WORLD_AIR_BLOCK_ID_V1 {
+                continue;
+            }
+            let solid = self.gameplay_content_runtime.block_action(cell.block_id).map_or_else(
+                || {
+                    cell.block_id != self.world.block_catalog().water_block_id
+                        && cell.liquid.kind == WorldLiquidKindV1::None
+                },
+                |profile| profile.solid,
+            );
+            if solid {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn apply_drop_transform_batch_v1(
+        &mut self,
+        entity_commands: Vec<EntityCommand>,
+        world_view_commands: Vec<WorldViewCommandV1>,
+    ) -> Result<(), IntegratedRuntimeError> {
+        if entity_commands.is_empty() {
+            return Ok(());
+        }
+        let entity_sequence = self.entity_command_sequence.saturating_add(1).max(1);
+        let entity_receipt = self
+            .entities
+            .apply_batch(&EntityCommandBatch {
+                schema: ENTITY_COMMAND_SCHEMA,
+                sequence: entity_sequence,
+                expected_revision: self.entities.revision(),
+                tick: self.tick,
+                commands: entity_commands,
+            })
+            .map_err(|error| IntegratedRuntimeError::new("drop-motion-entity", error.to_string()))?;
+        let batch_id = format!("drop-motion:{}:{}", self.tick, self.world_view.state.revision.sequence);
+        let world_view_batch = WorldViewBatchV1::new(
+            &batch_id,
+            &batch_id,
+            system_world_view_actor_v1(),
+            self.world_view.state.identity(),
+            world_view_commands,
+        );
+        match self.world_view.apply_batch(&world_view_batch, &self.gameplay.state) {
+            WorldViewReceiptV1::Accepted(_) => {}
+            WorldViewReceiptV1::Rejected { rejection, .. } => {
+                return Err(IntegratedRuntimeError::new(
+                    "drop-motion-world-view",
+                    format!("{:?}: {}", rejection.code, rejection.message),
+                ));
+            }
+        }
+        self.entity_command_sequence = entity_sequence;
+        self.sync_entity_schedules(std::slice::from_ref(&entity_receipt))?;
+        Ok(())
+    }
+
+    fn freeze_expired_drop_v1(&mut self, drop: &DroppedItemSpatialV1) -> Result<(), IntegratedRuntimeError> {
+        if drop.velocity_milli_per_second == FixedWorldVec3V1::default() {
+            return Ok(());
+        }
+        self.apply_drop_transform_batch_v1(
+            vec![EntityCommand::UpdateMotion {
+                id: drop.entity_id,
+                position: drop_position_to_entity_v1(drop.position),
+                yaw: drop_yaw_to_radians_v1(drop.rotation.yaw),
+                velocity: EntityVec3::ZERO,
+            }],
+            vec![WorldViewCommandV1::UpdateDropTransform {
+                drop_id: drop.drop_id.clone(),
+                expected_revision: drop.revision,
+                position: drop.position,
+                velocity_milli_per_second: FixedWorldVec3V1::default(),
+                rotation: drop.rotation,
+            }],
+        )
+    }
+
+    fn pickup_drop_for_player_v1(
+        &mut self,
+        drop: &DroppedItemSpatialV1,
+        binding: &PlayerInventoryBindingV1,
+    ) -> Result<bool, IntegratedRuntimeError> {
+        let custody = self
+            .gameplay
+            .state
+            .inventory
+            .containers
+            .get(&drop.container)
+            .ok_or_else(|| IntegratedRuntimeError::new("drop-pickup-custody", "drop custody disappeared"))?;
+        if custody.revision != drop.bound_container_revision {
+            return Err(IntegratedRuntimeError::new(
+                "drop-pickup-custody",
+                "drop custody revision changed before pickup",
+            ));
+        }
+        let stack = custody
+            .slots
+            .get(usize::from(drop.slot))
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or_else(|| IntegratedRuntimeError::new("drop-pickup-custody", "drop custody became empty"))?;
+        let transfers = self
+            .gameplay
+            .state
+            .inventory
+            .canonical_pickup_transfers_v1(
+                &SlotRef {
+                    container: drop.container.clone(),
+                    slot: drop.slot,
+                    expected_container_revision: Some(drop.bound_container_revision),
+                },
+                &binding.inventory_container,
+            )
+            .map_err(|error| {
+                IntegratedRuntimeError::new(
+                    "drop-pickup-destination",
+                    format!("{:?}: {}", error.code, error.message),
+                )
+            })?;
+        let Some(transfers) = transfers else {
+            return Ok(false);
+        };
+        let destination_revision = self
+            .gameplay
+            .state
+            .inventory
+            .containers
+            .get(&binding.inventory_container)
+            .ok_or_else(|| IntegratedRuntimeError::new("drop-pickup-player", "player inventory disappeared"))?
+            .revision;
+        let batch_id = format!(
+            "drop-pickup:{}:{}:{}",
+            self.tick,
+            drop.drop_id,
+            binding.player_id.packed()
+        );
+        let mut inventory_commands = Vec::with_capacity(transfers.len().saturating_add(1));
+        let mut remaining = stack.count;
+        for (transfer_index, (destination_slot, count)) in transfers.iter().copied().enumerate() {
+            let revision_offset = u64::try_from(transfer_index).map_err(|_| {
+                IntegratedRuntimeError::new("drop-pickup-capacity", "pickup transfer count exceeds u64")
+            })?;
+            let source_revision = drop
+                .bound_container_revision
+                .checked_add(revision_offset)
+                .ok_or_else(|| {
+                    IntegratedRuntimeError::new("drop-pickup-revision", "drop custody revision would overflow")
+                })?;
+            let destination_revision = destination_revision.checked_add(revision_offset).ok_or_else(|| {
+                IntegratedRuntimeError::new("drop-pickup-revision", "player inventory revision would overflow")
+            })?;
+            inventory_commands.push(GameplayCommand::Inventory(InventoryCommand::Transfer(
+                TransferCommand {
+                    from: SlotRef {
+                        container: drop.container.clone(),
+                        slot: drop.slot,
+                        expected_container_revision: Some(source_revision),
+                    },
+                    to: SlotRef {
+                        container: binding.inventory_container.clone(),
+                        slot: destination_slot,
+                        expected_container_revision: Some(destination_revision),
+                    },
+                    count,
+                    expected: Some(ExpectedStack {
+                        item_code: stack.item_code,
+                        metadata_hash: stack.metadata_hash,
+                        minimum_count: remaining,
+                    }),
+                },
+            )));
+            remaining = remaining.checked_sub(count).ok_or_else(|| {
+                IntegratedRuntimeError::new("drop-pickup-plan", "pickup plan exceeds the custody stack")
+            })?;
+        }
+        debug_assert_eq!(
+            remaining, 0,
+            "canonical pickup plan transfers the complete custody stack"
+        );
+        if remaining != 0 {
+            return Err(IntegratedRuntimeError::new(
+                "drop-pickup-plan",
+                "pickup plan does not transfer the complete custody stack",
+            ));
+        }
+        let transfer_count = u64::try_from(transfers.len())
+            .map_err(|_| IntegratedRuntimeError::new("drop-pickup-capacity", "pickup transfer count exceeds u64"))?;
+        let emptied_custody_revision = drop
+            .bound_container_revision
+            .checked_add(transfer_count)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new("drop-pickup-revision", "drop custody removal revision would overflow")
+            })?;
+        inventory_commands.push(GameplayCommand::Inventory(InventoryCommand::RemoveEmptyDropCustody(
+            RemoveEmptyDropCustodyCommand {
+                custody: drop.container.clone(),
+                expected_revision: emptied_custody_revision,
+            },
+        )));
+        let batch = GameplayBatch::new(
+            &batch_id,
+            &batch_id,
+            system_gameplay_actor_v1(),
+            self.gameplay.state.identity(),
+            inventory_commands,
+        );
+        let mut staged_gameplay = self.gameplay.clone();
+        match staged_gameplay.apply_batch(&batch) {
+            GameplayReceipt::Accepted(_) => {}
+            GameplayReceipt::Rejected { rejection, .. }
+                if matches!(
+                    rejection.code,
+                    RejectionCode::Capacity | RejectionCode::RulesRejected | RejectionCode::InsufficientResource
+                ) =>
+            {
+                return Ok(false);
+            }
+            GameplayReceipt::Rejected { rejection, .. } => {
+                return Err(IntegratedRuntimeError::new(
+                    "drop-pickup-gameplay",
+                    format!("{:?}: {}", rejection.code, rejection.message),
+                ));
+            }
+        }
+        let entity_sequence = self.entity_command_sequence.saturating_add(1).max(1);
+        let mut staged_entities = self.entities.clone();
+        let entity_receipt = staged_entities
+            .apply_batch(&EntityCommandBatch {
+                schema: ENTITY_COMMAND_SCHEMA,
+                sequence: entity_sequence,
+                expected_revision: staged_entities.revision(),
+                tick: self.tick,
+                commands: vec![EntityCommand::Despawn {
+                    id: drop.entity_id,
+                    // R6's frozen despawn ABI has no pickup variant. `Admin`
+                    // is its generic authority-directed removal reason; R7's
+                    // canonical lifecycle reason remains `PickedUp` below.
+                    reason: DespawnReason::Admin,
+                }],
+            })
+            .map_err(|error| IntegratedRuntimeError::new("drop-pickup-despawn", error.to_string()))?;
+        let world_view_batch = WorldViewBatchV1::new(
+            format!("{batch_id}:world-view"),
+            format!("{batch_id}:world-view"),
+            system_world_view_actor_v1(),
+            self.world_view.state.identity(),
+            vec![WorldViewCommandV1::RemoveDrop {
+                drop_id: drop.drop_id.clone(),
+                expected_revision: drop.revision,
+                reason: DropRemovalReasonV1::PickedUp,
+            }],
+        );
+        let staged_world_view = stage_world_view_batches_v1(
+            &self.world_view,
+            &staged_gameplay.state,
+            &staged_entities,
+            &[world_view_batch],
+        )
+        .map_err(|error| IntegratedRuntimeError::new("drop-pickup-world-view", error.to_string()))?;
+        validate_world_view_runtime_links_v1(
+            &staged_world_view.authority.state,
+            &staged_gameplay.state,
+            &staged_entities,
+        )
+        .map_err(|error| IntegratedRuntimeError::new("drop-pickup-links", error.to_string()))?;
+        self.gameplay = staged_gameplay;
+        self.world_view = staged_world_view.authority;
+        self.entities = staged_entities;
+        self.entity_command_sequence = entity_sequence;
+        self.sync_entity_schedules(std::slice::from_ref(&entity_receipt))?;
+        Ok(true)
     }
 
     fn push_effect_event(&mut self, entity_external_id: &str, kind: PhysicsEventKindV1, amount: f64) {
@@ -7108,6 +7656,80 @@ fn write_effect_event(hasher: &mut CanonicalHasher, event: &IntegratedRuntimeEff
 
 fn normalized_i16(value: i16) -> f64 {
     (f64::from(value) / 32_767.0).clamp(-1.0, 1.0)
+}
+
+fn system_gameplay_actor_v1() -> GameplayActor {
+    GameplayActor {
+        actor_id: GAMEPLAY_SCHEDULER_ACTOR_ID_V1.into(),
+        player_id: None,
+        entity_id: None,
+        role: ActorRole::System,
+    }
+}
+
+fn system_world_view_actor_v1() -> GameplayActor {
+    GameplayActor {
+        actor_id: "system".into(),
+        player_id: None,
+        entity_id: None,
+        role: ActorRole::System,
+    }
+}
+
+fn drop_position_to_entity_v1(value: FixedWorldVec3V1) -> EntityVec3 {
+    EntityVec3::new(
+        value.x_milli as f32 / 1_000.0,
+        value.y_milli as f32 / 1_000.0,
+        value.z_milli as f32 / 1_000.0,
+    )
+}
+
+fn drop_yaw_to_radians_v1(yaw_microturns: u32) -> f32 {
+    (yaw_microturns as f32 / 1_000_000.0) * std::f32::consts::TAU
+}
+
+fn entity_component_to_milli_v1(value: f32) -> Option<i64> {
+    let scaled = f64::from(value) * 1_000.0;
+    if !scaled.is_finite() || scaled <= i64::MIN as f64 || scaled >= i64::MAX as f64 {
+        return None;
+    }
+    Some(scaled.round() as i64)
+}
+
+fn drop_entity_transform_matches_v1(drop: &DroppedItemSpatialV1, record: &EntityCompatibilityRecord) -> bool {
+    let position_matches = [
+        (drop.position.x_milli, record.position.x),
+        (drop.position.y_milli, record.position.y),
+        (drop.position.z_milli, record.position.z),
+    ]
+    .into_iter()
+    .all(|(expected, actual)| entity_component_to_milli_v1(actual) == Some(expected));
+    let velocity_matches = [
+        (drop.velocity_milli_per_second.x_milli, record.velocity.x),
+        (drop.velocity_milli_per_second.y_milli, record.velocity.y),
+        (drop.velocity_milli_per_second.z_milli, record.velocity.z),
+    ]
+    .into_iter()
+    .all(|(expected, actual)| entity_component_to_milli_v1(actual) == Some(expected));
+    let expected_yaw = drop_yaw_to_radians_v1(drop.rotation.yaw);
+    position_matches && velocity_matches && (record.yaw - expected_yaw).abs() <= 1.0e-5
+}
+
+fn drop_within_pickup_radius_v1(position: FixedWorldVec3V1, player_position: EntityVec3) -> bool {
+    let Some(player_x) = entity_component_to_milli_v1(player_position.x) else {
+        return false;
+    };
+    let Some(player_y) = entity_component_to_milli_v1(player_position.y) else {
+        return false;
+    };
+    let Some(player_z) = entity_component_to_milli_v1(player_position.z) else {
+        return false;
+    };
+    let dx = i128::from(position.x_milli.saturating_sub(player_x));
+    let dy = i128::from(position.y_milli.saturating_sub(player_y.saturating_add(800)));
+    let dz = i128::from(position.z_milli.saturating_sub(player_z));
+    let radius = i128::from(INTEGRATED_RUNTIME_DROP_PICKUP_RADIUS_MILLI_V1);
+    dx * dx + dy * dy + dz * dz < radius * radius
 }
 
 fn ray_normal_i8(value: f64) -> i8 {
@@ -9274,7 +9896,8 @@ mod tests {
             .inventory_container
             .clone();
         let mut state = runtime.gameplay().state.clone();
-        state.inventory.containers.get_mut(&inventory_key).unwrap().slots[0] = Some(ItemStack::simple(42, count));
+        state.inventory.containers.get_mut(&inventory_key).unwrap().slots[0] =
+            (count > 0).then(|| ItemStack::simple(42, count));
         state.revision.sequence = state.revision.sequence.saturating_add(1);
         state.revision.inventory = state.revision.inventory.saturating_add(1);
         runtime.gameplay = GameplayAuthority::new(state);
@@ -9290,6 +9913,142 @@ mod tests {
             .unwrap();
         runtime.invalidate_state_hash();
         runtime
+    }
+
+    fn create_metadata_fixture_v1() -> ItemInstanceMetadataV1 {
+        let mut metadata = ItemInstanceMetadataV1 {
+            hash: CanonicalHash::default(),
+            type_id: "blockwild.item.instance".into(),
+            schema_id: "pickup-specimen".into(),
+            schema_version: 1,
+            content_version: 3,
+            canonical_json_bytes: br#"{"name":"Mizu","traits":["swift"]}"#.to_vec(),
+            unknown_extension_bytes: vec![0, 0x80, 0xff],
+        };
+        metadata.hash = metadata.calculate_hash();
+        metadata
+    }
+
+    fn trigger_one_player_drop_v1(runtime: &mut IntegratedRuntimeV2) -> (u64, RuntimeInputActionReceiptV1) {
+        runtime
+            .accept_inputs(&[RuntimeInputFrameV1 {
+                sequence: 1,
+                target_tick: 1,
+                buttons: RUNTIME_INPUT_BUTTON_DROP_V1,
+                ..RuntimeInputFrameV1::default()
+            }])
+            .unwrap();
+        runtime.step(1_000_000, 8_000).unwrap();
+        let timestamp = 1_050_000;
+        let summary = runtime.step(timestamp, 8_000).unwrap();
+        let receipt = summary
+            .action_receipts
+            .into_iter()
+            .find(|receipt| receipt.kind == RuntimeInputActionKindV1::Drop)
+            .expect("drop rising edge emits one receipt");
+        assert_eq!(receipt.outcome, RuntimeInputActionOutcomeV1::Applied);
+        (timestamp, receipt)
+    }
+
+    fn advance_one_fixed_step_v1(runtime: &mut IntegratedRuntimeV2, timestamp: &mut u64) {
+        *timestamp = timestamp.saturating_add(INTEGRATED_RUNTIME_FIXED_STEP_US);
+        let summary = runtime.step(*timestamp, 8_000).unwrap();
+        assert_eq!(summary.fixed_steps, 1);
+    }
+
+    fn set_drop_unlock_v1(runtime: &mut IntegratedRuntimeV2, unlock_tick: u64) {
+        let drop = runtime.world_view.state.dropped_items.values().next().unwrap().clone();
+        let batch_id = format!("test-drop-lock-{unlock_tick}");
+        let batch = WorldViewBatchV1::new(
+            &batch_id,
+            &batch_id,
+            system_world_view_actor_v1(),
+            runtime.world_view.state.identity(),
+            vec![WorldViewCommandV1::SetDropPickupLock {
+                drop_id: drop.drop_id,
+                expected_revision: drop.revision,
+                pickup_lock_actor_id: None,
+                pickup_unlock_tick: unlock_tick,
+            }],
+        );
+        assert!(matches!(
+            runtime.world_view.apply_batch(&batch, &runtime.gameplay.state),
+            WorldViewReceiptV1::Accepted(_)
+        ));
+        runtime.invalidate_state_hash();
+    }
+
+    fn park_drop_at_player_v1(runtime: &mut IntegratedRuntimeV2) {
+        let drop = runtime.world_view.state.dropped_items.values().next().unwrap().clone();
+        let player = runtime.player.as_ref().unwrap();
+        let position = FixedWorldVec3V1 {
+            x_milli: (player.body.position.x * 1_000.0).round() as i64,
+            y_milli: ((player.body.position.y + 0.8) * 1_000.0).round() as i64,
+            z_milli: (player.body.position.z * 1_000.0).round() as i64,
+        };
+        runtime
+            .apply_drop_transform_batch_v1(
+                vec![EntityCommand::UpdateMotion {
+                    id: drop.entity_id,
+                    position: drop_position_to_entity_v1(position),
+                    yaw: drop_yaw_to_radians_v1(drop.rotation.yaw),
+                    velocity: EntityVec3::ZERO,
+                }],
+                vec![WorldViewCommandV1::UpdateDropTransform {
+                    drop_id: drop.drop_id,
+                    expected_revision: drop.revision,
+                    position,
+                    velocity_milli_per_second: FixedWorldVec3V1::default(),
+                    rotation: drop.rotation,
+                }],
+            )
+            .unwrap();
+        runtime.invalidate_state_hash();
+    }
+
+    fn move_bound_player_for_drop_test_v1(runtime: &mut IntegratedRuntimeV2, position: SimulationVec3) {
+        let player_id = runtime.player.as_ref().unwrap().entity_id;
+        let mut body = runtime.player.as_ref().unwrap().body.clone();
+        body.position = position;
+        body.velocity = SimulationVec3::new(0.0, 0.0, 0.0);
+        runtime.player.as_mut().unwrap().body = body;
+        let mut record = runtime.entities.compatibility_record(player_id).unwrap().clone();
+        record.position = EntityVec3::new(position.x as f32, position.y as f32, position.z as f32);
+        record.velocity = EntityVec3::ZERO;
+        let sequence = runtime.entity_command_sequence.saturating_add(1).max(1);
+        let receipt = runtime
+            .entities
+            .apply_batch(&EntityCommandBatch {
+                schema: ENTITY_COMMAND_SCHEMA,
+                sequence,
+                expected_revision: runtime.entities.revision(),
+                tick: runtime.tick,
+                commands: vec![EntityCommand::ReplaceCompatibilityRecord {
+                    id: player_id,
+                    value: record,
+                }],
+            })
+            .unwrap();
+        runtime.entity_command_sequence = sequence;
+        runtime.sync_entity_schedules(&[receipt]).unwrap();
+        runtime.invalidate_state_hash();
+    }
+
+    fn replace_gameplay_state_for_drop_test_v1(runtime: &mut IntegratedRuntimeV2, state: GameplayState) {
+        let player = runtime.player.as_ref().unwrap();
+        runtime.gameplay = GameplayAuthority::new(state);
+        runtime
+            .gameplay
+            .grant_actor(
+                player.binding.actor_id.clone(),
+                ActorGrant::host(player.binding.player_id, player.entity_id),
+            )
+            .unwrap();
+        runtime
+            .gameplay
+            .grant_actor(GAMEPLAY_SCHEDULER_ACTOR_ID_V1, ActorGrant::system())
+            .unwrap();
+        runtime.invalidate_state_hash();
     }
 
     fn runtime_with_action_content(creative_mode: bool, held: Option<ItemStack>) -> IntegratedRuntimeV2 {
@@ -10397,6 +11156,562 @@ mod tests {
                 .cloned(),
             before_held
         );
+    }
+
+    #[test]
+    fn dropped_item_lock_is_exact_and_pickup_commits_all_domains_once() {
+        let mut runtime = runtime_with_bound_player_item(2);
+        let (mut timestamp, action) = trigger_one_player_drop_v1(&mut runtime);
+        park_drop_at_player_v1(&mut runtime);
+        let drop = runtime.world_view.state.dropped_items.values().next().unwrap().clone();
+        assert_eq!(
+            drop.pickup_lock_actor_id, None,
+            "new native drops use a global deadline"
+        );
+        let inventory_key = runtime
+            .world_view
+            .state
+            .player_binding(PlayerId::new(1, 1))
+            .unwrap()
+            .inventory_container
+            .clone();
+        assert_eq!(drop.created_tick, 0);
+        assert_eq!(drop.pickup_unlock_tick, INTEGRATED_RUNTIME_DROP_PICKUP_DELAY_TICKS_V1);
+        assert_eq!(runtime.tick(), 1);
+        assert_eq!(
+            runtime.gameplay.state.inventory.containers[&inventory_key].slots[0]
+                .as_ref()
+                .unwrap()
+                .count,
+            1
+        );
+
+        while runtime.tick() < drop.pickup_unlock_tick.saturating_sub(1) {
+            advance_one_fixed_step_v1(&mut runtime, &mut timestamp);
+            assert!(runtime.world_view.state.dropped_items.contains_key(&drop.drop_id));
+            assert!(runtime.entities.hot().contains_key(&drop.entity_id));
+            assert!(
+                runtime
+                    .gameplay
+                    .state
+                    .inventory
+                    .containers
+                    .contains_key(&drop.container)
+            );
+        }
+        assert_eq!(runtime.tick(), drop.pickup_unlock_tick.saturating_sub(1));
+        advance_one_fixed_step_v1(&mut runtime, &mut timestamp);
+        assert_eq!(runtime.tick(), drop.pickup_unlock_tick);
+        assert!(!runtime.world_view.state.dropped_items.contains_key(&drop.drop_id));
+        assert!(!runtime.entities.contains(drop.entity_id));
+        assert!(
+            !runtime
+                .gameplay
+                .state
+                .inventory
+                .containers
+                .contains_key(&drop.container)
+        );
+        assert_eq!(
+            runtime.gameplay.state.inventory.containers[&inventory_key].slots[0]
+                .as_ref()
+                .unwrap()
+                .count,
+            2
+        );
+        assert_eq!(action.target_entity_id, drop.entity_id.packed());
+
+        let after = runtime.identity();
+        advance_one_fixed_step_v1(&mut runtime, &mut timestamp);
+        assert_eq!(
+            runtime.gameplay.state.inventory.containers[&inventory_key].slots[0]
+                .as_ref()
+                .unwrap()
+                .count,
+            2,
+            "a removed drop cannot be picked twice"
+        );
+        assert_ne!(runtime.identity(), after, "the fixed-step clocks still advance");
+    }
+
+    #[test]
+    fn dropped_item_motion_and_collision_are_refresh_cadence_equivalent() {
+        fn run(refresh_hz: u64) -> (DroppedItemSpatialV1, CanonicalHash, u64) {
+            let mut runtime = runtime_with_bound_player_item(1);
+            let (start, _) = trigger_one_player_drop_v1(&mut runtime);
+            set_drop_unlock_v1(&mut runtime, 100);
+            move_bound_player_for_drop_test_v1(&mut runtime, SimulationVec3::new(0.0, 63.5, 0.0));
+            for frame in 1..=refresh_hz {
+                let timestamp = start + frame * 1_000_000 / refresh_hz;
+                runtime.step(timestamp, 8_000).unwrap();
+            }
+            let drop = runtime.world_view.state.dropped_items.values().next().unwrap().clone();
+            assert!(!runtime.drop_position_collides_v1(drop.position).unwrap());
+            assert!(
+                runtime
+                    .drop_position_collides_v1(FixedWorldVec3V1 {
+                        x_milli: 1_000_000_000,
+                        y_milli: 64_000,
+                        z_milli: 1_000_000_000,
+                    })
+                    .unwrap(),
+                "unloaded terrain is a deterministic solid boundary"
+            );
+            (drop, runtime.state_hash(), runtime.tick())
+        }
+
+        let at_30 = run(30);
+        let at_60 = run(60);
+        let at_120 = run(120);
+        assert_eq!(at_30, at_60);
+        assert_eq!(at_60, at_120);
+        assert_eq!(at_120.2, 21);
+    }
+
+    #[test]
+    fn full_pickup_rolls_back_and_retries_after_capacity_is_available() {
+        let mut runtime = runtime_with_bound_player_item(1);
+        let (mut timestamp, _) = trigger_one_player_drop_v1(&mut runtime);
+        park_drop_at_player_v1(&mut runtime);
+        let drop = runtime.world_view.state.dropped_items.values().next().unwrap().clone();
+        let inventory_key = runtime
+            .world_view
+            .state
+            .player_binding(PlayerId::new(1, 1))
+            .unwrap()
+            .inventory_container
+            .clone();
+        let mut state = runtime.gameplay.state.clone();
+        let inventory = state.inventory.containers.get_mut(&inventory_key).unwrap();
+        inventory.slots.fill_with(|| Some(ItemStack::simple(42, 64)));
+        inventory.revision = inventory.revision.checked_add(1).unwrap();
+        state.revision.sequence = state.revision.sequence.checked_add(1).unwrap();
+        state.revision.inventory = state.revision.inventory.checked_add(1).unwrap();
+        replace_gameplay_state_for_drop_test_v1(&mut runtime, state);
+
+        while runtime.tick() < drop.pickup_unlock_tick {
+            advance_one_fixed_step_v1(&mut runtime, &mut timestamp);
+        }
+        let blocked_custody = runtime.gameplay.state.inventory.containers[&drop.container].clone();
+        let blocked_drop = runtime.world_view.state.dropped_items[&drop.drop_id].clone();
+        assert!(runtime.entities.hot().contains_key(&drop.entity_id));
+        assert_eq!(blocked_custody.slots[usize::from(drop.slot)].as_ref().unwrap().count, 1);
+
+        let mut state = runtime.gameplay.state.clone();
+        let inventory = state.inventory.containers.get_mut(&inventory_key).unwrap();
+        inventory.slots[8] = None;
+        inventory.revision = inventory.revision.checked_add(1).unwrap();
+        state.revision.sequence = state.revision.sequence.checked_add(1).unwrap();
+        state.revision.inventory = state.revision.inventory.checked_add(1).unwrap();
+        replace_gameplay_state_for_drop_test_v1(&mut runtime, state);
+        advance_one_fixed_step_v1(&mut runtime, &mut timestamp);
+        assert!(
+            !runtime
+                .gameplay
+                .state
+                .inventory
+                .containers
+                .contains_key(&drop.container)
+        );
+        assert!(!runtime.world_view.state.dropped_items.contains_key(&drop.drop_id));
+        assert!(!runtime.entities.contains(drop.entity_id));
+        assert_eq!(
+            runtime.gameplay.state.inventory.containers[&inventory_key].slots[8]
+                .as_ref()
+                .unwrap(),
+            &ItemStack::simple(42, 1)
+        );
+        assert!(
+            blocked_drop.revision > drop.revision,
+            "failed capacity only allows motion revisions"
+        );
+    }
+
+    #[test]
+    fn metadata_bearing_pickup_preserves_exact_stack_and_descriptor() {
+        let mut runtime = runtime_with_bound_player_item(0);
+        let metadata = create_metadata_fixture_v1();
+        let stack = ItemStack {
+            item_code: 42,
+            count: 1,
+            durability_millionths: Some(345_678),
+            metadata_hash: metadata.hash,
+        };
+        let inventory_key = runtime
+            .world_view
+            .state
+            .player_binding(PlayerId::new(1, 1))
+            .unwrap()
+            .inventory_container
+            .clone();
+        runtime
+            .import_player_inventory(
+                PlayerInventoryImportWireV1 {
+                    import: blockwild_gameplay::ImportPlayerInventoryV1 {
+                        inventory: inventory_key.clone(),
+                        expected_revision: 0,
+                        slots: std::iter::once(Some(stack.clone()))
+                            .chain(std::iter::repeat_n(None, 8))
+                            .collect(),
+                        metadata: vec![metadata.clone()],
+                    },
+                    selected_slot: 0,
+                },
+                CanonicalHash([0xa5; 16]),
+            )
+            .unwrap();
+        let (mut timestamp, _) = trigger_one_player_drop_v1(&mut runtime);
+        park_drop_at_player_v1(&mut runtime);
+        let drop = runtime.world_view.state.dropped_items.values().next().unwrap().clone();
+        while runtime.tick() < drop.pickup_unlock_tick {
+            advance_one_fixed_step_v1(&mut runtime, &mut timestamp);
+        }
+        assert_eq!(
+            runtime.gameplay.state.inventory.containers[&inventory_key].slots[0]
+                .as_ref()
+                .unwrap(),
+            &stack
+        );
+        assert_eq!(
+            runtime.gameplay.state.inventory.item_instance_metadata[&metadata.hash],
+            metadata
+        );
+        assert!(
+            !runtime
+                .gameplay
+                .state
+                .inventory
+                .containers
+                .contains_key(&drop.container)
+        );
+        assert!(!runtime.entities.contains(drop.entity_id));
+    }
+
+    #[test]
+    fn expired_nonempty_drop_is_retained_and_frozen() {
+        let mut runtime = runtime_with_bound_player_item(1);
+        let (mut timestamp, _) = trigger_one_player_drop_v1(&mut runtime);
+        move_bound_player_for_drop_test_v1(&mut runtime, SimulationVec3::new(0.0, 63.5, 0.0));
+        let drop_id = runtime.world_view.state.dropped_items.keys().next().unwrap().clone();
+        let expiry = runtime.world_view.state.dropped_items[&drop_id].pickup_unlock_tick;
+        runtime
+            .world_view
+            .state
+            .dropped_items
+            .get_mut(&drop_id)
+            .unwrap()
+            .expires_tick = Some(expiry);
+        runtime.invalidate_state_hash();
+        while runtime.tick() <= expiry {
+            advance_one_fixed_step_v1(&mut runtime, &mut timestamp);
+        }
+        let drop = runtime.world_view.state.dropped_items[&drop_id].clone();
+        assert_eq!(drop.velocity_milli_per_second, FixedWorldVec3V1::default());
+        assert!(
+            runtime
+                .gameplay
+                .state
+                .inventory
+                .containers
+                .contains_key(&drop.container)
+        );
+        assert!(runtime.entities.hot().contains_key(&drop.entity_id));
+        assert_eq!(
+            runtime.gameplay.state.inventory.containers[&drop.container].slots[usize::from(drop.slot)]
+                .as_ref()
+                .unwrap()
+                .count,
+            1
+        );
+    }
+
+    #[test]
+    fn canonical_drop_scan_is_bounded_and_rotates_without_prefix_bias() {
+        let mut runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        for index in 0..130_u32 {
+            let drop_id = format!("drop-{index:03}");
+            runtime.world_view.state.dropped_items.insert(
+                drop_id.clone(),
+                DroppedItemSpatialV1 {
+                    drop_id,
+                    revision: 1,
+                    entity_id: EntityId::new(index.saturating_add(1), 1),
+                    container: ContainerKey {
+                        kind: ContainerKind::Container,
+                        id: format!("custody-{index:03}"),
+                        owner_id: None,
+                    },
+                    slot: 0,
+                    bound_container_revision: 1,
+                    position: FixedWorldVec3V1::default(),
+                    velocity_milli_per_second: FixedWorldVec3V1::default(),
+                    rotation: RotationMicroturnsV1::default(),
+                    created_tick: 0,
+                    expires_tick: None,
+                    pickup_lock_actor_id: None,
+                    pickup_unlock_tick: 0,
+                },
+            );
+        }
+        runtime.tick = 1;
+        let first = runtime.canonical_drop_scan_v1();
+        assert_eq!(first.len(), INTEGRATED_RUNTIME_MAX_DROP_MOTION_PER_STEP_V1);
+        assert_eq!(first.first().unwrap(), "drop-000");
+        assert_eq!(first.last().unwrap(), "drop-127");
+        runtime.tick = 2;
+        let second = runtime.canonical_drop_scan_v1();
+        assert_eq!(second.len(), INTEGRATED_RUNTIME_MAX_DROP_MOTION_PER_STEP_V1);
+        assert_eq!(&second[..4], ["drop-128", "drop-129", "drop-000", "drop-001"]);
+        runtime.tick = 3;
+        let third = runtime.canonical_drop_scan_v1();
+        assert_eq!(third.first().unwrap(), "drop-126");
+        assert!(
+            first
+                .into_iter()
+                .chain(second)
+                .chain(third)
+                .collect::<BTreeSet<_>>()
+                .len()
+                == 130
+        );
+    }
+
+    #[test]
+    fn one_thousand_drop_scan_work_remains_strictly_bounded() {
+        let mut runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        for index in 0..1_000_u32 {
+            let drop_id = format!("drop-{index:04}");
+            runtime.world_view.state.dropped_items.insert(
+                drop_id.clone(),
+                DroppedItemSpatialV1 {
+                    drop_id,
+                    revision: 1,
+                    entity_id: EntityId::new(index.saturating_add(1), 1),
+                    container: ContainerKey {
+                        kind: ContainerKind::Container,
+                        id: format!("custody-{index:04}"),
+                        owner_id: None,
+                    },
+                    slot: 0,
+                    bound_container_revision: 1,
+                    position: FixedWorldVec3V1::default(),
+                    velocity_milli_per_second: FixedWorldVec3V1::default(),
+                    rotation: RotationMicroturnsV1::default(),
+                    created_tick: 0,
+                    expires_tick: None,
+                    pickup_lock_actor_id: None,
+                    pickup_unlock_tick: 0,
+                },
+            );
+        }
+        let mut visited = BTreeSet::new();
+        for tick in 1..=8 {
+            runtime.tick = tick;
+            let scan = runtime.canonical_drop_scan_v1();
+            assert_eq!(scan.len(), INTEGRATED_RUNTIME_MAX_DROP_MOTION_PER_STEP_V1);
+            visited.extend(scan);
+        }
+        assert_eq!(
+            visited.len(),
+            1_000,
+            "eight bounded pages cover the complete sorted ring"
+        );
+    }
+
+    #[test]
+    fn multiple_pickups_follow_canonical_order_and_respect_the_per_step_budget() {
+        let mut runtime = runtime_with_bound_player_item(17);
+        for sequence in 1..=17_u64 {
+            let outcome = runtime
+                .apply_player_drop(RuntimeInputFrameV1 {
+                    sequence,
+                    target_tick: 0,
+                    buttons: RUNTIME_INPUT_BUTTON_DROP_V1,
+                    ..RuntimeInputFrameV1::default()
+                })
+                .unwrap();
+            assert_eq!(outcome.0, RuntimeInputActionOutcomeV1::Applied);
+        }
+        let canonical_ids = runtime
+            .world_view
+            .state
+            .dropped_items
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(canonical_ids.len(), 17);
+        let commands = runtime
+            .world_view
+            .state
+            .dropped_items
+            .values()
+            .map(|drop| WorldViewCommandV1::SetDropPickupLock {
+                drop_id: drop.drop_id.clone(),
+                expected_revision: drop.revision,
+                pickup_lock_actor_id: None,
+                pickup_unlock_tick: 0,
+            })
+            .collect();
+        let batch = WorldViewBatchV1::new(
+            "unlock-pickup-budget-fixture",
+            "unlock-pickup-budget-fixture",
+            system_world_view_actor_v1(),
+            runtime.world_view.state.identity(),
+            commands,
+        );
+        assert!(matches!(
+            runtime.world_view.apply_batch(&batch, &runtime.gameplay.state),
+            WorldViewReceiptV1::Accepted(_)
+        ));
+        runtime.invalidate_state_hash();
+
+        runtime.advance_dropped_items_v1().unwrap();
+        assert_eq!(runtime.world_view.state.dropped_items.len(), 1);
+        assert_eq!(
+            runtime.world_view.state.dropped_items.keys().next().unwrap(),
+            canonical_ids.last().unwrap(),
+            "the first sixteen canonical IDs are picked up before the budget stops the scan"
+        );
+        let inventory_key = runtime
+            .world_view
+            .state
+            .player_binding(PlayerId::new(1, 1))
+            .unwrap()
+            .inventory_container
+            .clone();
+        assert_eq!(
+            runtime.gameplay.state.inventory.containers[&inventory_key].slots[0]
+                .as_ref()
+                .unwrap()
+                .count,
+            INTEGRATED_RUNTIME_MAX_DROP_PICKUPS_PER_STEP_V1 as u32
+        );
+    }
+
+    #[test]
+    fn delayed_drop_checkpoint_restores_exactly_and_replays_future_pickup() {
+        let mut original = runtime_with_bound_player_item(2);
+        let (mut timestamp, _) = trigger_one_player_drop_v1(&mut original);
+        park_drop_at_player_v1(&mut original);
+        let expected_unlock = original
+            .world_view
+            .state
+            .dropped_items
+            .values()
+            .next()
+            .unwrap()
+            .pickup_unlock_tick;
+        let checkpoint = original.export_runtime_checkpoint().unwrap();
+        let mut restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint),
+        )
+        .unwrap();
+        assert_eq!(restored.identity(), original.identity());
+        assert_eq!(
+            restored
+                .world_view
+                .state
+                .dropped_items
+                .values()
+                .next()
+                .unwrap()
+                .pickup_unlock_tick,
+            expected_unlock
+        );
+        while original.tick() <= expected_unlock {
+            timestamp = timestamp.saturating_add(INTEGRATED_RUNTIME_FIXED_STEP_US);
+            let first = original.step(timestamp, 8_000).unwrap();
+            let second = restored.step(timestamp, 8_000).unwrap();
+            assert_eq!(first, second);
+            assert_eq!(original.identity(), restored.identity());
+        }
+        assert!(original.world_view.state.dropped_items.is_empty());
+        assert_eq!(restored.identity(), original.identity());
+        let future_checkpoint = restored.export_runtime_checkpoint().unwrap();
+        let future = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &future_checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&future_checkpoint),
+        )
+        .unwrap();
+        assert_eq!(future.identity(), restored.identity());
+    }
+
+    #[test]
+    fn stale_drop_links_and_cold_players_fail_closed_with_whole_step_rollback() {
+        let mut transform_runtime = runtime_with_bound_player_item(1);
+        let (mut timestamp, _) = trigger_one_player_drop_v1(&mut transform_runtime);
+        let drop = transform_runtime
+            .world_view
+            .state
+            .dropped_items
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        commit_entity_commands(
+            &mut transform_runtime,
+            "corrupt-drop-transform",
+            vec![EntityCommand::UpdateMotion {
+                id: drop.entity_id,
+                position: EntityVec3::new(9.0, 65.0, 9.0),
+                yaw: 0.0,
+                velocity: EntityVec3::ZERO,
+            }],
+        );
+        let before = transform_runtime.identity();
+        timestamp = timestamp.saturating_add(INTEGRATED_RUNTIME_FIXED_STEP_US);
+        assert_eq!(
+            transform_runtime.step(timestamp, 8_000).unwrap_err().code,
+            "drop-transform-link"
+        );
+        assert_eq!(transform_runtime.identity(), before);
+
+        let mut custody_runtime = runtime_with_bound_player_item(1);
+        let (mut timestamp, _) = trigger_one_player_drop_v1(&mut custody_runtime);
+        let drop = custody_runtime
+            .world_view
+            .state
+            .dropped_items
+            .values()
+            .next()
+            .unwrap()
+            .clone();
+        custody_runtime
+            .gameplay
+            .state
+            .inventory
+            .containers
+            .get_mut(&drop.container)
+            .unwrap()
+            .revision += 1;
+        custody_runtime.invalidate_state_hash();
+        let before = custody_runtime.identity();
+        timestamp = timestamp.saturating_add(INTEGRATED_RUNTIME_FIXED_STEP_US);
+        let error = custody_runtime.step(timestamp, 8_000).unwrap_err();
+        assert!(
+            matches!(error.code.as_str(), "drop-custody-link" | "player-motion"),
+            "cross-domain validation may reject the stale custody at the first scheduled domain boundary: {error:?}"
+        );
+        assert_eq!(custody_runtime.identity(), before);
+
+        let mut cold_player_runtime = runtime_with_bound_player_item(1);
+        let (_timestamp, _) = trigger_one_player_drop_v1(&mut cold_player_runtime);
+        let player_id = cold_player_runtime.player.as_ref().unwrap().entity_id;
+        commit_entity_commands(
+            &mut cold_player_runtime,
+            "hibernate-pickup-player",
+            vec![EntityCommand::Hibernate { id: player_id }],
+        );
+        let current_tick = cold_player_runtime.tick();
+        set_drop_unlock_v1(&mut cold_player_runtime, current_tick);
+        let before = cold_player_runtime.identity();
+        let mut candidate = cold_player_runtime.clone();
+        assert_eq!(
+            candidate.advance_dropped_items_v1().unwrap_err().code,
+            "drop-player-orphan"
+        );
+        assert_eq!(cold_player_runtime.identity(), before);
     }
 
     #[test]

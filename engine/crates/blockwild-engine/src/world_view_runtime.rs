@@ -658,6 +658,7 @@ mod tests {
                     created_tick: 0,
                     expires_tick: Some(200),
                     pickup_lock_actor_id: None,
+                    pickup_unlock_tick: 0,
                 },
             );
         }
@@ -769,6 +770,7 @@ mod tests {
                 created_tick: 0,
                 expires_tick: None,
                 pickup_lock_actor_id: None,
+                pickup_unlock_tick: 0,
             },
         );
         let invalid = WorldViewAuthorityV1::new(invalid_state);
@@ -921,6 +923,7 @@ mod tests {
             rotation: RotationMicroturnsV1::default(),
             expires_tick: Some(200),
             pickup_lock_actor_id: None,
+            pickup_unlock_tick: 0,
         };
         let staged_drop =
             blockwild_gameplay::stage_player_drop_v1(&fixture.gameplay, &fixture.world_view.state, &request).unwrap();

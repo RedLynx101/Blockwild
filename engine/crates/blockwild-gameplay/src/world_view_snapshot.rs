@@ -13,6 +13,7 @@ use crate::world_view::{
 use crate::*;
 
 pub const WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V1: u16 = 1;
+pub const WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V2: u16 = 2;
 pub const WORLD_VIEW_MAX_SNAPSHOT_BYTES_V1: usize = 64 * 1024 * 1024;
 pub const WORLD_VIEW_MAX_SNAPSHOT_EXTENSIONS_V1: usize = 1024 * 1024;
 
@@ -64,6 +65,7 @@ pub struct DecodedWorldViewAuthoritySnapshotV1 {
     pub authority: WorldViewAuthorityV1,
     pub unknown_extension_bytes: Vec<u8>,
     pub snapshot_hash: CanonicalHash,
+    pub schema_version: u16,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -346,8 +348,22 @@ impl WorldViewAuthorityV1 {
             ));
         }
         let parts = self.snapshot_parts();
+        // Continue emitting byte-identical BWVWSP/1 records for states whose
+        // pickup semantics are representable by the legacy implicit
+        // `created_tick` deadline. The first explicit delayed unlock upgrades
+        // the record to BWVWSP/2.
+        let schema_version = if parts
+            .state
+            .dropped_items
+            .values()
+            .any(|drop| drop.pickup_unlock_tick != drop.created_tick)
+        {
+            WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V2
+        } else {
+            WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V1
+        };
         let mut payload = Writer::default();
-        encode_state(&mut payload, &parts.state)?;
+        encode_state(&mut payload, &parts.state, schema_version)?;
         encode_grants(&mut payload, &parts.grants)?;
         encode_idempotency(&mut payload, &parts.idempotency)?;
         encode_idempotency_order(&mut payload, &parts.idempotency_order)?;
@@ -362,7 +378,7 @@ impl WorldViewAuthorityV1 {
         }
         let mut output = Writer::default();
         output.raw(&WORLD_VIEW_SNAPSHOT_MAGIC_V1);
-        output.u16(WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V1);
+        output.u16(schema_version);
         output.u16(WORLD_VIEW_SNAPSHOT_FLAGS_V1);
         output.u64(
             u64::try_from(payload.bytes.len())
@@ -370,7 +386,7 @@ impl WorldViewAuthorityV1 {
         );
         output.hash(self.state.state_hash());
         output.hash(self.replay_hash());
-        output.hash(world_view_payload_hash_v1(&payload.bytes));
+        output.hash(world_view_payload_hash_v1(&payload.bytes, schema_version));
         output.raw(&payload.bytes);
         Ok(output.bytes)
     }
@@ -382,7 +398,7 @@ impl WorldViewAuthorityV1 {
     ) -> Result<WorldViewSnapshotInstallReportV1, WorldViewSnapshotErrorV1> {
         let decoded = decode_world_view_authority_snapshot_v1(bytes, gameplay)?;
         let report = WorldViewSnapshotInstallReportV1 {
-            schema_version: WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V1,
+            schema_version: decoded.schema_version,
             state_hash: decoded.authority.state.state_hash(),
             replay_hash: decoded.authority.replay_hash(),
             snapshot_hash: decoded.snapshot_hash,
@@ -416,7 +432,10 @@ pub fn decode_world_view_authority_snapshot_v1(
         ));
     }
     let schema = reader.u16()?;
-    if schema != WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V1 {
+    if !matches!(
+        schema,
+        WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V1 | WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V2
+    ) {
         return Err(WorldViewSnapshotErrorV1::new(
             WorldViewSnapshotErrorCodeV1::UnsupportedVersion,
             WORLD_VIEW_SNAPSHOT_MAGIC_V1.len(),
@@ -444,7 +463,7 @@ pub fn decode_world_view_authority_snapshot_v1(
     }
     let payload = reader.raw(payload_len)?.to_vec();
     reader.finish()?;
-    if world_view_payload_hash_v1(&payload) != expected_payload_hash {
+    if world_view_payload_hash_v1(&payload, schema) != expected_payload_hash {
         return Err(WorldViewSnapshotErrorV1::new(
             WorldViewSnapshotErrorCodeV1::Corrupt,
             WORLD_VIEW_SNAPSHOT_HEADER_BYTES_V1,
@@ -452,7 +471,7 @@ pub fn decode_world_view_authority_snapshot_v1(
         ));
     }
     let mut payload_reader = Reader::new(&payload);
-    let state = decode_state(&mut payload_reader)?;
+    let state = decode_state(&mut payload_reader, schema)?;
     let grants = decode_grants(&mut payload_reader)?;
     let idempotency = decode_idempotency(&mut payload_reader)?;
     let idempotency_order = decode_idempotency_order(&mut payload_reader)?;
@@ -488,6 +507,7 @@ pub fn decode_world_view_authority_snapshot_v1(
         authority,
         unknown_extension_bytes,
         snapshot_hash: canonical_world_view_snapshot_hash_v1(bytes),
+        schema_version: schema,
     })
 }
 
@@ -498,14 +518,18 @@ pub fn canonical_world_view_snapshot_hash_v1(bytes: &[u8]) -> CanonicalHash {
     hasher.finish()
 }
 
-fn world_view_payload_hash_v1(bytes: &[u8]) -> CanonicalHash {
+fn world_view_payload_hash_v1(bytes: &[u8], schema_version: u16) -> CanonicalHash {
     let mut hasher = CanonicalHasher::new("blockwild.gameplay.world-view.snapshot.payload.v1");
-    hasher.write_u16(WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V1);
+    hasher.write_u16(schema_version);
     hasher.write_bytes(bytes);
     hasher.finish()
 }
 
-fn encode_state(writer: &mut Writer, state: &WorldViewStateV1) -> Result<(), WorldViewSnapshotErrorV1> {
+fn encode_state(
+    writer: &mut Writer,
+    state: &WorldViewStateV1,
+    schema_version: u16,
+) -> Result<(), WorldViewSnapshotErrorV1> {
     encode_world_key(writer, &state.world)?;
     encode_revision(writer, state.revision);
     writer.u64(state.tick);
@@ -515,7 +539,7 @@ fn encode_state(writer: &mut Writer, state: &WorldViewStateV1) -> Result<(), Wor
     }
     writer.count(state.dropped_items.len())?;
     for drop in state.dropped_items.values() {
-        encode_drop(writer, drop)?;
+        encode_drop(writer, drop, schema_version)?;
     }
     writer.count(state.player_bindings.len())?;
     for binding in state.player_bindings.values() {
@@ -527,7 +551,7 @@ fn encode_state(writer: &mut Writer, state: &WorldViewStateV1) -> Result<(), Wor
     Ok(())
 }
 
-fn decode_state(reader: &mut Reader<'_>) -> Result<WorldViewStateV1, WorldViewSnapshotErrorV1> {
+fn decode_state(reader: &mut Reader<'_>, schema_version: u16) -> Result<WorldViewStateV1, WorldViewSnapshotErrorV1> {
     let world = decode_world_key(reader)?;
     let revision = decode_revision(reader)?;
     let tick = reader.u64()?;
@@ -539,7 +563,7 @@ fn decode_state(reader: &mut Reader<'_>) -> Result<WorldViewStateV1, WorldViewSn
     }
     let mut dropped_items = BTreeMap::new();
     for _ in 0..reader.count(WORLD_VIEW_MAX_DROPPED_ITEMS_V1)? {
-        let drop = decode_drop(reader)?;
+        let drop = decode_drop(reader, schema_version)?;
         let key = drop.drop_id.clone();
         insert_unique(&mut dropped_items, key, drop, reader.offset, "dropped item")?;
     }
@@ -745,7 +769,11 @@ fn decode_machine_anchor(reader: &mut Reader<'_>) -> Result<MachineSpatialAnchor
     })
 }
 
-fn encode_drop(writer: &mut Writer, drop: &DroppedItemSpatialV1) -> Result<(), WorldViewSnapshotErrorV1> {
+fn encode_drop(
+    writer: &mut Writer,
+    drop: &DroppedItemSpatialV1,
+    schema_version: u16,
+) -> Result<(), WorldViewSnapshotErrorV1> {
     writer.string(&drop.drop_id)?;
     writer.u64(drop.revision);
     writer.u64(drop.entity_id.packed());
@@ -757,23 +785,45 @@ fn encode_drop(writer: &mut Writer, drop: &DroppedItemSpatialV1) -> Result<(), W
     encode_rotation(writer, drop.rotation);
     writer.u64(drop.created_tick);
     writer.option_u64(drop.expires_tick);
-    writer.option_string(drop.pickup_lock_actor_id.as_deref())
+    writer.option_string(drop.pickup_lock_actor_id.as_deref())?;
+    if schema_version >= WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V2 {
+        writer.u64(drop.pickup_unlock_tick);
+    }
+    Ok(())
 }
 
-fn decode_drop(reader: &mut Reader<'_>) -> Result<DroppedItemSpatialV1, WorldViewSnapshotErrorV1> {
+fn decode_drop(reader: &mut Reader<'_>, schema_version: u16) -> Result<DroppedItemSpatialV1, WorldViewSnapshotErrorV1> {
+    let drop_id = reader.string()?;
+    let revision = reader.u64()?;
+    let entity_id = decode_entity_id(reader.u64()?);
+    let container = decode_container_key(reader)?;
+    let slot = reader.u16()?;
+    let bound_container_revision = reader.u64()?;
+    let position = decode_position(reader)?;
+    let velocity_milli_per_second = decode_position(reader)?;
+    let rotation = decode_rotation(reader)?;
+    let created_tick = reader.u64()?;
+    let expires_tick = reader.option_u64()?;
+    let pickup_lock_actor_id = reader.option_string()?;
+    let pickup_unlock_tick = if schema_version >= WORLD_VIEW_SNAPSHOT_SCHEMA_VERSION_V2 {
+        reader.u64()?
+    } else {
+        created_tick
+    };
     Ok(DroppedItemSpatialV1 {
-        drop_id: reader.string()?,
-        revision: reader.u64()?,
-        entity_id: decode_entity_id(reader.u64()?),
-        container: decode_container_key(reader)?,
-        slot: reader.u16()?,
-        bound_container_revision: reader.u64()?,
-        position: decode_position(reader)?,
-        velocity_milli_per_second: decode_position(reader)?,
-        rotation: decode_rotation(reader)?,
-        created_tick: reader.u64()?,
-        expires_tick: reader.option_u64()?,
-        pickup_lock_actor_id: reader.option_string()?,
+        drop_id,
+        revision,
+        entity_id,
+        container,
+        slot,
+        bound_container_revision,
+        position,
+        velocity_milli_per_second,
+        rotation,
+        created_tick,
+        expires_tick,
+        pickup_lock_actor_id,
+        pickup_unlock_tick,
     })
 }
 
