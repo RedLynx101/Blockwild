@@ -18,18 +18,19 @@ use blockwild_engine::{
     IntegratedRuntimeReceiptV2, IntegratedRuntimeV2, PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
     PLAYER_BOOTSTRAP_STATUS_TYPE_V1, PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1, PLAYER_INVENTORY_IMPORT_TYPE_V1,
     RuntimeCommandCacheLookupV1, SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3, SIMULATION_PLAYER_BIND_TYPE_V3,
-    TERRAIN_RESIDENCY_BATCH_TYPE_V1, TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, WorldViewExtractionInputV1,
-    decode_content_install_page_v1, decode_entity_authority_export_v1, decode_entity_authority_import_v2,
-    decode_entity_command_batch_v1, decode_entity_compatibility_export_v1, decode_entity_compatibility_import_v1,
-    decode_gameplay_actor_grant_v1, decode_gameplay_batch_v1, decode_network_agent_grant_v1,
-    decode_network_command_release_v1, decode_network_delta_build_request_v1, decode_network_peer_grant_v1,
-    decode_network_peer_release_v1, decode_network_reconnect_request_v1, decode_network_replication_record_v1,
-    decode_player_bootstrap_status_query_v1, decode_player_inventory_import_v1, decode_runtime_persistence_dispatch_v1,
-    decode_runtime_player_binding_v1, decode_terrain_residency_batch_v1, encode_content_install_receipt_v1,
+    TERRAIN_RESIDENCY_BATCH_TYPE_V1, TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2,
+    TERRAIN_RESIDENCY_RECONCILE_RECEIPT_TYPE_V2, WorldViewExtractionInputV1, decode_content_install_page_v1,
+    decode_entity_authority_export_v1, decode_entity_authority_import_v2, decode_entity_command_batch_v1,
+    decode_entity_compatibility_export_v1, decode_entity_compatibility_import_v1, decode_gameplay_actor_grant_v1,
+    decode_gameplay_batch_v1, decode_network_agent_grant_v1, decode_network_command_release_v1,
+    decode_network_delta_build_request_v1, decode_network_peer_grant_v1, decode_network_peer_release_v1,
+    decode_network_reconnect_request_v1, decode_network_replication_record_v1, decode_player_bootstrap_status_query_v1,
+    decode_player_inventory_import_v1, decode_runtime_persistence_dispatch_v1, decode_runtime_player_binding_v1,
+    decode_terrain_residency_batch_v1, decode_terrain_residency_reconcile_batch_v2, encode_content_install_receipt_v1,
     encode_entity_authority_import_receipt_v1, encode_entity_event_batch_v1, encode_gameplay_receipt_v1,
     encode_player_bootstrap_status_v1, encode_player_inventory_import_receipt_v1,
     encode_runtime_persistence_dispatch_receipt_v1, encode_terrain_residency_receipt_v1,
-    integrated_runtime_checkpoint_hash_v1,
+    encode_terrain_residency_reconcile_receipt_v2, integrated_runtime_checkpoint_hash_v1,
 };
 use blockwild_network::{InterestSelectionStatsV1, encode_network_checkpoint_v1, encode_network_delta_v1};
 use blockwild_persistence::{PersistenceDispatchOutcomeV1, PersistenceDispatchStatusV1, PersistenceRetryDirectiveV1};
@@ -68,7 +69,7 @@ const DOMAIN_VIEW_MAX_FIELDS_V1: usize = 2_048;
 const DOMAIN_VIEW_MAX_BLOCKERS_V1: usize = 32;
 const DOMAIN_VIEW_COUNT_V1: u16 = 8;
 const AUDIO_EXTRACTION_SCHEMA_V2: u16 = 2;
-const CAPABILITIES: [&str; 14] = [
+const CAPABILITIES: [&str; 15] = [
     "awaited-receipts-v1",
     "bounded-entity-extraction-v1",
     "bounded-extraction-v1-pending-live-domain-views",
@@ -83,6 +84,7 @@ const CAPABILITIES: [&str; 14] = [
     "integrated-runtime-v1",
     "network-authority-v1",
     "terrain-residency-v1",
+    "terrain-residency-reconcile-v2",
 ];
 
 #[derive(Default)]
@@ -1077,14 +1079,11 @@ fn dispatch_command(
     let mut receipts = Vec::with_capacity(batch.operations.len());
     let mut deferred_final_bind_receipts = Vec::<(usize, WireHash)>::new();
     for (index, operation) in batch.operations.iter().enumerate() {
-        let expected_schema = if operation.domain == RuntimeDomainV1::Simulation {
-            match operation.type_id.as_str() {
-                SIMULATION_PLAYER_BIND_TYPE_V2 => 2,
-                SIMULATION_PLAYER_BIND_TYPE_V3 => 3,
-                _ => 1,
-            }
-        } else {
-            1
+        let expected_schema = match (operation.domain, operation.type_id.as_str()) {
+            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V2) => 2,
+            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V3) => 3,
+            (RuntimeDomainV1::World, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2) => 2,
+            _ => 1,
         };
         if operation.schema != expected_schema {
             return Err((
@@ -1108,6 +1107,20 @@ fn dispatch_command(
                     RuntimeDomainV1::World,
                     TERRAIN_RESIDENCY_RECEIPT_TYPE_V1,
                     encode_terrain_residency_receipt_v1(&receipt)
+                        .map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::World, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2) => {
+                let request = decode_terrain_residency_reconcile_batch_v2(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let receipt = candidate
+                    .reconcile_terrain_residency(&request)
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation_with_schema(
+                    RuntimeDomainV1::World,
+                    TERRAIN_RESIDENCY_RECONCILE_RECEIPT_TYPE_V2,
+                    2,
+                    encode_terrain_residency_reconcile_receipt_v2(&receipt)
                         .map_err(|error| (error.code.into(), error.message))?,
                 )
             }
@@ -3634,6 +3647,7 @@ mod tests {
         assert!(has_capability("bulk-platform-v1"));
         assert!(has_capability("content-bundle-install-v1"));
         assert!(has_capability("terrain-residency-v1"));
+        assert!(has_capability("terrain-residency-reconcile-v2"));
         assert!(!has_capability("content-authority-v1"));
         assert!(has_capability("entity-authority-snapshot-v2"));
         assert!(has_capability("entity-compatibility-bridge-v1"));
@@ -3893,6 +3907,96 @@ mod tests {
         assert_eq!(repeated.generated_chunks, 0);
         assert_eq!(repeated.already_resident_chunks, 1);
         assert_eq!(repeat_identity, generated_identity);
+    }
+
+    #[test]
+    fn terrain_residency_reconcile_command_replaces_the_exact_set() {
+        let RuntimeResponseV1::Ready {
+            runtime_handle,
+            identity,
+            capabilities,
+            ..
+        } = decode_response_v1(&blockwild_runtime_create_v2(
+            &encode_request_v1(&create_request(104)).unwrap(),
+        ))
+        .unwrap()
+        else {
+            panic!("expected ready runtime")
+        };
+        assert!(
+            capabilities
+                .iter()
+                .any(|value| value == "terrain-residency-reconcile-v2")
+        );
+        let first_request = blockwild_engine::IntegratedTerrainResidencyReconcileBatchV2 {
+            expected_world_revision: WorldAuthorityRevisionV1 {
+                epoch: identity.revision.epoch,
+                mutation: 0,
+                residency: 0,
+            },
+            generation_options_json: DEFAULT_GENERATION_OPTIONS_JSON_V1.into(),
+            desired_chunks: vec![blockwild_engine::IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 }],
+        };
+        let payload = blockwild_engine::encode_terrain_residency_reconcile_batch_v2(&first_request).unwrap();
+        let (first_identity, first_receipt) = dispatch_single_operation(
+            runtime_handle,
+            105,
+            identity,
+            "terrain-reconcile:first",
+            domain_operation_with_schema(
+                RuntimeDomainV1::World,
+                TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2,
+                2,
+                payload,
+            ),
+        );
+        assert_eq!(first_receipt.type_id, TERRAIN_RESIDENCY_RECONCILE_RECEIPT_TYPE_V2);
+        assert_eq!(first_receipt.schema, 2);
+        let first = blockwild_engine::decode_terrain_residency_reconcile_receipt_v2(&first_receipt.payload).unwrap();
+        assert_eq!(
+            (
+                first.generated_chunk_count,
+                first.evicted_chunk_count,
+                first.resident_sections
+            ),
+            (1, 0, 12)
+        );
+        assert_eq!(first.world_revision.residency, first_identity.revision.world);
+
+        let second_request = blockwild_engine::IntegratedTerrainResidencyReconcileBatchV2 {
+            expected_world_revision: first.world_revision,
+            generation_options_json: DEFAULT_GENERATION_OPTIONS_JSON_V1.into(),
+            desired_chunks: vec![blockwild_engine::IntegratedTerrainChunkCoordinateV1 {
+                chunk_x: 10,
+                chunk_z: -4,
+            }],
+        };
+        let payload = blockwild_engine::encode_terrain_residency_reconcile_batch_v2(&second_request).unwrap();
+        let (second_identity, second_receipt) = dispatch_single_operation(
+            runtime_handle,
+            106,
+            first_identity,
+            "terrain-reconcile:teleport",
+            domain_operation_with_schema(
+                RuntimeDomainV1::World,
+                TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2,
+                2,
+                payload,
+            ),
+        );
+        let second = blockwild_engine::decode_terrain_residency_reconcile_receipt_v2(&second_receipt.payload).unwrap();
+        assert_eq!(
+            (
+                second.generated_chunk_count,
+                second.retained_chunk_count,
+                second.evicted_chunk_count
+            ),
+            (1, 0, 1)
+        );
+        assert_eq!(second.desired_chunks, second_request.desired_chunks);
+        assert_eq!(second.evicted_chunks, first_request.desired_chunks);
+        assert_eq!(second.resident_sections, 12);
+        assert_eq!(second.world_revision.residency, second_identity.revision.world);
     }
 
     #[test]

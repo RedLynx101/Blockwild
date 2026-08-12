@@ -334,6 +334,21 @@ impl WorldAuthorityStoreR4V1 {
         self.active_shard().sections.len()
     }
 
+    /// Canonical coordinates for every chunk with resident generated state in
+    /// the active location. The union includes auxiliary-only chunks so an
+    /// exact residency reconciler cannot leak metadata after partial recovery.
+    #[must_use]
+    pub fn resident_chunk_coordinates(&self) -> Vec<(i32, i32)> {
+        let shard = self.active_shard();
+        let mut chunks = shard
+            .sections
+            .keys()
+            .map(|section| (section.chunk_x, section.chunk_z))
+            .collect::<BTreeSet<_>>();
+        chunks.extend(shard.chunk_auxiliary.keys().map(|chunk| (chunk.chunk_x, chunk.chunk_z)));
+        chunks.into_iter().collect()
+    }
+
     pub fn scheduler_mut(&mut self) -> &mut SectionResidencySchedulerV1 {
         &mut self.active_shard_mut().residency
     }
@@ -451,6 +466,31 @@ impl WorldAuthorityStoreR4V1 {
             shard.revision.residency = shard.revision.residency.saturating_add(1);
         }
         removed
+    }
+
+    /// Evicts all disposable generated state for one active-location chunk in
+    /// one revision step. Authored edits and the section revision ledger stay
+    /// intact so a later generation/install replays the journal exactly.
+    pub fn evict_chunk(&mut self, address: &crate::WorldChunkAddressV1) -> u16 {
+        if address.world != self.active {
+            return 0;
+        }
+        let shard = self.active_shard_mut();
+        let sections = shard
+            .sections
+            .keys()
+            .filter(|section| section.chunk_x == address.chunk_x && section.chunk_z == address.chunk_z)
+            .cloned()
+            .collect::<Vec<_>>();
+        for section in &sections {
+            shard.residency.cancel_section(section);
+            shard.sections.remove(section);
+        }
+        let auxiliary_removed = shard.chunk_auxiliary.remove(address).is_some();
+        if !sections.is_empty() || auxiliary_removed {
+            shard.revision.residency = shard.revision.residency.saturating_add(1);
+        }
+        u16::try_from(sections.len()).expect("a world chunk has at most the bounded section count")
     }
 
     pub fn switch_active_location(&mut self, address: WorldAddressV1) -> AuthorityResult<()> {

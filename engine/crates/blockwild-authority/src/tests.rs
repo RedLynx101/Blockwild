@@ -181,6 +181,76 @@ fn generated_chunk_auxiliary_is_authoritative_while_resident_and_evicts_with_las
 }
 
 #[test]
+fn exact_chunk_eviction_is_bounded_idempotent_and_preserves_authored_edits() {
+    let world = address("exact-chunk-eviction");
+    let mut store = WorldAuthorityStoreR4V1::new(world.clone(), catalog()).expect("store");
+    let chunk = WorldChunkAddressV1 {
+        world: world.clone(),
+        chunk_x: -2,
+        chunk_z: 3,
+    };
+    for section_y in 0_i16..WORLD_SECTION_COUNT_V1 as i16 {
+        store
+            .install_section_for_replay(empty_install(section_address(&world, -2, 3, section_y), 1))
+            .expect("section");
+    }
+    store
+        .install_chunk_auxiliary(empty_auxiliary(chunk.clone()))
+        .expect("auxiliary");
+    let edited = CellPositionV1 { x: -31, y: 1, z: 49 };
+    assert!(matches!(
+        store.apply_mutation_batch(batch(
+            &store,
+            "edit-before-eviction",
+            vec![WorldMutationCommandR4V1::SetBlock {
+                position: edited,
+                block_id: 3,
+                facing: None,
+            }],
+        )),
+        WorldMutationReceiptR4V1::Accepted { mutated: true, .. }
+    ));
+    assert_eq!(store.resident_chunk_coordinates(), vec![(-2, 3)]);
+    let revision_before = store.revision();
+    assert_eq!(store.evict_chunk(&chunk), WORLD_SECTION_COUNT_V1 as u16);
+    assert_eq!(store.resident_section_count(), 0);
+    assert!(store.chunk_auxiliary(&chunk).is_none());
+    assert!(store.resident_chunk_coordinates().is_empty());
+    assert_eq!(store.edit_journal().get(&edited).map(|cell| cell.block_id), Some(3));
+    assert_eq!(store.revision().residency, revision_before.residency + 1);
+
+    let revision_after = store.revision();
+    assert_eq!(store.evict_chunk(&chunk), 0);
+    assert_eq!(
+        store.revision(),
+        revision_after,
+        "idempotent eviction does not advance authority"
+    );
+
+    store
+        .install_section_for_replay(empty_install(section_address(&world, -2, 3, edited.section_y()), 2))
+        .expect("reinstall");
+    assert!(matches!(
+        store.read_cell(edited),
+        WorldCellReadV1::Loaded { cell, .. } if cell.block_id == 3
+    ));
+
+    let auxiliary_only = WorldChunkAddressV1 {
+        world,
+        chunk_x: 8,
+        chunk_z: -5,
+    };
+    store
+        .install_chunk_auxiliary(empty_auxiliary(auxiliary_only.clone()))
+        .expect("auxiliary-only fixture");
+    assert_eq!(store.resident_chunk_coordinates(), vec![(-2, 3), (8, -5)]);
+    let auxiliary_revision = store.revision();
+    assert_eq!(store.evict_chunk(&auxiliary_only), 0);
+    assert!(store.chunk_auxiliary(&auxiliary_only).is_none());
+    assert_eq!(store.revision().residency, auxiliary_revision.residency + 1);
+}
+
+#[test]
 fn auxiliary_light_patch_is_section_granular_revision_checked_and_atomic() {
     let world = address("auxiliary-patch");
     let mut store = WorldAuthorityStoreR4V1::new(world.clone(), catalog()).expect("store");

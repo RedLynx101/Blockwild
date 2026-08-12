@@ -112,6 +112,7 @@ pub const INTEGRATED_RUNTIME_MAX_ENTITY_SCHEDULE_JOBS_V1: usize = 256;
 pub const INTEGRATED_RUNTIME_MAX_ECOLOGY_SCHEDULE_JOBS_V1: usize = 64;
 pub const INTEGRATED_RUNTIME_MAX_PATH_SCHEDULE_JOBS_V1: usize = 64;
 pub const INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1: usize = 25;
+pub const INTEGRATED_RUNTIME_MAX_TERRAIN_RECONCILE_EVICTED_CHUNKS_V2: usize = 65_536;
 pub const INTEGRATED_RUNTIME_ECOLOGY_CADENCE_TICKS_V1: u64 = 20;
 pub const INTEGRATED_RUNTIME_NATIVE_DOMAIN_COUNT_V1: u16 = 6;
 const NATIVE_WORLD_RECORD_ID_V1: &str = "rust-world-r4-v1";
@@ -490,6 +491,32 @@ pub struct IntegratedTerrainResidencyReceiptV1 {
     pub requested_resident_chunks: u32,
     pub resident_sections: u32,
     pub chunks: Vec<IntegratedTerrainResidencyChunkReceiptV1>,
+    pub state_hash: CanonicalHash,
+}
+
+/// Exact bounded active-ring reconcile. Unlike the additive V1 ensure, this
+/// request declares the complete desired resident chunk set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegratedTerrainResidencyReconcileBatchV2 {
+    pub expected_world_revision: WorldAuthorityRevisionV1,
+    pub generation_options_json: String,
+    /// Complete desired set in canonical `(chunk_x, chunk_z)` order.
+    pub desired_chunks: Vec<IntegratedTerrainChunkCoordinateV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegratedTerrainResidencyReconcileReceiptV2 {
+    pub previous_world_revision: WorldAuthorityRevisionV1,
+    pub world_revision: WorldAuthorityRevisionV1,
+    pub desired_chunk_count: u32,
+    pub generated_chunk_count: u32,
+    pub retained_chunk_count: u32,
+    pub evicted_chunk_count: u32,
+    pub resident_sections: u32,
+    pub desired_chunks: Vec<IntegratedTerrainChunkCoordinateV1>,
+    pub generated_chunks: Vec<IntegratedTerrainChunkCoordinateV1>,
+    pub retained_chunks: Vec<IntegratedTerrainChunkCoordinateV1>,
+    pub evicted_chunks: Vec<IntegratedTerrainChunkCoordinateV1>,
     pub state_hash: CanonicalHash,
 }
 
@@ -5324,6 +5351,124 @@ impl IntegratedRuntimeV2 {
         })
     }
 
+    /// Atomically reconciles the complete active terrain residency set. All
+    /// generation and install work occurs on a cloned runtime; only a fully
+    /// validated exact result replaces live authority. Eviction removes
+    /// disposable sections and auxiliary data while the authored edit journal
+    /// remains available for deterministic revisit generation.
+    pub fn reconcile_terrain_residency(
+        &mut self,
+        request: &IntegratedTerrainResidencyReconcileBatchV2,
+    ) -> Result<IntegratedTerrainResidencyReconcileReceiptV2, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        validate_terrain_residency_reconcile_batch_v2(request)?;
+        let previous_world_revision = self.world.revision();
+        if request.expected_world_revision != previous_world_revision {
+            return Err(IntegratedRuntimeError::new(
+                "terrain-residency-reconcile-stale",
+                "terrain residency reconcile expected an obsolete world authority revision",
+            ));
+        }
+        if request.generation_options_json != self.config.generation_options_json {
+            return Err(IntegratedRuntimeError::new(
+                "terrain-generation-options",
+                "terrain residency reconcile does not match the immutable runtime generation options",
+            ));
+        }
+
+        let desired_set = request
+            .desired_chunks
+            .iter()
+            .map(|coordinate| (coordinate.chunk_x, coordinate.chunk_z))
+            .collect::<BTreeSet<_>>();
+        let evicted_chunks = self
+            .world
+            .resident_chunk_coordinates()
+            .into_iter()
+            .filter(|coordinate| !desired_set.contains(coordinate))
+            .map(|(chunk_x, chunk_z)| IntegratedTerrainChunkCoordinateV1 { chunk_x, chunk_z })
+            .collect::<Vec<_>>();
+        if evicted_chunks.len() > INTEGRATED_RUNTIME_MAX_TERRAIN_RECONCILE_EVICTED_CHUNKS_V2 {
+            return Err(IntegratedRuntimeError::new(
+                "terrain-residency-reconcile-count",
+                "terrain residency reconcile exceeds its bounded legacy-eviction recovery limit",
+            ));
+        }
+
+        let mut candidate = self.clone();
+        let ensured = candidate.ensure_terrain_residency(&IntegratedTerrainResidencyBatchV1 {
+            expected_world_revision: previous_world_revision,
+            generation_options_json: request.generation_options_json.clone(),
+            chunks: request.desired_chunks.clone(),
+        })?;
+        let mut generated_chunks = Vec::new();
+        let mut retained_chunks = Vec::new();
+        for chunk in ensured.chunks {
+            match chunk.status {
+                IntegratedTerrainResidencyStatusV1::Generated => generated_chunks.push(chunk.coordinate),
+                IntegratedTerrainResidencyStatusV1::AlreadyResident => retained_chunks.push(chunk.coordinate),
+            }
+        }
+        let address = candidate.world.active_address().clone();
+        for coordinate in &evicted_chunks {
+            let removed_sections = candidate.world.evict_chunk(&AuthorityChunkAddressV1 {
+                world: address.clone(),
+                chunk_x: coordinate.chunk_x,
+                chunk_z: coordinate.chunk_z,
+            });
+            if removed_sections > 12 {
+                return Err(IntegratedRuntimeError::new(
+                    "terrain-residency-reconcile-eviction",
+                    "terrain residency reconcile observed an impossible section count",
+                ));
+            }
+        }
+
+        let final_chunks = candidate.world.resident_chunk_coordinates();
+        let desired_coordinates = request
+            .desired_chunks
+            .iter()
+            .map(|coordinate| (coordinate.chunk_x, coordinate.chunk_z))
+            .collect::<Vec<_>>();
+        let expected_sections = request.desired_chunks.len().checked_mul(12).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "terrain-residency-reconcile-count",
+                "terrain residency reconcile section count overflowed",
+            )
+        })?;
+        if final_chunks != desired_coordinates || candidate.world.resident_section_count() != expected_sections {
+            return Err(IntegratedRuntimeError::new(
+                "terrain-residency-reconcile-incomplete",
+                "terrain residency reconcile did not produce the exact desired chunk and section set",
+            ));
+        }
+
+        candidate.invalidate_state_hash();
+        let world_revision = candidate.world.revision();
+        let resident_sections = u32::try_from(candidate.world.resident_section_count()).map_err(|_| {
+            IntegratedRuntimeError::new(
+                "terrain-residency-reconcile-count",
+                "resident section count exceeds the diagnostics wire range",
+            )
+        })?;
+        let state_hash = candidate.state_hash();
+        *self = candidate;
+        Ok(IntegratedTerrainResidencyReconcileReceiptV2 {
+            previous_world_revision,
+            world_revision,
+            desired_chunk_count: request.desired_chunks.len() as u32,
+            generated_chunk_count: generated_chunks.len() as u32,
+            retained_chunk_count: retained_chunks.len() as u32,
+            evicted_chunk_count: evicted_chunks.len() as u32,
+            resident_sections,
+            desired_chunks: request.desired_chunks.clone(),
+            generated_chunks,
+            retained_chunks,
+            evicted_chunks,
+            state_hash,
+        })
+    }
+
     fn generate_chunk(
         &self,
         request: &GenerateChunkRequestV2,
@@ -5793,6 +5938,20 @@ fn validate_terrain_residency_batch_v1(
                 "terrain residency chunks must be sorted and unique by chunk_x then chunk_z",
             ));
         }
+    }
+    Ok(())
+}
+
+fn validate_terrain_residency_reconcile_batch_v2(
+    request: &IntegratedTerrainResidencyReconcileBatchV2,
+) -> Result<(), IntegratedRuntimeError> {
+    validate_terrain_residency_batch_v1(&IntegratedTerrainResidencyBatchV1 {
+        expected_world_revision: request.expected_world_revision,
+        generation_options_json: request.generation_options_json.clone(),
+        chunks: request.desired_chunks.clone(),
+    })?;
+    for coordinate in &request.desired_chunks {
+        validate_terrain_halo_coordinate_v1(*coordinate)?;
     }
     Ok(())
 }
@@ -10147,6 +10306,128 @@ mod tests {
         );
         assert_eq!(runtime.state_hash(), before_hash);
         assert_eq!(runtime.generation_diagnostics(), before_generation_diagnostics);
+    }
+
+    #[test]
+    fn exact_terrain_reconcile_bounds_long_travel_and_restores_edited_revisits() {
+        let fixture = blockwild_generation::fixture_request("integrated-residency-reconcile", 0, 0, 1);
+        let mut config = IntegratedRuntimeConfigV2 {
+            world_seed: fixture.seed_text,
+            terrain_content_hash: parse_canonical_hash(&fixture.content_hash).unwrap(),
+            generator_hash: parse_canonical_hash(&fixture.generator_hash).unwrap(),
+            ..IntegratedRuntimeConfigV2::default()
+        };
+        config.block_catalog.water_block_id = GeneratedBlock::WATER;
+        let mut runtime = IntegratedRuntimeV2::new(config).unwrap();
+        let ring = |center_x: i32, center_z: i32| {
+            let mut chunks = Vec::new();
+            for chunk_x in center_x - 2..=center_x + 2 {
+                for chunk_z in center_z - 2..=center_z + 2 {
+                    chunks.push(IntegratedTerrainChunkCoordinateV1 { chunk_x, chunk_z });
+                }
+            }
+            chunks
+        };
+        let reconcile = |runtime: &mut IntegratedRuntimeV2, chunks| {
+            runtime.reconcile_terrain_residency(&IntegratedTerrainResidencyReconcileBatchV2 {
+                expected_world_revision: runtime.world().revision(),
+                generation_options_json: runtime.config().generation_options_json.clone(),
+                desired_chunks: chunks,
+            })
+        };
+
+        let initial = reconcile(&mut runtime, ring(0, 0)).unwrap();
+        assert_eq!((initial.generated_chunk_count, initial.retained_chunk_count), (25, 0));
+        assert_eq!(initial.resident_sections, 300);
+        let edited_position = CellPositionV1 { x: 1, y: 100, z: 1 };
+        let mut edit = IntegratedRuntimeBatchV2::empty("reconcile-edit", runtime.identity());
+        edit.world.push(WorldMutationBatchR4V1 {
+            schema_version: blockwild_authority::WORLD_AUTHORITY_SCHEMA_V1,
+            batch_id: "reconcile-edit".into(),
+            authority_id: "player:terrain-test".into(),
+            address: runtime.world().active_address().clone(),
+            expected_revision: runtime.world().revision(),
+            commands: vec![blockwild_authority::WorldMutationCommandR4V1::SetBlock {
+                position: edited_position,
+                block_id: 254,
+                facing: None,
+            }],
+        });
+        assert!(runtime.commit(edit).accepted());
+
+        for step in 1..=8 {
+            let receipt = reconcile(&mut runtime, ring(step * 5, step * -3)).unwrap();
+            assert_eq!(receipt.desired_chunk_count, 25);
+            assert_eq!(receipt.resident_sections, 300);
+            assert_eq!(runtime.world().resident_chunk_coordinates().len(), 25);
+            assert_eq!(runtime.world().resident_section_count(), 300);
+        }
+        assert!(matches!(
+            runtime.world().read_cell(edited_position),
+            WorldCellReadV1::Unloaded { .. }
+        ));
+
+        let revisit = reconcile(&mut runtime, ring(0, 0)).unwrap();
+        assert_eq!(revisit.generated_chunk_count, 25);
+        assert_eq!(revisit.evicted_chunk_count, 25);
+        assert!(matches!(
+            runtime.world().read_cell(edited_position),
+            WorldCellReadV1::Loaded { cell, .. } if cell.block_id == 254
+        ));
+        let idempotent = reconcile(&mut runtime, ring(0, 0)).unwrap();
+        assert_eq!(idempotent.generated_chunk_count, 0);
+        assert_eq!(idempotent.retained_chunk_count, 25);
+        assert_eq!(idempotent.evicted_chunk_count, 0);
+        assert_eq!(idempotent.previous_world_revision, idempotent.world_revision);
+    }
+
+    #[test]
+    fn exact_terrain_reconcile_rejects_stale_invalid_and_partial_work_atomically() {
+        let fixture = blockwild_generation::fixture_request("integrated-residency-reconcile-reject", 0, 0, 1);
+        let mut runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2 {
+            world_seed: fixture.seed_text,
+            terrain_content_hash: parse_canonical_hash(&fixture.content_hash).unwrap(),
+            generator_hash: parse_canonical_hash(&fixture.generator_hash).unwrap(),
+            ..IntegratedRuntimeConfigV2::default()
+        })
+        .unwrap();
+        let valid = IntegratedTerrainResidencyReconcileBatchV2 {
+            expected_world_revision: runtime.world().revision(),
+            generation_options_json: runtime.config().generation_options_json.clone(),
+            desired_chunks: vec![IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 }],
+        };
+        runtime.reconcile_terrain_residency(&valid).unwrap();
+        let before_hash = runtime.state_hash();
+        let before_revision = runtime.world().revision();
+        let before_diagnostics = runtime.generation_diagnostics();
+        let stale = IntegratedTerrainResidencyReconcileBatchV2 {
+            expected_world_revision: valid.expected_world_revision,
+            desired_chunks: vec![IntegratedTerrainChunkCoordinateV1 { chunk_x: 1, chunk_z: 0 }],
+            ..valid.clone()
+        };
+        assert_eq!(
+            runtime.reconcile_terrain_residency(&stale).unwrap_err().code,
+            "terrain-residency-reconcile-stale"
+        );
+        let invalid = IntegratedTerrainResidencyReconcileBatchV2 {
+            expected_world_revision: before_revision,
+            desired_chunks: vec![
+                IntegratedTerrainChunkCoordinateV1 { chunk_x: 1, chunk_z: 0 },
+                IntegratedTerrainChunkCoordinateV1 {
+                    chunk_x: i32::MAX,
+                    chunk_z: 0,
+                },
+            ],
+            ..valid
+        };
+        assert_eq!(
+            runtime.reconcile_terrain_residency(&invalid).unwrap_err().code,
+            "terrain-residency-coordinate"
+        );
+        assert_eq!(runtime.state_hash(), before_hash);
+        assert_eq!(runtime.world().revision(), before_revision);
+        assert_eq!(runtime.world().resident_chunk_coordinates(), vec![(0, 0)]);
+        assert_eq!(runtime.generation_diagnostics(), before_diagnostics);
     }
 
     #[test]
