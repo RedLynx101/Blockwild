@@ -8,8 +8,24 @@ import { CAPTURE_ORB_RACK_SIZE, CREATURE_HEALER_GEL_CAP, CREATURE_HEALER_GEL_MUL
 import { CREATURE_MOVES, CREATURE_REACTIONS, CREATURE_STATUSES } from "./creature-moves";
 import { CREATURE_PROFILES } from "./creature-profiles";
 import { CREATURE_TYPE_CHART, CREATURE_TYPES } from "./creature-types";
-import { BLOCKS, ITEMS, RECIPES, SMELTING, itemForBlock, type BlockDefinition } from "./data";
+import {
+  ARCHIVE_SHELF_BLOCKS,
+  BLOCKS,
+  CULTIVATED_FLOWERS,
+  ITEMS,
+  ORDINARY_FLOWERS,
+  RECIPES,
+  SMELTING,
+  BlockId,
+  Item,
+  isBedBlock,
+  itemForBlock,
+  type BlockDefinition,
+  type ItemCode,
+} from "./data";
 import { isDirectionallyPlacedBlock } from "./block-facing";
+import { doorItem, isDoorBlock } from "./doors";
+import { canTill, isTreeLogBlock, plantingResult } from "./farming";
 import { DIGITAL_CREATURE_CELL_CAPACITY, DIGITAL_CREATURE_HEAL_SECONDS, DIGITAL_ITEM_CELL_CAPACITY } from "./digital-storage";
 import { COMMERCE_CATALOG, STOCKS, ATLANTIAN_MERCHANT_OFFERS, DWARF_MERCHANT_OFFERS, GOBLIN_MERCHANT_OFFERS, HOBBIT_MERCHANT_OFFERS, SUGARCOURT_MERCHANT_OFFERS, WOOD_ELF_MERCHANT_OFFERS } from "./economy";
 import { FACTIONS } from "./factions";
@@ -36,7 +52,8 @@ export const MAX_RUST_CONTENT_BYTES = 256 * 1024;
 export const MAX_RUST_CONTENT_EXTENSION_BYTES = 64 * 1024;
 export const MAX_RUST_CONTENT_ALIASES = 16;
 export const RUST_BLOCK_ACTION_CATALOG_ID = "block-actions" as const;
-export const RUST_BLOCK_ACTION_CATALOG_SCHEMA = 1 as const;
+export const RUST_BLOCK_ACTION_CATALOG_SCHEMA = 2 as const;
+export const RUST_BLOCK_ACTION_RNG_SCALE = 1_000_000 as const;
 
 export const RUST_CONTENT_DOMAINS = Object.freeze([
   "item", "crafting-recipe", "machine-recipe", "machine-profile", "ability-spell", "creature-profile",
@@ -362,6 +379,417 @@ function source(domain: RustContentDomain, id: string, schemaId: string, schemaV
   return { domain, id, schemaId, schemaVersion, contentVersion, value };
 }
 
+export const RUST_BLOCK_ACTION_RNG_SEMANTICS_V2 = Object.freeze({
+  algorithm: "xorshift32",
+  seedDerivation: "blockwild-seed-stream-v1",
+  stream: "block-action-loot-v1",
+  unit: "u32-open-upper-v1",
+  ordering: "stable-profile-rule-order-v1",
+  randomDropGate: "less-than-or-equal-v1",
+  exclusiveSelection: "less-than-cumulative-v1",
+  plantYieldClampMaximumMillionths: 999_900,
+} as const);
+
+export const RUST_BLOCK_ACTION_AUTHORITY_BLOCKERS_V2 = Object.freeze([
+  "authoritative-rng-context-unbound",
+  "dynamic-session-dispatch-runtime",
+  "game-mode-host-custody-runtime",
+  "legacy-computed-loot-source-runtime",
+  "world-support-collision-runtime",
+] as const);
+
+export type RustBlockLootCountV2 = Readonly<
+  | { kind: "constant"; value: number }
+  | { kind: "uniform-inclusive"; minimum: number; maximum: number }
+  | {
+    kind: "shared-roll-formula";
+    base: number;
+    floorRollMultiplier: number;
+    scytheBonus: number;
+    thresholdBonuses: readonly Readonly<{ aboveMillionths: number; amount: number; scytheOnly: boolean }>[];
+  }
+>;
+
+export type RustBlockLootRuleV2 = Readonly<{
+  id: string;
+  item: ItemCode;
+  chanceMillionths: number;
+  chanceModifier: "none" | "luck-adjusted-v1";
+  /**
+   * `random-drop-v1` consumes a gate draw even at probability one and, on
+   * success, a second count draw even for a constant range. `shared-plant-yield`
+   * consumes one draw for the complete harvest. `shared-exclusive` consumes
+   * one strict cumulative-selection draw for the complete rule list.
+   */
+  rollScope: "none" | "random-drop-v1" | "shared-plant-yield" | "shared-exclusive";
+  count: RustBlockLootCountV2;
+}>;
+
+export type RustBlockHarvestIntentV2 = Readonly<{
+  replacementWithoutScythe: BlockId;
+  replacementWithScythe: BlockId;
+  replantedWithoutScythe: boolean;
+  replantedWithScythe: boolean;
+  preserveCultivated: true;
+  scytheDurabilityCost: number;
+}>;
+
+export type RustBlockPlantingRuleV2 = Readonly<{
+  item: ItemCode;
+  above: "air" | "replaceable-dry" | "water-source";
+  resultBlock: BlockId;
+}>;
+
+type RustBlockLootV2 = Readonly<{
+  mode: "none" | "all" | "exclusive";
+  selfDropMode: "absent" | "contextual" | "mapped-item";
+  silkTouch: "not-authored";
+  rules: readonly RustBlockLootRuleV2[];
+}>;
+
+type PlantHarvestSpec = Readonly<{
+  replacementWithoutScythe: BlockId;
+  replacementWithScythe: BlockId;
+  replantedWithoutScythe: boolean;
+  replantedWithScythe: boolean;
+  rules: readonly RustBlockLootRuleV2[];
+}>;
+
+const constantCount = (value: number): RustBlockLootCountV2 => ({ kind: "constant", value });
+const uniformCount = (minimum: number, maximum: number): RustBlockLootCountV2 => ({ kind: "uniform-inclusive", minimum, maximum });
+const sharedCount = (
+  base: number,
+  floorRollMultiplier: number,
+  scytheBonus = 0,
+  thresholdBonuses: readonly Readonly<{ aboveMillionths: number; amount: number; scytheOnly?: boolean }>[] = [],
+): RustBlockLootCountV2 => ({
+  kind: "shared-roll-formula",
+  base,
+  floorRollMultiplier,
+  scytheBonus,
+  thresholdBonuses: thresholdBonuses.map((bonus) => ({ ...bonus, scytheOnly: bonus.scytheOnly === true })),
+});
+
+const lootRule = (
+  id: string,
+  item: ItemCode,
+  count: RustBlockLootCountV2,
+  options: Readonly<{
+    chanceMillionths?: number;
+    chanceModifier?: RustBlockLootRuleV2["chanceModifier"];
+    rollScope?: RustBlockLootRuleV2["rollScope"];
+  }> = {},
+): RustBlockLootRuleV2 => ({
+  id,
+  item,
+  chanceMillionths: options.chanceMillionths ?? RUST_BLOCK_ACTION_RNG_SCALE,
+  chanceModifier: options.chanceModifier ?? "none",
+  rollScope: options.rollScope ?? "none",
+  count,
+});
+
+const plantRule = (id: string, item: ItemCode, count: RustBlockLootCountV2): RustBlockLootRuleV2 => lootRule(
+  id,
+  item,
+  count,
+  { rollScope: "shared-plant-yield" },
+);
+
+function plantHarvestSpec(block: BlockId): PlantHarvestSpec | null {
+  const crop = (
+    replacement: BlockId,
+    rules: readonly RustBlockLootRuleV2[],
+  ): PlantHarvestSpec => ({
+    replacementWithoutScythe: replacement,
+    replacementWithScythe: replacement,
+    replantedWithoutScythe: true,
+    replantedWithScythe: true,
+    rules,
+  });
+  if (block === BlockId.WheatCrop) return crop(BlockId.WheatSprout, [
+    plantRule("wheat", Item.Wheat, sharedCount(2, 2, 1)),
+    plantRule("wheat-seeds", Item.WheatSeeds, sharedCount(1, 0, 0, [
+      { aboveMillionths: 560_000, amount: 1 },
+      { aboveMillionths: 820_000, amount: 1, scytheOnly: true },
+    ])),
+  ]);
+  if (block === BlockId.MoonriceCrop) return crop(BlockId.MoonriceSprout, [
+    plantRule("moonrice", Item.Moonrice, sharedCount(2, 3, 1)),
+    plantRule("moonrice-seeds", Item.MoonriceSeeds, sharedCount(1, 0, 0, [{ aboveMillionths: 500_000, amount: 1 }])),
+  ]);
+  if (block === BlockId.SunrootCrop) return crop(BlockId.SunrootSprout, [
+    plantRule("sunroot", Item.Sunroot, sharedCount(2, 3, 1)),
+    plantRule("sunroot-starts", Item.SunrootStarts, sharedCount(1, 0, 0, [{ aboveMillionths: 620_000, amount: 1 }])),
+  ]);
+  if (block === BlockId.PeppermintCrop) return crop(BlockId.PeppermintSprout, [
+    plantRule("peppermint-cane", Item.PeppermintCane, sharedCount(2, 3, 1)),
+    plantRule("peppermint-starts", Item.PeppermintSeeds, sharedCount(1, 0, 0, [{ aboveMillionths: 580_000, amount: 1 }])),
+  ]);
+  if (block === BlockId.CocoaCrop) return crop(BlockId.CocoaSprout, [
+    plantRule("cocoa-nib", Item.CocoaNib, sharedCount(2, 3, 1)),
+    plantRule("cocoa-seeds", Item.CocoaSeeds, sharedCount(1, 0, 0, [{ aboveMillionths: 620_000, amount: 1 }])),
+  ]);
+  if (block === BlockId.CottonCrop) return crop(BlockId.CottonSprout, [
+    plantRule("cotton-boll", Item.CottonBoll, sharedCount(2, 3, 1)),
+    plantRule("cotton-seeds", Item.CottonSeeds, sharedCount(1, 0, 0, [{ aboveMillionths: 550_000, amount: 1 }])),
+  ]);
+  if (block === BlockId.SunCarrotCrop) return crop(BlockId.SunCarrotSprout, [
+    plantRule("sun-carrot", Item.SunCarrot, sharedCount(2, 2, 1)),
+    plantRule("sun-carrot-seeds", Item.SunCarrotSeeds, sharedCount(1, 0, 0, [{ aboveMillionths: 620_000, amount: 1 }])),
+  ]);
+  if (block === BlockId.BluepodCrop) return crop(BlockId.BluepodSprout, [
+    plantRule("bluepod-beans", Item.BluepodBeans, sharedCount(2, 3, 1)),
+    plantRule("bluepod-seeds", Item.BluepodSeeds, sharedCount(1, 0, 0, [{ aboveMillionths: 580_000, amount: 1 }])),
+  ]);
+  const stable = (replacement: BlockId, replanted: boolean, rules: readonly RustBlockLootRuleV2[]): PlantHarvestSpec => ({
+    replacementWithoutScythe: replacement,
+    replacementWithScythe: replacement,
+    replantedWithoutScythe: replanted,
+    replantedWithScythe: replanted,
+    rules,
+  });
+  if (block === BlockId.ShellfruitCrop) return stable(BlockId.ShellfruitYoung, true, [
+    plantRule("shellfruit", Item.Shellfruit, sharedCount(2, 3, 1)),
+  ]);
+  if (block === BlockId.MoonberryBushRipe) return stable(BlockId.MoonberryBush, true, [
+    plantRule("moonberry", Item.Berry, sharedCount(2, 3, 1)),
+  ]);
+  if (block === BlockId.SunberryBushRipe) return stable(BlockId.SunberryBush, true, [
+    plantRule("sunberry", Item.Sunberry, sharedCount(2, 2, 1)),
+  ]);
+  if (block === BlockId.AppleFruit) return stable(BlockId.Air, false, [plantRule("apple", Item.Apple, constantCount(1))]);
+  if (block === BlockId.FrostpearFruit) return stable(BlockId.Air, false, [plantRule("frostpear", Item.Frostpear, constantCount(1))]);
+  const cultivatedIndex = CULTIVATED_FLOWERS.indexOf(block);
+  if (cultivatedIndex >= 0) return stable(ORDINARY_FLOWERS[cultivatedIndex], true, [
+    plantRule("cultivated-flower", itemForBlock(ORDINARY_FLOWERS[cultivatedIndex]), sharedCount(4, 4, 2)),
+  ]);
+  const wild: Readonly<Partial<Record<BlockId, Readonly<{ item: ItemCode; count: RustBlockLootCountV2; replacement?: BlockId }>>>> = {
+    [BlockId.Saltbrush]: { item: Item.SaltbrushSprig, count: sharedCount(1, 2) },
+    [BlockId.CoastAster]: { item: Item.CoastAsterPetal, count: sharedCount(2, 2) },
+    [BlockId.SakuraBloom]: { item: Item.SakuraBloomItem, count: sharedCount(1, 2) },
+    [BlockId.Dreamblossom]: { item: Item.DreamblossomItem, count: sharedCount(1, 2) },
+    [BlockId.LanternLotus]: { item: Item.LanternLotusItem, count: sharedCount(1, 2) },
+    [BlockId.RainveilFern]: { item: Item.RainveilFernItem, count: constantCount(1) },
+    [BlockId.GumdropBush]: { item: Item.Gumdrop, count: sharedCount(1, 3) },
+    [BlockId.PeppermintTuft]: { item: Item.PeppermintCane, count: sharedCount(1, 2) },
+    [BlockId.LollipopOrchid]: { item: Item.LollipopPetal, count: sharedCount(1, 2) },
+    [BlockId.MarshmallowShrub]: { item: Item.MarshmallowTuft, count: sharedCount(1, 2) },
+    [BlockId.LumenKelp]: { item: Item.LumenKelpFrond, count: sharedCount(1, 2), replacement: BlockId.Water },
+    [BlockId.StarCoral]: { item: Item.StarCoralShard, count: sharedCount(1, 2), replacement: BlockId.Water },
+    [BlockId.AbyssBloom]: { item: Item.AbyssBloomNectar, count: constantCount(1), replacement: BlockId.Water },
+    [BlockId.Tidevine]: { item: Item.TidevineFiber, count: sharedCount(1, 3), replacement: BlockId.Water },
+  };
+  const entry = wild[block];
+  return entry ? stable(
+    entry.replacement ?? BlockId.Air,
+    false,
+    [plantRule("wild-plant", entry.item, entry.count)],
+  ) : null;
+}
+
+const GRASS_TO_DIRT = new Set<BlockId>([
+  BlockId.Grass, BlockId.SnowyGrass, BlockId.SavannaGrass, BlockId.SwampGrass, BlockId.JungleGrass, BlockId.SakuraGrass,
+]);
+const STONE_TO_COBBLE = new Set<BlockId>([BlockId.Stone, BlockId.Deepstone, BlockId.Basalt]);
+const ORDINARY_LEAVES = new Set<BlockId>([
+  BlockId.WildwoodLeaves, BlockId.PineLeaves, BlockId.BirchLeaves, BlockId.BloomLeaves,
+  BlockId.JungleLeaves, BlockId.SakuraLeaves, BlockId.CandywoodLeaves,
+]);
+const SAPLING_BLOCKS = new Set<BlockId>([
+  BlockId.WildwoodSapling, BlockId.JungleSapling, BlockId.SakuraSapling, BlockId.CandywoodSapling,
+]);
+const FENCE_GATE_BLOCKS = new Set<BlockId>([
+  BlockId.FenceGateNorthSouthClosed, BlockId.FenceGateEastWestClosed,
+  BlockId.FenceGateNorthSouthOpen, BlockId.FenceGateEastWestOpen,
+]);
+const DYNAMIC_STATE_BLOCKS = new Set<BlockId>([
+  BlockId.Furnace, BlockId.WheatMill, BlockId.Chest, BlockId.Apiary, BlockId.WildBeehive,
+  BlockId.ChrysalisLoom, BlockId.CaptureOrbRack, BlockId.CreatureHealer, BlockId.FieldPerch,
+  BlockId.AlchemyStand, BlockId.Distillery, BlockId.Sugarworks, BlockId.GolemForge,
+  BlockId.ButterflyExhibit, BlockId.GlassAquarium, BlockId.TomeDisplay, ...ARCHIVE_SHELF_BLOCKS,
+]);
+
+function blockLoot(definition: BlockDefinition): RustBlockLootV2 {
+  const type = definition.id;
+  if (type === BlockId.Air || type === BlockId.Bedrock || definition.liquid !== undefined || type === BlockId.WildBeehive) {
+    return { mode: "none", selfDropMode: "absent", silkTouch: "not-authored", rules: [] };
+  }
+  if (isDoorBlock(type)) return {
+    mode: "all", selfDropMode: "contextual", silkTouch: "not-authored",
+    rules: [lootRule("paired-door", doorItem(type), constantCount(1))],
+  };
+  if (isBedBlock(type)) return {
+    mode: "all", selfDropMode: "contextual", silkTouch: "not-authored",
+    rules: [lootRule("paired-bed", Item.WildwoodBed, constantCount(1))],
+  };
+  const harvest = plantHarvestSpec(type);
+  if (harvest) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: harvest.rules };
+  if (type === BlockId.SugarplumGrass) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("sugar-soil", Item.SugarSoilBlock, constantCount(1))] };
+  if (GRASS_TO_DIRT.has(type)) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("soil", BlockId.Dirt, constantCount(1))] };
+  if (STONE_TO_COBBLE.has(type)) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("cobblestone", BlockId.Cobblestone, constantCount(1))] };
+  const rangedOre: Readonly<Partial<Record<BlockId, readonly [ItemCode, number, number]>>> = {
+    [BlockId.CoalOre]: [Item.Coal, 1, 2],
+    [BlockId.IronOre]: [Item.RawIron, 1, 4],
+    [BlockId.CopperOre]: [Item.RawCopper, 1, 4],
+    [BlockId.CrystalOre]: [Item.CrystalShard, 1, 2],
+    [BlockId.LivingVein]: [Item.VeinmetalFlake, 1, 2],
+  };
+  const ore = rangedOre[type];
+  if (ore) return {
+    mode: "all", selfDropMode: "contextual", silkTouch: "not-authored",
+    rules: [lootRule("ore", ore[0], uniformCount(ore[1], ore[2]), { rollScope: "random-drop-v1" })],
+  };
+  if (type === BlockId.GoldOre) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("raw-gold", Item.RawGold, constantCount(1))] };
+  if (type === BlockId.VeinmetalHeart) return {
+    mode: "all", selfDropMode: "contextual", silkTouch: "not-authored",
+    rules: [
+      lootRule("living-node", Item.LivingNode, constantCount(1)),
+      lootRule("veinmetal-flake", Item.VeinmetalFlake, uniformCount(2, 4), { rollScope: "random-drop-v1" }),
+    ],
+  };
+  if (ORDINARY_LEAVES.has(type)) {
+    const sapling = type === BlockId.JungleLeaves ? Item.RainveilSapling
+      : type === BlockId.SakuraLeaves ? Item.SakurabloomSapling
+        : type === BlockId.CandywoodLeaves ? Item.CandywoodSaplingItem : BlockId.WildwoodSapling;
+    return {
+      mode: "all", selfDropMode: "contextual", silkTouch: "not-authored",
+      rules: [
+        lootRule("stick", Item.Stick, uniformCount(1, 2), { chanceMillionths: 220_000, chanceModifier: "luck-adjusted-v1", rollScope: "random-drop-v1" }),
+        lootRule("sapling", sapling, constantCount(1), { chanceMillionths: 55_000, chanceModifier: "luck-adjusted-v1", rollScope: "random-drop-v1" }),
+        lootRule("apple", Item.Apple, constantCount(1), { chanceMillionths: 60_000, chanceModifier: "luck-adjusted-v1", rollScope: "random-drop-v1" }),
+      ],
+    };
+  }
+  if (type === BlockId.AppleLeaves || type === BlockId.FrostpearLeaves) return {
+    mode: "all", selfDropMode: "contextual", silkTouch: "not-authored",
+    rules: [
+      lootRule("stick", Item.Stick, uniformCount(1, 2), { chanceMillionths: 200_000, chanceModifier: "luck-adjusted-v1", rollScope: "random-drop-v1" }),
+      lootRule(type === BlockId.AppleLeaves ? "apple" : "frostpear", type === BlockId.AppleLeaves ? Item.Apple : Item.Frostpear, constantCount(1), {
+        chanceMillionths: type === BlockId.AppleLeaves ? 80_000 : 85_000,
+        chanceModifier: "luck-adjusted-v1",
+        rollScope: "random-drop-v1",
+      }),
+    ],
+  };
+  if (type === BlockId.TallGrass || definition.verticalConnectGroup === "double-tall-grass") return {
+    mode: "all", selfDropMode: "contextual", silkTouch: "not-authored",
+    rules: [lootRule("fiber", Item.Fiber, constantCount(1), { chanceMillionths: 350_000, chanceModifier: "luck-adjusted-v1", rollScope: "random-drop-v1" })],
+  };
+  if (type === BlockId.Gravel) return {
+    mode: "exclusive", selfDropMode: "contextual", silkTouch: "not-authored",
+    rules: [
+      lootRule("flint", Item.Flint, constantCount(1), { chanceMillionths: 160_000, rollScope: "shared-exclusive" }),
+      lootRule("gravel", BlockId.Gravel, constantCount(1), { chanceMillionths: 840_000, rollScope: "shared-exclusive" }),
+    ],
+  };
+  if (type === BlockId.WheatSprout || type === BlockId.WheatYoung) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("wheat-seeds", Item.WheatSeeds, constantCount(1))] };
+  if (type === BlockId.MoonberryShoot || type === BlockId.MoonberryBush) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("moonberry", Item.Berry, constantCount(1))] };
+  if (type === BlockId.SunberryShoot || type === BlockId.SunberryBush) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("sunberry", Item.Sunberry, constantCount(1))] };
+  if (type === BlockId.AppleSapling) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("apple", Item.Apple, constantCount(1))] };
+  if (type === BlockId.FrostpearSapling) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("frostpear", Item.Frostpear, constantCount(1))] };
+  const item = type === BlockId.Torch || definition.shape === "torch" ? BlockId.Torch : itemForBlock(type);
+  if (ITEMS[item] === undefined) return { mode: "none", selfDropMode: "absent", silkTouch: "not-authored", rules: [] };
+  return { mode: "all", selfDropMode: "mapped-item", silkTouch: "not-authored", rules: [lootRule("mapped-item", item, constantCount(1))] };
+}
+
+function plantingRulesForBlock(soil: BlockId): RustBlockPlantingRuleV2[] {
+  const representatives = [
+    ["air", BlockId.Air],
+    ["replaceable-dry", BlockId.TallGrass],
+    ["water-source", BlockId.Water],
+  ] as const;
+  const rules: RustBlockPlantingRuleV2[] = [];
+  for (const item of Object.values(ITEMS).filter((entry) => entry.useKind === "plant").sort((left, right) => left.id - right.id)) {
+    for (const [above, aboveBlock] of representatives) {
+      const planted = plantingResult(item.id, soil, aboveBlock);
+      if (planted) rules.push({ item: item.id, above, resultBlock: planted.block });
+    }
+  }
+  return rules;
+}
+
+const PLACEMENT_ITEMS_BY_BLOCK = new Map<BlockId, ItemCode[]>();
+for (const item of Object.values(ITEMS)) {
+  if (item.placeBlock === undefined) continue;
+  const items = PLACEMENT_ITEMS_BY_BLOCK.get(item.placeBlock) ?? [];
+  items.push(item.id);
+  PLACEMENT_ITEMS_BY_BLOCK.set(item.placeBlock, items);
+}
+for (const items of PLACEMENT_ITEMS_BY_BLOCK.values()) items.sort((left, right) => left - right);
+
+function placementIntent(definition: BlockDefinition, placementItems: readonly ItemCode[]) {
+  if (!placementItems.length) return "none" as const;
+  if (definition.shape === "torch") return "attached-torch" as const;
+  if (isDoorBlock(definition.id)) return "paired-door" as const;
+  if (isBedBlock(definition.id)) return "paired-bed" as const;
+  if (FENCE_GATE_BLOCKS.has(definition.id)) return "oriented-gate" as const;
+  if (definition.shape === "aquarium" || definition.shape === "exhibit") return "bounded-network" as const;
+  if (SAPLING_BLOCKS.has(definition.id)) return "sapling" as const;
+  return isDirectionallyPlacedBlock(definition.id) ? "directional" as const : "direct" as const;
+}
+
+function interactionIntents(definition: BlockDefinition, plantingRules: readonly RustBlockPlantingRuleV2[]) {
+  const intents: string[] = [];
+  if (plantHarvestSpec(definition.id)) intents.push("harvest");
+  if (canTill(definition.id, BlockId.Air)) intents.push("till");
+  if (plantingRules.length) intents.push("plant");
+  if (definition.liquid !== undefined) intents.push("bucket");
+  if (definition.id === BlockId.Water) intents.push("fill-bottle");
+  if (FENCE_GATE_BLOCKS.has(definition.id)) intents.push("toggle-gate");
+  if (definition.id === BlockId.WildwoodFence || FENCE_GATE_BLOCKS.has(definition.id)) intents.push("hitch-lead");
+  if (isDoorBlock(definition.id)) intents.push("toggle-door");
+  if (isBedBlock(definition.id)) intents.push("sleep-session");
+  if (definition.shape === "chair" || definition.shape === "stool") intents.push("seat");
+  const sessions: Readonly<Partial<Record<BlockId, string>>> = {
+    [BlockId.CraftingTable]: "crafting-session",
+    [BlockId.Furnace]: "furnace-session",
+    [BlockId.WheatMill]: "wheat-mill-session",
+    [BlockId.Chest]: "chest-session",
+    [BlockId.Apiary]: "apiary-session",
+    [BlockId.WildBeehive]: "apiary-session",
+    [BlockId.ChrysalisLoom]: "morph-loom-session",
+    [BlockId.CaptureOrbRack]: "orb-rack-session",
+    [BlockId.CreatureHealer]: "healing-station-session",
+    [BlockId.GlassAquarium]: "aquarium-session",
+    [BlockId.FieldPerch]: "field-perch-session",
+    [BlockId.WaygridVaultTerminal]: "waygrid-items-session",
+    [BlockId.WaygridCreatureArchive]: "waygrid-creatures-session",
+    [BlockId.GolemForge]: "golem-forge-session",
+    [BlockId.ButterflyExhibit]: "exhibit-session",
+    [BlockId.CartographyTable]: "cartography-session",
+    [BlockId.AlchemyStand]: "alchemy-session",
+    [BlockId.Distillery]: "distillery-session",
+    [BlockId.Sugarworks]: "sugarworks-session",
+    [BlockId.Wayshrine]: "map-session",
+    [BlockId.DraconicIncubator]: "incubator-session",
+    [BlockId.DeepgearLift]: "lift",
+    [BlockId.TomeDisplay]: "tome-display-session",
+    [BlockId.CaveMarker]: "wayfinder-session",
+  };
+  if (ARCHIVE_SHELF_BLOCKS.includes(definition.id)) intents.push("archive-shelf-session");
+  const session = sessions[definition.id];
+  if (session) intents.push(session);
+  return intents;
+}
+
+function authorityBlockers(definition: BlockDefinition, loot: RustBlockLootV2) {
+  const blockers: string[] = [];
+  if (isTreeLogBlock(definition.id)) blockers.push("rooted-tree-discovery-runtime");
+  if (isDoorBlock(definition.id) || isBedBlock(definition.id)) blockers.push("paired-world-state-runtime");
+  if (definition.waterlogged || definition.id === BlockId.PeppermintTuft || definition.verticalConnectGroup === "double-tall-grass") blockers.push("column-world-state-runtime");
+  if (definition.shape === "aquarium" || definition.shape === "exhibit") blockers.push("network-topology-state-runtime");
+  if (DYNAMIC_STATE_BLOCKS.has(definition.id)) blockers.push("dynamic-block-state-runtime");
+  if (loot.rules.some((rule) => rule.chanceModifier === "luck-adjusted-v1")) blockers.push("player-luck-context-runtime");
+  if (loot.rules.some((rule) => rule.rollScope !== "none")) blockers.push("authoritative-rng-context-unbound");
+  if (definition.liquid !== undefined) blockers.push("liquid-source-state-runtime");
+  const mappedItem = itemForBlock(definition.id);
+  if (loot.mode === "none" && definition.id !== BlockId.Air && definition.id !== BlockId.Bedrock
+    && definition.liquid === undefined && definition.id !== BlockId.WildBeehive && ITEMS[mappedItem] === undefined) {
+    blockers.push("legacy-loot-item-reference-unresolved");
+  }
+  return [...new Set(blockers)].sort();
+}
+
 function blockActionTopologyFlags(definition: BlockDefinition) {
   const flags: string[] = [];
   if (isDirectionallyPlacedBlock(definition.id)) flags.push("directional");
@@ -374,11 +802,19 @@ function blockActionTopologyFlags(definition: BlockDefinition) {
   return flags;
 }
 
-export function blockwildBlockActionCatalogV1() {
+export function blockwildBlockActionCatalogV2() {
   const profiles = Object.values(BLOCKS)
     .sort((left, right) => left.id - right.id)
     .map((definition) => {
       const mappedItem = itemForBlock(definition.id);
+      const loot = blockLoot(definition);
+      const harvest = plantHarvestSpec(definition.id);
+      const plantingRules = plantingRulesForBlock(definition.id);
+      const placementItems = PLACEMENT_ITEMS_BY_BLOCK.get(definition.id) ?? [];
+      const interactions = interactionIntents(definition, plantingRules);
+      const profileAuthorityBlockers = authorityBlockers(definition, loot);
+      const blocked = definition.id === BlockId.Air || definition.id === BlockId.Bedrock || definition.liquid !== undefined;
+      const rootedTree = isTreeLogBlock(definition.id);
       return {
         id: definition.id,
         hardness: definition.hardness,
@@ -393,10 +829,45 @@ export function blockwildBlockActionCatalogV1() {
         ...(definition.verticalConnectGroup === undefined ? {} : { verticalConnectGroup: definition.verticalConnectGroup }),
         ...(definition.connectGroup === undefined ? {} : { connectGroup: definition.connectGroup }),
         topologyFlags: blockActionTopologyFlags(definition),
+        breakProfile: {
+          replacement: blocked ? "blocked"
+            : isDoorBlock(definition.id) || isBedBlock(definition.id) ? "paired-air"
+              : definition.waterlogged ? "column-water"
+                : definition.id === BlockId.PeppermintTuft || definition.verticalConnectGroup === "double-tall-grass" ? "column-air"
+                  : rootedTree ? "rooted-tree-or-air"
+                    : "air",
+          durabilityCost: blocked ? { kind: "none" }
+            : rootedTree ? { kind: "rooted-tree-log-count", minimum: 1, divisor: 4, rounding: "ceiling" }
+              : { kind: "constant", amount: 1 },
+          wrongTool: "break-no-loot",
+          contextualOverride: rootedTree ? "rooted-tree-fall-runtime" : "none",
+          loot: { ...loot, rules: loot.rules.map((rule, ordinal) => ({ ...rule, ordinal })) },
+        },
+        ...(harvest === null ? {} : { harvestIntent: {
+          replacementWithoutScythe: harvest.replacementWithoutScythe,
+          replacementWithScythe: harvest.replacementWithScythe,
+          replantedWithoutScythe: harvest.replantedWithoutScythe,
+          replantedWithScythe: harvest.replantedWithScythe,
+          preserveCultivated: true,
+          scytheDurabilityCost: 1,
+        } satisfies RustBlockHarvestIntentV2 }),
+        placementIntent: placementIntent(definition, placementItems),
+        ...(placementItems.length ? { placementItems } : {}),
+        ...(interactions.length ? { interactionIntents: interactions } : {}),
+        ...(plantingRules.length ? { plantingRules } : {}),
+        ...(profileAuthorityBlockers.length ? { authorityBlockers: profileAuthorityBlockers } : {}),
       };
     });
-  return { schema: RUST_BLOCK_ACTION_CATALOG_SCHEMA, profiles } as const;
+  return {
+    schema: RUST_BLOCK_ACTION_CATALOG_SCHEMA,
+    rngSemantics: RUST_BLOCK_ACTION_RNG_SEMANTICS_V2,
+    authorityBlockers: RUST_BLOCK_ACTION_AUTHORITY_BLOCKERS_V2,
+    profiles,
+  } as const;
 }
+
+/** Compatibility name retained for callers; it now returns the explicit V2 catalog. */
+export const blockwildBlockActionCatalogV1 = blockwildBlockActionCatalogV2;
 
 export function blockwildProductionContentSources(): readonly RustContentSourceEntry[] {
   const entries: RustContentSourceEntry[] = [];
@@ -405,7 +876,7 @@ export function blockwildProductionContentSources(): readonly RustContentSourceE
     RUST_BLOCK_ACTION_CATALOG_ID,
     "block-action-catalog",
     RUST_BLOCK_ACTION_CATALOG_SCHEMA,
-    blockwildBlockActionCatalogV1(),
+    blockwildBlockActionCatalogV2(),
   ));
   for (const item of Object.values(ITEMS)) entries.push(source("item", String(item.id), "item-definition", 1, item));
   for (const recipe of RECIPES) entries.push(source("crafting-recipe", recipe.id, "crafting-recipe", 1, recipe));

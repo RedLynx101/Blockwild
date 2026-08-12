@@ -6,6 +6,7 @@ import test from "node:test";
 import fixture from "./fixtures/rust-engine/r7/content-metadata-roundtrip-v1.json";
 import {
   canonicalMetadataBlobHashV1,
+  blockwildBlockActionCatalogV2,
   RUST_BLOCK_ACTION_CATALOG_ID,
   RUST_BLOCK_ACTION_CATALOG_SCHEMA,
   compileBlockwildProductionContent,
@@ -17,7 +18,8 @@ import {
   type RustContentSourceEntry,
 } from "../app/game/rust-integrated-runtime-content";
 import { isDirectionallyPlacedBlock } from "../app/game/block-facing";
-import { BLOCKS, ITEMS, itemForBlock } from "../app/game/data";
+import { BLOCKS, ITEMS, BlockId, Item, itemForBlock, type ItemCode } from "../app/game/data";
+import { harvestPlant, plantingResult } from "../app/game/farming";
 import {
   attestPlayerRenderProfileV1,
   BLOCKWILD_PLAYER_RENDER_PROFILE_V1,
@@ -84,9 +86,9 @@ test("production compiler covers all eleven canonical domains without blockers o
   assert.deepEqual(bundle.blockers, []);
   assert.ok(bundle.manifest);
   assert.equal(bundle.artifacts.length, 3_247);
-  assert.equal(bundle.manifest.manifestHash, "782888fed91858df90284a7b66cd64fc");
+  assert.equal(bundle.manifest.manifestHash, "4f7380f3c64a3e7c90284a7b66cd64fc");
   const expected = {
-    item: { count: 538, hash: "eb55bc552f18afe1c88e1191e821f9e8" },
+    item: { count: 538, hash: "68b1935aeb931b6248d0f4dcc74913c1" },
     "crafting-recipe": { count: 198, hash: "d1d9d49ba264b18cc83a527d0fca8a83" },
     "machine-recipe": { count: 46, hash: "ed2dd1f09fc42315c85a98f1da201cdf" },
     "machine-profile": { count: 14, hash: "b0d1fa9becc124cdc81a2845cbc5ab14" },
@@ -122,15 +124,15 @@ test("production block actions are a bounded exact projection of authored block 
   assert.ok(artifact);
   assert.equal(artifact.schemaId, "block-action-catalog");
   assert.equal(artifact.schemaVersion, RUST_BLOCK_ACTION_CATALOG_SCHEMA);
-  assert.equal(artifact.canonicalBytes.length, 46_567);
-  assert.equal(artifact.blobHash, "af5b1a0732499ea8c83a571e32b3e97f");
+  assert.equal(artifact.canonicalBytes.length, 238_041);
+  assert.equal(artifact.blobHash, "4292b5a0f6ef4503c83a571e121f6862");
 
   const decoded = JSON.parse(decoder.decode(artifact.canonicalBytes)) as {
     schema: number;
     profiles: Array<Record<string, unknown>>;
   };
   const authored = Object.values(BLOCKS).sort((left, right) => left.id - right.id);
-  assert.equal(decoded.schema, 1);
+  assert.equal(decoded.schema, 2);
   assert.equal(decoded.profiles.length, 313);
   assert.deepEqual(decoded.profiles.map((profile) => profile.id), authored.map((definition) => definition.id));
 
@@ -145,7 +147,22 @@ test("production block actions are a bounded exact projection of authored block 
     if (definition.connectGroup !== undefined) topologyFlags.push("horizontal-connected");
     if (definition.waterlogged === true) topologyFlags.push("waterlogged");
     if (definition.shape === "aquarium" || definition.shape === "exhibit") topologyFlags.push("bounded-network");
-    assert.deepEqual(decoded.profiles[index], {
+    const profile = decoded.profiles[index];
+    assert.deepEqual({
+      id: profile.id,
+      hardness: profile.hardness,
+      solid: profile.solid,
+      replaceable: profile.replaceable,
+      preferredTool: profile.preferredTool,
+      requiredTier: profile.requiredTier,
+      ...(profile.item === undefined ? {} : { item: profile.item }),
+      ...(profile.liquid === undefined ? {} : { liquid: profile.liquid }),
+      ...(profile.shape === undefined ? {} : { shape: profile.shape }),
+      ...(profile.collisionHeight === undefined ? {} : { collisionHeight: profile.collisionHeight }),
+      ...(profile.verticalConnectGroup === undefined ? {} : { verticalConnectGroup: profile.verticalConnectGroup }),
+      ...(profile.connectGroup === undefined ? {} : { connectGroup: profile.connectGroup }),
+      topologyFlags: profile.topologyFlags,
+    }, {
       id: definition.id,
       hardness: definition.hardness,
       solid: definition.solid,
@@ -161,6 +178,116 @@ test("production block actions are a bounded exact projection of authored block 
       topologyFlags,
     }, `block ${definition.id}`);
   }
+  assert.deepEqual(decoded, blockwildBlockActionCatalogV2());
+});
+
+type ContextualLootCount = Readonly<{
+  kind: "constant" | "uniform-inclusive" | "shared-roll-formula";
+  value?: number;
+  minimum?: number;
+  maximum?: number;
+  base?: number;
+  floorRollMultiplier?: number;
+  scytheBonus?: number;
+  thresholdBonuses?: readonly Readonly<{ aboveMillionths: number; amount: number; scytheOnly: boolean }>[];
+}>;
+
+type ContextualBlockProfile = Readonly<{
+  id: BlockId;
+  breakProfile: Readonly<{
+    loot: Readonly<{ rules: readonly Readonly<{ item: ItemCode; count: ContextualLootCount; ordinal: number }>[] }>;
+  }>;
+  harvestIntent?: Readonly<{
+    replacementWithoutScythe: BlockId;
+    replacementWithScythe: BlockId;
+    replantedWithoutScythe: boolean;
+    replantedWithScythe: boolean;
+    preserveCultivated: true;
+    scytheDurabilityCost: number;
+  }>;
+  placementIntent: string;
+  placementItems?: readonly ItemCode[];
+  interactionIntents?: readonly string[];
+  plantingRules?: readonly Readonly<{ item: ItemCode; above: "air" | "replaceable-dry" | "water-source"; resultBlock: BlockId }>[];
+  authorityBlockers?: readonly string[];
+}>;
+
+function evaluateContextualCount(count: ContextualLootCount, roll: number, scythe: boolean) {
+  roll = Math.max(0, Math.min(0.9999, roll));
+  if (count.kind === "constant") return count.value!;
+  if (count.kind === "uniform-inclusive") {
+    return count.minimum! + Math.floor(roll * (count.maximum! - count.minimum! + 1));
+  }
+  return count.base! + Math.floor(roll * count.floorRollMultiplier!) + (scythe ? count.scytheBonus! : 0)
+    + (count.thresholdBonuses ?? []).reduce((sum, bonus) =>
+      sum + (roll > bonus.aboveMillionths / 1_000_000 && (!bonus.scytheOnly || scythe) ? bonus.amount : 0), 0);
+}
+
+test("contextual block actions preserve every authored harvest, planting, placement and item dependency", () => {
+  const catalog = blockwildBlockActionCatalogV2();
+  const profiles = catalog.profiles as readonly unknown[] as readonly ContextualBlockProfile[];
+  const byId = new Map(profiles.map((profile) => [profile.id, profile]));
+  assert.equal(byId.size, Object.keys(BLOCKS).length, "every BLOCKS entry appears exactly once");
+
+  const rolls = [
+    0, 0.000001, 0.333333, 0.499999, 0.5, 0.549999, 0.55, 0.550001, 0.559999, 0.56, 0.560001,
+    0.579999, 0.58, 0.580001, 0.619999, 0.62, 0.620001, 0.819999, 0.82, 0.820001, 0.999999,
+  ];
+  for (const definition of Object.values(BLOCKS)) {
+    const profile = byId.get(definition.id)!;
+    const canonicalHarvest = harvestPlant(definition.id, false, 0.5, true);
+    assert.equal(profile.harvestIntent !== undefined, canonicalHarvest !== null, `harvest intent ${definition.id}`);
+    if (canonicalHarvest && profile.harvestIntent) {
+      assert.deepEqual(profile.harvestIntent, {
+        replacementWithoutScythe: canonicalHarvest.replacement,
+        replacementWithScythe: harvestPlant(definition.id, true, 0.5, true)!.replacement,
+        replantedWithoutScythe: canonicalHarvest.replanted,
+        replantedWithScythe: harvestPlant(definition.id, true, 0.5, true)!.replanted,
+        preserveCultivated: true,
+        scytheDurabilityCost: 1,
+      }, `harvest transform ${definition.id}`);
+      for (const scythe of [false, true]) for (const roll of rolls) {
+        const canonical = harvestPlant(definition.id, scythe, roll, true);
+        assert.ok(canonical);
+        const emitted = profile.breakProfile.loot.rules.map((rule, ordinal) => {
+          assert.equal(rule.ordinal, ordinal, `stable loot rule ordinal ${definition.id}`);
+          return { item: rule.item, count: evaluateContextualCount(rule.count, roll, scythe) };
+        });
+        assert.deepEqual(emitted, canonical.drops, `harvest yield ${definition.id} scythe=${scythe} roll=${roll}`);
+      }
+    }
+
+    const representatives = [
+      ["air", BlockId.Air],
+      ["replaceable-dry", BlockId.TallGrass],
+      ["water-source", BlockId.Water],
+    ] as const;
+    const expectedPlanting = Object.values(ITEMS)
+      .filter((item) => item.useKind === "plant")
+      .sort((left, right) => left.id - right.id)
+      .flatMap((item) => representatives.flatMap(([above, aboveBlock]) => {
+        const result = plantingResult(item.id, definition.id, aboveBlock);
+        return result ? [{ item: item.id, above, resultBlock: result.block }] : [];
+      }));
+    assert.deepEqual(profile.plantingRules ?? [], expectedPlanting, `planting rules ${definition.id}`);
+  }
+
+  for (const item of Object.values(ITEMS)) {
+    if (item.placeBlock === undefined) continue;
+    const profile = byId.get(item.placeBlock);
+    assert.ok(profile, `placeBlock dependency ${item.id}`);
+    assert.ok(profile.placementItems?.includes(item.id), `reverse placement dependency ${item.id}`);
+    assert.notEqual(profile.placementIntent, "none", `placement intent ${item.id}`);
+  }
+  for (const profile of profiles) {
+    assert.equal(profile.placementIntent === "none", (profile.placementItems ?? []).length === 0, `placement exactness ${profile.id}`);
+    for (const item of profile.breakProfile.loot.rules.map((rule) => rule.item)) assert.ok(ITEMS[item], `loot item ${item}`);
+    for (const rule of profile.plantingRules ?? []) assert.ok(ITEMS[rule.item] && BLOCKS[rule.resultBlock], `plant rule ${profile.id}`);
+    assert.deepEqual(profile.authorityBlockers ?? [], [...(profile.authorityBlockers ?? [])].sort(), `blocker order ${profile.id}`);
+  }
+  assert.ok(catalog.authorityBlockers.includes("legacy-computed-loot-source-runtime"));
+  assert.equal(byId.get(BlockId.Gravel)!.breakProfile.loot.rules.length, 2);
+  assert.equal(byId.get(BlockId.CoalOre)!.breakProfile.loot.rules[0].item, Item.Coal);
 });
 
 test("production player profile is derived from and pinned to the tracked BWM2 artifact", async () => {

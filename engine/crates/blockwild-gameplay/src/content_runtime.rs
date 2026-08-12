@@ -13,6 +13,11 @@ pub const MAX_CONTENT_JSON_NODES: usize = 65_536;
 pub const MAX_CONTENT_REFERENCES: usize = 262_144;
 pub const MAX_CONTENT_RESOURCES_PER_ENTRY: usize = 4_096;
 pub const MAX_BLOCK_ACTION_PROFILES: usize = 4_096;
+pub const MAX_BLOCK_LOOT_RULES: usize = 32;
+pub const MAX_BLOCK_LOOT_THRESHOLD_BONUSES: usize = 16;
+pub const MAX_BLOCK_PLANTING_RULES: usize = 512;
+pub const MAX_BLOCK_ACTION_INTENTS: usize = 32;
+pub const MAX_BLOCK_AUTHORITY_BLOCKERS: usize = 32;
 pub const BLOCK_ACTION_CATALOG_ID: &str = "block-actions";
 pub const CONTENT_ACTION_FIXED_SCALE: u64 = 1_000_000;
 
@@ -98,6 +103,7 @@ const BLOCK_ACTION_VERTICAL_CONNECT_GROUPS: &[&str] = &[
 pub enum ContentSchema {
     ItemDefinition,
     BlockActionCatalog,
+    BlockActionCatalogV2,
     CraftingRecipe,
     BlueprintDefinition,
     AlchemyRecipe,
@@ -138,6 +144,7 @@ impl ContentSchema {
         match self {
             Self::ItemDefinition => "item-definition@1",
             Self::BlockActionCatalog => "block-action-catalog@1",
+            Self::BlockActionCatalogV2 => "block-action-catalog@2",
             Self::CraftingRecipe => "crafting-recipe@1",
             Self::BlueprintDefinition => "blueprint-definition@1",
             Self::AlchemyRecipe => "alchemy-recipe@1",
@@ -384,6 +391,204 @@ pub enum ContentItemUseKind {
     Cardforge,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockLootChanceModifier {
+    None,
+    LuckAdjustedV1,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockLootRollScope {
+    None,
+    RandomDropV1,
+    SharedPlantYield,
+    SharedExclusive,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentBlockLootThresholdBonus {
+    pub above_millionths: u64,
+    pub amount: u32,
+    pub scythe_only: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContentBlockLootCount {
+    Constant(u32),
+    UniformInclusive {
+        minimum: u32,
+        maximum: u32,
+    },
+    SharedRollFormula {
+        base: u32,
+        floor_roll_multiplier: u32,
+        scythe_bonus: u32,
+        threshold_bonuses: Vec<ContentBlockLootThresholdBonus>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentBlockLootRule {
+    pub ordinal: u16,
+    pub id: String,
+    pub item_code: u32,
+    pub chance_millionths: u64,
+    pub chance_modifier: ContentBlockLootChanceModifier,
+    pub roll_scope: ContentBlockLootRollScope,
+    pub count: ContentBlockLootCount,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockLootMode {
+    None,
+    All,
+    Exclusive,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockSelfDropMode {
+    Absent,
+    Contextual,
+    MappedItem,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockSilkTouchPolicy {
+    NotAuthored,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentBlockLootProfile {
+    pub mode: ContentBlockLootMode,
+    pub self_drop_mode: ContentBlockSelfDropMode,
+    pub silk_touch: ContentBlockSilkTouchPolicy,
+    pub rules: Vec<ContentBlockLootRule>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockBreakReplacement {
+    Blocked,
+    Air,
+    PairedAir,
+    ColumnAir,
+    ColumnWater,
+    RootedTreeOrAir,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ContentBlockDurabilityCost {
+    None,
+    Constant(u32),
+    RootedTreeLogCount { minimum: u32, divisor: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockContextualOverride {
+    None,
+    RootedTreeFallRuntime,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockWrongToolPolicy {
+    BreakNoLoot,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentBlockBreakProfile {
+    pub replacement: ContentBlockBreakReplacement,
+    pub durability_cost: ContentBlockDurabilityCost,
+    pub wrong_tool: ContentBlockWrongToolPolicy,
+    pub contextual_override: ContentBlockContextualOverride,
+    pub loot: ContentBlockLootProfile,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentBlockHarvestIntent {
+    pub replacement_without_scythe: u16,
+    pub replacement_with_scythe: u16,
+    pub replanted_without_scythe: bool,
+    pub replanted_with_scythe: bool,
+    pub preserve_cultivated: bool,
+    pub scythe_durability_cost: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockPlacementIntent {
+    None,
+    Direct,
+    Directional,
+    AttachedTorch,
+    PairedDoor,
+    PairedBed,
+    OrientedGate,
+    BoundedNetwork,
+    Sapling,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockInteractionIntent {
+    Harvest,
+    Till,
+    Plant,
+    Bucket,
+    FillBottle,
+    ToggleGate,
+    HitchLead,
+    ToggleDoor,
+    SleepSession,
+    Seat,
+    ArchiveShelfSession,
+    CraftingSession,
+    FurnaceSession,
+    WheatMillSession,
+    ChestSession,
+    ApiarySession,
+    MorphLoomSession,
+    OrbRackSession,
+    HealingStationSession,
+    AquariumSession,
+    FieldPerchSession,
+    WaygridItemsSession,
+    WaygridCreaturesSession,
+    GolemForgeSession,
+    ExhibitSession,
+    CartographySession,
+    AlchemySession,
+    DistillerySession,
+    SugarworksSession,
+    MapSession,
+    IncubatorSession,
+    Lift,
+    TomeDisplaySession,
+    WayfinderSession,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentBlockPlantAbove {
+    Air,
+    ReplaceableDry,
+    WaterSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentBlockPlantingRule {
+    pub item_code: u32,
+    pub above: ContentBlockPlantAbove,
+    pub result_block: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentBlockActionRngSemantics {
+    pub algorithm: String,
+    pub seed_derivation: String,
+    pub stream: String,
+    pub unit: String,
+    pub ordering: String,
+    pub random_drop_gate: String,
+    pub exclusive_selection: String,
+    pub plant_yield_clamp_maximum_millionths: u64,
+}
+
 /// Typed action semantics retained from one installed item-definition blob.
 /// Optional fields remain optional so non-interactive resources do not acquire
 /// fabricated tool, food, or placement behavior during materialization.
@@ -395,10 +600,19 @@ pub struct ContentItemActionProfile {
     pub max_durability: Option<u32>,
     pub infinite_durability: Option<bool>,
     pub food: Option<u32>,
+    pub damage: Option<u32>,
+    pub fuel: Option<u32>,
     pub use_kind: Option<ContentItemUseKind>,
     pub place_block: Option<u16>,
     pub plant_block: Option<u16>,
     pub bucket_liquid: Option<ContentActionLiquidKind>,
+    pub ammo_item: Option<u32>,
+    pub magazine_size: Option<u32>,
+    pub blueprint_id: Option<String>,
+    pub potion_id: Option<String>,
+    pub creature_kind: Option<String>,
+    pub spell_id: Option<String>,
+    pub mana_increase: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -418,11 +632,20 @@ pub struct ContentBlockActionProfile {
     pub vertical_connect_group: Option<String>,
     pub connect_group: Option<String>,
     pub topology_flags: u16,
+    pub break_profile: Option<ContentBlockBreakProfile>,
+    pub harvest_intent: Option<ContentBlockHarvestIntent>,
+    pub placement_intent: Option<ContentBlockPlacementIntent>,
+    pub placement_items: Vec<u32>,
+    pub interaction_intents: Vec<ContentBlockInteractionIntent>,
+    pub planting_rules: Vec<ContentBlockPlantingRule>,
+    pub authority_blockers: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContentBlockActionCatalogRecord {
     pub core: ContentRecordCore,
+    pub rng_semantics: Option<ContentBlockActionRngSemantics>,
+    pub authority_blockers: Vec<String>,
     pub profiles: BTreeMap<u16, ContentBlockActionProfile>,
 }
 
@@ -633,6 +856,8 @@ struct RecordFacts {
     item_code: Option<u32>,
     max_stack: Option<u32>,
     item_action: Option<ContentItemActionProfile>,
+    block_action_rng_semantics: Option<ContentBlockActionRngSemantics>,
+    block_action_authority_blockers: Vec<String>,
     block_actions: BTreeMap<u16, ContentBlockActionProfile>,
     capacity_fields: BTreeMap<String, u64>,
     cooldown_millis: u64,
@@ -1189,6 +1414,7 @@ fn validate_action_links(registry: &ContentRuntimeRegistry, blockers: &mut Vec<C
         // Legacy manifests remain valid until the production catalog is installed.
         return;
     };
+    let contextual_v2 = catalog.core.schema == ContentSchema::BlockActionCatalogV2;
     for item in registry.items.values() {
         for (path, block_id) in [
             ("$.placeBlock", item.action.place_block),
@@ -1206,6 +1432,90 @@ fn validate_action_links(registry: &ContentRuntimeRegistry, blockers: &mut Vec<C
                     path,
                     Some(format!("block-action:{block_id}")),
                     None,
+                ));
+            }
+        }
+        if contextual_v2
+            && let Some(block_id) = item.action.place_block
+            && let Some(profile) = catalog.profiles.get(&block_id)
+            && !profile.placement_items.contains(&item.item_code)
+        {
+            blockers.push(runtime_blocker(
+                ContentRuntimeBlockerCode::DescriptorMismatch,
+                ContentRuntimeStage::References,
+                Some(ContentDomain::Item),
+                Some(item.core.id.clone()),
+                "$.placeBlock",
+                Some(format!("block-action:{block_id} lists item {}", item.item_code)),
+                Some("missing reverse placement binding".to_owned()),
+            ));
+        }
+    }
+    if !contextual_v2 {
+        return;
+    }
+    for profile in catalog.profiles.values() {
+        if let Some(harvest) = &profile.harvest_intent {
+            for (field, replacement) in [
+                ("replacementWithoutScythe", harvest.replacement_without_scythe),
+                ("replacementWithScythe", harvest.replacement_with_scythe),
+            ] {
+                if catalog.profiles.contains_key(&replacement) {
+                    continue;
+                }
+                blockers.push(runtime_blocker(
+                    ContentRuntimeBlockerCode::MissingDependency,
+                    ContentRuntimeStage::References,
+                    Some(ContentDomain::Item),
+                    Some(BLOCK_ACTION_CATALOG_ID.to_owned()),
+                    &format!("$.profiles[id={}].harvestIntent.{field}", profile.block_id),
+                    Some(format!("block-action:{replacement}")),
+                    None,
+                ));
+            }
+        }
+        for item_code in &profile.placement_items {
+            if registry
+                .items
+                .get(&item_code.to_string())
+                .is_some_and(|item| item.action.place_block != Some(profile.block_id))
+            {
+                blockers.push(runtime_blocker(
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::References,
+                    Some(ContentDomain::Item),
+                    Some(BLOCK_ACTION_CATALOG_ID.to_owned()),
+                    &format!("$.profiles[id={}].placementItems", profile.block_id),
+                    Some(format!("item {item_code} places block {}", profile.block_id)),
+                    Some("item placeBlock mismatch".to_owned()),
+                ));
+            }
+        }
+        for rule in &profile.planting_rules {
+            if !catalog.profiles.contains_key(&rule.result_block) {
+                blockers.push(runtime_blocker(
+                    ContentRuntimeBlockerCode::MissingDependency,
+                    ContentRuntimeStage::References,
+                    Some(ContentDomain::Item),
+                    Some(BLOCK_ACTION_CATALOG_ID.to_owned()),
+                    &format!("$.profiles[id={}].plantingRules.resultBlock", profile.block_id),
+                    Some(format!("block-action:{}", rule.result_block)),
+                    None,
+                ));
+            }
+            if registry
+                .items
+                .get(&rule.item_code.to_string())
+                .is_some_and(|item| item.action.use_kind != Some(ContentItemUseKind::Plant))
+            {
+                blockers.push(runtime_blocker(
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::References,
+                    Some(ContentDomain::Item),
+                    Some(BLOCK_ACTION_CATALOG_ID.to_owned()),
+                    &format!("$.profiles[id={}].plantingRules.item", profile.block_id),
+                    Some("item with useKind plant".to_owned()),
+                    Some(rule.item_code.to_string()),
                 ));
             }
         }
@@ -1375,6 +1685,7 @@ fn resolve_schema(
     let schema = match (entry.domain, blob.schema_id.as_str(), blob.schema_version) {
         (ContentDomain::Item, "item-definition", 1) => ContentSchema::ItemDefinition,
         (ContentDomain::Item, "block-action-catalog", 1) => ContentSchema::BlockActionCatalog,
+        (ContentDomain::Item, "block-action-catalog", 2) => ContentSchema::BlockActionCatalogV2,
         (ContentDomain::CraftingRecipe, "crafting-recipe", 1) => ContentSchema::CraftingRecipe,
         (ContentDomain::CraftingRecipe, "blueprint-definition", 1) => ContentSchema::BlueprintDefinition,
         (ContentDomain::MachineRecipe, "alchemy-recipe", 1) => ContentSchema::AlchemyRecipe,
@@ -1438,7 +1749,9 @@ fn validate_record(record: &DecodedRecord, blockers: &mut Vec<ContentRuntimeBloc
     let mut facts = RecordFacts::default();
     match record.schema {
         ContentSchema::ItemDefinition => validate_item(record, object, &mut facts, blockers),
-        ContentSchema::BlockActionCatalog => validate_block_action_catalog(record, object, &mut facts, blockers),
+        ContentSchema::BlockActionCatalog | ContentSchema::BlockActionCatalogV2 => {
+            validate_block_action_catalog(record, object, &mut facts, blockers);
+        }
         ContentSchema::CraftingRecipe => validate_crafting(record, object, &mut facts, blockers),
         ContentSchema::BlueprintDefinition => validate_blueprint(record, object, &mut facts, blockers),
         ContentSchema::AlchemyRecipe | ContentSchema::DistilleryRecipe | ContentSchema::SugarworksRecipe => {
@@ -1516,7 +1829,8 @@ fn validate_item(
     }
     let tool_kind = optional_string(record, object, "toolKind", blockers)
         .and_then(|value| parse_item_tool_kind(record, "$.toolKind", value, blockers));
-    if let Some(ammo) = optional_u32(record, object, "ammoItem", 1, u32::MAX, blockers) {
+    let ammo_item = optional_u32(record, object, "ammoItem", 1, u32::MAX, blockers);
+    if let Some(ammo) = ammo_item {
         push_reference(facts, ContentDomain::Item, ammo.to_string(), "$.ammoItem");
     }
     facts.item_code = item_code;
@@ -1536,6 +1850,8 @@ fn validate_item(
         max_durability: optional_u32(record, object, "maxDurability", 1, u32::MAX, blockers),
         infinite_durability: optional_bool(record, object, "infiniteDurability", blockers),
         food: optional_u32(record, object, "food", 0, u32::MAX, blockers),
+        damage: optional_u32(record, object, "damage", 0, u32::MAX, blockers),
+        fuel: optional_u32(record, object, "fuel", 0, u32::MAX, blockers),
         use_kind: optional_string(record, object, "useKind", blockers)
             .and_then(|value| parse_item_use_kind(record, "$.useKind", value, blockers)),
         place_block: optional_u32(record, object, "placeBlock", 0, u16::MAX.into(), blockers)
@@ -1544,6 +1860,13 @@ fn validate_item(
             .and_then(|value| u16::try_from(value).ok()),
         bucket_liquid: optional_string(record, object, "bucketLiquid", blockers)
             .and_then(|value| parse_liquid_kind(record, "$.bucketLiquid", value, blockers)),
+        ammo_item,
+        magazine_size: optional_u32(record, object, "magazineSize", 1, u32::MAX, blockers),
+        blueprint_id: optional_string(record, object, "blueprintId", blockers).map(str::to_owned),
+        potion_id: optional_string(record, object, "potionId", blockers).map(str::to_owned),
+        creature_kind: optional_string(record, object, "creatureKind", blockers).map(str::to_owned),
+        spell_id: optional_string(record, object, "spellId", blockers).map(str::to_owned),
+        mana_increase: optional_u32(record, object, "manaIncrease", 0, u32::MAX, blockers),
     };
     if item_action.tool_kind.is_none() && (item_action.tier.is_some() || item_action.mining_speed_millionths.is_some())
     {
@@ -1566,6 +1889,16 @@ fn validate_item(
             "missing or non-bucket",
         ));
     }
+    if item_action.magazine_size.is_some() != item_action.ammo_item.is_some() {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            "$.ammoItem",
+            "ammoItem and magazineSize together",
+            "only one field present",
+        ));
+    }
     facts.item_action = Some(item_action);
 }
 
@@ -1575,6 +1908,7 @@ fn validate_block_action_catalog(
     facts: &mut RecordFacts,
     blockers: &mut Vec<ContentRuntimeBlocker>,
 ) {
+    let is_v2 = record.schema == ContentSchema::BlockActionCatalogV2;
     if record.id != BLOCK_ACTION_CATALOG_ID {
         blockers.push(for_record(
             record,
@@ -1585,7 +1919,13 @@ fn validate_block_action_catalog(
             &record.id,
         ));
     }
-    required_u32(record, object, "schema", 1, 1, blockers);
+    let expected_schema = if is_v2 { 2 } else { 1 };
+    required_u32(record, object, "schema", expected_schema, expected_schema, blockers);
+    if is_v2 {
+        facts.block_action_rng_semantics = parse_block_action_rng_semantics(record, object, blockers);
+        facts.block_action_authority_blockers =
+            parse_block_authority_blockers(record, object, "$", "authorityBlockers", true, blockers);
+    }
     let Some(profiles) = required_array(record, object, "profiles", blockers) else {
         return;
     };
@@ -1691,6 +2031,100 @@ fn validate_block_action_catalog(
             connect_group.as_deref(),
             blockers,
         );
+        let (
+            break_profile,
+            harvest_intent,
+            placement_intent,
+            placement_items,
+            interaction_intents,
+            planting_rules,
+            authority_blockers,
+        ) = if is_v2 {
+            (
+                parse_block_break_profile(record, profile, &base, facts, blockers),
+                parse_block_harvest_intent(record, profile, &base, blockers),
+                parse_block_placement_intent(record, profile, &base, blockers),
+                parse_block_placement_items(record, profile, &base, facts, blockers),
+                parse_block_interaction_intents(record, profile, &base, blockers),
+                parse_block_planting_rules(record, profile, &base, facts, blockers),
+                parse_block_authority_blockers(record, profile, &base, "authorityBlockers", false, blockers),
+            )
+        } else {
+            (None, None, None, Vec::new(), Vec::new(), Vec::new(), Vec::new())
+        };
+        if is_v2 {
+            if placement_intent.is_some_and(|intent| intent == ContentBlockPlacementIntent::None)
+                != placement_items.is_empty()
+            {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::Invariants,
+                    &field_path(&base, "placementItems"),
+                    "empty exactly when placementIntent is none",
+                    &placement_items.len().to_string(),
+                ));
+            }
+            let declares_harvest = interaction_intents.contains(&ContentBlockInteractionIntent::Harvest);
+            if declares_harvest != harvest_intent.is_some() {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::Invariants,
+                    &field_path(&base, "harvestIntent"),
+                    "present exactly when interactionIntents contains harvest",
+                    if harvest_intent.is_some() { "present" } else { "missing" },
+                ));
+            }
+            let declares_planting = interaction_intents.contains(&ContentBlockInteractionIntent::Plant);
+            if declares_planting == planting_rules.is_empty() {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::Invariants,
+                    &field_path(&base, "plantingRules"),
+                    "non-empty exactly when interactionIntents contains plant",
+                    &planting_rules.len().to_string(),
+                ));
+            }
+            if let Some(action) = &break_profile {
+                if harvest_intent.is_some()
+                    && action
+                        .loot
+                        .rules
+                        .iter()
+                        .any(|rule| rule.roll_scope != ContentBlockLootRollScope::SharedPlantYield)
+                {
+                    blockers.push(for_record(
+                        record,
+                        ContentRuntimeBlockerCode::DescriptorMismatch,
+                        ContentRuntimeStage::Invariants,
+                        &field_path(&base, "breakProfile"),
+                        "harvest loot rules share the single legacy plant-yield draw",
+                        "non-shared harvest roll",
+                    ));
+                }
+                if action.loot.self_drop_mode == ContentBlockSelfDropMode::MappedItem {
+                    let exact_mapped = mapped_item_code.is_some_and(|mapped| {
+                        action.loot.rules.len() == 1
+                            && action.loot.rules[0].item_code == mapped
+                            && action.loot.rules[0].chance_millionths == CONTENT_ACTION_FIXED_SCALE
+                            && action.loot.rules[0].roll_scope == ContentBlockLootRollScope::None
+                            && action.loot.rules[0].count == ContentBlockLootCount::Constant(1)
+                    });
+                    if !exact_mapped {
+                        blockers.push(for_record(
+                            record,
+                            ContentRuntimeBlockerCode::DescriptorMismatch,
+                            ContentRuntimeStage::Invariants,
+                            &field_path(&base, "breakProfile"),
+                            "mapped-item loot exactly matches the canonical mapped item",
+                            "mismatch",
+                        ));
+                    }
+                }
+            }
+        }
 
         if let (
             Some(block_id),
@@ -1721,6 +2155,13 @@ fn validate_block_action_catalog(
                 vertical_connect_group,
                 connect_group,
                 topology_flags,
+                break_profile,
+                harvest_intent,
+                placement_intent,
+                placement_items,
+                interaction_intents,
+                planting_rules,
+                authority_blockers,
             };
             if facts.block_actions.insert(block_id, profile).is_some() {
                 blockers.push(for_record(
@@ -2999,11 +3440,16 @@ fn insert_record(registry: &mut ContentRuntimeRegistry, record: DecodedRecord, f
     };
     match domain {
         ContentDomain::Item => {
-            if record.schema == ContentSchema::BlockActionCatalog {
+            if matches!(
+                record.schema,
+                ContentSchema::BlockActionCatalog | ContentSchema::BlockActionCatalogV2
+            ) {
                 registry.block_action_catalogs.insert(
                     id,
                     ContentBlockActionCatalogRecord {
                         core,
+                        rng_semantics: facts.block_action_rng_semantics,
+                        authority_blockers: facts.block_action_authority_blockers,
                         profiles: facts.block_actions,
                     },
                 );
@@ -3637,6 +4083,25 @@ fn required_array<'a>(
     Some(value)
 }
 
+fn required_array_at<'a>(
+    record: &DecodedRecord,
+    object: &'a BTreeMap<String, CanonicalJson>,
+    field: &str,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<&'a [CanonicalJson]> {
+    let path = field_path(base, field);
+    let Some(value) = object.get(field) else {
+        missing_field(record, &path, "array", blockers);
+        return None;
+    };
+    let Some(value) = value.as_array() else {
+        invalid_type(record, &path, "array", value, blockers);
+        return None;
+    };
+    Some(value)
+}
+
 fn optional_array<'a>(
     record: &DecodedRecord,
     object: &'a BTreeMap<String, CanonicalJson>,
@@ -3646,6 +4111,22 @@ fn optional_array<'a>(
     let value = object.get(field)?;
     let Some(value) = value.as_array() else {
         invalid_type(record, &format!("$.{field}"), "array", value, blockers);
+        return None;
+    };
+    Some(value)
+}
+
+fn optional_array_at<'a>(
+    record: &DecodedRecord,
+    object: &'a BTreeMap<String, CanonicalJson>,
+    field: &str,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<&'a [CanonicalJson]> {
+    let value = object.get(field)?;
+    let path = field_path(base, field);
+    let Some(value) = value.as_array() else {
+        invalid_type(record, &path, "array", value, blockers);
         return None;
     };
     Some(value)
@@ -3668,6 +4149,25 @@ fn required_object<'a>(
     Some(value)
 }
 
+fn required_object_at<'a>(
+    record: &DecodedRecord,
+    object: &'a BTreeMap<String, CanonicalJson>,
+    field: &str,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<&'a BTreeMap<String, CanonicalJson>> {
+    let path = field_path(base, field);
+    let Some(value) = object.get(field) else {
+        missing_field(record, &path, "object", blockers);
+        return None;
+    };
+    let Some(value) = value.as_object() else {
+        invalid_type(record, &path, "object", value, blockers);
+        return None;
+    };
+    Some(value)
+}
+
 fn optional_object<'a>(
     record: &DecodedRecord,
     object: &'a BTreeMap<String, CanonicalJson>,
@@ -3677,6 +4177,22 @@ fn optional_object<'a>(
     let value = object.get(field)?;
     let Some(value) = value.as_object() else {
         invalid_type(record, &format!("$.{field}"), "object", value, blockers);
+        return None;
+    };
+    Some(value)
+}
+
+fn optional_object_at<'a>(
+    record: &DecodedRecord,
+    object: &'a BTreeMap<String, CanonicalJson>,
+    field: &str,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<&'a BTreeMap<String, CanonicalJson>> {
+    let value = object.get(field)?;
+    let path = field_path(base, field);
+    let Some(value) = value.as_object() else {
+        invalid_type(record, &path, "object", value, blockers);
         return None;
     };
     Some(value)
@@ -4033,6 +4549,951 @@ fn parse_item_use_kind(
         }
     };
     Some(parsed)
+}
+
+fn parse_block_action_rng_semantics(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentBlockActionRngSemantics> {
+    let base = "$.rngSemantics";
+    let semantics = required_object_at(record, object, "rngSemantics", "$", blockers)?;
+    Some(ContentBlockActionRngSemantics {
+        algorithm: required_exact_string_at(record, semantics, "algorithm", base, "xorshift32", blockers)?.to_owned(),
+        seed_derivation: required_exact_string_at(
+            record,
+            semantics,
+            "seedDerivation",
+            base,
+            "blockwild-seed-stream-v1",
+            blockers,
+        )?
+        .to_owned(),
+        stream: required_exact_string_at(record, semantics, "stream", base, "block-action-loot-v1", blockers)?
+            .to_owned(),
+        unit: required_exact_string_at(record, semantics, "unit", base, "u32-open-upper-v1", blockers)?.to_owned(),
+        ordering: required_exact_string_at(
+            record,
+            semantics,
+            "ordering",
+            base,
+            "stable-profile-rule-order-v1",
+            blockers,
+        )?
+        .to_owned(),
+        random_drop_gate: required_exact_string_at(
+            record,
+            semantics,
+            "randomDropGate",
+            base,
+            "less-than-or-equal-v1",
+            blockers,
+        )?
+        .to_owned(),
+        exclusive_selection: required_exact_string_at(
+            record,
+            semantics,
+            "exclusiveSelection",
+            base,
+            "less-than-cumulative-v1",
+            blockers,
+        )?
+        .to_owned(),
+        plant_yield_clamp_maximum_millionths: u64::from(required_u32_at(
+            record,
+            semantics,
+            "plantYieldClampMaximumMillionths",
+            base,
+            999_900,
+            999_900,
+            blockers,
+        )?),
+    })
+}
+
+const BLOCK_AUTHORITY_BLOCKERS: &[&str] = &[
+    "authoritative-rng-context-unbound",
+    "column-world-state-runtime",
+    "dynamic-block-state-runtime",
+    "dynamic-session-dispatch-runtime",
+    "game-mode-host-custody-runtime",
+    "legacy-computed-loot-source-runtime",
+    "legacy-loot-item-reference-unresolved",
+    "liquid-source-state-runtime",
+    "network-topology-state-runtime",
+    "paired-world-state-runtime",
+    "player-luck-context-runtime",
+    "rooted-tree-discovery-runtime",
+    "world-support-collision-runtime",
+];
+
+fn parse_block_authority_blockers(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    field: &str,
+    required: bool,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Vec<String> {
+    let path = field_path(base, field);
+    let values = if required {
+        required_array_at(record, object, field, base, blockers)
+    } else {
+        optional_array_at(record, object, field, base, blockers)
+    };
+    let Some(values) = values else {
+        return Vec::new();
+    };
+    if values.len() > MAX_BLOCK_AUTHORITY_BLOCKERS {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::Capacity,
+            ContentRuntimeStage::Invariants,
+            &path,
+            &format!("0..{MAX_BLOCK_AUTHORITY_BLOCKERS}"),
+            &values.len().to_string(),
+        ));
+    }
+    let mut parsed = Vec::new();
+    let mut previous: Option<&str> = None;
+    for (index, value) in values.iter().take(MAX_BLOCK_AUTHORITY_BLOCKERS).enumerate() {
+        let item_path = format!("{path}[{index}]");
+        let Some(value) = value.as_str() else {
+            invalid_type(record, &item_path, "authority blocker string", value, blockers);
+            continue;
+        };
+        if !BLOCK_AUTHORITY_BLOCKERS.contains(&value) {
+            enum_value(record, &item_path, value, BLOCK_AUTHORITY_BLOCKERS, blockers);
+            continue;
+        }
+        if previous.is_some_and(|prior| prior >= value) {
+            blockers.push(for_record(
+                record,
+                ContentRuntimeBlockerCode::DescriptorMismatch,
+                ContentRuntimeStage::Invariants,
+                &item_path,
+                "strict ascending unique authority blockers",
+                value,
+            ));
+        }
+        previous = Some(value);
+        parsed.push(value.to_owned());
+    }
+    parsed
+}
+
+fn parse_block_loot_count(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentBlockLootCount> {
+    let kind = required_nonempty_string_at(record, object, "kind", base, blockers)?;
+    match kind {
+        "constant" => {
+            required_u32_at(record, object, "value", base, 1, u32::MAX, blockers).map(ContentBlockLootCount::Constant)
+        }
+        "uniform-inclusive" => {
+            let minimum = required_u32_at(record, object, "minimum", base, 1, u32::MAX, blockers)?;
+            let maximum = required_u32_at(record, object, "maximum", base, 1, u32::MAX, blockers)?;
+            if minimum > maximum {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::Range,
+                    ContentRuntimeStage::Invariants,
+                    &field_path(base, "maximum"),
+                    "maximum >= minimum",
+                    &maximum.to_string(),
+                ));
+                return None;
+            }
+            Some(ContentBlockLootCount::UniformInclusive { minimum, maximum })
+        }
+        "shared-roll-formula" => {
+            let base_count = required_u32_at(record, object, "base", base, 0, u32::MAX, blockers)?;
+            let floor_roll_multiplier =
+                required_u32_at(record, object, "floorRollMultiplier", base, 0, u32::MAX, blockers)?;
+            let scythe_bonus = required_u32_at(record, object, "scytheBonus", base, 0, u32::MAX, blockers)?;
+            let threshold_path = field_path(base, "thresholdBonuses");
+            let values = required_array_at(record, object, "thresholdBonuses", base, blockers)?;
+            if values.len() > MAX_BLOCK_LOOT_THRESHOLD_BONUSES {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::Capacity,
+                    ContentRuntimeStage::Invariants,
+                    &threshold_path,
+                    &format!("0..{MAX_BLOCK_LOOT_THRESHOLD_BONUSES}"),
+                    &values.len().to_string(),
+                ));
+            }
+            let mut threshold_bonuses = Vec::new();
+            let mut previous = None;
+            for (index, value) in values.iter().take(MAX_BLOCK_LOOT_THRESHOLD_BONUSES).enumerate() {
+                let item_base = format!("{threshold_path}[{index}]");
+                let Some(value) = value.as_object() else {
+                    invalid_type(record, &item_base, "threshold bonus object", value, blockers);
+                    continue;
+                };
+                let above_millionths = required_u32_at(
+                    record,
+                    value,
+                    "aboveMillionths",
+                    &item_base,
+                    0,
+                    (CONTENT_ACTION_FIXED_SCALE - 1) as u32,
+                    blockers,
+                )
+                .map(u64::from);
+                let amount = required_u32_at(record, value, "amount", &item_base, 1, u32::MAX, blockers);
+                let scythe_only = required_bool_at(record, value, "scytheOnly", &item_base, blockers);
+                if let (Some(above_millionths), Some(amount), Some(scythe_only)) =
+                    (above_millionths, amount, scythe_only)
+                {
+                    if previous.is_some_and(|prior| prior >= above_millionths) {
+                        blockers.push(for_record(
+                            record,
+                            ContentRuntimeBlockerCode::DescriptorMismatch,
+                            ContentRuntimeStage::Invariants,
+                            &field_path(&item_base, "aboveMillionths"),
+                            "strict ascending unique thresholds",
+                            &above_millionths.to_string(),
+                        ));
+                    }
+                    previous = Some(above_millionths);
+                    threshold_bonuses.push(ContentBlockLootThresholdBonus {
+                        above_millionths,
+                        amount,
+                        scythe_only,
+                    });
+                }
+            }
+            Some(ContentBlockLootCount::SharedRollFormula {
+                base: base_count,
+                floor_roll_multiplier,
+                scythe_bonus,
+                threshold_bonuses,
+            })
+        }
+        _ => {
+            enum_value(
+                record,
+                &field_path(base, "kind"),
+                kind,
+                &["constant", "uniform-inclusive", "shared-roll-formula"],
+                blockers,
+            );
+            None
+        }
+    }
+}
+
+fn parse_block_loot_rule(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    expected_ordinal: usize,
+    facts: &mut RecordFacts,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentBlockLootRule> {
+    let ordinal = required_u32_at(record, object, "ordinal", base, 0, u16::MAX.into(), blockers)
+        .and_then(|value| u16::try_from(value).ok())?;
+    if usize::from(ordinal) != expected_ordinal {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            &field_path(base, "ordinal"),
+            &expected_ordinal.to_string(),
+            &ordinal.to_string(),
+        ));
+    }
+    let id = required_nonempty_string_at(record, object, "id", base, blockers)?.to_owned();
+    let item_code = required_u32_at(record, object, "item", base, 1, u32::MAX, blockers)?;
+    push_reference(
+        facts,
+        ContentDomain::Item,
+        item_code.to_string(),
+        &field_path(base, "item"),
+    );
+    let chance_millionths = u64::from(required_u32_at(
+        record,
+        object,
+        "chanceMillionths",
+        base,
+        1,
+        CONTENT_ACTION_FIXED_SCALE as u32,
+        blockers,
+    )?);
+    let chance_modifier = match required_nonempty_string_at(record, object, "chanceModifier", base, blockers)? {
+        "none" => ContentBlockLootChanceModifier::None,
+        "luck-adjusted-v1" => ContentBlockLootChanceModifier::LuckAdjustedV1,
+        value => {
+            enum_value(
+                record,
+                &field_path(base, "chanceModifier"),
+                value,
+                &["none", "luck-adjusted-v1"],
+                blockers,
+            );
+            return None;
+        }
+    };
+    let roll_scope = match required_nonempty_string_at(record, object, "rollScope", base, blockers)? {
+        "none" => ContentBlockLootRollScope::None,
+        "random-drop-v1" => ContentBlockLootRollScope::RandomDropV1,
+        "shared-plant-yield" => ContentBlockLootRollScope::SharedPlantYield,
+        "shared-exclusive" => ContentBlockLootRollScope::SharedExclusive,
+        value => {
+            enum_value(
+                record,
+                &field_path(base, "rollScope"),
+                value,
+                &["none", "random-drop-v1", "shared-plant-yield", "shared-exclusive"],
+                blockers,
+            );
+            return None;
+        }
+    };
+    let count_base = field_path(base, "count");
+    let count_object = required_object_at(record, object, "count", base, blockers)?;
+    let count = parse_block_loot_count(record, count_object, &count_base, blockers)?;
+    if roll_scope == ContentBlockLootRollScope::None
+        && (chance_millionths != CONTENT_ACTION_FIXED_SCALE || chance_modifier != ContentBlockLootChanceModifier::None)
+    {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            base,
+            "non-random rules have probability one and no modifier",
+            &format!("{chance_millionths}:{chance_modifier:?}"),
+        ));
+    }
+    if chance_modifier == ContentBlockLootChanceModifier::LuckAdjustedV1
+        && roll_scope != ContentBlockLootRollScope::RandomDropV1
+    {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            &field_path(base, "chanceModifier"),
+            "luck adjustment only on random-drop-v1",
+            "incompatible roll scope",
+        ));
+    }
+    Some(ContentBlockLootRule {
+        ordinal,
+        id,
+        item_code,
+        chance_millionths,
+        chance_modifier,
+        roll_scope,
+        count,
+    })
+}
+
+fn parse_block_loot_profile(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    facts: &mut RecordFacts,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentBlockLootProfile> {
+    let mode = match required_nonempty_string_at(record, object, "mode", base, blockers)? {
+        "none" => ContentBlockLootMode::None,
+        "all" => ContentBlockLootMode::All,
+        "exclusive" => ContentBlockLootMode::Exclusive,
+        value => {
+            enum_value(
+                record,
+                &field_path(base, "mode"),
+                value,
+                &["none", "all", "exclusive"],
+                blockers,
+            );
+            return None;
+        }
+    };
+    let self_drop_mode = match required_nonempty_string_at(record, object, "selfDropMode", base, blockers)? {
+        "absent" => ContentBlockSelfDropMode::Absent,
+        "contextual" => ContentBlockSelfDropMode::Contextual,
+        "mapped-item" => ContentBlockSelfDropMode::MappedItem,
+        value => {
+            enum_value(
+                record,
+                &field_path(base, "selfDropMode"),
+                value,
+                &["absent", "contextual", "mapped-item"],
+                blockers,
+            );
+            return None;
+        }
+    };
+    required_exact_string_at(record, object, "silkTouch", base, "not-authored", blockers)?;
+    let rules_path = field_path(base, "rules");
+    let values = required_array_at(record, object, "rules", base, blockers)?;
+    if values.len() > MAX_BLOCK_LOOT_RULES {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::Capacity,
+            ContentRuntimeStage::Invariants,
+            &rules_path,
+            &format!("0..{MAX_BLOCK_LOOT_RULES}"),
+            &values.len().to_string(),
+        ));
+    }
+    let mut rules = Vec::new();
+    let mut ids = BTreeSet::new();
+    for (index, value) in values.iter().take(MAX_BLOCK_LOOT_RULES).enumerate() {
+        let rule_base = format!("{rules_path}[{index}]");
+        let Some(value) = value.as_object() else {
+            invalid_type(record, &rule_base, "loot rule object", value, blockers);
+            continue;
+        };
+        if let Some(rule) = parse_block_loot_rule(record, value, &rule_base, index, facts, blockers) {
+            if !ids.insert(rule.id.clone()) {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::Invariants,
+                    &field_path(&rule_base, "id"),
+                    "unique loot rule id",
+                    &rule.id,
+                ));
+            }
+            rules.push(rule);
+        }
+    }
+    match mode {
+        ContentBlockLootMode::None if !rules.is_empty() => blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            &rules_path,
+            "no rules when loot mode is none",
+            &rules.len().to_string(),
+        )),
+        ContentBlockLootMode::None if self_drop_mode != ContentBlockSelfDropMode::Absent => blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            &field_path(base, "selfDropMode"),
+            "absent when loot mode is none",
+            "non-absent",
+        )),
+        ContentBlockLootMode::All if rules.is_empty() => blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            &rules_path,
+            "at least one rule when loot mode is all",
+            "empty",
+        )),
+        ContentBlockLootMode::All
+            if rules
+                .iter()
+                .any(|rule| rule.roll_scope == ContentBlockLootRollScope::SharedExclusive) =>
+        {
+            blockers.push(for_record(
+                record,
+                ContentRuntimeBlockerCode::DescriptorMismatch,
+                ContentRuntimeStage::Invariants,
+                &rules_path,
+                "shared-exclusive rules only in exclusive mode",
+                "shared-exclusive",
+            ));
+        }
+        ContentBlockLootMode::Exclusive => {
+            let chance_sum = rules.iter().map(|rule| rule.chance_millionths).sum::<u64>();
+            if rules.len() < 2
+                || chance_sum != CONTENT_ACTION_FIXED_SCALE
+                || rules.iter().any(|rule| {
+                    rule.roll_scope != ContentBlockLootRollScope::SharedExclusive
+                        || rule.chance_modifier != ContentBlockLootChanceModifier::None
+                })
+            {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::Invariants,
+                    &rules_path,
+                    "two or more unmodified shared-exclusive rules totaling 1000000",
+                    &format!("count={};chance={chance_sum}", rules.len()),
+                ));
+            }
+        }
+        _ => {}
+    }
+    Some(ContentBlockLootProfile {
+        mode,
+        self_drop_mode,
+        silk_touch: ContentBlockSilkTouchPolicy::NotAuthored,
+        rules,
+    })
+}
+
+fn parse_block_break_profile(
+    record: &DecodedRecord,
+    profile: &BTreeMap<String, CanonicalJson>,
+    profile_base: &str,
+    facts: &mut RecordFacts,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentBlockBreakProfile> {
+    let base = field_path(profile_base, "breakProfile");
+    let object = required_object_at(record, profile, "breakProfile", profile_base, blockers)?;
+    let replacement = match required_nonempty_string_at(record, object, "replacement", &base, blockers)? {
+        "blocked" => ContentBlockBreakReplacement::Blocked,
+        "air" => ContentBlockBreakReplacement::Air,
+        "paired-air" => ContentBlockBreakReplacement::PairedAir,
+        "column-air" => ContentBlockBreakReplacement::ColumnAir,
+        "column-water" => ContentBlockBreakReplacement::ColumnWater,
+        "rooted-tree-or-air" => ContentBlockBreakReplacement::RootedTreeOrAir,
+        value => {
+            enum_value(
+                record,
+                &field_path(&base, "replacement"),
+                value,
+                &[
+                    "blocked",
+                    "air",
+                    "paired-air",
+                    "column-air",
+                    "column-water",
+                    "rooted-tree-or-air",
+                ],
+                blockers,
+            );
+            return None;
+        }
+    };
+    let durability_base = field_path(&base, "durabilityCost");
+    let durability = required_object_at(record, object, "durabilityCost", &base, blockers)?;
+    let durability_cost = match required_nonempty_string_at(record, durability, "kind", &durability_base, blockers)? {
+        "none" => ContentBlockDurabilityCost::None,
+        "constant" => ContentBlockDurabilityCost::Constant(required_u32_at(
+            record,
+            durability,
+            "amount",
+            &durability_base,
+            1,
+            u32::MAX,
+            blockers,
+        )?),
+        "rooted-tree-log-count" => {
+            let minimum = required_u32_at(record, durability, "minimum", &durability_base, 1, u32::MAX, blockers)?;
+            let divisor = required_u32_at(record, durability, "divisor", &durability_base, 1, u32::MAX, blockers)?;
+            required_exact_string_at(record, durability, "rounding", &durability_base, "ceiling", blockers)?;
+            ContentBlockDurabilityCost::RootedTreeLogCount { minimum, divisor }
+        }
+        value => {
+            enum_value(
+                record,
+                &field_path(&durability_base, "kind"),
+                value,
+                &["none", "constant", "rooted-tree-log-count"],
+                blockers,
+            );
+            return None;
+        }
+    };
+    required_exact_string_at(record, object, "wrongTool", &base, "break-no-loot", blockers)?;
+    let contextual_override = match required_nonempty_string_at(record, object, "contextualOverride", &base, blockers)?
+    {
+        "none" => ContentBlockContextualOverride::None,
+        "rooted-tree-fall-runtime" => ContentBlockContextualOverride::RootedTreeFallRuntime,
+        value => {
+            enum_value(
+                record,
+                &field_path(&base, "contextualOverride"),
+                value,
+                &["none", "rooted-tree-fall-runtime"],
+                blockers,
+            );
+            return None;
+        }
+    };
+    let loot_base = field_path(&base, "loot");
+    let loot = required_object_at(record, object, "loot", &base, blockers)
+        .and_then(|loot| parse_block_loot_profile(record, loot, &loot_base, facts, blockers))?;
+    let rooted = replacement == ContentBlockBreakReplacement::RootedTreeOrAir;
+    if rooted
+        != matches!(
+            contextual_override,
+            ContentBlockContextualOverride::RootedTreeFallRuntime
+        )
+        || rooted != matches!(durability_cost, ContentBlockDurabilityCost::RootedTreeLogCount { .. })
+    {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            &base,
+            "rooted replacement, override, and durability cost together",
+            "inconsistent rooted-tree fields",
+        ));
+    }
+    if (replacement == ContentBlockBreakReplacement::Blocked)
+        != matches!(durability_cost, ContentBlockDurabilityCost::None)
+    {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            &durability_base,
+            "none exactly for blocked breaks",
+            "inconsistent blocked durability",
+        ));
+    }
+    Some(ContentBlockBreakProfile {
+        replacement,
+        durability_cost,
+        wrong_tool: ContentBlockWrongToolPolicy::BreakNoLoot,
+        contextual_override,
+        loot,
+    })
+}
+
+fn parse_block_harvest_intent(
+    record: &DecodedRecord,
+    profile: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentBlockHarvestIntent> {
+    let object = optional_object_at(record, profile, "harvestIntent", base, blockers)?;
+    let intent_base = field_path(base, "harvestIntent");
+    Some(ContentBlockHarvestIntent {
+        replacement_without_scythe: required_u32_at(
+            record,
+            object,
+            "replacementWithoutScythe",
+            &intent_base,
+            0,
+            u16::MAX.into(),
+            blockers,
+        )
+        .and_then(|value| u16::try_from(value).ok())?,
+        replacement_with_scythe: required_u32_at(
+            record,
+            object,
+            "replacementWithScythe",
+            &intent_base,
+            0,
+            u16::MAX.into(),
+            blockers,
+        )
+        .and_then(|value| u16::try_from(value).ok())?,
+        replanted_without_scythe: required_bool_at(record, object, "replantedWithoutScythe", &intent_base, blockers)?,
+        replanted_with_scythe: required_bool_at(record, object, "replantedWithScythe", &intent_base, blockers)?,
+        preserve_cultivated: required_bool_at(record, object, "preserveCultivated", &intent_base, blockers)?,
+        scythe_durability_cost: required_u32_at(
+            record,
+            object,
+            "scytheDurabilityCost",
+            &intent_base,
+            0,
+            u32::MAX,
+            blockers,
+        )?,
+    })
+}
+
+fn parse_block_placement_intent(
+    record: &DecodedRecord,
+    profile: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentBlockPlacementIntent> {
+    let value = required_nonempty_string_at(record, profile, "placementIntent", base, blockers)?;
+    let parsed = match value {
+        "none" => ContentBlockPlacementIntent::None,
+        "direct" => ContentBlockPlacementIntent::Direct,
+        "directional" => ContentBlockPlacementIntent::Directional,
+        "attached-torch" => ContentBlockPlacementIntent::AttachedTorch,
+        "paired-door" => ContentBlockPlacementIntent::PairedDoor,
+        "paired-bed" => ContentBlockPlacementIntent::PairedBed,
+        "oriented-gate" => ContentBlockPlacementIntent::OrientedGate,
+        "bounded-network" => ContentBlockPlacementIntent::BoundedNetwork,
+        "sapling" => ContentBlockPlacementIntent::Sapling,
+        _ => {
+            enum_value(
+                record,
+                &field_path(base, "placementIntent"),
+                value,
+                &[
+                    "none",
+                    "direct",
+                    "directional",
+                    "attached-torch",
+                    "paired-door",
+                    "paired-bed",
+                    "oriented-gate",
+                    "bounded-network",
+                    "sapling",
+                ],
+                blockers,
+            );
+            return None;
+        }
+    };
+    Some(parsed)
+}
+
+fn parse_block_placement_items(
+    record: &DecodedRecord,
+    profile: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    facts: &mut RecordFacts,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Vec<u32> {
+    let path = field_path(base, "placementItems");
+    let Some(values) = optional_array_at(record, profile, "placementItems", base, blockers) else {
+        return Vec::new();
+    };
+    if values.len() > MAX_BLOCK_ACTION_INTENTS {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::Capacity,
+            ContentRuntimeStage::Invariants,
+            &path,
+            &format!("0..{MAX_BLOCK_ACTION_INTENTS}"),
+            &values.len().to_string(),
+        ));
+    }
+    let mut items = Vec::new();
+    let mut previous = None;
+    for (index, value) in values.iter().take(MAX_BLOCK_ACTION_INTENTS).enumerate() {
+        let item_path = format!("{path}[{index}]");
+        let Some(item) = json_u32(value, 1, u32::MAX) else {
+            invalid_type(record, &item_path, "positive item code", value, blockers);
+            continue;
+        };
+        if previous.is_some_and(|prior| prior >= item) {
+            blockers.push(for_record(
+                record,
+                ContentRuntimeBlockerCode::DescriptorMismatch,
+                ContentRuntimeStage::Invariants,
+                &item_path,
+                "strict ascending unique placement item codes",
+                &item.to_string(),
+            ));
+        }
+        previous = Some(item);
+        push_reference(facts, ContentDomain::Item, item.to_string(), &item_path);
+        items.push(item);
+    }
+    items
+}
+
+fn parse_block_interaction_intent(
+    record: &DecodedRecord,
+    path: &str,
+    value: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentBlockInteractionIntent> {
+    let parsed = match value {
+        "harvest" => ContentBlockInteractionIntent::Harvest,
+        "till" => ContentBlockInteractionIntent::Till,
+        "plant" => ContentBlockInteractionIntent::Plant,
+        "bucket" => ContentBlockInteractionIntent::Bucket,
+        "fill-bottle" => ContentBlockInteractionIntent::FillBottle,
+        "toggle-gate" => ContentBlockInteractionIntent::ToggleGate,
+        "hitch-lead" => ContentBlockInteractionIntent::HitchLead,
+        "toggle-door" => ContentBlockInteractionIntent::ToggleDoor,
+        "sleep-session" => ContentBlockInteractionIntent::SleepSession,
+        "seat" => ContentBlockInteractionIntent::Seat,
+        "archive-shelf-session" => ContentBlockInteractionIntent::ArchiveShelfSession,
+        "crafting-session" => ContentBlockInteractionIntent::CraftingSession,
+        "furnace-session" => ContentBlockInteractionIntent::FurnaceSession,
+        "wheat-mill-session" => ContentBlockInteractionIntent::WheatMillSession,
+        "chest-session" => ContentBlockInteractionIntent::ChestSession,
+        "apiary-session" => ContentBlockInteractionIntent::ApiarySession,
+        "morph-loom-session" => ContentBlockInteractionIntent::MorphLoomSession,
+        "orb-rack-session" => ContentBlockInteractionIntent::OrbRackSession,
+        "healing-station-session" => ContentBlockInteractionIntent::HealingStationSession,
+        "aquarium-session" => ContentBlockInteractionIntent::AquariumSession,
+        "field-perch-session" => ContentBlockInteractionIntent::FieldPerchSession,
+        "waygrid-items-session" => ContentBlockInteractionIntent::WaygridItemsSession,
+        "waygrid-creatures-session" => ContentBlockInteractionIntent::WaygridCreaturesSession,
+        "golem-forge-session" => ContentBlockInteractionIntent::GolemForgeSession,
+        "exhibit-session" => ContentBlockInteractionIntent::ExhibitSession,
+        "cartography-session" => ContentBlockInteractionIntent::CartographySession,
+        "alchemy-session" => ContentBlockInteractionIntent::AlchemySession,
+        "distillery-session" => ContentBlockInteractionIntent::DistillerySession,
+        "sugarworks-session" => ContentBlockInteractionIntent::SugarworksSession,
+        "map-session" => ContentBlockInteractionIntent::MapSession,
+        "incubator-session" => ContentBlockInteractionIntent::IncubatorSession,
+        "lift" => ContentBlockInteractionIntent::Lift,
+        "tome-display-session" => ContentBlockInteractionIntent::TomeDisplaySession,
+        "wayfinder-session" => ContentBlockInteractionIntent::WayfinderSession,
+        _ => {
+            enum_value(
+                record,
+                path,
+                value,
+                &[
+                    "harvest",
+                    "till",
+                    "plant",
+                    "bucket",
+                    "fill-bottle",
+                    "toggle-gate",
+                    "hitch-lead",
+                    "toggle-door",
+                    "sleep-session",
+                    "seat",
+                    "archive-shelf-session",
+                    "crafting-session",
+                    "furnace-session",
+                    "wheat-mill-session",
+                    "chest-session",
+                    "apiary-session",
+                    "morph-loom-session",
+                    "orb-rack-session",
+                    "healing-station-session",
+                    "aquarium-session",
+                    "field-perch-session",
+                    "waygrid-items-session",
+                    "waygrid-creatures-session",
+                    "golem-forge-session",
+                    "exhibit-session",
+                    "cartography-session",
+                    "alchemy-session",
+                    "distillery-session",
+                    "sugarworks-session",
+                    "map-session",
+                    "incubator-session",
+                    "lift",
+                    "tome-display-session",
+                    "wayfinder-session",
+                ],
+                blockers,
+            );
+            return None;
+        }
+    };
+    Some(parsed)
+}
+
+fn parse_block_interaction_intents(
+    record: &DecodedRecord,
+    profile: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Vec<ContentBlockInteractionIntent> {
+    let path = field_path(base, "interactionIntents");
+    let Some(values) = optional_array_at(record, profile, "interactionIntents", base, blockers) else {
+        return Vec::new();
+    };
+    if values.len() > MAX_BLOCK_ACTION_INTENTS {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::Capacity,
+            ContentRuntimeStage::Invariants,
+            &path,
+            &format!("0..{MAX_BLOCK_ACTION_INTENTS}"),
+            &values.len().to_string(),
+        ));
+    }
+    let mut intents = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (index, value) in values.iter().take(MAX_BLOCK_ACTION_INTENTS).enumerate() {
+        let item_path = format!("{path}[{index}]");
+        let Some(value) = value.as_str() else {
+            invalid_type(record, &item_path, "interaction intent string", value, blockers);
+            continue;
+        };
+        if let Some(intent) = parse_block_interaction_intent(record, &item_path, value, blockers) {
+            if !seen.insert(intent) {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::Invariants,
+                    &item_path,
+                    "unique interaction intents",
+                    value,
+                ));
+            }
+            intents.push(intent);
+        }
+    }
+    intents
+}
+
+fn parse_block_planting_rules(
+    record: &DecodedRecord,
+    profile: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    facts: &mut RecordFacts,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Vec<ContentBlockPlantingRule> {
+    let path = field_path(base, "plantingRules");
+    let Some(values) = optional_array_at(record, profile, "plantingRules", base, blockers) else {
+        return Vec::new();
+    };
+    if values.len() > MAX_BLOCK_PLANTING_RULES {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::Capacity,
+            ContentRuntimeStage::Invariants,
+            &path,
+            &format!("0..{MAX_BLOCK_PLANTING_RULES}"),
+            &values.len().to_string(),
+        ));
+    }
+    let mut rules = Vec::new();
+    let mut previous = None;
+    for (index, value) in values.iter().take(MAX_BLOCK_PLANTING_RULES).enumerate() {
+        let item_base = format!("{path}[{index}]");
+        let Some(value) = value.as_object() else {
+            invalid_type(record, &item_base, "planting rule object", value, blockers);
+            continue;
+        };
+        let item_code = required_u32_at(record, value, "item", &item_base, 1, u32::MAX, blockers);
+        let above =
+            required_nonempty_string_at(record, value, "above", &item_base, blockers).and_then(|value| match value {
+                "air" => Some(ContentBlockPlantAbove::Air),
+                "replaceable-dry" => Some(ContentBlockPlantAbove::ReplaceableDry),
+                "water-source" => Some(ContentBlockPlantAbove::WaterSource),
+                _ => {
+                    enum_value(
+                        record,
+                        &field_path(&item_base, "above"),
+                        value,
+                        &["air", "replaceable-dry", "water-source"],
+                        blockers,
+                    );
+                    None
+                }
+            });
+        let result_block = required_u32_at(record, value, "resultBlock", &item_base, 0, u16::MAX.into(), blockers)
+            .and_then(|value| u16::try_from(value).ok());
+        if let (Some(item_code), Some(above), Some(result_block)) = (item_code, above, result_block) {
+            let order = (item_code, above);
+            if previous.is_some_and(|prior| prior >= order) {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::Invariants,
+                    &item_base,
+                    "strict item/above order with unique planting rules",
+                    &format!("{item_code}:{above:?}"),
+                ));
+            }
+            previous = Some(order);
+            push_reference(
+                facts,
+                ContentDomain::Item,
+                item_code.to_string(),
+                &field_path(&item_base, "item"),
+            );
+            rules.push(ContentBlockPlantingRule {
+                item_code,
+                above,
+                result_block,
+            });
+        }
+    }
+    rules
 }
 
 fn parse_topology_flags(
@@ -4430,6 +5891,39 @@ mod tests {
         vec![item, catalog]
     }
 
+    fn contextual_action_fixture() -> Vec<ContentArtifact> {
+        let place_item = artifact(
+            ContentDomain::Item,
+            "1",
+            "item-definition",
+            1,
+            r##"{"color":"#68a341","damage":3,"fuel":4,"id":1,"maxDurability":99,"maxStack":1,"miningSpeed":1.25,"name":"Survey Pick","placeBlock":1,"tier":2,"toolKind":"pickaxe"}"##,
+        );
+        let plant_item = artifact(
+            ContentDomain::Item,
+            "2",
+            "item-definition",
+            1,
+            r##"{"color":"#895b35","id":2,"maxStack":64,"name":"Test Seed","plantBlock":1,"useKind":"plant"}"##,
+        );
+        let ranged_item = artifact(
+            ContentDomain::Item,
+            "3",
+            "item-definition",
+            1,
+            r##"{"ammoItem":1,"color":"#345678","damage":7,"id":3,"magazineSize":1,"maxDurability":50,"maxStack":1,"name":"Test Bow","toolKind":"bow","useKind":"ranged-weapon"}"##,
+        );
+        let mut catalog = artifact(
+            ContentDomain::Item,
+            BLOCK_ACTION_CATALOG_ID,
+            "block-action-catalog",
+            2,
+            r#"{"authorityBlockers":["authoritative-rng-context-unbound","dynamic-session-dispatch-runtime","game-mode-host-custody-runtime","legacy-computed-loot-source-runtime","world-support-collision-runtime"],"profiles":[{"breakProfile":{"contextualOverride":"none","durabilityCost":{"kind":"none"},"loot":{"mode":"none","rules":[],"selfDropMode":"absent","silkTouch":"not-authored"},"replacement":"blocked","wrongTool":"break-no-loot"},"hardness":0,"id":0,"placementIntent":"none","preferredTool":"hand","replaceable":true,"requiredTier":0,"solid":false,"topologyFlags":[]},{"authorityBlockers":["authoritative-rng-context-unbound"],"breakProfile":{"contextualOverride":"none","durabilityCost":{"amount":1,"kind":"constant"},"loot":{"mode":"all","rules":[{"chanceMillionths":1000000,"chanceModifier":"none","count":{"base":2,"floorRollMultiplier":2,"kind":"shared-roll-formula","scytheBonus":1,"thresholdBonuses":[{"aboveMillionths":560000,"amount":1,"scytheOnly":false}]},"id":"produce","item":1,"ordinal":0,"rollScope":"shared-plant-yield"},{"chanceMillionths":1000000,"chanceModifier":"none","count":{"kind":"constant","value":1},"id":"seed","item":2,"ordinal":1,"rollScope":"shared-plant-yield"}],"selfDropMode":"contextual","silkTouch":"not-authored"},"replacement":"air","wrongTool":"break-no-loot"},"hardness":0.5,"harvestIntent":{"preserveCultivated":true,"replacementWithScythe":1,"replacementWithoutScythe":1,"replantedWithScythe":true,"replantedWithoutScythe":true,"scytheDurabilityCost":1},"id":1,"interactionIntents":["harvest","plant"],"item":1,"placementIntent":"direct","placementItems":[1],"plantingRules":[{"above":"air","item":2,"resultBlock":1}],"preferredTool":"pickaxe","replaceable":false,"requiredTier":2,"solid":true,"topologyFlags":[]},{"authorityBlockers":["authoritative-rng-context-unbound","player-luck-context-runtime"],"breakProfile":{"contextualOverride":"none","durabilityCost":{"amount":1,"kind":"constant"},"loot":{"mode":"all","rules":[{"chanceMillionths":220000,"chanceModifier":"luck-adjusted-v1","count":{"kind":"uniform-inclusive","maximum":2,"minimum":1},"id":"fiber","item":1,"ordinal":0,"rollScope":"random-drop-v1"}],"selfDropMode":"contextual","silkTouch":"not-authored"},"replacement":"air","wrongTool":"break-no-loot"},"hardness":0.1,"id":2,"placementIntent":"none","preferredTool":"hand","replaceable":true,"requiredTier":0,"solid":false,"topologyFlags":[]},{"authorityBlockers":["authoritative-rng-context-unbound"],"breakProfile":{"contextualOverride":"none","durabilityCost":{"amount":1,"kind":"constant"},"loot":{"mode":"exclusive","rules":[{"chanceMillionths":160000,"chanceModifier":"none","count":{"kind":"constant","value":1},"id":"first","item":1,"ordinal":0,"rollScope":"shared-exclusive"},{"chanceMillionths":840000,"chanceModifier":"none","count":{"kind":"constant","value":1},"id":"second","item":2,"ordinal":1,"rollScope":"shared-exclusive"}],"selfDropMode":"contextual","silkTouch":"not-authored"},"replacement":"air","wrongTool":"break-no-loot"},"hardness":0.2,"id":3,"placementIntent":"none","preferredTool":"hand","replaceable":true,"requiredTier":0,"solid":false,"topologyFlags":[]}],"rngSemantics":{"algorithm":"xorshift32","exclusiveSelection":"less-than-cumulative-v1","ordering":"stable-profile-rule-order-v1","plantYieldClampMaximumMillionths":999900,"randomDropGate":"less-than-or-equal-v1","seedDerivation":"blockwild-seed-stream-v1","stream":"block-action-loot-v1","unit":"u32-open-upper-v1"},"schema":2}"#,
+        );
+        catalog.unknown_extension_bytes = vec![0, 0x80, 0xff, 11];
+        vec![place_item, plant_item, ranged_item, catalog]
+    }
+
     fn installed(artifacts: Vec<ContentArtifact>) -> (ProductionContentManifest, MetadataBlobStore) {
         let bundle = compile_content_bundle("content-runtime-fixture-v1", artifacts).expect("fixture compiles");
         let mut store = MetadataBlobStore::default();
@@ -4561,6 +6055,124 @@ mod tests {
                 .schema,
             ContentSchema::BlockActionCatalog
         );
+    }
+
+    #[test]
+    fn contextual_action_profiles_materialize_losslessly() {
+        let (manifest, store) = installed(contextual_action_fixture());
+        let (registry, report) =
+            materialize_content_runtime(&manifest, &store).expect("contextual actions materialize");
+        assert_eq!(report.installed_entries, 4);
+        let item = &registry.items["1"].action;
+        assert_eq!(item.damage, Some(3));
+        assert_eq!(item.fuel, Some(4));
+        assert_eq!(item.place_block, Some(1));
+        let ranged = &registry.items["3"].action;
+        assert_eq!(ranged.ammo_item, Some(1));
+        assert_eq!(ranged.magazine_size, Some(1));
+        assert_eq!(ranged.damage, Some(7));
+        assert_eq!(ranged.use_kind, Some(ContentItemUseKind::RangedWeapon));
+
+        let catalog = &registry.block_action_catalogs[BLOCK_ACTION_CATALOG_ID];
+        assert_eq!(catalog.core.schema, ContentSchema::BlockActionCatalogV2);
+        assert_eq!(catalog.core.unknown_extension_bytes, [0, 0x80, 0xff, 11]);
+        assert_eq!(
+            catalog.rng_semantics.as_ref().expect("rng semantics").stream,
+            "block-action-loot-v1"
+        );
+        assert!(
+            catalog
+                .authority_blockers
+                .contains(&"legacy-computed-loot-source-runtime".to_owned())
+        );
+
+        let profile = registry.block_action(1).expect("contextual block");
+        assert_eq!(profile.placement_intent, Some(ContentBlockPlacementIntent::Direct));
+        assert_eq!(profile.placement_items, [1]);
+        assert_eq!(profile.planting_rules[0].item_code, 2);
+        assert_eq!(profile.planting_rules[0].result_block, 1);
+        let harvest = profile.harvest_intent.as_ref().expect("harvest intent");
+        assert_eq!(harvest.replacement_without_scythe, 1);
+        assert_eq!(harvest.replacement_with_scythe, 1);
+        assert!(harvest.replanted_without_scythe);
+        assert!(harvest.replanted_with_scythe);
+        assert!(harvest.preserve_cultivated);
+        let loot = &profile.break_profile.as_ref().expect("break profile").loot;
+        assert_eq!(loot.mode, ContentBlockLootMode::All);
+        assert_eq!(loot.silk_touch, ContentBlockSilkTouchPolicy::NotAuthored);
+        assert_eq!(loot.rules[0].ordinal, 0);
+        assert_eq!(loot.rules[1].ordinal, 1);
+        assert!(matches!(
+            loot.rules[0].count,
+            ContentBlockLootCount::SharedRollFormula {
+                base: 2,
+                floor_roll_multiplier: 2,
+                scythe_bonus: 1,
+                ..
+            }
+        ));
+        let exclusive = registry.block_action(3).expect("exclusive block");
+        assert_eq!(
+            exclusive.break_profile.as_ref().expect("break profile").loot.mode,
+            ContentBlockLootMode::Exclusive
+        );
+    }
+
+    #[test]
+    fn contextual_action_bounds_references_probability_and_order_fail_atomically() {
+        let (manifest, store) = installed(contextual_action_fixture());
+        let mut registry = ContentRuntimeRegistry::default();
+        registry.install(&manifest, &store).expect("initial contextual install");
+        let original = registry.clone();
+        let cases = [
+            (
+                "\"id\":\"seed\",\"item\":2",
+                "\"id\":\"seed\",\"item\":999",
+                ContentRuntimeBlockerCode::MissingDependency,
+                "unknown item reference",
+            ),
+            (
+                "\"maximum\":2,\"minimum\":1",
+                "\"maximum\":0,\"minimum\":1",
+                ContentRuntimeBlockerCode::InvalidType,
+                "invalid loot range",
+            ),
+            (
+                "\"chanceMillionths\":220000",
+                "\"chanceMillionths\":1000001",
+                ContentRuntimeBlockerCode::InvalidType,
+                "out-of-bounds probability",
+            ),
+            (
+                "\"id\":\"second\",\"item\":2,\"ordinal\":1",
+                "\"id\":\"second\",\"item\":2,\"ordinal\":0",
+                ContentRuntimeBlockerCode::DescriptorMismatch,
+                "loot order drift",
+            ),
+            (
+                "\"chanceMillionths\":840000",
+                "\"chanceMillionths\":830000",
+                ContentRuntimeBlockerCode::DescriptorMismatch,
+                "exclusive probability gap",
+            ),
+        ];
+        for (needle, replacement, code, label) in cases {
+            let mut invalid = contextual_action_fixture();
+            let catalog = invalid
+                .iter_mut()
+                .find(|artifact| artifact.schema_id == "block-action-catalog")
+                .expect("catalog fixture");
+            let source = String::from_utf8(catalog.canonical_bytes.clone()).expect("fixture UTF-8");
+            assert!(source.contains(needle), "mutation target: {label}");
+            catalog.canonical_bytes = source.replace(needle, replacement).into_bytes();
+            let (bad_manifest, bad_store) = installed(invalid);
+            let blockers = registry.install(&bad_manifest, &bad_store).expect_err(label);
+            assert!(
+                blockers.iter().any(|blocker| blocker.code == code),
+                "{label}: {blockers:?}"
+            );
+            assert_eq!(registry, original, "{label}");
+        }
     }
 
     #[test]
