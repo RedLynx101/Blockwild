@@ -14,16 +14,17 @@ use blockwild_entity::{
     encode_compatibility_record, encode_entity_authority_snapshot,
 };
 use blockwild_gameplay::{
-    ALL_CONTENT_DOMAINS, AcceptedReceipt, ActivityLease, ActorGrant, ActorRole, AuthorityIdentity, BattleAction,
-    CardforgeCommand, CombatCommand, ContainerKind, ContentArtifact, ContentDomain, ContentDomainDigest, CraftCommand,
-    CreateDropCustodyCommand, CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3, FurnaceAdvanceCommand,
-    GAMEPLAY_COMMAND_ADVANCE_SCHEDULE_TAG_V1, GameplayActor, GameplayBatch, GameplayCommand, GameplayEvent,
-    GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1, INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG, Ingredient,
-    InventoryCommand, ItemInstanceMetadataV1, MAX_ITEM_INSTANCE_METADATA_BYTES_V1,
-    MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1, MachineCommand, MachineOperation, OpaquePayload,
-    PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1, PacifyMethod, PlayerInventoryBindingV1, PrintingKey, ProgressionAction,
-    ProgressionCommand, Rejection, RejectionCode, RemoveEmptyDropCustodyCommand, ResourceDelta, ResourceEndpoint,
-    ResourceKey, ResourceKind, Scope, SlotRef, StatDelta, TransferCommand, WorldKey,
+    ALL_CONTENT_DOMAINS, AcceptedReceipt, ActivityLease, ActorGrant, ActorRole, ApplyBlockActionV1, AuthorityIdentity,
+    BattleAction, CardforgeCommand, CombatCommand, ContainerKind, ContentArtifact, ContentDomain, ContentDomainDigest,
+    CraftCommand, CreateDropCustodyCommand, CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3,
+    FurnaceAdvanceCommand, GAMEPLAY_COMMAND_ADVANCE_SCHEDULE_TAG_V1, GameplayActor, GameplayBatch, GameplayCommand,
+    GameplayEvent, GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1,
+    INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG, INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG, Ingredient, InventoryCommand,
+    ItemInstanceMetadataV1, MAX_ITEM_INSTANCE_METADATA_BYTES_V1, MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1,
+    MachineCommand, MachineOperation, OpaquePayload, PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1, PacifyMethod,
+    PlayerInventoryBindingV1, PrintingKey, ProgressionAction, ProgressionCommand, Rejection, RejectionCode,
+    RemoveEmptyDropCustodyCommand, ResourceDelta, ResourceEndpoint, ResourceKey, ResourceKind, Scope, SlotRef,
+    StatDelta, TransferCommand, WorldKey,
 };
 pub use blockwild_gameplay::{ContainerKey, ImportPlayerInventoryV1, ItemStack};
 use blockwild_network::{
@@ -2084,6 +2085,17 @@ fn write_inventory_command(writer: &mut Writer, value: &InventoryCommand) -> Res
             writer.u8(INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG as u8);
             write_player_inventory_import(writer, value)?;
         }
+        InventoryCommand::ApplyBlockActionV1(value) => {
+            writer.u8(INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG as u8);
+            write_container_key(writer, &value.inventory)?;
+            writer.u16(value.slot);
+            writer.u64(value.expected_container_revision);
+            write_optional_item_stack(writer, &value.expected_stack);
+            writer.u32(value.consume_count);
+            writer.u32(value.durability_cost_millionths);
+            write_optional_item_stack(writer, &value.created_stack);
+            writer.string(&value.reason)?;
+        }
     }
     Ok(())
 }
@@ -2154,6 +2166,18 @@ fn read_inventory_command(reader: &mut Reader<'_>) -> Result<InventoryCommand, W
         tag if u16::from(tag) == INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG => Ok(
             InventoryCommand::ImportPlayerInventoryV1(read_player_inventory_import(reader)?),
         ),
+        tag if u16::from(tag) == INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG => {
+            Ok(InventoryCommand::ApplyBlockActionV1(ApplyBlockActionV1 {
+                inventory: read_container_key(reader)?,
+                slot: reader.u16()?,
+                expected_container_revision: reader.u64()?,
+                expected_stack: read_optional_item_stack(reader)?,
+                consume_count: reader.u32()?,
+                durability_cost_millionths: reader.u32()?,
+                created_stack: read_optional_item_stack(reader)?,
+                reason: reader.string()?,
+            }))
+        }
         _ => Err(WireError::new("inventory-command", "unknown inventory command tag")),
     }
 }
@@ -4939,6 +4963,40 @@ mod tests {
         };
         command.slots.push(None);
         assert_eq!(encode_gameplay_batch_v1(&over_bound).unwrap_err().code, "domain-count");
+    }
+
+    #[test]
+    fn block_action_inventory_command_wire_round_trips_exactly() {
+        let command = InventoryCommand::ApplyBlockActionV1(ApplyBlockActionV1 {
+            inventory: ContainerKey::player("player:block-action-wire"),
+            slot: 8,
+            expected_container_revision: u64::MAX,
+            expected_stack: Some(ItemStack {
+                item_code: 17,
+                count: 1,
+                durability_millionths: Some(750_000),
+                metadata_hash: CanonicalHash([0x80; 16]),
+            }),
+            consume_count: 0,
+            durability_cost_millionths: 25_000,
+            created_stack: Some(ItemStack::simple(19, 2)),
+            reason: "block-break-wire".into(),
+        });
+        let state = blockwild_gameplay::GameplayState::new(WorldKey::new("universe", "surface"), 1);
+        let batch = GameplayBatch::new(
+            "block-action:1",
+            "block-action:1",
+            GameplayActor {
+                actor_id: "player:block-action-wire".into(),
+                player_id: Some(PlayerId::new(1, 1)),
+                entity_id: Some(EntityId::new(2, 1)),
+                role: ActorRole::Host,
+            },
+            state.identity(),
+            vec![GameplayCommand::Inventory(command)],
+        );
+        let encoded = encode_gameplay_batch_v1(&batch).unwrap();
+        assert_eq!(decode_gameplay_batch_v1(&encoded).unwrap(), batch);
     }
 
     #[test]

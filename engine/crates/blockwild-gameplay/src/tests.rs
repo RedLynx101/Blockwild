@@ -249,6 +249,149 @@ fn inventory_import_idempotency_key_conflict_does_not_mutate_twice() {
     assert_eq!(authority.replay().len(), 1);
 }
 
+fn block_action_inventory_fixture() -> (InventoryState, ContainerKey, ItemStack) {
+    let mut state = InventoryState::default();
+    for (code, id, max_stack) in [(10, "test-pick", 1), (20, "test-block", 64), (30, "filler", 64)] {
+        state
+            .register_item(ItemDefinition {
+                code,
+                content_id: id.into(),
+                max_stack,
+                tags: BTreeSet::new(),
+            })
+            .unwrap();
+    }
+    let key = ContainerKey::player("block-actor");
+    let held = ItemStack {
+        item_code: 10,
+        count: 1,
+        durability_millionths: Some(200_000),
+        metadata_hash: CanonicalHash::default(),
+    };
+    let mut container = Container::new(key.clone(), 9);
+    container.slots[0] = Some(held.clone());
+    state.insert_container(container).unwrap();
+    (state, key, held)
+}
+
+#[test]
+fn block_action_combines_tool_damage_and_loot_with_one_revision() {
+    let (mut state, key, held) = block_action_inventory_fixture();
+    let deltas = state
+        .apply_block_action_v1(&ApplyBlockActionV1 {
+            inventory: key.clone(),
+            slot: 0,
+            expected_container_revision: 0,
+            expected_stack: Some(held),
+            consume_count: 0,
+            durability_cost_millionths: 100_000,
+            created_stack: Some(ItemStack::simple(20, 1)),
+            reason: "test-break".into(),
+        })
+        .unwrap();
+    let container = &state.containers[&key];
+    assert_eq!(container.revision, 1, "one block action advances custody exactly once");
+    assert_eq!(
+        container.slots[0].as_ref().unwrap().durability_millionths,
+        Some(100_000)
+    );
+    assert!(
+        container
+            .slots
+            .iter()
+            .flatten()
+            .any(|stack| stack.item_code == 20 && stack.count == 1)
+    );
+    assert_eq!(deltas.iter().map(|delta| delta.amount).sum::<i64>(), 1);
+}
+
+#[test]
+fn block_action_tool_break_and_metadata_or_capacity_failure_are_atomic() {
+    let (mut state, key, held) = block_action_inventory_fixture();
+    let deltas = state
+        .apply_block_action_v1(&ApplyBlockActionV1 {
+            inventory: key.clone(),
+            slot: 0,
+            expected_container_revision: 0,
+            expected_stack: Some(held),
+            consume_count: 0,
+            durability_cost_millionths: 200_000,
+            created_stack: None,
+            reason: "test-break-tool".into(),
+        })
+        .unwrap();
+    assert_eq!(state.containers[&key].revision, 1);
+    assert!(state.containers[&key].slots[0].is_none());
+    assert_eq!(deltas.iter().map(|delta| delta.amount).sum::<i64>(), -1);
+
+    let (mut missing_metadata, key, held) = block_action_inventory_fixture();
+    let before = missing_metadata.clone();
+    let result = missing_metadata.apply_block_action_v1(&ApplyBlockActionV1 {
+        inventory: key.clone(),
+        slot: 0,
+        expected_container_revision: 0,
+        expected_stack: Some(held),
+        consume_count: 0,
+        durability_cost_millionths: 100_000,
+        created_stack: Some(ItemStack {
+            item_code: 20,
+            count: 1,
+            durability_millionths: None,
+            metadata_hash: CanonicalHash([7; 16]),
+        }),
+        reason: "test-break-metadata".into(),
+    });
+    assert_eq!(result.unwrap_err().code, RejectionCode::InvalidCommand);
+    assert_eq!(missing_metadata, before);
+
+    let (mut full, key, held) = block_action_inventory_fixture();
+    for slot in 1..9 {
+        full.containers.get_mut(&key).unwrap().slots[slot] = Some(ItemStack::simple(30, 64));
+    }
+    let before = full.clone();
+    assert_eq!(
+        full.apply_block_action_v1(&ApplyBlockActionV1 {
+            inventory: key,
+            slot: 0,
+            expected_container_revision: 0,
+            expected_stack: Some(held),
+            consume_count: 0,
+            durability_cost_millionths: 100_000,
+            created_stack: Some(ItemStack::simple(20, 1)),
+            reason: "test-break-capacity".into(),
+        })
+        .unwrap_err()
+        .code,
+        RejectionCode::Capacity
+    );
+    assert_eq!(full, before);
+}
+
+#[test]
+fn block_action_rejects_stacked_durable_tools_without_mutation() {
+    let (mut state, key, mut held) = block_action_inventory_fixture();
+    held.count = 2;
+    state.containers.get_mut(&key).unwrap().slots[0] = Some(held.clone());
+    let before = state.clone();
+    assert_eq!(
+        state
+            .apply_block_action_v1(&ApplyBlockActionV1 {
+                inventory: key,
+                slot: 0,
+                expected_container_revision: 0,
+                expected_stack: Some(held),
+                consume_count: 0,
+                durability_cost_millionths: 1,
+                created_stack: None,
+                reason: "stacked-durable".into(),
+            })
+            .unwrap_err()
+            .code,
+        RejectionCode::InvalidCommand
+    );
+    assert_eq!(state, before);
+}
+
 #[test]
 fn reference_fixture_is_deterministic_and_complete() {
     let first = run_reference_fixture();

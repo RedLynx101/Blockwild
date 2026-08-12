@@ -1114,7 +1114,7 @@ fn dispatch_command(
                 let request = decode_terrain_residency_reconcile_batch_v2(&operation.payload)
                     .map_err(|error| (error.code.into(), error.message))?;
                 let receipt = candidate
-                    .reconcile_terrain_residency(&request)
+                    .reconcile_terrain_residency_on_transaction_candidate(&request)
                     .map_err(|error| (error.code, error.message))?;
                 domain_operation_with_schema(
                     RuntimeDomainV1::World,
@@ -4000,6 +4000,41 @@ mod tests {
     }
 
     #[test]
+    fn terrain_reconcile_uses_outer_command_candidate_and_rolls_back_later_failure() {
+        let RuntimeRequestV1::Create { config, .. } = create_request(107) else {
+            unreachable!("fixture is a create request")
+        };
+        let runtime = create_runtime(config).unwrap();
+        let before = runtime.identity();
+        let reconcile = blockwild_engine::IntegratedTerrainResidencyReconcileBatchV2 {
+            expected_world_revision: runtime.world().revision(),
+            generation_options_json: DEFAULT_GENERATION_OPTIONS_JSON_V1.into(),
+            desired_chunks: vec![blockwild_engine::IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 }],
+        };
+        let payload = blockwild_engine::encode_terrain_residency_reconcile_batch_v2(&reconcile).unwrap();
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "terrain-reconcile:rollback".into(),
+            idempotency_key: "terrain-reconcile:rollback".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&before),
+            operations: vec![
+                domain_operation_with_schema(
+                    RuntimeDomainV1::World,
+                    TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2,
+                    2,
+                    payload,
+                ),
+                domain_operation(RuntimeDomainV1::World, "blockwild.world.unsupported.r4.v1", Vec::new()),
+            ],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        assert!(dispatch_command(&runtime, &batch).is_err());
+        assert_eq!(runtime.identity(), before);
+        assert_eq!(runtime.world().resident_section_count(), 0);
+    }
+
+    #[test]
     fn checkpoint_export_destroy_restore_is_exact_and_corruption_fails_closed() {
         let created = decode_response_v1(&blockwild_runtime_create_v2(
             &encode_request_v1(&create_request(11)).unwrap(),
@@ -5654,17 +5689,35 @@ mod tests {
         assert_eq!(encode_hud_extraction(&restored), before_bundle);
     }
 
-    #[test]
-    fn bound_world_view_bwx0_matches_shared_typescript_fixture() {
-        let actual = encode_hud_extraction(&runtime_with_bound_extraction_player())
+    fn bound_world_view_bwx0_fixture_hex() -> String {
+        encode_hud_extraction(&runtime_with_bound_extraction_player())
             .iter()
             .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+            .collect()
+    }
+
+    #[test]
+    fn bound_world_view_bwx0_matches_shared_typescript_fixture() {
+        let actual = bound_world_view_bwx0_fixture_hex();
         let expected = include_str!(
             "../../../../tests/fixtures/rust-engine/r10-authoritative-extraction/bound-world-view-bwx0-v1.hex"
         )
         .trim();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    #[ignore = "maintainer-only fixture regeneration"]
+    fn regenerate_bound_world_view_bwx0_fixture() {
+        let target = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tests/fixtures/rust-engine/r10-authoritative-extraction/bound-world-view-bwx0-v1.hex");
+        assert!(
+            target.is_file(),
+            "fixture path must already exist: {}",
+            target.display()
+        );
+        std::fs::write(&target, format!("{}\n", bound_world_view_bwx0_fixture_hex()))
+            .expect("write canonical BWX0 fixture");
     }
 
     #[test]

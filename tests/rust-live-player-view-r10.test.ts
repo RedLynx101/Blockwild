@@ -69,7 +69,7 @@ function extraction(entityRecords: readonly RustEntityExtractionRecordR6V3[], om
       locationId: "surface",
       revision: Object.freeze({ epoch: 1, world: 1, entities: 1, gameplay: 1, persistence: 1, network: 1, simulation: 1 }),
       tick: 0,
-      stateHash: "f87984009a0457cbc83a5720c9106506",
+      stateHash: "48333e062896d381c83a579e605472b4",
     }),
     extractionRevision: 6,
     render: encodeRustEntityExtractionR6V3(entities),

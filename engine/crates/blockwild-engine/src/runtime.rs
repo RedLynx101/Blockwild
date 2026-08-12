@@ -12,9 +12,10 @@ use std::sync::Arc;
 
 use blockwild_authority::{
     BlockCatalogV1, CellPositionV1, ChunkAuxiliaryDataV1, LiquidMetadataV1, ReadOriginV1, ReadSizeV1, SectionInstallV1,
-    WORLD_SECTION_CELL_COUNT_V1, WorldAddressV1 as AuthorityWorldAddressV1, WorldAuthorityRevisionV1,
-    WorldAuthorityStoreR4V1, WorldCellReadV1, WorldCellV1, WorldChunkAddressV1 as AuthorityChunkAddressV1,
-    WorldLiquidKindV1, WorldMutationBatchR4V1, WorldMutationReceiptR4V1, WorldReadPageV1, WorldSectionAddressV1,
+    WORLD_AIR_BLOCK_ID_V1, WORLD_BEDROCK_BLOCK_ID_V1, WORLD_MAX_Y_V1, WORLD_MIN_Y_V1, WORLD_SECTION_CELL_COUNT_V1,
+    WorldAddressV1 as AuthorityWorldAddressV1, WorldAuthorityRevisionV1, WorldAuthorityStoreR4V1, WorldCellReadV1,
+    WorldCellV1, WorldChunkAddressV1 as AuthorityChunkAddressV1, WorldLiquidKindV1, WorldMutationBatchR4V1,
+    WorldMutationCommandR4V1, WorldMutationReceiptR4V1, WorldReadPageV1, WorldSectionAddressV1,
     decode_compatibility_save_binary_v1, decode_world_authority_snapshot_r4_v1, encode_world_authority_snapshot_r4_v1,
 };
 use blockwild_entity::{
@@ -25,13 +26,14 @@ use blockwild_entity::{
     encode_entity_authority_snapshot,
 };
 use blockwild_gameplay::{
-    ActorGrant, ActorRole, CombatCommand, ContainerKey, ContainerKind, ContentArtifact, ContentDomain,
-    ContentDomainDigest, CreatePlayerCustodyCommand, ExpectedStack, FixedVec3, FixedWorldVec3V1, GameplayActor,
-    GameplayAuthority, GameplayBatch, GameplayCommand, GameplayReceipt, GameplayScheduleAdvanceV1, GameplayState,
-    InventoryCommand, ItemDefinition, ItemInstanceMetadataV1, MetadataBlobStore, PlayerDropStageRequestV1,
-    PlayerInventoryBindingV1, RotationMicroturnsV1, WorldKey, WorldViewAcceptedReceiptV1, WorldViewAuthorityV1,
-    WorldViewBatchV1, WorldViewCommandV1, WorldViewReceiptV1, compile_content_bundle,
-    decode_gameplay_authority_snapshot, install_content_bundle, materialize_content_runtime, stage_player_drop_v1,
+    ActorGrant, ActorRole, ApplyBlockActionV1, CombatCommand, ContainerKey, ContainerKind, ContentActionToolKind,
+    ContentArtifact, ContentDomain, ContentDomainDigest, ContentRuntimeRegistry, CreatePlayerCustodyCommand,
+    ExpectedStack, FixedVec3, FixedWorldVec3V1, GameplayActor, GameplayAuthority, GameplayBatch, GameplayCommand,
+    GameplayReceipt, GameplayScheduleAdvanceV1, GameplayState, InventoryCommand, ItemDefinition,
+    ItemInstanceMetadataV1, ItemStack, MetadataBlobStore, PlayerDropStageRequestV1, PlayerInventoryBindingV1,
+    RotationMicroturnsV1, WorldKey, WorldViewAcceptedReceiptV1, WorldViewAuthorityV1, WorldViewBatchV1,
+    WorldViewCommandV1, WorldViewReceiptV1, compile_content_bundle, decode_gameplay_authority_snapshot,
+    install_content_bundle, materialize_content_runtime, stage_player_drop_v1,
 };
 use blockwild_generation::{
     Block as GeneratedBlock, ChunkPayloadV2, GENERATOR_VERSION, GenerateChunkRequestV2, GenerationDiagnostics,
@@ -66,12 +68,13 @@ use blockwild_runtime_wire::{
     decode_command_receipt_v1, encode_command_receipt_v1, validate_command_receipt_hash_v1,
 };
 use blockwild_simulation::{
-    AirZoneTopologyJobV1, AirZoneTopologyResultV1, ContractError, GravityProfileV1, LiquidFrontierResultV1,
-    LiquidFrontierStepV1, PHYSICS_CONTACT_HEAD_SUBMERGED, PHYSICS_CONTACT_IN_LIQUID, PHYSICS_CONTROL_CROUCH,
-    PHYSICS_CONTROL_JUMP, PHYSICS_CONTROL_SPRINT, PathJobResultV1, PathJobV1, PhysicsBodyV1, PhysicsControlsV1,
-    PhysicsEventKindV1, PhysicsStepInputV1, PhysicsStepResultV1, PhysicsSwimProfileV1, SimulationJobIdentityV1,
-    Vec3 as SimulationVec3, WorldAddressV1 as SimulationWorldAddressV1, WorldIdentityV1, WorldReadWindowV1,
-    WorldRevisionV1, find_path, solve_air_zones, step_liquid_frontier, step_physics,
+    AabbV1, ActionRayEntityTargetV1, ActionRayTargetV1, AirZoneTopologyJobV1, AirZoneTopologyResultV1, ContractError,
+    GravityProfileV1, LiquidFrontierResultV1, LiquidFrontierStepV1, PHYSICS_CONTACT_HEAD_SUBMERGED,
+    PHYSICS_CONTACT_IN_LIQUID, PHYSICS_CONTROL_CROUCH, PHYSICS_CONTROL_JUMP, PHYSICS_CONTROL_SPRINT, PathJobResultV1,
+    PathJobV1, PhysicsBodyV1, PhysicsControlsV1, PhysicsEventKindV1, PhysicsStepInputV1, PhysicsStepResultV1,
+    PhysicsSwimProfileV1, SimulationJobIdentityV1, Vec3 as SimulationVec3, VoxelRayHitKindV1, VoxelRaycastQueryV1,
+    WorldAddressV1 as SimulationWorldAddressV1, WorldIdentityV1, WorldReadWindowV1, WorldRevisionV1, find_path,
+    raycast_action_target, solve_air_zones, step_liquid_frontier, step_physics,
 };
 use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, PlayerId, seed_stream};
 
@@ -127,6 +130,7 @@ const NATIVE_RUNTIME_CORE_SCHEMA_V2: u16 = 2;
 const NATIVE_RUNTIME_CORE_SCHEMA_V3: u16 = 3;
 const NATIVE_RUNTIME_CORE_SCHEMA_V4: u16 = 4;
 const NATIVE_RUNTIME_CORE_SCHEMA_V5: u16 = 5;
+const NATIVE_RUNTIME_CORE_SCHEMA_V6: u16 = 6;
 const DURABLE_SESSION_NEUTRAL_ID_V1: &str = "blockwild-durable-session-neutral-v1";
 const DEFAULT_TERRAIN_CONTENT_HASH_V2: CanonicalHash = CanonicalHash([
     0xcc, 0x59, 0x90, 0x3b, 0xe7, 0x7d, 0xfe, 0x30, 0x10, 0x9d, 0x15, 0xbf, 0xaf, 0x0e, 0x30, 0x22,
@@ -188,9 +192,36 @@ pub struct IntegratedRuntimePlayerStateV2 {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum IntegratedRuntimeActionTargetV1 {
     Entity(EntityId),
-    Block(CellPositionV1),
+    Block { position: CellPositionV1, normal: [i8; 3] },
     Unloaded,
     None,
+}
+
+#[derive(Clone, Debug)]
+struct IntegratedRuntimeMiningToolV1 {
+    held_stack: Option<ItemStack>,
+    tool_kind: ContentActionToolKind,
+    tier: u16,
+    speed_millionths: u64,
+    durability_cost_millionths: u32,
+    profile_hash: CanonicalHash,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegratedRuntimeMiningStateV1 {
+    pub player_entity_id: u64,
+    pub target: CellPositionV1,
+    pub target_block_id: u16,
+    pub world_revision: WorldAuthorityRevisionV1,
+    pub selected_slot: u8,
+    pub held_item_code: u32,
+    pub held_metadata_hash: CanonicalHash,
+    pub held_durability_millionths: Option<u32>,
+    pub tool_profile_hash: CanonicalHash,
+    pub progress_millionths: u64,
+    pub required_work_millionths: u64,
+    pub started_tick: u64,
+    pub last_advanced_tick: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -494,6 +525,36 @@ pub struct IntegratedTerrainResidencyReceiptV1 {
     pub state_hash: CanonicalHash,
 }
 
+struct PreparedTerrainResidencyChunkV1 {
+    coordinate: IntegratedTerrainChunkCoordinateV1,
+    generation_request: GenerateChunkRequestV2,
+    chunk: ChunkPayloadV2,
+    cache_hit: bool,
+    already_resident: bool,
+    edit_hash: CanonicalHash,
+    namespace_hash: CanonicalHash,
+}
+
+struct PreparedTerrainResidencyV1 {
+    previous_world_revision: WorldAuthorityRevisionV1,
+    chunks: Vec<PreparedTerrainResidencyChunkV1>,
+}
+
+struct AppliedTerrainResidencyV1 {
+    previous_world_revision: WorldAuthorityRevisionV1,
+    world_revision: WorldAuthorityRevisionV1,
+    generated_chunks: u32,
+    already_resident_chunks: u32,
+    resident_sections: u32,
+    chunks: Vec<IntegratedTerrainResidencyChunkReceiptV1>,
+}
+
+struct PreparedTerrainResidencyReconcileV2 {
+    previous_world_revision: WorldAuthorityRevisionV1,
+    desired_set: BTreeSet<(i32, i32)>,
+    evicted_chunks: Vec<IntegratedTerrainChunkCoordinateV1>,
+}
+
 /// Exact bounded active-ring reconcile. Unlike the additive V1 ensure, this
 /// request declares the complete desired resident chunk set.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -704,6 +765,7 @@ struct IntegratedRuntimeCoreSnapshotV1 {
     last_input_sequence: Option<u64>,
     last_applied_input: Option<RuntimeInputFrameV1>,
     next_action_sequence: u64,
+    mining_state: Option<IntegratedRuntimeMiningStateV1>,
     replay: VecDeque<IntegratedRuntimeReplayEntryV2>,
     command_receipts: BTreeMap<(String, String), IntegratedRuntimeCommandReceiptCacheEntryV1>,
     command_receipt_order: VecDeque<(String, String)>,
@@ -752,6 +814,7 @@ pub struct IntegratedRuntimeV2 {
     world_view: WorldViewAuthorityV1,
     gameplay_content_store: MetadataBlobStore,
     gameplay_content_index: RuntimeContentIndexV1,
+    gameplay_content_runtime: ContentRuntimeRegistry,
     content_stage: Option<IntegratedRuntimeContentStageV1>,
     content_attestation: Option<IntegratedRuntimeContentAttestationV1>,
     native_world_extension_bytes: Vec<u8>,
@@ -799,6 +862,7 @@ pub struct IntegratedRuntimeV2 {
     last_input_sequence: Option<u64>,
     last_applied_input: Option<RuntimeInputFrameV1>,
     next_action_sequence: u64,
+    mining_state: Option<IntegratedRuntimeMiningStateV1>,
     command_receipts: BTreeMap<(String, String), IntegratedRuntimeCommandReceiptCacheEntryV1>,
     command_receipt_order: VecDeque<(String, String)>,
     command_receipt_bytes: usize,
@@ -855,6 +919,7 @@ impl IntegratedRuntimeV2 {
             world_view,
             gameplay_content_store: MetadataBlobStore::default(),
             gameplay_content_index: BTreeMap::new(),
+            gameplay_content_runtime: ContentRuntimeRegistry::default(),
             content_stage: None,
             content_attestation: None,
             native_world_extension_bytes: Vec::new(),
@@ -898,6 +963,7 @@ impl IntegratedRuntimeV2 {
             last_input_sequence: None,
             last_applied_input: None,
             next_action_sequence: 1,
+            mining_state: None,
             command_receipts: BTreeMap::new(),
             command_receipt_order: VecDeque::new(),
             command_receipt_bytes: 0,
@@ -1567,9 +1633,11 @@ impl IntegratedRuntimeV2 {
         };
         self.gameplay_content_store = candidate_store;
         self.gameplay_content_index = candidate_index;
+        self.gameplay_content_runtime = runtime_registry;
         self.gameplay = candidate_gameplay;
         self.content_stage = None;
         self.content_attestation = Some(attestation);
+        self.mining_state = None;
         self.gameplay_authority_revision = self.gameplay_authority_revision.saturating_add(1);
         self.network_revision = self.network_revision.saturating_add(1);
         self.invalidate_state_hash();
@@ -1786,7 +1854,7 @@ impl IntegratedRuntimeV2 {
             decode_world_view_native_record_v1(world_view_record, &decoded_gameplay.authority.state, &entities)
                 .map_err(|error| IntegratedRuntimeError::new("recovery-native-world-view", error.to_string()))?;
         let content = decode_runtime_content_snapshot_v1(content_record)?;
-        let (content_store, content_index, content_item_definitions) =
+        let (content_store, content_index, content_runtime, content_item_definitions) =
             install_runtime_content_snapshot_v1(&self.config, &content)?;
         if decoded_gameplay.authority.state.inventory.items != content_item_definitions {
             return Err(IntegratedRuntimeError::new(
@@ -1805,6 +1873,7 @@ impl IntegratedRuntimeV2 {
         candidate.native_world_view_extension_bytes = decoded_world_view.unknown_extension_bytes;
         candidate.gameplay_content_store = content_store;
         candidate.gameplay_content_index = content_index;
+        candidate.gameplay_content_runtime = content_runtime;
         candidate.content_stage = None;
         candidate.content_attestation = content.attestation;
         candidate.native_content_extension_bytes = content.unknown_extension_bytes;
@@ -1823,6 +1892,7 @@ impl IntegratedRuntimeV2 {
         candidate.last_input_sequence = core.last_input_sequence;
         candidate.last_applied_input = core.last_applied_input;
         candidate.next_action_sequence = core.next_action_sequence;
+        candidate.mining_state = core.mining_state;
         candidate.command_receipts = core.command_receipts;
         candidate.command_receipt_order = core.command_receipt_order;
         candidate.command_receipt_bytes = core.command_receipt_bytes;
@@ -1858,6 +1928,9 @@ impl IntegratedRuntimeV2 {
                 "recovery-player-entity",
                 "bound player record references an entity absent from the R6 snapshot",
             ));
+        }
+        if candidate.mining_state.is_some() && !candidate.mining_state_is_current_v1() {
+            candidate.mining_state = None;
         }
         let revision = candidate.revision();
         if revision.epoch != core.expected_revision.epoch
@@ -2872,6 +2945,7 @@ impl IntegratedRuntimeV2 {
             (None, None) => hasher.write_u16(0),
             (Some(_), Some(_)) => unreachable!("content installation is either staged or installed"),
         }
+        hasher.write_bytes(self.gameplay_content_runtime.registry_hash.as_bytes());
         hasher.write_u64(self.tick);
         hasher.write_u64(self.accumulator_us);
         hasher.write_u32(self.rng_state);
@@ -2939,6 +3013,13 @@ impl IntegratedRuntimeV2 {
             hasher.write_u16(0);
         }
         hasher.write_u64(self.next_action_sequence);
+        match &self.mining_state {
+            Some(mining) => {
+                hasher.write_u16(1);
+                write_mining_state_v1(&mut hasher, mining);
+            }
+            None => hasher.write_u16(0),
+        }
         let hash = hasher.finish();
         self.state_hash_cache.set(Some(hash));
         hash
@@ -3077,6 +3158,9 @@ impl IntegratedRuntimeV2 {
         staged_runtime.gameplay = staged_gameplay;
         staged_runtime.world_view = staged_world_view.authority;
         staged_runtime.persistence = staged_persistence;
+        if staged_runtime.world.revision() != self.world.revision() {
+            staged_runtime.mining_state = None;
+        }
         staged_runtime.entity_command_sequence = entity_receipts
             .iter()
             .fold(staged_runtime.entity_command_sequence, |sequence, receipt| {
@@ -3837,6 +3921,7 @@ impl IntegratedRuntimeV2 {
             flags,
             last_input_sequence: existing.map_or(0, |player| player.last_input_sequence),
         });
+        self.mining_state = None;
         self.simulation_revision = self.simulation_revision.saturating_add(1);
         self.invalidate_state_hash();
         Ok(())
@@ -3850,6 +3935,7 @@ impl IntegratedRuntimeV2 {
             ));
         }
         if self.player.is_some() {
+            self.advance_held_primary_mining(input)?;
             self.advance_bound_player(input)?;
         }
         self.advance_entity_and_gameplay_schedules()?;
@@ -3890,6 +3976,7 @@ impl IntegratedRuntimeV2 {
         let staged = stage_world_view_batches_v1(&self.world_view, &self.gameplay.state, &self.entities, &[batch])
             .map_err(|error| IntegratedRuntimeError::new("input-slot", error.to_string()))?;
         self.world_view = staged.authority;
+        self.mining_state = None;
         Ok(())
     }
 
@@ -3997,8 +4084,9 @@ impl IntegratedRuntimeV2 {
         &mut self,
         input: RuntimeInputFrameV1,
     ) -> Result<(RuntimeInputActionOutcomeV1, u64), IntegratedRuntimeError> {
-        match self.resolve_action_target(input, 4.5)? {
+        match self.raycast_action_target(input, 4.5)? {
             IntegratedRuntimeActionTargetV1::Entity(target) => {
+                self.mining_state = None;
                 let player = self.player.as_ref().expect("action dispatch checked player");
                 let actor_id = player.binding.actor_id.clone();
                 let target_record = self
@@ -4060,9 +4148,18 @@ impl IntegratedRuntimeV2 {
                 }
                 Ok((RuntimeInputActionOutcomeV1::Applied, target.packed()))
             }
-            IntegratedRuntimeActionTargetV1::Block(_) => Ok((RuntimeInputActionOutcomeV1::Blocked, 0)),
-            IntegratedRuntimeActionTargetV1::Unloaded => Ok((RuntimeInputActionOutcomeV1::Blocked, 0)),
-            IntegratedRuntimeActionTargetV1::None => Ok((RuntimeInputActionOutcomeV1::NoTarget, 0)),
+            IntegratedRuntimeActionTargetV1::Block { position, .. } => {
+                let outcome = self.begin_or_reset_mining(input, position)?;
+                Ok((outcome, 0))
+            }
+            IntegratedRuntimeActionTargetV1::Unloaded => {
+                self.mining_state = None;
+                Ok((RuntimeInputActionOutcomeV1::Blocked, 0))
+            }
+            IntegratedRuntimeActionTargetV1::None => {
+                self.mining_state = None;
+                Ok((RuntimeInputActionOutcomeV1::NoTarget, 0))
+            }
         }
     }
 
@@ -4071,12 +4168,14 @@ impl IntegratedRuntimeV2 {
         input: RuntimeInputFrameV1,
         action_key: &'static str,
     ) -> Result<(RuntimeInputActionOutcomeV1, u64), IntegratedRuntimeError> {
-        let _ = action_key;
-        match self.resolve_action_target(input, 5.0)? {
+        match self.raycast_action_target(input, 5.0)? {
             IntegratedRuntimeActionTargetV1::Entity(target) => {
                 Ok((RuntimeInputActionOutcomeV1::Blocked, target.packed()))
             }
-            IntegratedRuntimeActionTargetV1::Block(_) => Ok((RuntimeInputActionOutcomeV1::Blocked, 0)),
+            IntegratedRuntimeActionTargetV1::Block { position, normal } if action_key == "secondary-use" => {
+                Ok((self.apply_basic_block_placement(input, position, normal)?, 0))
+            }
+            IntegratedRuntimeActionTargetV1::Block { .. } => Ok((RuntimeInputActionOutcomeV1::Blocked, 0)),
             IntegratedRuntimeActionTargetV1::Unloaded => Ok((RuntimeInputActionOutcomeV1::Blocked, 0)),
             IntegratedRuntimeActionTargetV1::None => Ok((RuntimeInputActionOutcomeV1::NoTarget, 0)),
         }
@@ -4131,7 +4230,7 @@ impl IntegratedRuntimeV2 {
             return Ok((RuntimeInputActionOutcomeV1::Applied, parent_id.packed()));
         }
 
-        let target_id = match self.resolve_action_target(input, 4.5)? {
+        let target_id = match self.raycast_action_target(input, 4.5)? {
             IntegratedRuntimeActionTargetV1::Entity(target) => target,
             IntegratedRuntimeActionTargetV1::Unloaded => {
                 return Ok((RuntimeInputActionOutcomeV1::Blocked, 0));
@@ -4351,7 +4450,7 @@ impl IntegratedRuntimeV2 {
         Ok((RuntimeInputActionOutcomeV1::Applied, drop_entity_id.packed()))
     }
 
-    fn resolve_action_target(
+    fn raycast_action_target(
         &self,
         input: RuntimeInputFrameV1,
         maximum_distance: f64,
@@ -4360,78 +4459,547 @@ impl IntegratedRuntimeV2 {
             .player
             .as_ref()
             .ok_or_else(|| IntegratedRuntimeError::new("player-binding-required", "target query requires a player"))?;
-        let eye = SimulationVec3::new(
-            player.body.position.x,
-            player.body.position.y + player.body.height * 0.82,
-            player.body.position.z,
-        );
+        let eye = self.action_eye_v1(player);
         let yaw = normalized_i16(input.look_yaw) * std::f64::consts::PI;
         let pitch = normalized_i16(input.look_pitch) * std::f64::consts::FRAC_PI_2;
         let horizontal = pitch.cos();
         let direction = SimulationVec3::new(-yaw.sin() * horizontal, pitch.sin(), -yaw.cos() * horizontal);
-
-        let mut obstruction = maximum_distance + 0.25;
-        let mut block_target = None;
-        let mut unloaded = false;
-        let sample_count = (maximum_distance * 4.0).ceil() as u32;
-        let mut previous_cell = None;
-        for sample in 1..=sample_count {
-            let distance = f64::from(sample) * 0.25;
-            let cell = CellPositionV1 {
-                x: floor_i32(eye.x + direction.x * distance)?,
-                y: floor_i32(eye.y + direction.y * distance)?,
-                z: floor_i32(eye.z + direction.z * distance)?,
-            };
-            if previous_cell == Some(cell) {
-                continue;
-            }
-            previous_cell = Some(cell);
-            match self.world.read_cell(cell) {
-                WorldCellReadV1::Unloaded { .. } => {
-                    obstruction = distance;
-                    unloaded = true;
-                    break;
-                }
-                WorldCellReadV1::Loaded { cell: value, .. } if value.block_id != 0 => {
-                    obstruction = distance;
-                    block_target = Some(cell);
-                    break;
-                }
-                WorldCellReadV1::Loaded { .. } => {}
-            }
-        }
-
-        let mut best: Option<(f64, EntityId)> = None;
+        let end = eye + direction * maximum_distance;
+        let minimum = |left: f64, right: f64| floor_i32(left.min(right) + 0.5).map(|value| value.saturating_sub(1));
+        let maximum = |left: f64, right: f64| floor_i32(left.max(right) + 0.5).map(|value| value.saturating_add(1));
+        let origin = ReadOriginV1 {
+            x: minimum(eye.x, end.x)?,
+            y: minimum(eye.y, end.y)?,
+            z: minimum(eye.z, end.z)?,
+        };
+        let high = [maximum(eye.x, end.x)?, maximum(eye.y, end.y)?, maximum(eye.z, end.z)?];
+        let size = |low: i32, high: i32| {
+            high.checked_sub(low)
+                .and_then(|span| span.checked_add(1))
+                .and_then(|span| u16::try_from(span).ok())
+                .ok_or_else(|| IntegratedRuntimeError::new("input-action-window", "action ray window overflowed"))
+        };
+        let window = self.capture_simulation_window(
+            origin,
+            ReadSizeV1 {
+                x: size(origin.x, high[0])?,
+                y: size(origin.y, high[1])?,
+                z: size(origin.z, high[2])?,
+            },
+        )?;
+        let mut targets = Vec::with_capacity(self.entities.hot().len());
         for (id, entity) in self.entities.hot() {
             if *id == player.entity_id || entity.record.health <= 0.0 {
                 continue;
             }
-            let dx = f64::from(entity.record.position.x) - eye.x;
-            let dy = f64::from(entity.record.position.y) + 0.75 - eye.y;
-            let dz = f64::from(entity.record.position.z) - eye.z;
-            let projection = dx * direction.x + dy * direction.y + dz * direction.z;
-            if projection <= 0.0 || projection > maximum_distance || projection >= obstruction {
-                continue;
-            }
-            let distance_squared = dx * dx + dy * dy + dz * dz;
-            let lateral_squared = (distance_squared - projection * projection).max(0.0);
-            if lateral_squared > 1.1 * 1.1 {
-                continue;
-            }
-            if best.is_none_or(|(best_projection, best_id)| {
-                projection < best_projection || (projection == best_projection && *id < best_id)
-            }) {
-                best = Some((projection, *id));
-            }
+            let components = &entity.components;
+            let center = SimulationVec3::new(
+                f64::from(entity.record.position.x),
+                f64::from(entity.record.position.y),
+                f64::from(entity.record.position.z),
+            );
+            let radius = f64::from(components.locomotion.radius);
+            let half_height = f64::from(components.locomotion.half_height);
+            targets.push(ActionRayEntityTargetV1 {
+                entity_id: id.packed(),
+                bounds: AabbV1::new(
+                    SimulationVec3::new(center.x - radius, center.y - half_height, center.z - radius),
+                    SimulationVec3::new(center.x + radius, center.y + half_height, center.z + radius),
+                ),
+            });
         }
-        if let Some((_, id)) = best {
-            Ok(IntegratedRuntimeActionTargetV1::Entity(id))
-        } else if let Some(position) = block_target {
-            Ok(IntegratedRuntimeActionTargetV1::Block(position))
-        } else if unloaded {
-            Ok(IntegratedRuntimeActionTargetV1::Unloaded)
+        let result = raycast_action_target(
+            &window,
+            VoxelRaycastQueryV1 {
+                query_id: input.sequence,
+                origin: eye,
+                direction,
+                maximum_distance,
+                maximum_visited_cells: 128,
+                hit_liquids: false,
+            },
+            &targets,
+        )
+        .map_err(|error| IntegratedRuntimeError::new("input-action-raycast", error.to_string()))?;
+        match result.target {
+            Some(ActionRayTargetV1::Entity { entity_id, .. }) => Ok(IntegratedRuntimeActionTargetV1::Entity(
+                EntityId::new(entity_id as u32, (entity_id >> 32) as u32),
+            )),
+            Some(ActionRayTargetV1::Voxel(hit)) if hit.kind == VoxelRayHitKindV1::Solid => {
+                Ok(IntegratedRuntimeActionTargetV1::Block {
+                    position: CellPositionV1 {
+                        x: hit.cell.x,
+                        y: hit.cell.y,
+                        z: hit.cell.z,
+                    },
+                    normal: [
+                        ray_normal_i8(hit.normal.x),
+                        ray_normal_i8(hit.normal.y),
+                        ray_normal_i8(hit.normal.z),
+                    ],
+                })
+            }
+            Some(ActionRayTargetV1::Voxel(_)) | None if result.budget_exhausted => {
+                Ok(IntegratedRuntimeActionTargetV1::Unloaded)
+            }
+            Some(ActionRayTargetV1::Voxel(_)) => Ok(IntegratedRuntimeActionTargetV1::Unloaded),
+            None => Ok(IntegratedRuntimeActionTargetV1::None),
+        }
+    }
+
+    fn action_eye_v1(&self, player: &IntegratedRuntimePlayerStateV2) -> SimulationVec3 {
+        SimulationVec3::new(
+            player.body.position.x,
+            player.body.position.y + player.body.height * 0.82,
+            player.body.position.z,
+        )
+    }
+
+    fn held_stack_and_binding(&self) -> Option<(PlayerInventoryBindingV1, u64, Option<ItemStack>)> {
+        let player = self.player.as_ref()?;
+        let binding = self.world_view.state.player_binding(player.binding.player_id)?.clone();
+        let inventory = self
+            .gameplay
+            .state
+            .inventory
+            .containers
+            .get(&binding.inventory_container)?;
+        let held = inventory.slots.get(usize::from(binding.selected_slot))?.clone();
+        Some((binding, inventory.revision, held))
+    }
+
+    fn mining_tool_v1(&self, block_preferred_tool: ContentActionToolKind) -> Option<IntegratedRuntimeMiningToolV1> {
+        let player = self.player.as_ref()?;
+        let (_, _, held_stack) = self.held_stack_and_binding()?;
+        if player.binding.creative_mode {
+            let mut hasher = CanonicalHasher::new("blockwild-runtime-mining-tool-v1");
+            hasher.write_u16(1);
+            hasher.write_bytes(self.gameplay_content_runtime.registry_hash.as_bytes());
+            return Some(IntegratedRuntimeMiningToolV1 {
+                held_stack,
+                tool_kind: ContentActionToolKind::Hand,
+                tier: u16::MAX,
+                speed_millionths: 8_000_000,
+                durability_cost_millionths: 0,
+                profile_hash: hasher.finish(),
+            });
+        }
+        let item = held_stack.as_ref().and_then(|stack| {
+            self.gameplay_content_runtime
+                .items
+                .values()
+                .find(|item| item.item_code == stack.item_code)
+        });
+        let action = item.map(|item| &item.action);
+        if let (Some(stack), Some(action)) = (&held_stack, action)
+            && action.max_durability.is_some()
+            && action.infinite_durability != Some(true)
+            && (stack.count != 1 || stack.durability_millionths.is_none())
+        {
+            return None;
+        }
+        let tool_kind = action
+            .and_then(|action| action.tool_kind)
+            .unwrap_or(ContentActionToolKind::Hand);
+        let tier = action.and_then(|action| action.tier).unwrap_or(0);
+        let speed_millionths = if tool_kind == block_preferred_tool {
+            action
+                .and_then(|action| action.mining_speed_millionths)
+                .unwrap_or(1_000_000)
+        } else if block_preferred_tool == ContentActionToolKind::Hand {
+            1_100_000
         } else {
-            Ok(IntegratedRuntimeActionTargetV1::None)
+            480_000
+        };
+        let durability_cost_millionths = action
+            .and_then(|action| action.max_durability)
+            .filter(|_| action.and_then(|action| action.infinite_durability) != Some(true))
+            .map(|maximum| u32::try_from(1_000_000_u64.div_ceil(u64::from(maximum))).unwrap_or(1))
+            .unwrap_or(0);
+        let mut hasher = CanonicalHasher::new("blockwild-runtime-mining-tool-v1");
+        hasher.write_bytes(self.gameplay_content_runtime.registry_hash.as_bytes());
+        hasher.write_u16(tool_kind as u16);
+        hasher.write_u16(tier);
+        hasher.write_u64(speed_millionths);
+        hasher.write_u32(durability_cost_millionths);
+        match &held_stack {
+            Some(stack) => {
+                hasher.write_u16(1);
+                write_item_stack_hash_v1(&mut hasher, stack);
+            }
+            None => hasher.write_u16(0),
+        }
+        Some(IntegratedRuntimeMiningToolV1 {
+            held_stack,
+            tool_kind,
+            tier,
+            speed_millionths,
+            durability_cost_millionths,
+            profile_hash: hasher.finish(),
+        })
+    }
+
+    fn mining_state_is_current_v1(&self) -> bool {
+        let Some(state) = self.mining_state.as_ref() else {
+            return true;
+        };
+        let Some(player) = self.player.as_ref() else {
+            return false;
+        };
+        let Some((binding, _, held_stack)) = self.held_stack_and_binding() else {
+            return false;
+        };
+        let WorldCellReadV1::Loaded { cell, .. } = self.world.read_cell(state.target) else {
+            return false;
+        };
+        let Some(profile) = self.gameplay_content_runtime.block_action(cell.block_id) else {
+            return false;
+        };
+        if cell.block_id == WORLD_AIR_BLOCK_ID_V1
+            || !basic_single_cell_block_action_v1(profile)
+            || profile.mapped_item_code.is_none()
+        {
+            return false;
+        }
+        let Some(tool) = self.mining_tool_v1(profile.preferred_tool) else {
+            return false;
+        };
+        let held = held_stack.as_ref();
+        state.player_entity_id == player.entity_id.packed()
+            && state.target_block_id == cell.block_id
+            && state.world_revision == self.world.revision()
+            && state.selected_slot == u8::try_from(binding.selected_slot).unwrap_or(u8::MAX)
+            && state.held_item_code == held.map_or(0, |stack| stack.item_code)
+            && state.held_metadata_hash == held.map_or(CanonicalHash::default(), |stack| stack.metadata_hash)
+            && state.held_durability_millionths == held.and_then(|stack| stack.durability_millionths)
+            && state.tool_profile_hash == tool.profile_hash
+    }
+
+    fn begin_or_reset_mining(
+        &mut self,
+        input: RuntimeInputFrameV1,
+        position: CellPositionV1,
+    ) -> Result<RuntimeInputActionOutcomeV1, IntegratedRuntimeError> {
+        let player = self.player.as_ref().expect("action dispatch checked player");
+        let value = match self.world.read_cell(position) {
+            WorldCellReadV1::Loaded { cell, .. } if cell.block_id != WORLD_AIR_BLOCK_ID_V1 => cell,
+            WorldCellReadV1::Loaded { .. } => {
+                self.mining_state = None;
+                return Ok(RuntimeInputActionOutcomeV1::NoTarget);
+            }
+            WorldCellReadV1::Unloaded { .. } => {
+                self.mining_state = None;
+                return Ok(RuntimeInputActionOutcomeV1::Blocked);
+            }
+        };
+        let Some(profile) = self.gameplay_content_runtime.block_action(value.block_id).cloned() else {
+            self.mining_state = None;
+            return Ok(RuntimeInputActionOutcomeV1::Blocked);
+        };
+        if !basic_single_cell_block_action_v1(&profile) || profile.mapped_item_code.is_none() {
+            self.mining_state = None;
+            return Ok(RuntimeInputActionOutcomeV1::Blocked);
+        }
+        let Some(tool) = self.mining_tool_v1(profile.preferred_tool) else {
+            self.mining_state = None;
+            return Ok(RuntimeInputActionOutcomeV1::Ineligible);
+        };
+        let held = tool.held_stack.as_ref();
+        self.mining_state = Some(IntegratedRuntimeMiningStateV1 {
+            player_entity_id: player.entity_id.packed(),
+            target: position,
+            target_block_id: value.block_id,
+            world_revision: self.world.revision(),
+            selected_slot: input.selected_slot,
+            held_item_code: held.map_or(0, |stack| stack.item_code),
+            held_metadata_hash: held.map_or(CanonicalHash::default(), |stack| stack.metadata_hash),
+            held_durability_millionths: held.and_then(|stack| stack.durability_millionths),
+            tool_profile_hash: tool.profile_hash,
+            progress_millionths: 0,
+            required_work_millionths: 1_000_000,
+            started_tick: self.tick,
+            last_advanced_tick: self.tick,
+        });
+        self.invalidate_state_hash();
+        Ok(RuntimeInputActionOutcomeV1::Applied)
+    }
+
+    fn advance_held_primary_mining(&mut self, input: RuntimeInputFrameV1) -> Result<(), IntegratedRuntimeError> {
+        if input.buttons & RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1 == 0 {
+            if self.mining_state.take().is_some() {
+                self.invalidate_state_hash();
+            }
+            return Ok(());
+        }
+        let position = match self.raycast_action_target(input, 4.5)? {
+            IntegratedRuntimeActionTargetV1::Block { position, .. } => position,
+            _ => {
+                if self.mining_state.take().is_some() {
+                    self.invalidate_state_hash();
+                }
+                return Ok(());
+            }
+        };
+        let value = match self.world.read_cell(position) {
+            WorldCellReadV1::Loaded { cell, .. } if cell.block_id != WORLD_AIR_BLOCK_ID_V1 => cell,
+            _ => {
+                self.mining_state = None;
+                self.invalidate_state_hash();
+                return Ok(());
+            }
+        };
+        let Some(profile) = self.gameplay_content_runtime.block_action(value.block_id).cloned() else {
+            self.mining_state = None;
+            self.invalidate_state_hash();
+            return Ok(());
+        };
+        if !basic_single_cell_block_action_v1(&profile) || profile.mapped_item_code.is_none() {
+            self.mining_state = None;
+            self.invalidate_state_hash();
+            return Ok(());
+        }
+        let Some(tool) = self.mining_tool_v1(profile.preferred_tool) else {
+            self.mining_state = None;
+            self.invalidate_state_hash();
+            return Ok(());
+        };
+        let player_id = self.player.as_ref().expect("held mining has player").entity_id.packed();
+        let held = tool.held_stack.as_ref();
+        let signature_matches = self.mining_state.as_ref().is_some_and(|state| {
+            state.player_entity_id == player_id
+                && state.target == position
+                && state.target_block_id == value.block_id
+                && state.world_revision == self.world.revision()
+                && state.selected_slot == input.selected_slot
+                && state.held_item_code == held.map_or(0, |stack| stack.item_code)
+                && state.held_metadata_hash == held.map_or(CanonicalHash::default(), |stack| stack.metadata_hash)
+                && state.held_durability_millionths == held.and_then(|stack| stack.durability_millionths)
+                && state.tool_profile_hash == tool.profile_hash
+        });
+        if !signature_matches {
+            let _ = self.begin_or_reset_mining(input, position)?;
+            return Ok(());
+        }
+        if self
+            .mining_state
+            .as_ref()
+            .is_some_and(|state| self.tick <= state.last_advanced_tick || self.tick <= state.started_tick)
+        {
+            return Ok(());
+        }
+        let hardness = profile.hardness_millionths.max(120_000);
+        let increment = ((u128::from(INTEGRATED_RUNTIME_FIXED_STEP_US) * u128::from(tool.speed_millionths))
+            / u128::from(hardness))
+        .min(u128::from(u64::MAX)) as u64;
+        let complete = {
+            let state = self.mining_state.as_mut().expect("mining signature matched");
+            state.progress_millionths = state.progress_millionths.saturating_add(increment);
+            state.last_advanced_tick = self.tick;
+            state.progress_millionths >= state.required_work_millionths
+        };
+        self.invalidate_state_hash();
+        if complete {
+            self.complete_basic_block_break(input, position, &profile, &tool)?;
+        }
+        Ok(())
+    }
+
+    fn complete_basic_block_break(
+        &mut self,
+        input: RuntimeInputFrameV1,
+        position: CellPositionV1,
+        profile: &blockwild_gameplay::ContentBlockActionProfile,
+        tool: &IntegratedRuntimeMiningToolV1,
+    ) -> Result<(), IntegratedRuntimeError> {
+        let player = self.player.as_ref().expect("mining completion has player").clone();
+        let harvested = profile.required_tier == 0
+            || (tool.tool_kind == profile.preferred_tool && tool.tier >= profile.required_tier);
+        let created_stack = (!player.binding.creative_mode && harvested)
+            .then(|| {
+                profile
+                    .mapped_item_code
+                    .map(|item_code| ItemStack::simple(item_code, 1))
+            })
+            .flatten();
+        let (_, inventory_revision, _) = self
+            .held_stack_and_binding()
+            .ok_or_else(|| IntegratedRuntimeError::new("input-break-binding", "bound inventory disappeared"))?;
+        let inventory_command = (created_stack.is_some() || tool.durability_cost_millionths > 0).then(|| {
+            let binding = self
+                .world_view
+                .state
+                .player_binding(player.binding.player_id)
+                .expect("bound inventory was checked");
+            InventoryCommand::ApplyBlockActionV1(ApplyBlockActionV1 {
+                inventory: binding.inventory_container.clone(),
+                slot: u16::from(input.selected_slot),
+                expected_container_revision: inventory_revision,
+                expected_stack: tool.held_stack.clone(),
+                consume_count: 0,
+                durability_cost_millionths: tool.durability_cost_millionths,
+                created_stack,
+                reason: "block-break-v1".into(),
+            })
+        });
+        let batch_id = format!("input-break:{}:{}", input.sequence, self.next_action_sequence);
+        let committed = self.commit_basic_block_transaction(
+            &batch_id,
+            &player,
+            position,
+            WORLD_AIR_BLOCK_ID_V1,
+            inventory_command,
+        )?;
+        if committed {
+            self.mining_state = None;
+            self.invalidate_state_hash();
+        } else if let Some(state) = self.mining_state.as_mut() {
+            state.progress_millionths = state.required_work_millionths.saturating_sub(1);
+            state.last_advanced_tick = self.tick;
+            self.invalidate_state_hash();
+        }
+        Ok(())
+    }
+
+    fn apply_basic_block_placement(
+        &mut self,
+        input: RuntimeInputFrameV1,
+        hit: CellPositionV1,
+        normal: [i8; 3],
+    ) -> Result<RuntimeInputActionOutcomeV1, IntegratedRuntimeError> {
+        let player = self.player.as_ref().expect("action dispatch checked player").clone();
+        let Some((binding, inventory_revision, held)) = self.held_stack_and_binding() else {
+            return Ok(RuntimeInputActionOutcomeV1::Blocked);
+        };
+        let Some(held) = held else {
+            return Ok(RuntimeInputActionOutcomeV1::EmptySlot);
+        };
+        let Some(item) = self
+            .gameplay_content_runtime
+            .items
+            .values()
+            .find(|item| item.item_code == held.item_code)
+        else {
+            return Ok(RuntimeInputActionOutcomeV1::Blocked);
+        };
+        let Some(block_id) = item.action.place_block else {
+            return Ok(RuntimeInputActionOutcomeV1::Ineligible);
+        };
+        let Some(placed_profile) = self.gameplay_content_runtime.block_action(block_id) else {
+            return Ok(RuntimeInputActionOutcomeV1::Blocked);
+        };
+        if !basic_single_cell_block_action_v1(placed_profile) {
+            return Ok(RuntimeInputActionOutcomeV1::Blocked);
+        }
+        let hit_cell = match self.world.read_cell(hit) {
+            WorldCellReadV1::Loaded { cell, .. } => cell,
+            WorldCellReadV1::Unloaded { .. } => return Ok(RuntimeInputActionOutcomeV1::Blocked),
+        };
+        let hit_profile = self.gameplay_content_runtime.block_action(hit_cell.block_id);
+        if hit_cell.block_id != WORLD_AIR_BLOCK_ID_V1
+            && hit_profile.is_none_or(|profile| !basic_single_cell_block_action_v1(profile))
+        {
+            return Ok(RuntimeInputActionOutcomeV1::Blocked);
+        }
+        let target = if hit_profile.is_some_and(|profile| profile.replaceable) {
+            hit
+        } else {
+            if normal.iter().map(|value| value.unsigned_abs()).sum::<u8>() != 1 {
+                return Ok(RuntimeInputActionOutcomeV1::Blocked);
+            }
+            let Some(x) = hit.x.checked_add(i32::from(normal[0])) else {
+                return Ok(RuntimeInputActionOutcomeV1::Blocked);
+            };
+            let Some(y) = hit.y.checked_add(i32::from(normal[1])) else {
+                return Ok(RuntimeInputActionOutcomeV1::Blocked);
+            };
+            let Some(z) = hit.z.checked_add(i32::from(normal[2])) else {
+                return Ok(RuntimeInputActionOutcomeV1::Blocked);
+            };
+            CellPositionV1 { x, y, z }
+        };
+        if !(WORLD_MIN_Y_V1..=WORLD_MAX_Y_V1).contains(&target.y) {
+            return Ok(RuntimeInputActionOutcomeV1::Blocked);
+        }
+        let target_cell = match self.world.read_cell(target) {
+            WorldCellReadV1::Loaded { cell, .. } => cell,
+            WorldCellReadV1::Unloaded { .. } => return Ok(RuntimeInputActionOutcomeV1::Blocked),
+        };
+        if target_cell.liquid.kind != WorldLiquidKindV1::None
+            || (target_cell.block_id != WORLD_AIR_BLOCK_ID_V1
+                && self
+                    .gameplay_content_runtime
+                    .block_action(target_cell.block_id)
+                    .is_none_or(|profile| !profile.replaceable || !basic_single_cell_block_action_v1(profile)))
+        {
+            return Ok(RuntimeInputActionOutcomeV1::Blocked);
+        }
+        if placed_profile.solid && player_intersects_block_v1(&player.body, target) {
+            return Ok(RuntimeInputActionOutcomeV1::Blocked);
+        }
+        let inventory_command = (!player.binding.creative_mode).then(|| {
+            InventoryCommand::ApplyBlockActionV1(ApplyBlockActionV1 {
+                inventory: binding.inventory_container,
+                slot: u16::from(input.selected_slot),
+                expected_container_revision: inventory_revision,
+                expected_stack: Some(held),
+                consume_count: 1,
+                durability_cost_millionths: 0,
+                created_stack: None,
+                reason: "block-place-v1".into(),
+            })
+        });
+        let batch_id = format!("input-place:{}:{}", input.sequence, self.next_action_sequence);
+        Ok(
+            if self.commit_basic_block_transaction(&batch_id, &player, target, block_id, inventory_command)? {
+                RuntimeInputActionOutcomeV1::Applied
+            } else {
+                RuntimeInputActionOutcomeV1::Blocked
+            },
+        )
+    }
+
+    fn commit_basic_block_transaction(
+        &mut self,
+        batch_id: &str,
+        player: &IntegratedRuntimePlayerStateV2,
+        position: CellPositionV1,
+        block_id: u16,
+        inventory: Option<InventoryCommand>,
+    ) -> Result<bool, IntegratedRuntimeError> {
+        let mut batch = IntegratedRuntimeBatchV2::empty(batch_id, self.identity());
+        batch.world.push(WorldMutationBatchR4V1 {
+            schema_version: blockwild_authority::WORLD_AUTHORITY_SCHEMA_V1,
+            batch_id: batch_id.into(),
+            authority_id: player.binding.actor_id.clone(),
+            address: self.world.active_address().clone(),
+            expected_revision: self.world.revision(),
+            commands: vec![WorldMutationCommandR4V1::SetBlock {
+                position,
+                block_id,
+                facing: None,
+            }],
+        });
+        if let Some(inventory) = inventory {
+            batch.gameplay.push(GameplayBatch::new(
+                batch_id,
+                batch_id,
+                GameplayActor {
+                    actor_id: player.binding.actor_id.clone(),
+                    player_id: Some(player.binding.player_id),
+                    entity_id: Some(player.entity_id),
+                    role: ActorRole::Host,
+                },
+                self.gameplay.state.identity(),
+                vec![GameplayCommand::Inventory(inventory)],
+            ));
+        }
+        let mut candidate = self.clone();
+        match candidate.commit(batch) {
+            IntegratedRuntimeReceiptV2::Accepted(_) => {
+                *self = candidate;
+                Ok(true)
+            }
+            IntegratedRuntimeReceiptV2::Rejected(_) => Ok(false),
         }
     }
 
@@ -5209,8 +5777,15 @@ impl IntegratedRuntimeV2 {
         request: &GenerateChunkRequestV2,
     ) -> Result<GeneratedChunkInstallSummaryV2, IntegratedRuntimeError> {
         self.ensure_running()?;
+        let previous_world_revision = self.world.revision();
         let (chunk, cache_hit) = self.generate_chunk(request)?;
-        self.install_generated_chunk(request, chunk, cache_hit)
+        let mut summary = self.install_generated_chunk(request, chunk, cache_hit)?;
+        if self.world.revision() != previous_world_revision {
+            self.mining_state = None;
+            self.invalidate_state_hash();
+            summary.state_hash = self.state_hash();
+        }
+        Ok(summary)
     }
 
     /// Ensures a bounded explicit chunk set is resident through one atomic
@@ -5220,6 +5795,32 @@ impl IntegratedRuntimeV2 {
         &mut self,
         request: &IntegratedTerrainResidencyBatchV1,
     ) -> Result<IntegratedTerrainResidencyReceiptV1, IntegratedRuntimeError> {
+        let prepared = self.prepare_terrain_residency(request)?;
+        let mut candidate = self.clone();
+        let applied = candidate.apply_prepared_terrain_residency(prepared)?;
+        if applied.world_revision != applied.previous_world_revision {
+            candidate.mining_state = None;
+            candidate.invalidate_state_hash();
+        }
+        let state_hash = candidate.state_hash();
+        *self = candidate;
+        Ok(IntegratedTerrainResidencyReceiptV1 {
+            previous_world_revision: applied.previous_world_revision,
+            world_revision: applied.world_revision,
+            requested_chunks: applied.chunks.len() as u32,
+            generated_chunks: applied.generated_chunks,
+            already_resident_chunks: applied.already_resident_chunks,
+            requested_resident_chunks: applied.chunks.len() as u32,
+            resident_sections: applied.resident_sections,
+            chunks: applied.chunks,
+            state_hash,
+        })
+    }
+
+    fn prepare_terrain_residency(
+        &self,
+        request: &IntegratedTerrainResidencyBatchV1,
+    ) -> Result<PreparedTerrainResidencyV1, IntegratedRuntimeError> {
         self.ensure_running()?;
         validate_terrain_residency_batch_v1(request)?;
         let previous_world_revision = self.world.revision();
@@ -5285,11 +5886,11 @@ impl IntegratedRuntimeV2 {
             prepared_requests.push((*coordinate, generation_request, edit_hash, namespace_hash));
         }
 
-        let mut prepared = Vec::with_capacity(prepared_requests.len());
+        let mut chunks = Vec::with_capacity(prepared_requests.len());
         for (coordinate, generation_request, edit_hash, namespace_hash) in prepared_requests {
             let (chunk, cache_hit) = self.generate_chunk(&generation_request)?;
             let already_resident = terrain_chunk_is_exactly_resident_v1(&self.world, &chunk);
-            prepared.push((
+            chunks.push(PreparedTerrainResidencyChunkV1 {
                 coordinate,
                 generation_request,
                 chunk,
@@ -5297,22 +5898,38 @@ impl IntegratedRuntimeV2 {
                 already_resident,
                 edit_hash,
                 namespace_hash,
-            ));
+            });
         }
+        Ok(PreparedTerrainResidencyV1 {
+            previous_world_revision,
+            chunks,
+        })
+    }
 
-        let mut candidate = self.clone();
-        let mut chunks = Vec::with_capacity(prepared.len());
+    fn apply_prepared_terrain_residency(
+        &mut self,
+        prepared: PreparedTerrainResidencyV1,
+    ) -> Result<AppliedTerrainResidencyV1, IntegratedRuntimeError> {
+        let mut chunks = Vec::with_capacity(prepared.chunks.len());
         let mut generated_chunks = 0_u32;
         let mut already_resident_chunks = 0_u32;
-        for (coordinate, generation_request, chunk, cache_hit, already_resident, edit_hash, namespace_hash) in prepared
-        {
+        for prepared_chunk in prepared.chunks {
+            let PreparedTerrainResidencyChunkV1 {
+                coordinate,
+                generation_request,
+                chunk,
+                cache_hit,
+                already_resident,
+                edit_hash,
+                namespace_hash,
+            } = prepared_chunk;
             let source_hash = parse_canonical_hash(&chunk.chunk_hash)?;
             let request_hash = parse_canonical_hash(&generation_request.request_hash)?;
             let status = if already_resident {
                 already_resident_chunks = already_resident_chunks.saturating_add(1);
                 IntegratedTerrainResidencyStatusV1::AlreadyResident
             } else {
-                candidate.install_generated_chunk(&generation_request, chunk, cache_hit)?;
+                self.install_generated_chunk(&generation_request, chunk, cache_hit)?;
                 generated_chunks = generated_chunks.saturating_add(1);
                 IntegratedTerrainResidencyStatusV1::Generated
             };
@@ -5329,37 +5946,53 @@ impl IntegratedRuntimeV2 {
                 cache_hit,
             });
         }
-        let world_revision = candidate.world.revision();
-        let resident_sections = u32::try_from(candidate.world.resident_section_count()).map_err(|_| {
+        let world_revision = self.world.revision();
+        let resident_sections = u32::try_from(self.world.resident_section_count()).map_err(|_| {
             IntegratedRuntimeError::new(
                 "terrain-residency-count",
                 "resident section count exceeds the diagnostics wire range",
             )
         })?;
-        let state_hash = candidate.state_hash();
-        *self = candidate;
-        Ok(IntegratedTerrainResidencyReceiptV1 {
-            previous_world_revision,
+        Ok(AppliedTerrainResidencyV1 {
+            previous_world_revision: prepared.previous_world_revision,
             world_revision,
-            requested_chunks: chunks.len() as u32,
             generated_chunks,
             already_resident_chunks,
-            requested_resident_chunks: chunks.len() as u32,
             resident_sections,
             chunks,
-            state_hash,
         })
     }
 
-    /// Atomically reconciles the complete active terrain residency set. All
-    /// generation and install work occurs on a cloned runtime; only a fully
-    /// validated exact result replaces live authority. Eviction removes
-    /// disposable sections and auxiliary data while the authored edit journal
-    /// remains available for deterministic revisit generation.
+    /// Atomically reconciles the complete active terrain residency set. The
+    /// public native entry point owns exactly one transaction candidate; Wasm
+    /// dispatch uses `reconcile_terrain_residency_on_transaction_candidate`
+    /// because its command batch already owns that candidate.
     pub fn reconcile_terrain_residency(
         &mut self,
         request: &IntegratedTerrainResidencyReconcileBatchV2,
     ) -> Result<IntegratedTerrainResidencyReconcileReceiptV2, IntegratedRuntimeError> {
+        let prepared = self.prepare_terrain_residency_reconcile(request)?;
+        let mut candidate = self.clone();
+        let receipt = candidate.apply_prepared_terrain_residency_reconcile(request, prepared)?;
+        *self = candidate;
+        Ok(receipt)
+    }
+
+    /// Applies reconcile to a caller-owned transaction candidate without an
+    /// additional full-runtime clone. The caller must discard `self` on error;
+    /// integrated Wasm command dispatch provides exactly that boundary.
+    pub fn reconcile_terrain_residency_on_transaction_candidate(
+        &mut self,
+        request: &IntegratedTerrainResidencyReconcileBatchV2,
+    ) -> Result<IntegratedTerrainResidencyReconcileReceiptV2, IntegratedRuntimeError> {
+        let prepared = self.prepare_terrain_residency_reconcile(request)?;
+        self.apply_prepared_terrain_residency_reconcile(request, prepared)
+    }
+
+    fn prepare_terrain_residency_reconcile(
+        &self,
+        request: &IntegratedTerrainResidencyReconcileBatchV2,
+    ) -> Result<PreparedTerrainResidencyReconcileV2, IntegratedRuntimeError> {
         self.ensure_running()?;
         validate_terrain_residency_reconcile_batch_v2(request)?;
         let previous_world_revision = self.world.revision();
@@ -5381,9 +6014,24 @@ impl IntegratedRuntimeV2 {
             .iter()
             .map(|coordinate| (coordinate.chunk_x, coordinate.chunk_z))
             .collect::<BTreeSet<_>>();
-        let evicted_chunks = self
+        let maximum_state_chunks = INTEGRATED_RUNTIME_MAX_TERRAIN_RECONCILE_EVICTED_CHUNKS_V2
+            .checked_add(desired_set.len())
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "terrain-residency-reconcile-count",
+                    "terrain residency reconcile state bound overflowed",
+                )
+            })?;
+        let state_chunks = self
             .world
-            .resident_chunk_coordinates()
+            .disposable_residency_chunk_coordinates_bounded(maximum_state_chunks)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "terrain-residency-reconcile-count",
+                    "terrain residency reconcile exceeds its bounded legacy-eviction recovery limit",
+                )
+            })?;
+        let evicted_chunks = state_chunks
             .into_iter()
             .filter(|coordinate| !desired_set.contains(coordinate))
             .map(|(chunk_x, chunk_z)| IntegratedTerrainChunkCoordinateV1 { chunk_x, chunk_z })
@@ -5394,13 +6042,24 @@ impl IntegratedRuntimeV2 {
                 "terrain residency reconcile exceeds its bounded legacy-eviction recovery limit",
             ));
         }
+        Ok(PreparedTerrainResidencyReconcileV2 {
+            previous_world_revision,
+            desired_set,
+            evicted_chunks,
+        })
+    }
 
-        let mut candidate = self.clone();
-        let ensured = candidate.ensure_terrain_residency(&IntegratedTerrainResidencyBatchV1 {
-            expected_world_revision: previous_world_revision,
+    fn apply_prepared_terrain_residency_reconcile(
+        &mut self,
+        request: &IntegratedTerrainResidencyReconcileBatchV2,
+        prepared_reconcile: PreparedTerrainResidencyReconcileV2,
+    ) -> Result<IntegratedTerrainResidencyReconcileReceiptV2, IntegratedRuntimeError> {
+        let prepared_residency = self.prepare_terrain_residency(&IntegratedTerrainResidencyBatchV1 {
+            expected_world_revision: prepared_reconcile.previous_world_revision,
             generation_options_json: request.generation_options_json.clone(),
             chunks: request.desired_chunks.clone(),
         })?;
+        let ensured = self.apply_prepared_terrain_residency(prepared_residency)?;
         let mut generated_chunks = Vec::new();
         let mut retained_chunks = Vec::new();
         for chunk in ensured.chunks {
@@ -5409,9 +6068,9 @@ impl IntegratedRuntimeV2 {
                 IntegratedTerrainResidencyStatusV1::AlreadyResident => retained_chunks.push(chunk.coordinate),
             }
         }
-        let address = candidate.world.active_address().clone();
-        for coordinate in &evicted_chunks {
-            let removed_sections = candidate.world.evict_chunk(&AuthorityChunkAddressV1 {
+        let address = self.world.active_address().clone();
+        for coordinate in &prepared_reconcile.evicted_chunks {
+            let removed_sections = self.world.evict_chunk(&AuthorityChunkAddressV1 {
                 world: address.clone(),
                 chunk_x: coordinate.chunk_x,
                 chunk_z: coordinate.chunk_z,
@@ -5424,7 +6083,7 @@ impl IntegratedRuntimeV2 {
             }
         }
 
-        let final_chunks = candidate.world.resident_chunk_coordinates();
+        let final_chunks = self.world.resident_chunk_coordinates();
         let desired_coordinates = request
             .desired_chunks
             .iter()
@@ -5436,35 +6095,45 @@ impl IntegratedRuntimeV2 {
                 "terrain residency reconcile section count overflowed",
             )
         })?;
-        if final_chunks != desired_coordinates || candidate.world.resident_section_count() != expected_sections {
+        let final_disposable_chunks = self
+            .world
+            .disposable_residency_chunk_coordinates_bounded(request.desired_chunks.len());
+        if final_chunks != desired_coordinates
+            || final_disposable_chunks.as_deref() != Some(desired_coordinates.as_slice())
+            || self.world.resident_section_count() != expected_sections
+            || !self.world.scheduler_jobs_within_chunks(&prepared_reconcile.desired_set)
+        {
             return Err(IntegratedRuntimeError::new(
                 "terrain-residency-reconcile-incomplete",
-                "terrain residency reconcile did not produce the exact desired chunk and section set",
+                "terrain residency reconcile did not produce the exact desired resident and scheduler set",
             ));
         }
 
-        candidate.invalidate_state_hash();
-        let world_revision = candidate.world.revision();
-        let resident_sections = u32::try_from(candidate.world.resident_section_count()).map_err(|_| {
+        self.invalidate_state_hash();
+        let world_revision = self.world.revision();
+        if world_revision != prepared_reconcile.previous_world_revision {
+            self.mining_state = None;
+            self.invalidate_state_hash();
+        }
+        let resident_sections = u32::try_from(self.world.resident_section_count()).map_err(|_| {
             IntegratedRuntimeError::new(
                 "terrain-residency-reconcile-count",
                 "resident section count exceeds the diagnostics wire range",
             )
         })?;
-        let state_hash = candidate.state_hash();
-        *self = candidate;
+        let state_hash = self.state_hash();
         Ok(IntegratedTerrainResidencyReconcileReceiptV2 {
-            previous_world_revision,
+            previous_world_revision: prepared_reconcile.previous_world_revision,
             world_revision,
             desired_chunk_count: request.desired_chunks.len() as u32,
             generated_chunk_count: generated_chunks.len() as u32,
             retained_chunk_count: retained_chunks.len() as u32,
-            evicted_chunk_count: evicted_chunks.len() as u32,
+            evicted_chunk_count: prepared_reconcile.evicted_chunks.len() as u32,
             resident_sections,
             desired_chunks: request.desired_chunks.clone(),
             generated_chunks,
             retained_chunks,
-            evicted_chunks,
+            evicted_chunks: prepared_reconcile.evicted_chunks,
             state_hash,
         })
     }
@@ -5573,7 +6242,7 @@ impl IntegratedRuntimeV2 {
         // contract regression, so a whole-world clone is unnecessary.
         for install in installs {
             self.world
-                .install_section_for_replay(install)
+                .install_section_for_residency_replay(install)
                 .expect("prevalidated generated section install");
         }
         self.world
@@ -6344,6 +7013,45 @@ fn write_runtime_input(hasher: &mut CanonicalHasher, input: &RuntimeInputFrameV1
     hasher.write_u16(u16::from(input.flags));
 }
 
+fn write_item_stack_hash_v1(hasher: &mut CanonicalHasher, stack: &ItemStack) {
+    hasher.write_u32(stack.item_code);
+    hasher.write_u32(stack.count);
+    match stack.durability_millionths {
+        Some(value) => {
+            hasher.write_u16(1);
+            hasher.write_u32(value);
+        }
+        None => hasher.write_u16(0),
+    }
+    hasher.write_bytes(stack.metadata_hash.as_bytes());
+}
+
+fn write_mining_state_v1(hasher: &mut CanonicalHasher, state: &IntegratedRuntimeMiningStateV1) {
+    hasher.write_u64(state.player_entity_id);
+    hasher.write_i32(state.target.x);
+    hasher.write_i32(state.target.y);
+    hasher.write_i32(state.target.z);
+    hasher.write_u16(state.target_block_id);
+    hasher.write_u64(state.world_revision.epoch);
+    hasher.write_u64(state.world_revision.mutation);
+    hasher.write_u64(state.world_revision.residency);
+    hasher.write_u16(u16::from(state.selected_slot));
+    hasher.write_u32(state.held_item_code);
+    hasher.write_bytes(state.held_metadata_hash.as_bytes());
+    match state.held_durability_millionths {
+        Some(value) => {
+            hasher.write_u16(1);
+            hasher.write_u32(value);
+        }
+        None => hasher.write_u16(0),
+    }
+    hasher.write_bytes(state.tool_profile_hash.as_bytes());
+    hasher.write_u64(state.progress_millionths);
+    hasher.write_u64(state.required_work_millionths);
+    hasher.write_u64(state.started_tick);
+    hasher.write_u64(state.last_advanced_tick);
+}
+
 fn write_player_state(hasher: &mut CanonicalHasher, player: &IntegratedRuntimePlayerStateV2) {
     let binding = &player.binding;
     hasher.write_str(&binding.external_entity_id);
@@ -6400,6 +7108,41 @@ fn write_effect_event(hasher: &mut CanonicalHasher, event: &IntegratedRuntimeEff
 
 fn normalized_i16(value: i16) -> f64 {
     (f64::from(value) / 32_767.0).clamp(-1.0, 1.0)
+}
+
+fn ray_normal_i8(value: f64) -> i8 {
+    if value > 0.5 {
+        1
+    } else if value < -0.5 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn basic_single_cell_block_action_v1(profile: &blockwild_gameplay::ContentBlockActionProfile) -> bool {
+    profile.block_id != WORLD_BEDROCK_BLOCK_ID_V1
+        && profile.topology_flags == 0
+        && profile.shape.is_none()
+        && profile.collision_height_millionths.is_none()
+        && profile.vertical_connect_group.is_none()
+        && profile.connect_group.is_none()
+        && profile.liquid.is_none()
+}
+
+fn player_intersects_block_v1(body: &PhysicsBodyV1, position: CellPositionV1) -> bool {
+    let block_min_x = f64::from(position.x) - 0.5;
+    let block_max_x = block_min_x + 1.0;
+    let block_min_y = f64::from(position.y) - 0.5;
+    let block_max_y = block_min_y + 1.0;
+    let block_min_z = f64::from(position.z) - 0.5;
+    let block_max_z = block_min_z + 1.0;
+    body.position.x + body.radius > block_min_x
+        && body.position.x - body.radius < block_max_x
+        && body.position.y + body.height > block_min_y
+        && body.position.y < block_max_y
+        && body.position.z + body.radius > block_min_z
+        && body.position.z - body.radius < block_max_z
 }
 
 fn floor_i32(value: f64) -> Result<i32, IntegratedRuntimeError> {
@@ -6657,6 +7400,10 @@ impl NativeWriterV1 {
         self.raw(&value.to_le_bytes());
     }
 
+    fn i32(&mut self, value: i32) {
+        self.raw(&value.to_le_bytes());
+    }
+
     fn u64(&mut self, value: u64) {
         self.raw(&value.to_le_bytes());
     }
@@ -6767,6 +7514,10 @@ impl<'a> NativeReaderV1<'a> {
 
     fn u32(&mut self) -> Result<u32, IntegratedRuntimeError> {
         Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("fixed slice")))
+    }
+
+    fn i32(&mut self) -> Result<i32, IntegratedRuntimeError> {
+        Ok(i32::from_le_bytes(self.take(4)?.try_into().expect("fixed slice")))
     }
 
     fn u64(&mut self) -> Result<u64, IntegratedRuntimeError> {
@@ -7031,6 +7782,7 @@ fn decode_and_validate_native_bundle_v1(
 fn write_runtime_config_v1(
     writer: &mut NativeWriterV1,
     config: &IntegratedRuntimeConfigV2,
+    schema: u16,
 ) -> Result<(), IntegratedRuntimeError> {
     writer.string(&config.world_seed)?;
     writer.string(&config.universe_id)?;
@@ -7038,8 +7790,10 @@ fn write_runtime_config_v1(
     writer.string(&config.session_id)?;
     writer.hash(config.content_hash);
     writer.hash(config.generator_hash);
-    writer.hash(config.terrain_content_hash);
-    writer.string(&config.generation_options_json)?;
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V4 {
+        writer.hash(config.terrain_content_hash);
+        writer.string(&config.generation_options_json)?;
+    }
     writer.u16(config.block_catalog.water_block_id);
     writer.u32(config.block_catalog.directional_blocks.len() as u32);
     for value in &config.block_catalog.directional_blocks {
@@ -7173,15 +7927,94 @@ fn read_runtime_input_v1(reader: &mut NativeReaderV1<'_>) -> Result<RuntimeInput
     Ok(value)
 }
 
+fn write_mining_state_native_v1(writer: &mut NativeWriterV1, state: &IntegratedRuntimeMiningStateV1) {
+    writer.u64(state.player_entity_id);
+    writer.i32(state.target.x);
+    writer.i32(state.target.y);
+    writer.i32(state.target.z);
+    writer.u16(state.target_block_id);
+    writer.u64(state.world_revision.epoch);
+    writer.u64(state.world_revision.mutation);
+    writer.u64(state.world_revision.residency);
+    writer.u8(state.selected_slot);
+    writer.u32(state.held_item_code);
+    writer.hash(state.held_metadata_hash);
+    writer.bool(state.held_durability_millionths.is_some());
+    if let Some(value) = state.held_durability_millionths {
+        writer.u32(value);
+    }
+    writer.hash(state.tool_profile_hash);
+    writer.u64(state.progress_millionths);
+    writer.u64(state.required_work_millionths);
+    writer.u64(state.started_tick);
+    writer.u64(state.last_advanced_tick);
+}
+
+fn read_mining_state_native_v1(
+    reader: &mut NativeReaderV1<'_>,
+    tick: u64,
+    player: Option<&IntegratedRuntimePlayerStateV2>,
+) -> Result<IntegratedRuntimeMiningStateV1, IntegratedRuntimeError> {
+    let state = IntegratedRuntimeMiningStateV1 {
+        player_entity_id: reader.u64()?,
+        target: CellPositionV1 {
+            x: reader.i32()?,
+            y: reader.i32()?,
+            z: reader.i32()?,
+        },
+        target_block_id: reader.u16()?,
+        world_revision: WorldAuthorityRevisionV1 {
+            epoch: reader.u64()?,
+            mutation: reader.u64()?,
+            residency: reader.u64()?,
+        },
+        selected_slot: reader.u8()?,
+        held_item_code: reader.u32()?,
+        held_metadata_hash: reader.hash()?,
+        held_durability_millionths: if reader.bool()? { Some(reader.u32()?) } else { None },
+        tool_profile_hash: reader.hash()?,
+        progress_millionths: reader.u64()?,
+        required_work_millionths: reader.u64()?,
+        started_tick: reader.u64()?,
+        last_advanced_tick: reader.u64()?,
+    };
+    if state.player_entity_id == 0
+        || player.is_none_or(|player| player.entity_id.packed() != state.player_entity_id)
+        || state.target_block_id == WORLD_AIR_BLOCK_ID_V1
+        || state.target.y < WORLD_MIN_Y_V1
+        || state.target.y > WORLD_MAX_Y_V1
+        || state.selected_slot > 8
+        || state.held_durability_millionths.is_some_and(|value| value > 1_000_000)
+        || state.tool_profile_hash == CanonicalHash::default()
+        || state.required_work_millionths == 0
+        || state.progress_millionths >= state.required_work_millionths
+        || state.started_tick > state.last_advanced_tick
+        || state.last_advanced_tick > tick
+    {
+        return Err(IntegratedRuntimeError::new(
+            "native-mining-state",
+            "runtime checkpoint mining state is invalid or unbounded",
+        ));
+    }
+    state
+        .world_revision
+        .validate()
+        .map_err(|error| IntegratedRuntimeError::domain("native-mining-state", error))?;
+    Ok(state)
+}
+
 fn write_runtime_player_v1(
     writer: &mut NativeWriterV1,
     player: &IntegratedRuntimePlayerStateV2,
+    schema: u16,
 ) -> Result<(), IntegratedRuntimeError> {
     let binding = &player.binding;
     writer.string(&binding.external_entity_id)?;
-    writer.string(&binding.actor_id)?;
-    writer.u64(binding.player_id.packed());
-    writer.bool(binding.creative_mode);
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V2 {
+        writer.string(&binding.actor_id)?;
+        writer.u64(binding.player_id.packed());
+        writer.bool(binding.creative_mode);
+    }
     for value in [
         binding.radius,
         binding.standing_height,
@@ -7395,7 +8228,7 @@ fn read_compatibility_journal_v1(
 
 fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> IntegratedRuntimeCoreSnapshotV1 {
     IntegratedRuntimeCoreSnapshotV1 {
-        schema: NATIVE_RUNTIME_CORE_SCHEMA_V5,
+        schema: NATIVE_RUNTIME_CORE_SCHEMA_V6,
         config: runtime.config.clone(),
         expected_revision: runtime.revision(),
         tick: runtime.tick,
@@ -7413,6 +8246,7 @@ fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> Integ
         last_input_sequence: runtime.last_input_sequence,
         last_applied_input: runtime.last_applied_input,
         next_action_sequence: runtime.next_action_sequence,
+        mining_state: runtime.mining_state.clone(),
         replay: runtime.replay.clone(),
         command_receipts: runtime.command_receipts.clone(),
         command_receipt_order: runtime.command_receipt_order.clone(),
@@ -7447,7 +8281,7 @@ fn encode_runtime_core_snapshot_body_v1(
     let mut writer = NativeWriterV1::default();
     writer.raw(NATIVE_RUNTIME_MAGIC_V1);
     writer.u16(schema);
-    write_runtime_config_v1(&mut writer, &core.config)?;
+    write_runtime_config_v1(&mut writer, &core.config, schema)?;
     write_runtime_revision_v1(&mut writer, core.expected_revision);
     writer.u64(core.tick);
     writer.u64(core.last_monotonic_time_us);
@@ -7459,7 +8293,7 @@ fn encode_runtime_core_snapshot_body_v1(
     writer.u64(core.entity_command_sequence);
     writer.bool(core.player.is_some());
     if let Some(player) = &core.player {
-        write_runtime_player_v1(&mut writer, player)?;
+        write_runtime_player_v1(&mut writer, player, schema)?;
     }
     writer.u32(core.effect_events.len() as u32);
     for event in &core.effect_events {
@@ -7482,7 +8316,9 @@ fn encode_runtime_core_snapshot_body_v1(
     if let Some(input) = core.last_applied_input {
         write_runtime_input_v1(&mut writer, input);
     }
-    writer.u64(core.next_action_sequence);
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V2 {
+        writer.u64(core.next_action_sequence);
+    }
     writer.u32(core.replay.len() as u32);
     for entry in &core.replay {
         writer.u64(entry.sequence);
@@ -7491,16 +8327,18 @@ fn encode_runtime_core_snapshot_body_v1(
         writer.hash(entry.after_hash);
         writer.hash(entry.receipt_hash);
     }
-    writer.u32(core.command_receipt_order.len() as u32);
-    for key in &core.command_receipt_order {
-        let entry = core
-            .command_receipts
-            .get(key)
-            .expect("validated command receipt order contains every cache key");
-        writer.string(&key.0)?;
-        writer.string(&key.1)?;
-        writer.raw(&entry.command_hash.0);
-        writer.bytes(&entry.encoded_receipt)?;
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V3 {
+        writer.u32(core.command_receipt_order.len() as u32);
+        for key in &core.command_receipt_order {
+            let entry = core
+                .command_receipts
+                .get(key)
+                .expect("validated command receipt order contains every cache key");
+            writer.string(&key.0)?;
+            writer.string(&key.1)?;
+            writer.raw(&entry.command_hash.0);
+            writer.bytes(&entry.encoded_receipt)?;
+        }
     }
     write_compatibility_journal_v1(&mut writer, &core.compatibility_journal)?;
     if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V5 {
@@ -7515,6 +8353,12 @@ fn encode_runtime_core_snapshot_body_v1(
             IntegratedRuntimeError::new("native-runtime-proof", "runtime core durable replay proof is missing")
         })?);
     }
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V6 {
+        writer.bool(core.mining_state.is_some());
+        if let Some(state) = &core.mining_state {
+            write_mining_state_native_v1(&mut writer, state);
+        }
+    }
     writer.bytes(&core.unknown_extension_bytes)?;
     Ok(writer.finish())
 }
@@ -7527,12 +8371,20 @@ fn durable_runtime_core_state_proof_v1(
     core: &IntegratedRuntimeCoreSnapshotV1,
 ) -> Result<CanonicalHash, IntegratedRuntimeError> {
     let mut normalized = core.clone();
-    normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V4;
     normalized.config.session_id = DURABLE_SESSION_NEUTRAL_ID_V1.into();
     normalized.durable_network_drained_proof = None;
-    normalized.durable_state_proof = None;
-    normalized.durable_replay_proof = None;
-    let bytes = encode_runtime_core_snapshot_body_v1(&normalized, NATIVE_RUNTIME_CORE_SCHEMA_V4)?;
+    let proof_schema = if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V6 {
+        normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V6;
+        normalized.durable_state_proof = Some(CanonicalHash::default());
+        normalized.durable_replay_proof = Some(CanonicalHash::default());
+        NATIVE_RUNTIME_CORE_SCHEMA_V6
+    } else {
+        normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V4;
+        normalized.durable_state_proof = None;
+        normalized.durable_replay_proof = None;
+        NATIVE_RUNTIME_CORE_SCHEMA_V4
+    };
+    let bytes = encode_runtime_core_snapshot_body_v1(&normalized, proof_schema)?;
     let mut hasher = CanonicalHasher::new("blockwild-durable-runtime-core-state-v1");
     hasher.write_bytes(&bytes);
     Ok(hasher.finish())
@@ -7554,7 +8406,7 @@ fn encode_runtime_core_snapshot_v1(runtime: &IntegratedRuntimeV2) -> Result<Vec<
     core.durable_network_drained_proof = runtime.durable_network_save_boundary_proof().ok();
     core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&core)?);
     core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&core));
-    encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V5)
+    encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V6)
 }
 
 fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCoreSnapshotV1, IntegratedRuntimeError> {
@@ -7566,6 +8418,7 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V3
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V4
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V5
+        && schema != NATIVE_RUNTIME_CORE_SCHEMA_V6
     {
         return Err(IntegratedRuntimeError::new(
             "native-runtime-schema",
@@ -7763,6 +8616,11 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         } else {
             (None, None, None)
         };
+    let mining_state = if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V6 && reader.bool()? {
+        Some(read_mining_state_native_v1(&mut reader, tick, player.as_ref())?)
+    } else {
+        None
+    };
     let unknown_extension_bytes = reader.bytes(NATIVE_EXTENSION_MAX_BYTES_V1)?;
     reader.finish()?;
     let core = IntegratedRuntimeCoreSnapshotV1 {
@@ -7784,6 +8642,7 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         last_input_sequence,
         last_applied_input,
         next_action_sequence,
+        mining_state,
         replay,
         command_receipts,
         command_receipt_order,
@@ -8065,7 +8924,15 @@ fn decode_runtime_content_snapshot_v1(
 fn install_runtime_content_snapshot_v1(
     config: &IntegratedRuntimeConfigV2,
     content: &IntegratedRuntimeContentSnapshotV1,
-) -> Result<(MetadataBlobStore, RuntimeContentIndexV1, BTreeMap<u32, ItemDefinition>), IntegratedRuntimeError> {
+) -> Result<
+    (
+        MetadataBlobStore,
+        RuntimeContentIndexV1,
+        ContentRuntimeRegistry,
+        BTreeMap<u32, ItemDefinition>,
+    ),
+    IntegratedRuntimeError,
+> {
     let Some(attestation) = &content.attestation else {
         if !content.artifacts.is_empty() {
             return Err(IntegratedRuntimeError::new(
@@ -8073,7 +8940,12 @@ fn install_runtime_content_snapshot_v1(
                 "unattested native content cannot be installed",
             ));
         }
-        return Ok((MetadataBlobStore::default(), BTreeMap::new(), BTreeMap::new()));
+        return Ok((
+            MetadataBlobStore::default(),
+            BTreeMap::new(),
+            ContentRuntimeRegistry::default(),
+            BTreeMap::new(),
+        ));
     };
     if attestation.manifest_hash != config.content_hash {
         return Err(IntegratedRuntimeError::new(
@@ -8124,7 +8996,7 @@ fn install_runtime_content_snapshot_v1(
         ));
     }
     let item_definitions = item_definitions_from_runtime_registry(&registry)?;
-    Ok((store, index, item_definitions))
+    Ok((store, index, registry, item_definitions))
 }
 
 #[cfg(test)]
@@ -8200,7 +9072,8 @@ mod tests {
                 residency: EntityResidency::Hot,
             }],
         });
-        assert!(runtime.commit(batch).accepted());
+        let receipt = runtime.commit(batch);
+        assert!(receipt.accepted(), "unexpected entity command rejection: {receipt:?}");
         runtime
             .bind_player(RuntimePlayerBindingWireV1 {
                 external_entity_id: "player:one".into(),
@@ -8417,6 +9290,490 @@ mod tests {
             .unwrap();
         runtime.invalidate_state_hash();
         runtime
+    }
+
+    fn runtime_with_action_content(creative_mode: bool, held: Option<ItemStack>) -> IntegratedRuntimeV2 {
+        let artifacts = vec![
+            ContentArtifact {
+                domain: ContentDomain::Item,
+                id: "10".into(),
+                schema_id: "item-definition".into(),
+                schema_version: 1,
+                content_version: 1,
+                aliases: vec!["item:10".into()],
+                canonical_bytes: br#"{"id":10,"maxDurability":10,"maxStack":1,"miningSpeed":10,"name":"Test Pick","tier":2,"toolKind":"pickaxe"}"#.to_vec(),
+                unknown_extension_bytes: Vec::new(),
+            },
+            ContentArtifact {
+                domain: ContentDomain::Item,
+                id: "20".into(),
+                schema_id: "item-definition".into(),
+                schema_version: 1,
+                content_version: 1,
+                aliases: vec!["item:20".into()],
+                canonical_bytes: br#"{"id":20,"maxStack":64,"name":"Test Stone","placeBlock":1}"#.to_vec(),
+                unknown_extension_bytes: Vec::new(),
+            },
+            ContentArtifact {
+                domain: ContentDomain::Item,
+                id: "30".into(),
+                schema_id: "item-definition".into(),
+                schema_version: 1,
+                content_version: 1,
+                aliases: vec!["item:30".into()],
+                canonical_bytes: br#"{"id":30,"maxStack":64,"name":"Filler"}"#.to_vec(),
+                unknown_extension_bytes: Vec::new(),
+            },
+            ContentArtifact {
+                domain: ContentDomain::Item,
+                id: blockwild_gameplay::BLOCK_ACTION_CATALOG_ID.into(),
+                schema_id: "block-action-catalog".into(),
+                schema_version: 1,
+                content_version: 1,
+                aliases: vec!["item:block-actions".into()],
+                canonical_bytes: br#"{"profiles":[{"hardness":0,"id":0,"preferredTool":"hand","replaceable":true,"requiredTier":0,"solid":false,"topologyFlags":[]},{"hardness":1,"id":1,"item":20,"preferredTool":"pickaxe","replaceable":false,"requiredTier":2,"solid":true,"topologyFlags":[]},{"hardness":1,"id":2,"item":20,"preferredTool":"pickaxe","replaceable":false,"requiredTier":2,"shape":"door","solid":true,"topologyFlags":["paired"]},{"hardness":9999,"id":14,"item":20,"preferredTool":"pickaxe","replaceable":false,"requiredTier":99,"solid":true,"topologyFlags":[]}],"schema":1}"#.to_vec(),
+                unknown_extension_bytes: Vec::new(),
+            },
+        ];
+        let bundle = compile_content_bundle("runtime-actions-v1", artifacts.clone()).unwrap();
+        let mut runtime = runtime_with_bound_player_config(IntegratedRuntimeConfigV2 {
+            content_hash: bundle.manifest.manifest_hash,
+            ..IntegratedRuntimeConfigV2::default()
+        });
+        let page = ContentInstallPageWireV1 {
+            install_id: "runtime-actions-install".into(),
+            manifest_schema: bundle.manifest.schema_version,
+            source_revision: bundle.manifest.source_revision,
+            manifest_hash: bundle.manifest.manifest_hash,
+            domains: bundle.manifest.domains,
+            page_index: 0,
+            page_count: 1,
+            artifacts,
+        };
+        let bytes = crate::encode_content_install_page_v1(&page).unwrap();
+        runtime
+            .install_content_page(page, CanonicalHash(blockwild_runtime_wire::wire_checksum_v1(&bytes)))
+            .unwrap();
+        runtime.player.as_mut().unwrap().binding.creative_mode = creative_mode;
+        runtime.player.as_mut().unwrap().flags = u8::from(creative_mode) * RUNTIME_INPUT_FLAG_CREATIVE_V1;
+        let player_id = runtime.player.as_ref().unwrap().binding.player_id;
+        let player_entity_id = runtime.player.as_ref().unwrap().entity_id;
+        let actor_id = runtime.player.as_ref().unwrap().binding.actor_id.clone();
+        let inventory_key = runtime
+            .world_view
+            .state
+            .player_binding(player_id)
+            .unwrap()
+            .inventory_container
+            .clone();
+        let mut state = runtime.gameplay.state.clone();
+        state.inventory.containers.get_mut(&inventory_key).unwrap().slots[0] = held;
+        state.revision.sequence = state.revision.sequence.saturating_add(1);
+        state.revision.inventory = state.revision.inventory.saturating_add(1);
+        runtime.gameplay = GameplayAuthority::new(state);
+        runtime
+            .gameplay
+            .grant_actor(actor_id, ActorGrant::host(player_id, player_entity_id))
+            .unwrap();
+        runtime
+            .gameplay
+            .grant_actor(GAMEPLAY_SCHEDULER_ACTOR_ID_V1, ActorGrant::system())
+            .unwrap();
+        runtime.invalidate_state_hash();
+        runtime
+    }
+
+    fn action_input(sequence: u64, buttons: u32) -> RuntimeInputFrameV1 {
+        RuntimeInputFrameV1 {
+            sequence,
+            target_tick: sequence,
+            buttons,
+            selected_slot: 0,
+            ..RuntimeInputFrameV1::default()
+        }
+    }
+
+    fn set_loaded_block(runtime: &mut IntegratedRuntimeV2, batch_id: &str, position: CellPositionV1, block_id: u16) {
+        let mut batch = IntegratedRuntimeBatchV2::empty(batch_id, runtime.identity());
+        batch.world.push(WorldMutationBatchR4V1 {
+            schema_version: blockwild_authority::WORLD_AUTHORITY_SCHEMA_V1,
+            batch_id: batch_id.into(),
+            authority_id: "test".into(),
+            address: runtime.world.active_address().clone(),
+            expected_revision: runtime.world.revision(),
+            commands: vec![WorldMutationCommandR4V1::SetBlock {
+                position,
+                block_id,
+                facing: None,
+            }],
+        });
+        assert!(runtime.commit(batch).accepted());
+    }
+
+    fn action_target_position() -> CellPositionV1 {
+        CellPositionV1 { x: 8, y: 65, z: 5 }
+    }
+
+    fn test_pick(tier_durability_millionths: u32) -> ItemStack {
+        ItemStack {
+            item_code: 10,
+            count: 1,
+            durability_millionths: Some(tier_durability_millionths),
+            metadata_hash: CanonicalHash::default(),
+        }
+    }
+
+    #[test]
+    fn action_raycast_voxel_and_unknown_occlude_exact_entity_bounds() {
+        let mut runtime = runtime_with_action_content(true, None);
+        let voxel = action_target_position();
+        set_loaded_block(&mut runtime, "ray-voxel", voxel, 1);
+        let mut record = EntityCompatibilityRecord::new("entity:behind", "entity:behind", "test");
+        record.position = EntityVec3::new(8.0, 65.0, 4.0);
+        record.health = 10.0;
+        record.maximum_health = 10.0;
+        commit_entity_commands(
+            &mut runtime,
+            "ray-entity",
+            vec![EntityCommand::Spawn {
+                record,
+                residency: EntityResidency::Hot,
+            }],
+        );
+        assert!(matches!(
+            runtime.raycast_action_target(action_input(1, 0), 4.5).unwrap(),
+            IntegratedRuntimeActionTargetV1::Block { position, .. } if position == voxel
+        ));
+
+        let mut unknown = runtime_with_action_content(true, None);
+        let player = unknown.player.as_mut().unwrap();
+        player.body.position = SimulationVec3::new(15.0, 65.0, 8.0);
+        let toward_unloaded = RuntimeInputFrameV1 {
+            look_yaw: i16::MIN / 2,
+            ..action_input(2, 0)
+        };
+        assert_eq!(
+            unknown.raycast_action_target(toward_unloaded, 4.5).unwrap(),
+            IntegratedRuntimeActionTargetV1::Unloaded
+        );
+    }
+
+    #[test]
+    fn mining_edge_does_not_progress_and_release_target_or_revision_changes_reset() {
+        let mut runtime = runtime_with_action_content(false, Some(test_pick(1_000_000)));
+        let target = action_target_position();
+        set_loaded_block(&mut runtime, "mining-target", target, 1);
+        let held = action_input(1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1);
+        assert_eq!(
+            runtime.apply_primary_attack(held).unwrap().0,
+            RuntimeInputActionOutcomeV1::Applied
+        );
+        runtime.advance_held_primary_mining(held).unwrap();
+        assert_eq!(runtime.mining_state.as_ref().unwrap().progress_millionths, 0);
+
+        runtime.tick += 1;
+        runtime.advance_held_primary_mining(held).unwrap();
+        assert!(runtime.mining_state.as_ref().unwrap().progress_millionths > 0);
+        runtime.advance_held_primary_mining(action_input(2, 0)).unwrap();
+        assert!(runtime.mining_state.is_none());
+
+        let held = action_input(3, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1);
+        runtime.begin_or_reset_mining(held, target).unwrap();
+        set_loaded_block(
+            &mut runtime,
+            "other-world-mutation",
+            CellPositionV1 { x: 9, y: 65, z: 5 },
+            1,
+        );
+        assert!(runtime.mining_state.is_none(), "every R4 mutation invalidates mining");
+
+        runtime.begin_or_reset_mining(held, target).unwrap();
+        let look_away = RuntimeInputFrameV1 {
+            look_yaw: i16::MAX,
+            ..held
+        };
+        runtime.tick += 1;
+        runtime.advance_held_primary_mining(look_away).unwrap();
+        assert!(runtime.mining_state.is_none());
+    }
+
+    #[test]
+    fn bedrock_and_special_topology_fail_closed_for_creative_and_survival() {
+        let target = action_target_position();
+        for creative in [false, true] {
+            let held = (!creative).then(|| test_pick(1_000_000));
+            let mut runtime = runtime_with_action_content(creative, held);
+            set_loaded_block(
+                &mut runtime,
+                &format!("bedrock-{creative}"),
+                target,
+                WORLD_BEDROCK_BLOCK_ID_V1,
+            );
+            assert_eq!(
+                runtime
+                    .begin_or_reset_mining(action_input(1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1), target)
+                    .unwrap(),
+                RuntimeInputActionOutcomeV1::Blocked
+            );
+            assert!(runtime.mining_state.is_none());
+            assert_eq!(loaded_block_id(&runtime, target), WORLD_BEDROCK_BLOCK_ID_V1);
+        }
+
+        let mut special = runtime_with_action_content(false, Some(test_pick(1_000_000)));
+        set_loaded_block(&mut special, "special-paired", target, 2);
+        assert_eq!(
+            special
+                .begin_or_reset_mining(action_input(1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1), target)
+                .unwrap(),
+            RuntimeInputActionOutcomeV1::Blocked
+        );
+        assert_eq!(loaded_block_id(&special, target), 2);
+    }
+
+    #[test]
+    fn wrong_tier_breaks_without_loot_and_only_real_tools_wear() {
+        let target = action_target_position();
+        let mut hand = runtime_with_action_content(false, None);
+        set_loaded_block(&mut hand, "wrong-tier-hand", target, 1);
+        let input = action_input(1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1);
+        hand.begin_or_reset_mining(input, target).unwrap();
+        let profile = hand.gameplay_content_runtime.block_action(1).unwrap().clone();
+        let tool = hand.mining_tool_v1(profile.preferred_tool).unwrap();
+        hand.complete_basic_block_break(input, target, &profile, &tool).unwrap();
+        assert_eq!(loaded_block_id(&hand, target), WORLD_AIR_BLOCK_ID_V1);
+        assert!(hand.held_stack_and_binding().unwrap().2.is_none());
+
+        let mut under_tier = runtime_with_action_content(false, Some(test_pick(1_000_000)));
+        under_tier
+            .gameplay_content_runtime
+            .items
+            .get_mut("10")
+            .unwrap()
+            .action
+            .tier = Some(1);
+        set_loaded_block(&mut under_tier, "wrong-tier-tool", target, 1);
+        under_tier.begin_or_reset_mining(input, target).unwrap();
+        let profile = under_tier.gameplay_content_runtime.block_action(1).unwrap().clone();
+        let tool = under_tier.mining_tool_v1(profile.preferred_tool).unwrap();
+        under_tier
+            .complete_basic_block_break(input, target, &profile, &tool)
+            .unwrap();
+        assert_eq!(loaded_block_id(&under_tier, target), WORLD_AIR_BLOCK_ID_V1);
+        let held = under_tier.held_stack_and_binding().unwrap().2.unwrap();
+        assert_eq!(held.item_code, 10);
+        assert_eq!(held.durability_millionths, Some(900_000));
+        assert!(
+            !under_tier
+                .gameplay
+                .state
+                .inventory
+                .containers
+                .values()
+                .flat_map(|container| container.slots.iter().flatten())
+                .any(|stack| stack.item_code == 20)
+        );
+    }
+
+    #[test]
+    fn creative_basic_break_clears_world_without_loot_or_inventory_mutation() {
+        let target = action_target_position();
+        let mut runtime = runtime_with_action_content(true, Some(ItemStack::simple(20, 64)));
+        set_loaded_block(&mut runtime, "creative-break-target", target, 1);
+        let input = action_input(1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1);
+        runtime.begin_or_reset_mining(input, target).unwrap();
+        let profile = runtime.gameplay_content_runtime.block_action(1).unwrap().clone();
+        let tool = runtime.mining_tool_v1(profile.preferred_tool).unwrap();
+        let before_inventory = runtime.gameplay.state.inventory.clone();
+        runtime
+            .complete_basic_block_break(input, target, &profile, &tool)
+            .unwrap();
+        assert_eq!(loaded_block_id(&runtime, target), WORLD_AIR_BLOCK_ID_V1);
+        assert_eq!(runtime.gameplay.state.inventory, before_inventory);
+    }
+
+    #[test]
+    fn break_capacity_failure_rolls_back_world_tool_and_loot_then_can_retry() {
+        let target = action_target_position();
+        let mut runtime = runtime_with_action_content(false, Some(test_pick(1_000_000)));
+        set_loaded_block(&mut runtime, "rollback-target", target, 1);
+        let key = runtime.held_stack_and_binding().unwrap().0.inventory_container;
+        for slot in 1..9 {
+            runtime.gameplay.state.inventory.containers.get_mut(&key).unwrap().slots[slot] =
+                Some(ItemStack::simple(30, 64));
+        }
+        let input = action_input(1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1);
+        runtime.begin_or_reset_mining(input, target).unwrap();
+        let profile = runtime.gameplay_content_runtime.block_action(1).unwrap().clone();
+        let tool = runtime.mining_tool_v1(profile.preferred_tool).unwrap();
+        let before_world = runtime.world.canonical_state_hash();
+        let before_inventory = runtime.gameplay.state.inventory.clone();
+        runtime
+            .complete_basic_block_break(input, target, &profile, &tool)
+            .unwrap();
+        assert_eq!(runtime.world.canonical_state_hash(), before_world);
+        assert_eq!(runtime.gameplay.state.inventory, before_inventory);
+        assert_eq!(loaded_block_id(&runtime, target), 1);
+        let mining = runtime.mining_state.as_ref().unwrap();
+        assert_eq!(mining.progress_millionths, mining.required_work_millionths - 1);
+
+        runtime.gameplay.state.inventory.containers.get_mut(&key).unwrap().slots[8] = None;
+        let (_, inventory_revision, _) = runtime.held_stack_and_binding().unwrap();
+        runtime
+            .gameplay
+            .state
+            .inventory
+            .containers
+            .get_mut(&key)
+            .unwrap()
+            .revision = inventory_revision + 1;
+        runtime.begin_or_reset_mining(input, target).unwrap();
+        let tool = runtime.mining_tool_v1(profile.preferred_tool).unwrap();
+        runtime
+            .complete_basic_block_break(input, target, &profile, &tool)
+            .unwrap();
+        assert_eq!(loaded_block_id(&runtime, target), WORLD_AIR_BLOCK_ID_V1);
+    }
+
+    #[test]
+    fn placement_collision_and_capacity_failure_leave_world_and_inventory_exact() {
+        let mut runtime = runtime_with_action_content(false, Some(ItemStack::simple(20, 1)));
+        let hit = CellPositionV1 { x: 8, y: 65, z: 7 };
+        set_loaded_block(&mut runtime, "place-hit", hit, 1);
+        assert!(player_intersects_block_v1(
+            &runtime.player.as_ref().unwrap().body,
+            CellPositionV1 {
+                x: hit.x,
+                y: hit.y,
+                z: hit.z + 1
+            }
+        ));
+        let before_world = runtime.world.canonical_state_hash();
+        let before_inventory = runtime.gameplay.state.inventory.clone();
+        assert_eq!(
+            runtime
+                .apply_basic_block_placement(action_input(1, RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1), hit, [0, 0, 1])
+                .unwrap(),
+            RuntimeInputActionOutcomeV1::Blocked
+        );
+        assert_eq!(runtime.world.canonical_state_hash(), before_world);
+        assert_eq!(runtime.gameplay.state.inventory, before_inventory);
+
+        let missing = CellPositionV1 { x: 15, y: 65, z: 5 };
+        set_loaded_block(&mut runtime, "place-boundary-hit", missing, 1);
+        let before_world = runtime.world.canonical_state_hash();
+        let before_inventory = runtime.gameplay.state.inventory.clone();
+        assert_eq!(
+            runtime
+                .apply_basic_block_placement(
+                    action_input(2, RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1),
+                    missing,
+                    [1, 0, 0]
+                )
+                .unwrap(),
+            RuntimeInputActionOutcomeV1::Blocked
+        );
+        assert_eq!(runtime.world.canonical_state_hash(), before_world);
+        assert_eq!(runtime.gameplay.state.inventory, before_inventory);
+    }
+
+    #[test]
+    fn v6_mining_checkpoint_restores_exactly_and_advances_only_on_a_future_tick() {
+        let mut runtime = runtime_with_action_content(false, Some(test_pick(1_000_000)));
+        let target = action_target_position();
+        set_loaded_block(&mut runtime, "checkpoint-mining-target", target, 1);
+        let input = action_input(1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1);
+        runtime.begin_or_reset_mining(input, target).unwrap();
+        runtime.tick += 1;
+        runtime.advance_held_primary_mining(input).unwrap();
+        let saved = runtime.mining_state.clone().unwrap();
+        assert!(saved.progress_millionths > 0);
+
+        accept_all_authority_commits(&mut runtime);
+        let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+        let mut restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint),
+        )
+        .unwrap();
+        assert_eq!(restored.mining_state, Some(saved.clone()));
+        assert_eq!(restored.gameplay_content_runtime, runtime.gameplay_content_runtime);
+        restored.advance_held_primary_mining(input).unwrap();
+        assert_eq!(
+            restored.mining_state,
+            Some(saved.clone()),
+            "same tick cannot double-progress"
+        );
+        restored.tick += 1;
+        restored.advance_held_primary_mining(input).unwrap();
+        match restored.mining_state.as_ref() {
+            Some(state) => assert!(state.progress_millionths > saved.progress_millionths),
+            None => assert_eq!(
+                loaded_block_id(&restored, target),
+                WORLD_AIR_BLOCK_ID_V1,
+                "a future fixed tick may complete the restored action, but not discard it"
+            ),
+        }
+    }
+
+    #[test]
+    fn runtime_core_v1_through_v5_decode_without_mining_state() {
+        let runtime = runtime_with_bound_player();
+        for schema in [
+            NATIVE_RECORD_SCHEMA_V1,
+            NATIVE_RUNTIME_CORE_SCHEMA_V2,
+            NATIVE_RUNTIME_CORE_SCHEMA_V3,
+            NATIVE_RUNTIME_CORE_SCHEMA_V4,
+            NATIVE_RUNTIME_CORE_SCHEMA_V5,
+        ] {
+            let mut core = runtime_core_snapshot_from_runtime_v1(&runtime);
+            core.schema = schema;
+            core.mining_state = None;
+            core.command_receipts.clear();
+            core.command_receipt_order.clear();
+            core.command_receipt_bytes = 0;
+            core.durable_network_drained_proof = None;
+            core.durable_state_proof = None;
+            core.durable_replay_proof = None;
+            if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V5 {
+                core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&core).unwrap());
+                core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&core));
+            }
+            let bytes = encode_runtime_core_snapshot_body_v1(&core, schema).unwrap();
+            let decoded = decode_runtime_core_snapshot_v1(&bytes).unwrap();
+            assert_eq!(decoded.schema, schema);
+            assert!(decoded.mining_state.is_none(), "schema {schema} must default mining");
+        }
+    }
+
+    #[test]
+    fn terrain_reconcile_revision_change_clears_mining_state() {
+        let fixture = blockwild_generation::fixture_request("mining-residency-reset", 0, 0, 1);
+        let config = IntegratedRuntimeConfigV2 {
+            world_seed: fixture.seed_text,
+            terrain_content_hash: parse_canonical_hash(&fixture.content_hash).unwrap(),
+            generator_hash: parse_canonical_hash(&fixture.generator_hash).unwrap(),
+            ..IntegratedRuntimeConfigV2::default()
+        };
+        let mut runtime = runtime_with_action_content(false, Some(test_pick(1_000_000)));
+        runtime.config.world_seed = config.world_seed;
+        runtime.config.terrain_content_hash = config.terrain_content_hash;
+        runtime.config.generator_hash = config.generator_hash;
+        let target = action_target_position();
+        set_loaded_block(&mut runtime, "residency-mining-target", target, 1);
+        runtime
+            .begin_or_reset_mining(action_input(1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1), target)
+            .unwrap();
+        assert!(runtime.mining_state.is_some());
+        let previous = runtime.world.revision();
+        let receipt = runtime
+            .reconcile_terrain_residency(&IntegratedTerrainResidencyReconcileBatchV2 {
+                expected_world_revision: previous,
+                generation_options_json: runtime.config.generation_options_json.clone(),
+                desired_chunks: vec![IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 }],
+            })
+            .unwrap();
+        assert_ne!(receipt.world_revision, previous);
+        assert!(runtime.mining_state.is_none());
     }
 
     fn accept_next_authority_commit(runtime: &mut IntegratedRuntimeV2) {
@@ -8636,7 +9993,8 @@ mod tests {
             tick: runtime.tick(),
             commands,
         });
-        assert!(runtime.commit(batch).accepted());
+        let receipt = runtime.commit(batch);
+        assert!(receipt.accepted(), "unexpected entity command rejection: {receipt:?}");
     }
 
     #[test]
@@ -9088,6 +10446,7 @@ mod tests {
                 RuntimeInputFrameV1 {
                     sequence: 1,
                     buttons: RUNTIME_INPUT_BUTTON_MOUNT_TOGGLE_V1,
+                    look_pitch: -2_048,
                     ..RuntimeInputFrameV1::default()
                 },
                 0,
@@ -10428,6 +11787,133 @@ mod tests {
         assert_eq!(runtime.world().revision(), before_revision);
         assert_eq!(runtime.world().resident_chunk_coordinates(), vec![(0, 0)]);
         assert_eq!(runtime.generation_diagnostics(), before_diagnostics);
+    }
+
+    #[test]
+    fn exact_terrain_reconcile_removes_scheduler_only_chunks_and_active_cancellations() {
+        let fixture = blockwild_generation::fixture_request("integrated-reconcile-scheduler", 0, 0, 1);
+        let mut runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2 {
+            world_seed: fixture.seed_text,
+            terrain_content_hash: parse_canonical_hash(&fixture.content_hash).unwrap(),
+            generator_hash: parse_canonical_hash(&fixture.generator_hash).unwrap(),
+            ..IntegratedRuntimeConfigV2::default()
+        })
+        .unwrap();
+        let world = runtime.world().active_address().clone();
+        let authority_revision = runtime.world().revision();
+        let request = |request_id, chunk_x, sequence| blockwild_authority::ResidencyRequestV1 {
+            request_id,
+            epoch: authority_revision.epoch,
+            address: WorldSectionAddressV1 {
+                world: world.clone(),
+                chunk_x,
+                chunk_z: 0,
+                section_y: 0,
+            },
+            class: blockwild_authority::ResidencyPriorityClassV1::OccupiedSupport,
+            purpose: blockwild_authority::ResidencyPurposeV1::Generate,
+            distance_squared: 0,
+            direction_penalty: 0,
+            sequence,
+        };
+        {
+            let scheduler = runtime.world_mut_for_platform_install().scheduler_mut();
+            scheduler.submit(request(1, 9, 1)).unwrap();
+            scheduler.submit(request(2, 9, 2)).unwrap();
+            scheduler.submit(request(3, 0, 3)).unwrap();
+        }
+        let active = runtime
+            .world_mut_for_platform_install()
+            .scheduler_mut()
+            .start_next(authority_revision, fixture.content_hash)
+            .unwrap()
+            .unwrap();
+        assert!(runtime.world_mut_for_platform_install().scheduler_mut().cancel(1));
+
+        let receipt = runtime
+            .reconcile_terrain_residency(&IntegratedTerrainResidencyReconcileBatchV2 {
+                expected_world_revision: authority_revision,
+                generation_options_json: runtime.config().generation_options_json.clone(),
+                desired_chunks: vec![IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 }],
+            })
+            .unwrap();
+        assert_eq!(
+            receipt.evicted_chunks,
+            vec![IntegratedTerrainChunkCoordinateV1 { chunk_x: 9, chunk_z: 0 }]
+        );
+        let scheduler = runtime.world_mut_for_platform_install().scheduler_mut();
+        let scheduler_snapshot = scheduler.exact_snapshot();
+        assert_eq!(scheduler_snapshot.queued.len(), 1);
+        assert_eq!(scheduler_snapshot.queued[0].request_id, 3);
+        assert!(scheduler_snapshot.active.is_empty());
+        assert!(scheduler_snapshot.cancelled.is_empty());
+        assert_eq!(
+            scheduler.finish(&active, receipt.world_revision),
+            blockwild_authority::ResidencyCompletionV1::UnknownJob
+        );
+    }
+
+    #[test]
+    fn exact_terrain_reconcile_generation_failure_leaves_authority_unmodified() {
+        let fixture = blockwild_generation::fixture_request("integrated-reconcile-generation-failure", 0, 0, 1);
+        let mut runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2 {
+            world_seed: fixture.seed_text,
+            terrain_content_hash: parse_canonical_hash(&fixture.content_hash).unwrap(),
+            generator_hash: parse_canonical_hash(&fixture.generator_hash).unwrap(),
+            ..IntegratedRuntimeConfigV2::default()
+        })
+        .unwrap();
+        runtime
+            .reconcile_terrain_residency(&IntegratedTerrainResidencyReconcileBatchV2 {
+                expected_world_revision: runtime.world().revision(),
+                generation_options_json: runtime.config().generation_options_json.clone(),
+                desired_chunks: vec![IntegratedTerrainChunkCoordinateV1 { chunk_x: 1, chunk_z: 0 }],
+            })
+            .unwrap();
+        let edited = CellPositionV1 { x: 17, y: 100, z: 1 };
+        let mut edit = IntegratedRuntimeBatchV2::empty("generation-failure-edit", runtime.identity());
+        edit.world.push(WorldMutationBatchR4V1 {
+            schema_version: blockwild_authority::WORLD_AUTHORITY_SCHEMA_V1,
+            batch_id: "generation-failure-edit".into(),
+            authority_id: "player:terrain-test".into(),
+            address: runtime.world().active_address().clone(),
+            expected_revision: runtime.world().revision(),
+            commands: vec![blockwild_authority::WorldMutationCommandR4V1::SetBlock {
+                position: edited,
+                block_id: 254,
+                facing: None,
+            }],
+        });
+        assert!(runtime.commit(edit).accepted());
+        runtime.generation = Arc::new(GenerationService::new(blockwild_generation::GenerationServiceConfig {
+            cache_entries: 4,
+            maximum_edits: 0,
+        }));
+        let before_hash = runtime.state_hash();
+        let before_world_hash = runtime.world().canonical_state_hash();
+        let before_revision = runtime.world().revision();
+        let error = runtime
+            .reconcile_terrain_residency(&IntegratedTerrainResidencyReconcileBatchV2 {
+                expected_world_revision: before_revision,
+                generation_options_json: runtime.config().generation_options_json.clone(),
+                desired_chunks: vec![
+                    IntegratedTerrainChunkCoordinateV1 {
+                        chunk_x: -1,
+                        chunk_z: 0,
+                    },
+                    IntegratedTerrainChunkCoordinateV1 { chunk_x: 1, chunk_z: 0 },
+                ],
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "generation-error");
+        assert_eq!(runtime.state_hash(), before_hash);
+        assert_eq!(runtime.world().canonical_state_hash(), before_world_hash);
+        assert_eq!(runtime.world().revision(), before_revision);
+        assert_eq!(runtime.world().resident_chunk_coordinates(), vec![(1, 0)]);
+        assert!(matches!(
+            runtime.world().read_cell(edited),
+            WorldCellReadV1::Loaded { cell, .. } if cell.block_id == 254
+        ));
     }
 
     #[test]

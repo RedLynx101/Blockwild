@@ -5,7 +5,7 @@ use blockwild_types::{CanonicalHash, CanonicalHasher};
 
 use crate::{
     AuthorityError, AuthorityResult, JS_MAX_SAFE_INTEGER_V1, WORLD_SECTION_COUNT_V1, WorldAuthorityRevisionV1,
-    WorldSectionAddressV1, validate_hash,
+    WorldChunkAddressV1, WorldSectionAddressV1, validate_hash,
 };
 
 pub const WORLD_RESIDENCY_MAX_QUEUED_V1: usize = 65_536;
@@ -170,7 +170,10 @@ impl SectionResidencySchedulerV1 {
                 "request id and sequence must be positive",
             ));
         }
-        if self.queued.contains_key(&request.request_id) || self.active.contains_key(&request.request_id) {
+        if self.queued.contains_key(&request.request_id)
+            || self.active.contains_key(&request.request_id)
+            || self.cancelled.contains(&request.request_id)
+        {
             return Err(AuthorityError::new(
                 "duplicate-request",
                 "residency request id already exists",
@@ -187,7 +190,10 @@ impl SectionResidencySchedulerV1 {
     pub fn cancel(&mut self, request_id: u64) -> bool {
         if let Some(request) = self.queued.remove(&request_id) {
             self.queue.remove(&QueueKey::from(&request));
-            self.cancelled.insert(request_id);
+            // Queued work was never issued, so there can be no completion to
+            // reject. Retaining a tombstone here would leak one canonical
+            // scheduler entry for every cancelled queued request.
+            self.cancelled.remove(&request_id);
             return true;
         }
         if self.active.contains_key(&request_id) {
@@ -210,6 +216,52 @@ impl SectionResidencySchedulerV1 {
             self.cancel(id);
         }
         count
+    }
+
+    /// Removes every queued or active job for one chunk. Unlike `cancel`, this
+    /// is terminal scheduler cleanup: an already-issued completion becomes an
+    /// unknown job and cannot install, while no cancellation tombstone remains
+    /// in the canonical scheduler state.
+    pub fn remove_chunk(&mut self, address: &WorldChunkAddressV1) -> usize {
+        let queued_ids = self
+            .queued
+            .values()
+            .filter(|request| request.address.chunk() == *address)
+            .map(|request| request.request_id)
+            .collect::<Vec<_>>();
+        let active_ids = self
+            .active
+            .values()
+            .filter(|token| token.request.address.chunk() == *address)
+            .map(|token| token.request.request_id)
+            .collect::<Vec<_>>();
+        let count = queued_ids.len().saturating_add(active_ids.len());
+        for request_id in queued_ids {
+            if let Some(request) = self.queued.remove(&request_id) {
+                self.queue.remove(&QueueKey::from(&request));
+            }
+            self.cancelled.remove(&request_id);
+        }
+        for request_id in active_ids {
+            self.active.remove(&request_id);
+            self.cancelled.remove(&request_id);
+        }
+        let active_ids = self.active.keys().copied().collect::<BTreeSet<_>>();
+        self.cancelled.retain(|request_id| active_ids.contains(request_id));
+        count
+    }
+
+    pub(crate) fn job_addresses(&self) -> impl Iterator<Item = &WorldSectionAddressV1> {
+        self.queued
+            .values()
+            .map(|request| &request.address)
+            .chain(self.active.values().map(|token| &token.request.address))
+    }
+
+    pub(crate) fn has_orphaned_cancelled_jobs(&self) -> bool {
+        self.cancelled
+            .iter()
+            .any(|request_id| !self.active.contains_key(request_id))
     }
 
     pub fn start_next(

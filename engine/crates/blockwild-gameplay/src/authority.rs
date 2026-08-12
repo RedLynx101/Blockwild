@@ -486,13 +486,14 @@ fn dispatch(
                 InventoryCommand::ImportPlayerInventoryV1(command) => {
                     state.inventory.import_player_inventory_v1(command)?
                 }
+                InventoryCommand::ApplyBlockActionV1(command) => state.inventory.apply_block_action_v1(command)?,
             };
             resource_deltas.extend(deltas);
             touched.insert(Domain::Inventory);
-            let event_kind = if matches!(command, InventoryCommand::ImportPlayerInventoryV1(_)) {
-                "player-inventory-imported-v1"
-            } else {
-                "inventory"
+            let event_kind = match command {
+                InventoryCommand::ImportPlayerInventoryV1(_) => "player-inventory-imported-v1",
+                InventoryCommand::ApplyBlockActionV1(_) => "block-action-v1",
+                _ => "inventory",
             };
             push_event(events, batch_id, command_index, &actor.actor_id, event_kind, None);
         }
@@ -719,6 +720,7 @@ fn authorize_command(
                 InventoryCommand::RemoveEmptyDropCustody(_) => false,
                 InventoryCommand::CreatePlayerCustody(command) => owns(&command.inventory) && owns(&command.equipment),
                 InventoryCommand::ImportPlayerInventoryV1(_) => false,
+                InventoryCommand::ApplyBlockActionV1(command) => owns(&command.inventory),
             };
             if !allowed {
                 return Err(Rejection::new(

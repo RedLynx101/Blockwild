@@ -211,6 +211,9 @@ fn exact_chunk_eviction_is_bounded_idempotent_and_preserves_authored_edits() {
         WorldMutationReceiptR4V1::Accepted { mutated: true, .. }
     ));
     assert_eq!(store.resident_chunk_coordinates(), vec![(-2, 3)]);
+    let authored_revision = store
+        .current_section_revision(&edited.section_address(&world))
+        .expect("edited section revision");
     let revision_before = store.revision();
     assert_eq!(store.evict_chunk(&chunk), WORLD_SECTION_COUNT_V1 as u16);
     assert_eq!(store.resident_section_count(), 0);
@@ -228,8 +231,13 @@ fn exact_chunk_eviction_is_bounded_idempotent_and_preserves_authored_edits() {
     );
 
     store
-        .install_section_for_replay(empty_install(section_address(&world, -2, 3, edited.section_y()), 2))
+        .install_section_for_residency_replay(empty_install(section_address(&world, -2, 3, edited.section_y()), 2))
         .expect("reinstall");
+    assert_eq!(
+        store.current_section_revision(&edited.section_address(&world)),
+        Some(authored_revision),
+        "replay retains the authored section revision ledger"
+    );
     assert!(matches!(
         store.read_cell(edited),
         WorldCellReadV1::Loaded { cell, .. } if cell.block_id == 3
@@ -248,6 +256,118 @@ fn exact_chunk_eviction_is_bounded_idempotent_and_preserves_authored_edits() {
     assert_eq!(store.evict_chunk(&auxiliary_only), 0);
     assert!(store.chunk_auxiliary(&auxiliary_only).is_none());
     assert_eq!(store.revision().residency, auxiliary_revision.residency + 1);
+}
+
+#[test]
+fn chunk_eviction_removes_scheduler_only_work_and_cancelled_active_jobs() {
+    let world = address("scheduler-chunk-eviction");
+    let mut store = WorldAuthorityStoreR4V1::new(world.clone(), catalog()).expect("store");
+    let target = WorldChunkAddressV1 {
+        world: world.clone(),
+        chunk_x: 7,
+        chunk_z: -4,
+    };
+    let retained = WorldChunkAddressV1 {
+        world: world.clone(),
+        chunk_x: 8,
+        chunk_z: -4,
+    };
+    let request = |request_id, chunk: &WorldChunkAddressV1, section_y, sequence| ResidencyRequestV1 {
+        request_id,
+        epoch: 1,
+        address: section_address(&world, chunk.chunk_x, chunk.chunk_z, section_y),
+        class: ResidencyPriorityClassV1::OccupiedSupport,
+        purpose: ResidencyPurposeV1::Generate,
+        distance_squared: 0,
+        direction_penalty: 0,
+        sequence,
+    };
+    store.scheduler_mut().submit(request(1, &target, 0, 1)).unwrap();
+    store.scheduler_mut().submit(request(2, &target, 1, 2)).unwrap();
+    store.scheduler_mut().submit(request(3, &retained, 0, 3)).unwrap();
+    let scheduler_revision = store.revision();
+    let active = store
+        .scheduler_mut()
+        .start_next(scheduler_revision, HASH_A.into())
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.request.request_id, 1);
+    assert!(store.scheduler_mut().cancel(active.request.request_id));
+    assert_eq!(store.scheduler_mut().exact_snapshot().cancelled, vec![1]);
+
+    let before = store.revision();
+    assert_eq!(
+        store.evict_chunk(&target),
+        0,
+        "scheduler-only chunks have no resident sections"
+    );
+    assert_eq!(store.revision().residency, before.residency + 1);
+    let snapshot = store.scheduler_mut().exact_snapshot();
+    assert_eq!(
+        snapshot
+            .queued
+            .iter()
+            .map(|request| request.request_id)
+            .collect::<Vec<_>>(),
+        vec![3]
+    );
+    assert!(snapshot.active.is_empty());
+    assert!(snapshot.cancelled.is_empty());
+    let after_eviction = store.revision();
+    assert_eq!(
+        store.scheduler_mut().finish(&active, after_eviction),
+        ResidencyCompletionV1::UnknownJob,
+        "removed active work cannot install after exact eviction"
+    );
+    assert_eq!(
+        store.disposable_residency_chunk_coordinates_bounded(2),
+        Some(vec![(retained.chunk_x, retained.chunk_z)])
+    );
+
+    let mut restored_legacy = SectionResidencySchedulerV1::from_exact_snapshot(SectionResidencySnapshotV1 {
+        epoch: 1,
+        queued: vec![request(4, &target, 2, 4)],
+        active: Vec::new(),
+        cancelled: vec![99],
+    })
+    .expect("legacy orphan cancellation snapshot");
+    assert_eq!(restored_legacy.remove_chunk(&target), 1);
+    assert!(restored_legacy.exact_snapshot().cancelled.is_empty());
+}
+
+#[test]
+fn generated_revision_ledger_stays_bounded_across_more_than_5500_chunks_and_snapshots() {
+    let world = address("revision-ledger-soak");
+    let mut first = WorldAuthorityStoreR4V1::new(world.clone(), catalog()).expect("first store");
+    let mut second = first.clone();
+    for chunk_x in 0..5_501_i32 {
+        for store in [&mut first, &mut second] {
+            let shard = store.locations.get_mut(&world).expect("active shard");
+            for section_y in 0_i16..WORLD_SECTION_COUNT_V1 as i16 {
+                shard.revisions.insert(
+                    section_address(&world, chunk_x, 0, section_y),
+                    WorldSectionRevisionV1 {
+                        blocks: 1,
+                        metadata: 1,
+                        halo: 1,
+                    },
+                );
+            }
+            assert_eq!(
+                store.evict_chunk(&WorldChunkAddressV1 {
+                    world: world.clone(),
+                    chunk_x,
+                    chunk_z: 0,
+                }),
+                0
+            );
+        }
+    }
+    assert!(first.locations.get(&world).unwrap().revisions.is_empty());
+    assert_eq!(first.canonical_state_hash(), second.canonical_state_hash());
+    let encoded = encode_world_authority_snapshot_r4_v1(&first, &[]).expect("bounded snapshot");
+    let restored = decode_world_authority_snapshot_r4_v1(&encoded).expect("bounded snapshot restores");
+    assert_eq!(restored.authority.canonical_state_hash(), first.canonical_state_hash());
 }
 
 #[test]
@@ -613,6 +733,14 @@ fn scheduler_has_stable_priority_cancellation_and_stale_rejection() {
     scheduler
         .submit(section(1, ResidencyPriorityClassV1::OccupiedSupport, 3))
         .expect("submit");
+    assert!(scheduler.cancel(3));
+    assert!(
+        scheduler.exact_snapshot().cancelled.is_empty(),
+        "queued cancellation cannot retain an unreachable tombstone"
+    );
+    scheduler
+        .submit(section(1, ResidencyPriorityClassV1::OccupiedSupport, 3))
+        .expect("a cancelled queued id is immediately reusable");
     assert!(scheduler.cancel(3));
     let revision = WorldAuthorityRevisionV1 {
         epoch: 1,

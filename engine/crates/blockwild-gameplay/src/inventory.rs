@@ -9,6 +9,7 @@ pub const MAX_ITEM_INSTANCE_METADATA_BYTES_V1: usize = 64 * 1024;
 pub const MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1: usize = 64 * 1024;
 pub const MAX_PLAYER_INVENTORY_IMPORT_METADATA_BYTES_V1: usize = 256 * 1024;
 pub const INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG: u16 = 6;
+pub const INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG: u16 = 7;
 
 pub type ItemCode = u32;
 
@@ -379,6 +380,21 @@ pub struct ImportPlayerInventoryV1 {
     pub metadata: Vec<ItemInstanceMetadataV1>,
 }
 
+/// One inventory-side half of an authoritative block action. The integrated
+/// runtime applies this command and the corresponding R4 mutation to one
+/// cloned runtime, so neither side can commit without the other.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ApplyBlockActionV1 {
+    pub inventory: ContainerKey,
+    pub slot: u16,
+    pub expected_container_revision: u64,
+    pub expected_stack: Option<ItemStack>,
+    pub consume_count: u32,
+    pub durability_cost_millionths: u32,
+    pub created_stack: Option<ItemStack>,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InventoryCommand {
     Transfer(TransferCommand),
@@ -388,6 +404,7 @@ pub enum InventoryCommand {
     RemoveEmptyDropCustody(RemoveEmptyDropCustodyCommand),
     CreatePlayerCustody(CreatePlayerCustodyCommand),
     ImportPlayerInventoryV1(ImportPlayerInventoryV1),
+    ApplyBlockActionV1(ApplyBlockActionV1),
 }
 
 impl InventoryCommand {
@@ -479,6 +496,29 @@ impl InventoryCommand {
                     metadata.hash_into(hasher);
                 }
             }
+            Self::ApplyBlockActionV1(command) => {
+                hasher.write_u16(INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG);
+                command.inventory.hash_into(hasher);
+                hasher.write_u16(command.slot);
+                hasher.write_u64(command.expected_container_revision);
+                match &command.expected_stack {
+                    Some(stack) => {
+                        hasher.write_u16(1);
+                        stack.hash_into(hasher);
+                    }
+                    None => hasher.write_u16(0),
+                }
+                hasher.write_u32(command.consume_count);
+                hasher.write_u32(command.durability_cost_millionths);
+                match &command.created_stack {
+                    Some(stack) => {
+                        hasher.write_u16(1);
+                        stack.hash_into(hasher);
+                    }
+                    None => hasher.write_u16(0),
+                }
+                hasher.write_str(&command.reason);
+            }
         }
     }
 }
@@ -493,6 +533,162 @@ pub struct InventoryState {
 }
 
 impl InventoryState {
+    /// Applies exact held-stack cost and authored loot/placement custody as a
+    /// single staged inventory mutation. A caller receives no partial slot or
+    /// durability update when loot capacity, identity, or revision is stale.
+    pub fn apply_block_action_v1(&mut self, command: &ApplyBlockActionV1) -> Result<Vec<ResourceDelta>, Rejection> {
+        command.inventory.validate()?;
+        validate_id("block action reason", &command.reason)?;
+        if command.inventory.kind != ContainerKind::Player || command.inventory.owner_id.is_none() {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "block action requires an owned player inventory",
+            ));
+        }
+        if command.consume_count == 0 && command.durability_cost_millionths == 0 && command.created_stack.is_none() {
+            return Err(Rejection::new(RejectionCode::InvalidCommand, "block action is empty"));
+        }
+        if command.consume_count > 0 && command.durability_cost_millionths > 0 {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "block action cannot consume and damage the held stack together",
+            ));
+        }
+        let mut staged = self.clone();
+        let inventory = staged
+            .containers
+            .get(&command.inventory)
+            .ok_or_else(|| Rejection::new(RejectionCode::InvalidTarget, "block action inventory does not exist"))?;
+        check_container_revision(inventory, Some(command.expected_container_revision))?;
+        let held = inventory
+            .slots
+            .get(usize::from(command.slot))
+            .ok_or_else(|| Rejection::new(RejectionCode::InvalidTarget, "block action slot is outside inventory"))?
+            .clone();
+        if held != command.expected_stack {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "block action held stack changed",
+            ));
+        }
+        if command.consume_count > 0 || command.durability_cost_millionths > 0 {
+            let held = held.ok_or_else(|| {
+                Rejection::new(
+                    RejectionCode::InsufficientResource,
+                    "block action requires a held stack",
+                )
+            })?;
+            if held.count < command.consume_count {
+                return Err(Rejection::new(
+                    RejectionCode::InsufficientResource,
+                    "block action held stack is too small",
+                ));
+            }
+            if command.durability_cost_millionths > 0 {
+                if held.count != 1 {
+                    return Err(Rejection::new(
+                        RejectionCode::InvalidCommand,
+                        "durable block action tools must be singular stacks",
+                    ));
+                }
+                let durability = held.durability_millionths.ok_or_else(|| {
+                    Rejection::new(
+                        RejectionCode::InvalidCommand,
+                        "block action durability cost requires sealed durability",
+                    )
+                })?;
+                if durability < command.durability_cost_millionths {
+                    return Err(Rejection::new(
+                        RejectionCode::InsufficientResource,
+                        "block action tool durability is exhausted",
+                    ));
+                }
+            }
+            let inventory = staged
+                .containers
+                .get_mut(&command.inventory)
+                .expect("block action inventory was validated");
+            let slot = &mut inventory.slots[usize::from(command.slot)];
+            let held = slot.as_mut().expect("block action held stack was validated");
+            held.count -= command.consume_count;
+            if command.durability_cost_millionths > 0 {
+                let durability = held
+                    .durability_millionths
+                    .as_mut()
+                    .expect("block action durability was validated");
+                *durability -= command.durability_cost_millionths;
+                if *durability == 0 {
+                    held.count = 0;
+                }
+            }
+            if held.count == 0 {
+                *slot = None;
+            }
+        }
+        if let Some(created) = &command.created_stack {
+            let definition = staged
+                .items
+                .get(&created.item_code)
+                .ok_or_else(|| Rejection::new(RejectionCode::InvalidCommand, "block action creates an unknown item"))?;
+            created.validate(definition.max_stack)?;
+            if created.metadata_hash != CanonicalHash::default()
+                && !staged.item_instance_metadata.contains_key(&created.metadata_hash)
+            {
+                return Err(Rejection::new(
+                    RejectionCode::InvalidCommand,
+                    "block action created stack metadata descriptor is missing",
+                ));
+            }
+            staged.add_stack(&command.inventory, created.clone())?;
+        }
+        staged
+            .containers
+            .get_mut(&command.inventory)
+            .expect("block action inventory was validated")
+            .revision = command
+            .expected_container_revision
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "block action revision overflow"))?;
+        let mut deltas = Vec::new();
+        if command.consume_count > 0 {
+            let expected = command
+                .expected_stack
+                .as_ref()
+                .expect("consumption requires held stack");
+            deltas.push(ResourceDelta {
+                item_code: expected.item_code,
+                metadata_hash: expected.metadata_hash,
+                amount: -i64::from(command.consume_count),
+                reason: command.reason.clone(),
+            });
+        }
+        if command.durability_cost_millionths > 0
+            && command
+                .expected_stack
+                .as_ref()
+                .and_then(|stack| stack.durability_millionths)
+                == Some(command.durability_cost_millionths)
+        {
+            let expected = command.expected_stack.as_ref().expect("durability requires held stack");
+            deltas.push(ResourceDelta {
+                item_code: expected.item_code,
+                metadata_hash: expected.metadata_hash,
+                amount: -1,
+                reason: command.reason.clone(),
+            });
+        }
+        if let Some(created) = &command.created_stack {
+            deltas.push(ResourceDelta {
+                item_code: created.item_code,
+                metadata_hash: created.metadata_hash,
+                amount: i64::from(created.count),
+                reason: command.reason.clone(),
+            });
+        }
+        *self = staged;
+        Ok(deltas)
+    }
+
     pub fn register_item(&mut self, item: ItemDefinition) -> Result<(), Rejection> {
         item.validate()?;
         if self.items.insert(item.code, item).is_some() {
