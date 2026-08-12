@@ -1,10 +1,9 @@
 use blockwild_types::{CanonicalHash, CanonicalHasher};
 
-use crate::{ContractError, Vec3, VoxelRaycastQueryV1, WorldReadWindowV1, raycast_voxels};
+use crate::{ContractError, ProjectileSweepV1, Vec3, WorldReadWindowV1, sweep_projectile_contacts_batch};
 
 pub const CAMERA_MAX_VIEWPORT_V1: u32 = 16_384;
 pub const CAMERA_MAX_CLIP_DISTANCE_V1: f64 = 65_536.0;
-const CAMERA_COLLISION_MAX_CELLS_V1: usize = 256;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CameraModeV1 {
@@ -203,19 +202,17 @@ pub fn derive_camera_pose_v1(
             + right * shoulder;
         let desired_distance = offset.length().max(profile.minimum_distance);
         let direction = offset * offset.length().recip();
-        let query_distance = desired_distance + profile.collision_radius;
-        let hit = raycast_voxels(
+        let contacts = sweep_projectile_contacts_batch(
             window.expect("validated third-person window"),
-            VoxelRaycastQueryV1 {
-                query_id: 1,
+            &[ProjectileSweepV1 {
+                projectile_id: 1,
                 origin: target,
-                direction,
-                maximum_distance: query_distance,
-                maximum_visited_cells: CAMERA_COLLISION_MAX_CELLS_V1,
-                hit_liquids: false,
-            },
+                displacement: direction * desired_distance,
+                radius: profile.collision_radius,
+            }],
+            &[],
         )?;
-        let hit_distance = hit.hit.map(|hit| hit.distance);
+        let hit_distance = contacts.first().map(|contact| contact.hit.time * desired_distance);
         let collided = hit_distance.is_some_and(|distance| distance < desired_distance);
         let resolved_distance = hit_distance
             .filter(|distance| *distance < desired_distance)
