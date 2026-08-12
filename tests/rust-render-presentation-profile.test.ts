@@ -103,6 +103,35 @@ test("missing render profiles enumerate exact sorted source IDs without fabricat
   assert.equal(specialBlocks?.sourcePresentationIds.length, 172);
 });
 
+test("presentation registry resolves exact, explicit missing, and unmapped role refs without fallback", async () => {
+  const { manifest, bytes } = await productionCatalog();
+  const attested = await attestRenderPresentationCatalogV1(manifest, bytes);
+  const exact = attested.registry.resolve("held-item", { domain: "item", id: String(Item.StonePickaxe) });
+  assert.equal(exact.status, "exact");
+  if (exact.status === "exact") {
+    assert.equal(exact.profile.id, "held:stone-pickaxe");
+    assert.equal(exact.profile.model.id, "held-pickaxe");
+  }
+
+  const missingProfile = attested.profileCatalog.missingProfiles.find((candidate) =>
+    candidate.role === "held-item" && candidate.contentRefs.length > 0);
+  assert.ok(missingProfile);
+  const missingRef = missingProfile.contentRefs[0];
+  assert.ok(missingRef);
+  const missing = attested.registry.resolve("held-item", missingRef);
+  assert.equal(missing.status, "missing");
+  if (missing.status === "missing") assert.equal(missing.blocker.id, missingProfile.id);
+
+  assert.deepEqual(attested.registry.resolve("held-item", { domain: "item", id: "4294967295" }), {
+    status: "unmapped",
+    role: "held-item",
+    reference: { domain: "item", id: "4294967295" },
+  });
+  assert.equal(attested.registry.resolve("dropped-item", {
+    domain: "item", id: String(Item.StonePickaxe),
+  }).status, "unmapped");
+});
+
 test("production content carries the distinct attested catalog and retains blockers", () => {
   const bundle = compileBlockwildProductionContent();
   assert.deepEqual(bundle.blockers, []);

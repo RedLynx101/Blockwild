@@ -15,6 +15,18 @@ import {
   type RenderEntityModelAttestationR10,
 } from "./rust-render-entity-extraction-r10.ts";
 import {
+  createProductionHeldEquipmentModelsR10,
+  RustPresentationEntityExtractionR10,
+  type RustPresentationExtractionDiagnosticsR10,
+} from "./rust-render-presentation-extraction-r10.ts";
+import {
+  loadAttestedRenderPresentationCatalogV1,
+  RENDER_PRESENTATION_CATALOG_ID_V1,
+  RENDER_PRESENTATION_CATALOG_SCHEMA_ID_V1,
+  RENDER_PRESENTATION_CATALOG_SCHEMA_V1,
+  type AttestedRenderPresentationCatalogV1,
+} from "./rust-render-presentation-profile.ts";
+import {
   RustRenderSceneComposerR10,
   type RenderSceneExtractionSinkR10,
   type RustRenderSceneComposerOptionsR10,
@@ -36,6 +48,7 @@ export type RustLiveRenderRuntimeOptionsR10 = Readonly<{
   manifestUrl?: string;
   fetch?: typeof globalThis.fetch;
   profileLoader?: typeof loadAttestedPlayerRenderProfileV1;
+  presentationLoader?: typeof loadAttestedRenderPresentationCatalogV1;
   contentFactory?: typeof requireBlockwildProductionContent;
   maxInstances?: RustRenderSceneComposerOptionsR10["maxInstances"];
   maxParticles?: RustRenderSceneComposerOptionsR10["maxParticles"];
@@ -56,6 +69,7 @@ export type RustLiveRenderRuntimeDiagnosticsR10 = Readonly<{
   submittedExtractions: number;
   rejectedExtractions: number;
   modelAttestations: number;
+  heldEquipmentModels: number;
   contentManifestHash: string | null;
   modelCatalogHash: string | null;
   modelCatalogRevision: bigint | null;
@@ -63,6 +77,7 @@ export type RustLiveRenderRuntimeDiagnosticsR10 = Readonly<{
   lastAuthorityTick: bigint | null;
   lastFrameSequence: bigint | null;
   lastError: string | null;
+  presentation: RustPresentationExtractionDiagnosticsR10 | null;
   composer: ReturnType<RustRenderSceneComposerR10["diagnostics"]> | null;
 }>;
 
@@ -87,6 +102,18 @@ function hex16(value: string, label: string) {
 
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value === "boolean" || typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "number") {
+    invariant(Number.isFinite(value), "presentation content contains a non-finite number");
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  invariant(typeof value === "object", "presentation content contains an unsupported value");
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
 function contentArtifactKey(artifact: RustContentArtifact) {
@@ -137,6 +164,38 @@ export function createProductionRenderModelAttestationsR10(
   return Object.freeze([...attestations.values()].sort((left, right) => left.modelKey.localeCompare(right.modelKey)));
 }
 
+function attestProductionRenderPresentationsR10(
+  profile: AttestedPlayerRenderProfileV1,
+  presentations: AttestedRenderPresentationCatalogV1,
+  artifacts: readonly RustContentArtifact[],
+) {
+  const left = profile.catalog;
+  const right = presentations.modelCatalog;
+  invariant(left.revision === right.revision
+    && left.contentSha256 === right.contentSha256
+    && left.catalogHashHex === right.catalogHashHex
+    && left.byteLength === right.byteLength
+    && left.nodeCount === right.nodeCount
+    && left.models.length === right.models.length,
+  "player and presentation loaders did not attest the same BWM2 catalog");
+  const candidates = artifacts.filter((artifact) => artifact.domain === "machine-profile"
+    && artifact.id === RENDER_PRESENTATION_CATALOG_ID_V1);
+  invariant(candidates.length === 1, "production content has no unique render presentation catalog");
+  const artifact = candidates[0];
+  invariant(artifact.schemaId === RENDER_PRESENTATION_CATALOG_SCHEMA_ID_V1
+    && artifact.schemaVersion === RENDER_PRESENTATION_CATALOG_SCHEMA_V1
+    && artifact.contentVersion === 1,
+  "production render presentation catalog schema is unsupported");
+  let installed: unknown;
+  try {
+    installed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(artifact.canonicalBytes));
+  } catch {
+    throw new TypeError("production render presentation catalog bytes are not canonical JSON");
+  }
+  invariant(canonicalJson(installed) === canonicalJson(presentations.profileCatalog),
+    "production render presentation content differs from the attested registry");
+}
+
 /**
  * World-scoped owner for the verified BWM2 entity compiler and the one global
  * R10 scene composer that combines Rust runtime extraction with terrain.
@@ -155,11 +214,12 @@ export class RustLiveRenderRuntimeR10 {
   private accepting = true;
   private leaseOwned = false;
   private composer: RustRenderSceneComposerR10 | null = null;
-  private extractor: RustEntityRenderExtractionR10 | null = null;
+  private extractor: RustPresentationEntityExtractionR10 | null = null;
   private inFlightSubmissions = 0;
   private submittedExtractions = 0;
   private rejectedExtractions = 0;
   private modelAttestations = 0;
+  private heldEquipmentModels = 0;
   private contentManifestHash: string | null = null;
   private modelCatalogHash: string | null = null;
   private modelCatalogRevision: bigint | null = null;
@@ -207,7 +267,15 @@ export class RustLiveRenderRuntimeR10 {
     const operation = this.submissionTail.then(() => {
       const composer = this.requireComposerForAcceptedWork();
       this.validateAuthoritativeContext(extraction, context);
-      const accepted = composer.submitRuntimeExtraction(extraction, context);
+      const extractor = this.extractor;
+      invariant(extractor !== null, "live render presentation extractor is unavailable");
+      const token = extractor.prepareRuntimeExtraction(extraction);
+      let accepted = false;
+      try {
+        accepted = composer.submitRuntimeExtraction(extraction, context);
+      } finally {
+        extractor.finishPreparedRuntimeExtraction(token, accepted);
+      }
       if (accepted) {
         this.submittedExtractions += 1;
         this.lastExtractionRevision = BigInt(extraction.extractionRevision);
@@ -285,6 +353,7 @@ export class RustLiveRenderRuntimeR10 {
       submittedExtractions: this.submittedExtractions,
       rejectedExtractions: this.rejectedExtractions,
       modelAttestations: this.modelAttestations,
+      heldEquipmentModels: this.heldEquipmentModels,
       contentManifestHash: this.contentManifestHash,
       modelCatalogHash: this.modelCatalogHash,
       modelCatalogRevision: this.modelCatalogRevision,
@@ -292,6 +361,7 @@ export class RustLiveRenderRuntimeR10 {
       lastAuthorityTick: this.lastAuthorityTick,
       lastFrameSequence: this.lastFrameSequence,
       lastError: this.lastError,
+      presentation: this.extractor?.diagnostics() ?? null,
       composer: this.composer?.diagnostics() ?? null,
     });
   }
@@ -299,10 +369,11 @@ export class RustLiveRenderRuntimeR10 {
   private async initialize() {
     try {
       const loader = this.options.profileLoader ?? loadAttestedPlayerRenderProfileV1;
-      const profile = await loader({
-        manifestUrl: this.options.manifestUrl,
-        fetch: this.options.fetch,
-      });
+      const presentationLoader = this.options.presentationLoader ?? loadAttestedRenderPresentationCatalogV1;
+      const [profile, presentations] = await Promise.all([
+        loader({ manifestUrl: this.options.manifestUrl, fetch: this.options.fetch }),
+        presentationLoader({ manifestUrl: this.options.manifestUrl, fetch: this.options.fetch }),
+      ]);
       const content = (this.options.contentFactory ?? requireBlockwildProductionContent)();
       invariant(content.report.ok, "production Rust content is not fully attested");
       const manifestHash = content.manifest.manifestHash;
@@ -311,14 +382,18 @@ export class RustLiveRenderRuntimeR10 {
         invariant(this.options.expectedContentManifestHash === manifestHash,
           "live renderer content manifest differs from the active Rust runtime");
       }
+      attestProductionRenderPresentationsR10(profile, presentations, content.artifacts);
       const attestations = createProductionRenderModelAttestationsR10(profile, content.artifacts);
-      const extractor = new RustEntityRenderExtractionR10({
+      const equipmentModels = createProductionHeldEquipmentModelsR10(presentations);
+      const entityExtractor = new RustEntityRenderExtractionR10({
         catalog: profile.catalog,
         expectedContentManifestHash: hex16(manifestHash, "production content manifest hash"),
         modelAttestations: attestations,
+        equipmentModels,
         maxInstances: this.options.maxInstances,
         maxResourceOperations: this.options.maxResourceOperations,
       });
+      const extractor = new RustPresentationEntityExtractionR10(entityExtractor, presentations.registry);
       const composer = new RustRenderSceneComposerR10({
         sink: this.sink,
         epoch: this.epoch,
@@ -337,6 +412,7 @@ export class RustLiveRenderRuntimeR10 {
       this.extractor = extractor;
       this.composer = composer;
       this.modelAttestations = attestations.length;
+      this.heldEquipmentModels = equipmentModels.length;
       this.contentManifestHash = manifestHash;
       this.modelCatalogHash = profile.catalog.catalogHashHex;
       this.modelCatalogRevision = profile.catalog.revision;

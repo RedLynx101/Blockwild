@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { Item } from "../app/game/data.ts";
+import { TypeScriptCanonicalHasher } from "../app/game/rust-kernel-shadow.ts";
 import { requireBlockwildProductionContent } from "../app/game/rust-integrated-runtime-content.ts";
 import type { RustIntegratedRuntimeExtractionV1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import {
@@ -10,6 +12,10 @@ import {
   attestPlayerRenderProfileV1,
   type AttestedPlayerRenderProfileV1,
 } from "../app/game/rust-player-render-profile.ts";
+import {
+  attestRenderPresentationCatalogV1,
+  type AttestedRenderPresentationCatalogV1,
+} from "../app/game/rust-render-presentation-profile.ts";
 import { type RenderEntityFrameContextR10 } from "../app/game/rust-render-entity-extraction-r10.ts";
 import { encodeRustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-codec-r6.ts";
 import type { RustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-contract-r6.ts";
@@ -34,10 +40,77 @@ const PLAYER_ARTIFACT = CONTENT.artifacts.find((artifact) =>
   artifact.domain === "creature-profile" && artifact.id === PLAYER_RENDER_PROFILE_ID_V1)!;
 const IDENTITY_ROTATION = Object.freeze([0, 0, 0, 1] as const);
 let profilePromise: Promise<AttestedPlayerRenderProfileV1> | null = null;
+let presentationPromise: Promise<AttestedRenderPresentationCatalogV1> | null = null;
+
+class DomainWriter {
+  private bytes: number[] = [];
+  raw(value: Uint8Array) { this.bytes.push(...value); return this; }
+  u8(value: number) { this.bytes.push(value & 0xff); return this; }
+  u16(value: number) { return this.number(value, 2); }
+  u32(value: number) { return this.number(value, 4); }
+  u64(value: bigint | number) {
+    let remaining = BigInt(value);
+    for (let index = 0; index < 8; index += 1) {
+      this.bytes.push(Number(remaining & BigInt(0xff)));
+      remaining >>= BigInt(8);
+    }
+    return this;
+  }
+  string(value: string) {
+    const bytes = new TextEncoder().encode(value);
+    return this.u32(bytes.byteLength).raw(bytes);
+  }
+  finish() { return Uint8Array.from(this.bytes); }
+  private number(value: number, byteLength: number) {
+    let remaining = value >>> 0;
+    for (let index = 0; index < byteLength; index += 1) {
+      this.bytes.push(remaining & 0xff);
+      remaining >>>= 8;
+    }
+    return this;
+  }
+}
 
 function hex(value: string) {
   assert.match(value, /^[0-9a-f]{32}$/u);
   return Uint8Array.from(value.match(/../gu)!.map((part) => Number.parseInt(part, 16)));
+}
+
+function heldPlayerDomain(revision: number, tick: number, itemCode: number) {
+  const entityId = BigInt("4294967297");
+  const playerId = BigInt("8589934593");
+  const fields = [
+    ["entityId", new DomainWriter().u8(1).u64(entityId).finish()],
+    ["entityRevision", new DomainWriter().u8(1).u64(revision).finish()],
+    ["held.count", new DomainWriter().u8(1).u64(1).finish()],
+    ["held.durability.present", new DomainWriter().u8(0).u8(1).finish()],
+    ["held.durability.value", new DomainWriter().u8(1).u64(900_000).finish()],
+    ["held.itemCode", new DomainWriter().u8(1).u64(itemCode).finish()],
+    ["held.metadataHash", new DomainWriter().u8(5).raw(Uint8Array.from({ length: 16 }, () => 3)).finish()],
+    ["held.present", new DomainWriter().u8(0).u8(1).finish()],
+    ["playerId", new DomainWriter().u8(1).u64(playerId).finish()],
+  ] as const;
+  const canonicalFields = [...fields].sort(([left], [right]) => left.localeCompare(right));
+  const rowHasher = new TypeScriptCanonicalHasher("blockwild.r10.domain-row-revision.v1")
+    .writeU16(2).writeString(`binding:${playerId}`).writeU16(canonicalFields.length);
+  for (const [name, value] of canonicalFields) rowHasher.writeString(name).writeBytes(value);
+  const rowHash = rowHasher.finish();
+  const rowRevision = new DataView(rowHash.buffer, rowHash.byteOffset, 8).getBigUint64(0, true);
+  const row = new DomainWriter().u16(2).string(`binding:${playerId}`).u64(rowRevision).u16(canonicalFields.length);
+  for (const [name, value] of canonicalFields) row.string(name).raw(value);
+  const payload = row.finish();
+  const output = new DomainWriter().raw(new TextEncoder().encode("BWX0")).u16(1)
+    .u64(revision).u64(tick).raw(Uint8Array.from({ length: 16 }, () => 7)).raw(hex(CONTENT_HASH)).u8(1).u16(8);
+  for (let domain = 1; domain <= 8; domain += 1) {
+    const viewPayload = domain === 2 ? payload : new Uint8Array();
+    const selected = domain === 2 ? 1 : 0;
+    const payloadHash = new TypeScriptCanonicalHasher("blockwild.r10.domain-view-payload.v1")
+      .writeBytes(viewPayload).finish();
+    output.u8(domain).u16(1).u8(0).u64(revision)
+      .u32(selected).u32(selected).u32(0).u32(selected).u16(0)
+      .u32(viewPayload.byteLength).raw(payloadHash).raw(viewPayload);
+  }
+  return output.finish();
 }
 
 function loadFixtureProfile() {
@@ -47,6 +120,15 @@ function loadFixtureProfile() {
     return attestPlayerRenderProfileV1(manifest, bytes);
   })();
   return profilePromise;
+}
+
+function loadFixturePresentations() {
+  presentationPromise ??= (async () => {
+    const manifest = JSON.parse(await readFile(path.join(ROOT, "public", "renderer", "manifest.json"), "utf8")) as Record<string, unknown>;
+    const bytes = new Uint8Array(await readFile(path.join(ROOT, "public", "renderer", String(manifest.current), "models.bwm2")));
+    return attestRenderPresentationCatalogV1(manifest, bytes);
+  })();
+  return presentationPromise;
 }
 
 class CaptureSink implements RenderSceneExtractionSinkR10 {
@@ -67,6 +149,7 @@ function options(sink: CaptureSink, overrides: Partial<Parameters<typeof createR
     epoch: EPOCH,
     worldGeneration: GENERATION,
     profileLoader: async () => loadFixtureProfile(),
+    presentationLoader: async () => loadFixturePresentations(),
     contentFactory: () => CONTENT,
     ...overrides,
   } satisfies Parameters<typeof createRustLiveRenderRuntimeR10>[0];
@@ -102,7 +185,7 @@ function context(input: Readonly<{ epoch?: bigint; sequence?: bigint; tick?: big
   });
 }
 
-function extraction(revision = 1, tick = 10): RustIntegratedRuntimeExtractionV1 {
+function extraction(revision = 1, tick = 10, heldItemCode?: number): RustIntegratedRuntimeExtractionV1 {
   const entities: RustEntityExtractionR6V3 = Object.freeze({
     schema: 3,
     extractionRevision: BigInt(revision),
@@ -154,7 +237,7 @@ function extraction(revision = 1, tick = 10): RustIntegratedRuntimeExtractionV1 
     }),
     extractionRevision: revision,
     render: encodeRustEntityExtractionR6V3(entities),
-    hud: new Uint8Array(),
+    hud: heldItemCode === undefined ? new Uint8Array() : heldPlayerDomain(revision, tick, heldItemCode),
     audio: new Uint8Array(),
     platformRequests: new Uint8Array(),
     diagnostics: new Uint8Array(),
@@ -209,10 +292,38 @@ test("terrain and authoritative runtime extraction share the sole composer", asy
     })), true);
     const diagnostics = runtime.diagnostics();
     assert.equal(diagnostics.submittedExtractions, 1);
+    assert.equal(diagnostics.heldEquipmentModels, 11);
+    assert.deepEqual(diagnostics.presentation?.heldBlockers, [{
+      id: "held-item:unavailable:player-domain-envelope-absent",
+      status: "unavailable",
+      entityId: null,
+      itemId: null,
+      blockerId: "domain-extraction-not-submitted",
+    }]);
     assert.equal(diagnostics.composer?.entityExtractionRevision, BigInt(1));
     assert.equal(diagnostics.composer?.terrainFrameSequence, BigInt(1));
     assert.equal(sink.framesSeen.length, 1);
     assert.equal(runtime.metadata(GENERATION).entity.extractionRevision, BigInt(1));
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+test("live runtime submits an exact same-envelope held model to the composed renderer", async () => {
+  const sink = new CaptureSink();
+  const runtime = await createRustLiveRenderRuntimeR10(options(sink));
+  try {
+    assert.equal(await runtime.submitRuntimeExtraction(
+      GENERATION,
+      extraction(1, 10, Item.StonePickaxe),
+      context(),
+    ), true);
+    const held = runtime.metadata(GENERATION).entity.entries[0]?.equipment[0];
+    assert.equal(held?.slotKey, "world-view-held-right-hand");
+    assert.equal(held?.itemKey, String(Item.StonePickaxe));
+    assert.equal(held?.instanceIds.length, 5);
+    assert.equal(runtime.diagnostics().presentation?.heldAttachments, 1);
+    assert.deepEqual(runtime.diagnostics().presentation?.heldBlockers, []);
   } finally {
     await runtime.dispose();
   }

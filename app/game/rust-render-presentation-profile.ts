@@ -90,7 +90,27 @@ export type AttestedRenderPresentationCatalogV1 = Readonly<{
   profileCatalog: RenderPresentationCatalogV1;
   modelCatalog: RenderEntityCompiledModelCatalogR10;
   modelsByProfileId: ReadonlyMap<string, RenderEntityCompiledModelR10>;
+  registry: RenderPresentationRegistryV1;
 }>;
+
+export type RenderPresentationBindingV1 =
+  | Readonly<{
+    status: "exact";
+    role: RenderPresentationRoleV1;
+    reference: RenderPresentationContentRefV1;
+    profile: RenderPresentationProfileV1;
+  }>
+  | Readonly<{
+    status: "missing";
+    role: RenderPresentationRoleV1;
+    reference: RenderPresentationContentRefV1;
+    blocker: MissingRenderPresentationProfileV1;
+  }>
+  | Readonly<{
+    status: "unmapped";
+    role: RenderPresentationRoleV1;
+    reference: RenderPresentationContentRefV1;
+  }>;
 
 const itemRef = (item: ItemCode): RenderPresentationContentRefV1 => Object.freeze({ domain: "item", id: String(item) });
 const machineRef = (id: string): RenderPresentationContentRefV1 => Object.freeze({ domain: "machine-profile", id });
@@ -354,6 +374,64 @@ function validateProfileShape(profileCatalog: RenderPresentationCatalogV1) {
     "render presentation integration blockers are not canonical and unique");
 }
 
+function presentationBindingKey(role: RenderPresentationRoleV1, reference: RenderPresentationContentRefV1) {
+  return JSON.stringify([role, reference.domain, reference.id]);
+}
+
+function frozenReference(reference: RenderPresentationContentRefV1): RenderPresentationContentRefV1 {
+  return Object.freeze({ domain: reference.domain, id: reference.id });
+}
+
+/** Immutable role-and-content lookup that never substitutes one presentation role for another. */
+export class RenderPresentationRegistryV1 {
+  private readonly bindings: ReadonlyMap<string, RenderPresentationBindingV1>;
+
+  constructor(readonly catalog: RenderPresentationCatalogV1) {
+    validateProfileShape(catalog);
+    const bindings = new Map<string, RenderPresentationBindingV1>();
+    for (const profile of catalog.profiles) for (const reference of profile.contentRefs) {
+      const canonicalReference = frozenReference(reference);
+      const key = presentationBindingKey(profile.role, canonicalReference);
+      invariant(!bindings.has(key), `ambiguous ${profile.role} render presentation registry binding`);
+      bindings.set(key, Object.freeze({
+        status: "exact",
+        role: profile.role,
+        reference: canonicalReference,
+        profile,
+      }));
+    }
+    for (const blocker of catalog.missingProfiles) for (const reference of blocker.contentRefs) {
+      const canonicalReference = frozenReference(reference);
+      const key = presentationBindingKey(blocker.role, canonicalReference);
+      invariant(!bindings.has(key), `ambiguous ${blocker.role} render presentation registry coverage`);
+      bindings.set(key, Object.freeze({
+        status: "missing",
+        role: blocker.role,
+        reference: canonicalReference,
+        blocker,
+      }));
+    }
+    this.bindings = bindings;
+    Object.freeze(this);
+  }
+
+  resolve(
+    role: RenderPresentationRoleV1,
+    reference: RenderPresentationContentRefV1,
+  ): RenderPresentationBindingV1 {
+    const canonicalReference = frozenReference(reference);
+    return this.bindings.get(presentationBindingKey(role, canonicalReference)) ?? Object.freeze({
+      status: "unmapped",
+      role,
+      reference: canonicalReference,
+    });
+  }
+}
+
+export function createRenderPresentationRegistryV1(catalog: RenderPresentationCatalogV1) {
+  return new RenderPresentationRegistryV1(catalog);
+}
+
 function decoderManifest(
   manifest: PublishedRenderModelCatalogManifestV1,
   expected: RenderPresentationCatalogV1,
@@ -404,7 +482,8 @@ export async function attestRenderPresentationCatalogV1(
   }
   invariant(canonicalProfileText(expected) === canonicalProfileText(BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1),
     "render presentation catalog expectation drifted from production");
-  return Object.freeze({ profileCatalog: expected, modelCatalog, modelsByProfileId });
+  const registry = createRenderPresentationRegistryV1(expected);
+  return Object.freeze({ profileCatalog: expected, modelCatalog, modelsByProfileId, registry });
 }
 
 /** Fetches only the content-addressed BWM2 path named by the renderer manifest, then fully attests it. */

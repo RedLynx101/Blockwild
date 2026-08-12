@@ -1,0 +1,318 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import test from "node:test";
+
+import { Item } from "../app/game/data.ts";
+import { TypeScriptCanonicalHasher } from "../app/game/rust-kernel-shadow.ts";
+import { requireBlockwildProductionContent } from "../app/game/rust-integrated-runtime-content.ts";
+import type { RustIntegratedRuntimeExtractionV1 } from "../app/game/rust-integrated-runtime-contract.ts";
+import {
+  PLAYER_RENDER_MODEL_ID_V1,
+  PLAYER_RENDER_PROFILE_ID_V1,
+  attestPlayerRenderProfileV1,
+  type AttestedPlayerRenderProfileV1,
+} from "../app/game/rust-player-render-profile.ts";
+import {
+  RustEntityRenderExtractionR10,
+  type RenderEntityFrameContextR10,
+} from "../app/game/rust-render-entity-extraction-r10.ts";
+import {
+  createProductionHeldEquipmentModelsR10,
+  RUST_HELD_PRESENTATION_SLOT_R10,
+  RustPresentationEntityExtractionR10,
+} from "../app/game/rust-render-presentation-extraction-r10.ts";
+import {
+  attestRenderPresentationCatalogV1,
+  type AttestedRenderPresentationCatalogV1,
+} from "../app/game/rust-render-presentation-profile.ts";
+import { encodeRustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-codec-r6.ts";
+import type { RustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-contract-r6.ts";
+import { createProductionRenderModelAttestationsR10 } from "../app/game/rust-live-render-runtime-r10.ts";
+
+const ROOT = path.resolve(import.meta.dirname, "..");
+const CONTENT = requireBlockwildProductionContent();
+const CONTENT_HASH = CONTENT.manifest.manifestHash;
+const PLAYER_ARTIFACT = CONTENT.artifacts.find((artifact) =>
+  artifact.domain === "creature-profile" && artifact.id === PLAYER_RENDER_PROFILE_ID_V1)!;
+const ENTITY_ID = BigInt("4294967297");
+const PLAYER_ID = BigInt("8589934593");
+const EPOCH = BigInt(31);
+let catalogsPromise: Promise<readonly [AttestedPlayerRenderProfileV1, AttestedRenderPresentationCatalogV1]> | null = null;
+
+class Writer {
+  private bytes: number[] = [];
+  raw(value: Uint8Array) { this.bytes.push(...value); return this; }
+  u8(value: number) { this.bytes.push(value & 0xff); return this; }
+  u16(value: number) { return this.number(value, 2); }
+  u32(value: number) { return this.number(value, 4); }
+  u64(value: bigint | number) {
+    let remaining = BigInt(value);
+    for (let index = 0; index < 8; index += 1) {
+      this.bytes.push(Number(remaining & BigInt(0xff)));
+      remaining >>= BigInt(8);
+    }
+    return this;
+  }
+  string(value: string) {
+    const encoded = new TextEncoder().encode(value);
+    return this.u32(encoded.byteLength).raw(encoded);
+  }
+  finish() { return Uint8Array.from(this.bytes); }
+  private number(value: number, length: number) {
+    let remaining = value >>> 0;
+    for (let index = 0; index < length; index += 1) {
+      this.bytes.push(remaining & 0xff);
+      remaining >>>= 8;
+    }
+    return this;
+  }
+}
+
+function hex(value: string) {
+  assert.match(value, /^[0-9a-f]{32}$/u);
+  return Uint8Array.from(value.match(/../gu)!.map((part) => Number.parseInt(part, 16)));
+}
+
+function boolField(value: boolean) { return new Writer().u8(0).u8(value ? 1 : 0).finish(); }
+function u64Field(value: bigint | number) { return new Writer().u8(1).u64(value).finish(); }
+function hashField(value: Uint8Array) { assert.equal(value.byteLength, 16); return new Writer().u8(5).raw(value).finish(); }
+
+function domainRow(kind: number, key: string, fields: readonly (readonly [string, Uint8Array])[]) {
+  const canonical = [...fields].sort(([left], [right]) => left.localeCompare(right));
+  const hasher = new TypeScriptCanonicalHasher("blockwild.r10.domain-row-revision.v1")
+    .writeU16(kind).writeString(key).writeU16(canonical.length);
+  for (const [name, value] of canonical) hasher.writeString(name).writeBytes(value);
+  const hash = hasher.finish();
+  const revision = new DataView(hash.buffer, hash.byteOffset, 8).getBigUint64(0, true);
+  const writer = new Writer().u16(kind).string(key).u64(revision).u16(canonical.length);
+  for (const [name, value] of canonical) writer.string(name).raw(value);
+  return writer.finish();
+}
+
+function playerDomain(
+  extractionRevision: number,
+  authorityTick: number,
+  entityRevision: bigint,
+  itemCode: number,
+  options: Readonly<{ count?: number; durability?: number | null; metadataHash?: Uint8Array }> = {},
+) {
+  const durability = options.durability === undefined ? 750_000 : options.durability;
+  const fields: Array<readonly [string, Uint8Array]> = [
+    ["entityId", u64Field(ENTITY_ID)],
+    ["entityRevision", u64Field(entityRevision)],
+    ["held.count", u64Field(options.count ?? 1)],
+    ["held.durability.present", boolField(durability !== null)],
+    ["held.itemCode", u64Field(itemCode)],
+    ["held.metadataHash", hashField(options.metadataHash ?? Uint8Array.from({ length: 16 }, (_, index) => index + 1))],
+    ["held.present", boolField(true)],
+    ["playerId", u64Field(PLAYER_ID)],
+  ];
+  if (durability !== null) fields.push(["held.durability.value", u64Field(durability)]);
+  const row = domainRow(2, `binding:${PLAYER_ID}`, fields);
+  const writer = new Writer().raw(new TextEncoder().encode("BWX0")).u16(1)
+    .u64(extractionRevision).u64(authorityTick)
+    .raw(Uint8Array.from({ length: 16 }, () => 7)).raw(hex(CONTENT_HASH)).u8(1).u16(8);
+  for (let domain = 1; domain <= 8; domain += 1) {
+    const payload = domain === 2 ? row : new Uint8Array();
+    const selected = domain === 2 ? 1 : 0;
+    const payloadHash = new TypeScriptCanonicalHasher("blockwild.r10.domain-view-payload.v1")
+      .writeBytes(payload).finish();
+    writer.u8(domain).u16(1).u8(0).u64(entityRevision)
+      .u32(selected).u32(selected).u32(0).u32(selected).u16(0)
+      .u32(payload.byteLength).raw(payloadHash).raw(payload);
+  }
+  return writer.finish();
+}
+
+async function catalogs() {
+  catalogsPromise ??= (async () => {
+    const manifest = JSON.parse(await readFile(path.join(ROOT, "public", "renderer", "manifest.json"), "utf8")) as Record<string, unknown>;
+    const bytes = new Uint8Array(await readFile(path.join(ROOT, "public", "renderer", String(manifest.current), "models.bwm2")));
+    return Object.freeze([
+      await attestPlayerRenderProfileV1(manifest, bytes),
+      await attestRenderPresentationCatalogV1(manifest, bytes),
+    ] as const);
+  })();
+  return catalogsPromise;
+}
+
+function entityExtraction(revision = 1, tick = 10, equipment: RustEntityExtractionR6V3["records"][number]["equipment"] = []) {
+  return Object.freeze({
+    schema: 3 as const,
+    extractionRevision: BigInt(revision),
+    authorityTick: BigInt(tick),
+    contentManifestHash: hex(CONTENT_HASH),
+    contentReady: true,
+    total: 1,
+    selected: 1,
+    omitted: 0,
+    records: Object.freeze([Object.freeze({
+      entityId: ENTITY_ID,
+      residency: "hot" as const,
+      class: "player" as const,
+      simulationTier: "hero" as const,
+      protection: BigInt(1),
+      entityRevision: BigInt(revision),
+      externalEntityId: "presentation-player",
+      specimenId: "presentation-player",
+      kindKey: PLAYER_RENDER_PROFILE_ID_V1,
+      variantKey: null,
+      name: "Presentation Player",
+      modelKey: PLAYER_RENDER_MODEL_ID_V1,
+      modelRevision: PLAYER_ARTIFACT.contentVersion,
+      modelHash: hex(PLAYER_ARTIFACT.blobHash),
+      position: Object.freeze({ x: 0, y: 4, z: 0 }),
+      yaw: 0,
+      velocity: Object.freeze({ x: 0, y: 0, z: 0 }),
+      health: 20,
+      maximumHealth: 20,
+      tamed: false,
+      ageTicks: BigInt(0),
+      movementMode: "ground" as const,
+      grounded: true,
+      submerged: false,
+      lastDamageTick: BigInt(0),
+      action: Object.freeze({ key: "idle", phase: 0, startedTick: BigInt(0), endsTick: BigInt(0), target: null }),
+      equipment: Object.freeze(equipment),
+      mount: Object.freeze({ parentMount: null, occupiedSeat: null, acceptsRiders: false, saddleKey: null, seats: Object.freeze([]) }),
+      research: Object.freeze([]),
+    })]),
+  } satisfies RustEntityExtractionR6V3);
+}
+
+function envelope(
+  itemCode: number,
+  options: Readonly<{ revision?: number; entityRevision?: bigint; hud?: Uint8Array; equipment?: RustEntityExtractionR6V3["records"][number]["equipment"] }> = {},
+): RustIntegratedRuntimeExtractionV1 {
+  const revision = options.revision ?? 1;
+  const entities = entityExtraction(revision, 10, options.equipment);
+  return Object.freeze({
+    identity: Object.freeze({
+      universeId: "presentation-universe",
+      locationId: "presentation-location",
+      revision: Object.freeze({ epoch: 1, world: 1, entities: 1, gameplay: 1, persistence: 1, network: 1, simulation: 1 }),
+      tick: 10,
+      stateHash: "1".repeat(32),
+    }),
+    extractionRevision: revision,
+    render: encodeRustEntityExtractionR6V3(entities),
+    hud: options.hud ?? playerDomain(revision, 10, options.entityRevision ?? BigInt(revision), itemCode),
+    audio: new Uint8Array(),
+    platformRequests: new Uint8Array(),
+    diagnostics: new Uint8Array(),
+    extractionHash: "2".repeat(32),
+  });
+}
+
+function context(): RenderEntityFrameContextR10 {
+  return Object.freeze({
+    epoch: EPOCH,
+    frameSequence: BigInt(1),
+    simulationTick: BigInt(10),
+    animationTimeMicros: BigInt(500_000),
+    camera: Object.freeze({
+      position: [0, 4, 12] as const,
+      orientation: [0, 0, 0, 1] as const,
+      verticalFovRadians: 1,
+      near: 0.1,
+      far: 512,
+      viewport: [1280, 720] as const,
+    }),
+    environment: Object.freeze({
+      clearRgba8: [80, 130, 170, 255] as const,
+      ambientRgb8: [160, 170, 180] as const,
+      ambientIntensity: 0.7,
+      sunDirection: [0.2, 0.8, 0.4] as const,
+      sunRgb8: [255, 238, 200] as const,
+      sunIntensity: 0.9,
+      fogRgb8: [80, 130, 170] as const,
+      fogNear: 24,
+      fogFar: 220,
+      underwater: 0,
+      caveOcclusion: 0,
+    }),
+  });
+}
+
+async function createAdapter() {
+  const [profile, presentations] = await catalogs();
+  const base = new RustEntityRenderExtractionR10({
+    catalog: profile.catalog,
+    expectedContentManifestHash: hex(CONTENT_HASH),
+    modelAttestations: createProductionRenderModelAttestationsR10(profile, CONTENT.artifacts),
+    equipmentModels: createProductionHeldEquipmentModelsR10(presentations),
+  });
+  return { adapter: new RustPresentationEntityExtractionR10(base, presentations.registry), presentations };
+}
+
+test("same-envelope held item joins one exact BWM2 attachment into the R6 player", async () => {
+  const { adapter, presentations } = await createAdapter();
+  const source = envelope(Item.StonePickaxe);
+  const token = adapter.prepareRuntimeExtraction(source);
+  const result = adapter.extractBytes(source.render, context());
+  adapter.finishPreparedRuntimeExtraction(token, true);
+
+  const heldProfile = presentations.registry.resolve("held-item", { domain: "item", id: String(Item.StonePickaxe) });
+  assert.equal(heldProfile.status, "exact");
+  assert.equal(result.presentations[0]?.equipment.length, 1);
+  const held = result.presentations[0]?.equipment[0];
+  assert.equal(held?.slotKey, RUST_HELD_PRESENTATION_SLOT_R10);
+  assert.equal(held?.itemKey, String(Item.StonePickaxe));
+  assert.equal(held?.count, 1);
+  assert.equal(held?.durability, 750_000);
+  assert.deepEqual(held?.custom.map(([key, value]) => [key, [...value]]), [
+    ["world-view.durability-present", [1]],
+    ["world-view.metadata-hash", Array.from({ length: 16 }, (_, index) => index + 1)],
+  ]);
+  assert.equal(adapter.diagnostics().heldAttachments, 1);
+  assert.deepEqual(adapter.diagnostics().heldBlockers, []);
+  if (heldProfile.status === "exact") assert.equal(held?.instanceIds.length, heldProfile.profile.model.nodeCount);
+});
+
+test("explicit missing held profile emits a sorted blocker and never fabricates equipment", async () => {
+  const { adapter, presentations } = await createAdapter();
+  const missing = presentations.profileCatalog.missingProfiles.find((candidate) =>
+    candidate.role === "held-item" && candidate.contentRefs.length > 0);
+  assert.ok(missing);
+  const itemId = missing.contentRefs[0]?.id;
+  assert.ok(itemId);
+  const source = envelope(Number(itemId));
+  const token = adapter.prepareRuntimeExtraction(source);
+  const result = adapter.extractBytes(source.render, context());
+  adapter.finishPreparedRuntimeExtraction(token, true);
+
+  assert.deepEqual(result.presentations[0]?.equipment, []);
+  assert.equal(adapter.diagnostics().heldAttachments, 0);
+  assert.deepEqual(adapter.diagnostics().heldBlockers, [{
+    id: `held-item:missing:item:${itemId}:entity:${ENTITY_ID}:${missing.id}`,
+    status: "missing",
+    entityId: ENTITY_ID,
+    itemId,
+    blockerId: missing.id,
+  }]);
+});
+
+test("same-envelope revision mismatch, reserved-slot collision, and byte substitution fail closed", async () => {
+  const first = await createAdapter();
+  assert.throws(() => first.adapter.prepareRuntimeExtraction(envelope(Item.StonePickaxe, {
+    entityRevision: BigInt(2),
+  })), /entity revision differs from BWR6/u);
+
+  const second = await createAdapter();
+  const occupied = Object.freeze([Object.freeze([
+    RUST_HELD_PRESENTATION_SLOT_R10,
+    Object.freeze({ itemKey: String(Item.StonePickaxe), count: 1, durability: 0, custom: Object.freeze([]) }),
+  ] as const)]);
+  assert.throws(() => second.adapter.prepareRuntimeExtraction(envelope(Item.StonePickaxe, {
+    equipment: occupied,
+  })), /already owns reserved held presentation slot/u);
+
+  const third = await createAdapter();
+  const source = envelope(Item.StonePickaxe);
+  const token = third.adapter.prepareRuntimeExtraction(source);
+  const substituted = Uint8Array.from(source.render);
+  substituted[substituted.byteLength - 1] ^= 1;
+  assert.throws(() => third.adapter.extractBytes(substituted, context()), /differ from the prepared Worker envelope/u);
+  third.adapter.finishPreparedRuntimeExtraction(token, false);
+});

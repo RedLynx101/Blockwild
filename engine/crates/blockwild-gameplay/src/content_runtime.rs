@@ -728,6 +728,19 @@ pub struct ContentRenderPresentationCatalogRecord {
     pub integration_blockers: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContentRenderPresentationBinding<'a> {
+    Exact {
+        catalog: &'a ContentRenderPresentationCatalogRecord,
+        profile: &'a ContentRenderPresentationProfile,
+    },
+    Missing {
+        catalog: &'a ContentRenderPresentationCatalogRecord,
+        blocker: &'a ContentMissingRenderPresentationProfile,
+    },
+    Unmapped,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContentAbilityRecord {
     pub core: ContentRecordCore,
@@ -887,6 +900,37 @@ impl ContentRuntimeRegistry {
             .get(BLOCK_ACTION_CATALOG_ID)?
             .profiles
             .get(&block_id)
+    }
+
+    #[must_use]
+    pub fn render_presentation_binding(
+        &self,
+        role: ContentRenderPresentationRole,
+        domain: ContentDomain,
+        id: &str,
+    ) -> ContentRenderPresentationBinding<'_> {
+        let Some(catalog) = self.render_presentation_catalogs.get(RENDER_PRESENTATION_CATALOG_ID) else {
+            return ContentRenderPresentationBinding::Unmapped;
+        };
+        if let Some(profile) = catalog.profiles.values().find(|profile| {
+            profile.role == role
+                && profile
+                    .content_refs
+                    .iter()
+                    .any(|reference| reference.domain == domain && reference.id == id)
+        }) {
+            return ContentRenderPresentationBinding::Exact { catalog, profile };
+        }
+        if let Some(blocker) = catalog.missing_profiles.values().find(|blocker| {
+            blocker.role == role
+                && blocker
+                    .content_refs
+                    .iter()
+                    .any(|reference| reference.domain == domain && reference.id == id)
+        }) {
+            return ContentRenderPresentationBinding::Missing { catalog, blocker };
+        }
+        ContentRenderPresentationBinding::Unmapped
     }
 }
 
@@ -6911,6 +6955,38 @@ mod tests {
                 .contains_key(RENDER_PRESENTATION_CATALOG_ID)
         );
         assert!(!registry.machine_profiles.contains_key(RENDER_PRESENTATION_CATALOG_ID));
+    }
+
+    #[test]
+    fn render_presentation_binding_distinguishes_exact_missing_and_unmapped_refs() {
+        let (manifest, store) = installed(render_presentation_fixture());
+        let (registry, _) = materialize_content_runtime(&manifest, &store).expect("presentations materialize");
+
+        let ContentRenderPresentationBinding::Exact { catalog, profile } =
+            registry.render_presentation_binding(ContentRenderPresentationRole::HeldItem, ContentDomain::Item, "1")
+        else {
+            panic!("held item 1 should have one exact presentation");
+        };
+        assert_eq!(catalog.core.id, RENDER_PRESENTATION_CATALOG_ID);
+        assert_eq!(profile.id, "held:survey-pick");
+        assert_eq!(profile.model.model_id, "held-pickaxe");
+
+        let ContentRenderPresentationBinding::Missing { catalog, blocker } =
+            registry.render_presentation_binding(ContentRenderPresentationRole::WorldProp, ContentDomain::Item, "2")
+        else {
+            panic!("world prop item 2 should retain its explicit blocker");
+        };
+        assert_eq!(catalog.core.id, RENDER_PRESENTATION_CATALOG_ID);
+        assert_eq!(blocker.id, "missing:world-prop:board");
+
+        assert_eq!(
+            registry.render_presentation_binding(ContentRenderPresentationRole::HeldItem, ContentDomain::Item, "2",),
+            ContentRenderPresentationBinding::Unmapped
+        );
+        assert_eq!(
+            registry.render_presentation_binding(ContentRenderPresentationRole::HeldItem, ContentDomain::Item, "999",),
+            ContentRenderPresentationBinding::Unmapped
+        );
     }
 
     #[test]
