@@ -19,6 +19,7 @@ import {
   RENDER_MAX_PARTICLES_V2,
   RENDER_MAX_RESOURCE_OPERATIONS_V2,
   type RenderFrameV2,
+  type RenderCameraV2,
   type RenderInstanceV2,
   type RenderResourceBatchV2,
   type RenderResourceOperationV2,
@@ -37,7 +38,14 @@ import {
   type RustDomainBundleR10,
   type RustRuntimeDiagnosticsR10,
 } from "./rust-authoritative-extraction-r10.ts";
-import type { RustIntegratedRuntimeExtractionV1 } from "./rust-integrated-runtime-contract.ts";
+import type {
+  RustIntegratedRuntimeExtractionV1,
+  RustIntegratedRuntimeExtractionViewV1,
+} from "./rust-integrated-runtime-contract.ts";
+import {
+  decodeRustLiveCameraViewR10,
+  type RustLiveCameraViewR10,
+} from "./rust-live-camera-view-r10.ts";
 
 const U64_MAX = BigInt("0xffffffffffffffff");
 const RESOURCE_FINGERPRINT_EPOCH = BigInt(0);
@@ -88,6 +96,23 @@ export type RenderEntityPresentationViewR10 = Readonly<{
   actionPhase: number;
 }>;
 
+/** Shell-owned frame fields. Camera authority is deliberately absent. */
+export type RenderRuntimeFrameContextR10 = Readonly<{
+  epoch: bigint;
+  frameSequence: bigint;
+  simulationTick: bigint;
+  animationTimeMicros: bigint;
+  environment: RenderEntityFrameContextR10["environment"];
+}>;
+
+/** Exact browser view requested from the Rust extraction authority. */
+export type RustRenderRequiredViewR10 = Readonly<{
+  expectedExternalEntityId: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  viewRevision: number;
+}>;
+
 export type RustRenderSceneComposerDiagnosticsR10 = Readonly<{
   schema: 1;
   epoch: bigint;
@@ -107,6 +132,9 @@ export type RustRenderSceneComposerDiagnosticsR10 = Readonly<{
   submittedFrames: number;
   rejectedFrames: number;
   staleTerrainFrames: number;
+  heldTerrainFrames: number;
+  supersededTerrainFrames: number;
+  deduplicatedCompositions: number;
   staleEntityExtractions: number;
   futureEntityFrames: number;
   expiredEntityFrames: number;
@@ -122,6 +150,10 @@ export type RustRenderSceneComposerDiagnosticsR10 = Readonly<{
   contentManifestHashHex: string;
   modelCatalogHash: string;
   modelCatalogRevision: bigint;
+  requiredView: RustRenderRequiredViewR10 | null;
+  cameraAuthorityTick: bigint | null;
+  cameraPoseHash: string | null;
+  pendingTerrainFrameSequence: bigint | null;
   sink: Readonly<Record<string, unknown>>;
 }>;
 
@@ -167,6 +199,9 @@ type MutableCountersR10 = {
   submittedFrames: number;
   rejectedFrames: number;
   staleTerrainFrames: number;
+  heldTerrainFrames: number;
+  supersededTerrainFrames: number;
+  deduplicatedCompositions: number;
   staleEntityExtractions: number;
   futureEntityFrames: number;
   expiredEntityFrames: number;
@@ -289,6 +324,43 @@ function canonicalResourceBatch(batch: RenderResourceBatchV2) {
 
 function canonicalFrame(frame: RenderFrameV2) {
   return decodeRenderFrameV2(encodeRenderFrameV2(frame));
+}
+
+function exactRequiredView(
+  expectedExternalEntityId: string,
+  view: RustIntegratedRuntimeExtractionViewV1,
+): RustRenderRequiredViewR10 {
+  invariant(typeof expectedExternalEntityId === "string" && expectedExternalEntityId.length > 0,
+    "required render camera identity is empty");
+  invariant(Number.isInteger(view.viewportWidth) && view.viewportWidth >= 1 && view.viewportWidth <= 16_384
+    && Number.isInteger(view.viewportHeight) && view.viewportHeight >= 1 && view.viewportHeight <= 16_384,
+  "required render viewport is outside the camera contract");
+  invariant(Number.isSafeInteger(view.viewRevision) && view.viewRevision > 0,
+    "required render view revision must be a positive safe integer");
+  return Object.freeze({ expectedExternalEntityId, ...view });
+}
+
+function sameRequiredView(left: RustRenderRequiredViewR10, right: RustRenderRequiredViewR10) {
+  return left.expectedExternalEntityId === right.expectedExternalEntityId
+    && left.viewportWidth === right.viewportWidth
+    && left.viewportHeight === right.viewportHeight
+    && left.viewRevision === right.viewRevision;
+}
+
+function renderCameraFromAuthority(camera: RustLiveCameraViewR10): RenderCameraV2 {
+  return Object.freeze({
+    position: Object.freeze([camera.position.x, camera.position.y, camera.position.z] as const),
+    orientation: Object.freeze([
+      camera.orientation.x,
+      camera.orientation.y,
+      camera.orientation.z,
+      camera.orientation.w,
+    ] as const),
+    verticalFovRadians: camera.projection.verticalFovRadians,
+    near: camera.projection.near,
+    far: camera.projection.far,
+    viewport: Object.freeze([camera.viewport.width, camera.viewport.height] as const),
+  });
 }
 
 function cloneSourceState(state: SourceStateR10): SourceStateR10 {
@@ -503,7 +575,13 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
   private globalResourceRevision = BigInt(0);
   private globalFrameSequence = BigInt(0);
   private terrainFrameSequence = BigInt(0);
-  private terrainSimulationTick = BigInt(0);
+  private acceptedTerrainFrameSequence = BigInt(0);
+  private acceptedTerrainSimulationTick = BigInt(0);
+  private latestTerrainFrame: RenderFrameV2 | null = null;
+  private latestTerrainSignature: string | null = null;
+  private lastCompositionKey: string | null = null;
+  private requiredView: RustRenderRequiredViewR10 | null = null;
+  private cameraView: RustLiveCameraViewR10 | null = null;
   private entityExtractionRevision: bigint | null = null;
   private entityExtractionSignature: string | null = null;
   private entityResult: RenderEntityExtractionResultR10 | null = null;
@@ -516,6 +594,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
   private counters: MutableCountersR10 = {
     emittedResourceBatches: 0, deduplicatedResourceOperations: 0, removedResources: 0,
     submittedFrames: 0, rejectedFrames: 0, staleTerrainFrames: 0, staleEntityExtractions: 0,
+    heldTerrainFrames: 0, supersededTerrainFrames: 0, deduplicatedCompositions: 0,
     futureEntityFrames: 0, expiredEntityFrames: 0, omittedEntityGroups: 0,
     omittedEntityInstances: 0, recoveryRequests: 0,
     staleDomainExtractions: 0,
@@ -546,13 +625,74 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     return this.applySourceBatch("terrain", batch, null);
   }
 
-  /** Terrain frames drive the single composed presentation cadence. */
+  /**
+   * Arm the exact view that the runtime must request from Rust. Changing the
+   * view invalidates the old camera immediately, before any subsequent terrain
+   * frame can reach the renderer.
+   */
+  armRequiredView(expectedExternalEntityId: string, view: RustIntegratedRuntimeExtractionViewV1) {
+    const next = exactRequiredView(expectedExternalEntityId, view);
+    const current = this.requiredView;
+    if (current) {
+      if (next.viewRevision < current.viewRevision) throw new Error("required render view revision regressed");
+      if (next.viewRevision === current.viewRevision) {
+        if (sameRequiredView(next, current)) return false;
+        throw new Error("required render view revision conflicts with its existing viewport or identity");
+      }
+    }
+    this.requiredView = next;
+    this.sink.resize(next.viewportWidth, next.viewportHeight);
+    return true;
+  }
+
+  requiredCameraView() { return this.requiredView; }
+
+  /** Terrain frames cache one latest candidate and present only on an exact camera join. */
   frame(frame: RenderFrameV2) {
     const terrainFrame = canonicalFrame(frame);
     if (terrainFrame.epoch !== this.epoch) throw new Error("terrain frame epoch does not match the composed scene");
     if (terrainFrame.resourceRevision !== this.terrain.revision) throw new Error("terrain frame resource revision does not match its source stream");
-    if (terrainFrame.frameSequence <= this.terrainFrameSequence || terrainFrame.simulationTick < this.terrainSimulationTick) {
+    const signature = hex(terrainFrame.frameHash);
+    if (terrainFrame.frameSequence < this.acceptedTerrainFrameSequence
+      || terrainFrame.simulationTick < this.acceptedTerrainSimulationTick) {
       this.counters.staleTerrainFrames += 1; this.counters.rejectedFrames += 1; return false;
+    }
+    if (terrainFrame.frameSequence === this.acceptedTerrainFrameSequence) {
+      if (signature !== this.latestTerrainSignature) throw new Error("terrain frame sequence conflicts with its cached source frame");
+      return this.composeLatestTerrain();
+    }
+    // There is exactly one pending slot: replace/count only when the previous
+    // cached source sequence has not already reached the sink.
+    if (this.latestTerrainFrame && this.terrainFrameSequence < this.latestTerrainFrame.frameSequence) {
+      this.counters.supersededTerrainFrames += 1;
+    }
+    this.latestTerrainFrame = terrainFrame;
+    this.latestTerrainSignature = signature;
+    this.acceptedTerrainFrameSequence = terrainFrame.frameSequence;
+    this.acceptedTerrainSimulationTick = terrainFrame.simulationTick;
+    return this.composeLatestTerrain();
+  }
+
+  private composeLatestTerrain(candidateCamera: RustLiveCameraViewR10 | null = this.cameraView) {
+    const terrainFrame = this.latestTerrainFrame;
+    if (!terrainFrame) return true;
+    const required = this.requiredView;
+    const cameraView = candidateCamera;
+    if (!required || !cameraView
+      || cameraView.authorityTick !== terrainFrame.simulationTick
+      || cameraView.externalEntityId !== required.expectedExternalEntityId
+      || cameraView.viewRevision !== BigInt(required.viewRevision)
+      || cameraView.viewport.width !== required.viewportWidth
+      || cameraView.viewport.height !== required.viewportHeight
+      || terrainFrame.resourceRevision !== this.terrain.revision) {
+      this.counters.heldTerrainFrames += 1;
+      return true;
+    }
+    const camera = renderCameraFromAuthority(cameraView);
+    const compositionKey = `${terrainFrame.frameSequence}:${cameraView.poseHash}:${cameraView.viewRevision}`;
+    if (compositionKey === this.lastCompositionKey) {
+      this.counters.deduplicatedCompositions += 1;
+      return true;
     }
 
     let entityFrame: RenderFrameV2 | null = null;
@@ -577,7 +717,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
       invariant(this.resident.has(`geometry:${instance.geometry}`), `instance ${instance.stableId} references non-resident geometry`);
       invariant(this.resident.has(`material:${instance.material}`), `instance ${instance.stableId} references non-resident material`);
     }
-    const instances = sortedInstances([...terrainInstances, ...selected.instances], this.resident, terrainFrame.camera);
+    const instances = sortedInstances([...terrainInstances, ...selected.instances], this.resident, camera);
 
     const particleIds = new Set<bigint>();
     const allParticles = [...terrainFrame.particles, ...(entityFrame?.particles ?? [])]
@@ -596,7 +736,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
       simulationTick: terrainFrame.simulationTick,
       animationTimeMicros: terrainFrame.animationTimeMicros,
       resourceRevision: this.globalResourceRevision,
-      camera: terrainFrame.camera,
+      camera,
       environment: terrainFrame.environment,
       instances,
       particles: allParticles,
@@ -604,7 +744,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     if (!this.sink.frame(composed)) { this.counters.rejectedFrames += 1; return false; }
     this.globalFrameSequence = nextSequence;
     this.terrainFrameSequence = terrainFrame.frameSequence;
-    this.terrainSimulationTick = terrainFrame.simulationTick;
+    this.lastCompositionKey = compositionKey;
     this.counters.submittedFrames += 1;
     return true;
   }
@@ -615,13 +755,36 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
   }
 
   /** Validate every R10 section before mutating the composed renderer state. */
-  submitRuntimeExtraction(extraction: RustIntegratedRuntimeExtractionV1, context: RenderEntityFrameContextR10) {
+  submitRuntimeExtraction(
+    extraction: RustIntegratedRuntimeExtractionV1,
+    context: RenderRuntimeFrameContextR10,
+  ) {
+    const required = this.requiredView;
+    invariant(required !== null, "authoritative render camera view is not armed");
+    const cameraView = decodeRustLiveCameraViewR10(extraction, required.expectedExternalEntityId, required);
+    invariant(cameraView.authorityTick === context.simulationTick,
+      "camera authority tick does not match render extraction context");
+    const entityContext: RenderEntityFrameContextR10 = Object.freeze({
+      epoch: context.epoch,
+      frameSequence: context.frameSequence,
+      simulationTick: context.simulationTick,
+      animationTimeMicros: context.animationTimeMicros,
+      camera: renderCameraFromAuthority(cameraView),
+      environment: context.environment,
+    });
     const decoded = decodeRustAuthoritativeExtractionR10(extraction);
     const staged = decoded.domains
       ? this.validateDomainExtraction(decoded.domains, decoded.audio, decoded.diagnostics, context)
       : null;
-    if (extraction.render.byteLength > 0 && !this.submitEntityBytes(extraction.render, context)) return false;
+    // Resource uploads and the entity catalogue are intentionally recoverable
+    // staging: a downstream sink may accept resources and then reject the
+    // composed frame, so they cannot be rolled back truthfully. Camera/domain
+    // metadata and presentation cursors commit only after the frame succeeds;
+    // an exact retry deduplicates the staged entity result and resubmits it.
+    if (extraction.render.byteLength > 0 && !this.submitEntityBytes(extraction.render, entityContext)) return false;
+    if (!this.composeLatestTerrain(cameraView)) return false;
     if (staged) this.commitDomainExtraction(staged.bundle, staged.audio, staged.diagnostics, staged.signature);
+    this.cameraView = cameraView;
     return true;
   }
 
@@ -659,7 +822,23 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     return true;
   }
 
-  resize(width: number, height: number) { this.sink.resize(width, height); }
+  resize(width: number, height: number) {
+    invariant(Number.isInteger(width) && width >= 1 && width <= 16_384
+      && Number.isInteger(height) && height >= 1 && height <= 16_384,
+    "render viewport is outside the camera contract");
+    const current = this.requiredView;
+    if (!current) {
+      this.sink.resize(width, height);
+      return;
+    }
+    if (current.viewportWidth === width && current.viewportHeight === height) return;
+    invariant(current.viewRevision < Number.MAX_SAFE_INTEGER, "required render view revision exhausted");
+    this.armRequiredView(current.expectedExternalEntityId, {
+      viewportWidth: width,
+      viewportHeight: height,
+      viewRevision: current.viewRevision + 1,
+    });
+  }
 
   requestRecovery(reason = "composed renderer device/store recovery") {
     const accepted = this.sink.requestRecovery(reason);
@@ -754,6 +933,13 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
       contentManifestHashHex: hex(this.trustedContentManifestHash),
       modelCatalogHash: this.trustedModelCatalogHash,
       modelCatalogRevision: this.trustedModelCatalogRevision,
+      requiredView: this.requiredView,
+      cameraAuthorityTick: this.cameraView?.authorityTick ?? null,
+      cameraPoseHash: this.cameraView?.poseHash ?? null,
+      pendingTerrainFrameSequence: this.latestTerrainFrame !== null
+        && this.terrainFrameSequence < this.latestTerrainFrame.frameSequence
+        ? this.latestTerrainFrame.frameSequence
+        : null,
       sink: this.sink.diagnostics(),
     });
   }
@@ -762,7 +948,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     bundle: RustDomainBundleR10,
     audio: RustAudioExtractionR10 | null,
     diagnostics: RustRuntimeDiagnosticsR10 | null,
-    context: RenderEntityFrameContextR10,
+    context: Pick<RenderRuntimeFrameContextR10, "simulationTick">,
   ) {
     invariant(equalBytes(bundle.contentManifestHash, this.trustedContentManifestHash), "domain content manifest attestation mismatch");
     invariant(bundle.authorityTick === context.simulationTick, "domain authority tick does not match render extraction context");

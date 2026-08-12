@@ -230,7 +230,7 @@ test("R10 audio and diagnostics preserve bounded canonical authority", () => {
   assert.deepEqual(decoded.flags, [false, true, false, true, false]);
 });
 
-test("R10 scene composer installs domain metadata atomically and rejects divergent replay", () => {
+test("R10 scene composer refuses domain metadata before an authoritative camera view is armed", () => {
   const diagnosticsWriter = new Writer().raw(encoder.encode("BWRX")).u16(2).u64(11);
   for (let index = 0; index < 7; index += 1) diagnosticsWriter.u64(index);
   diagnosticsWriter.raw(Uint8Array.from({ length: 16 }, () => 0x11));
@@ -272,17 +272,10 @@ test("R10 scene composer installs domain metadata atomically and rejects diverge
     frameSequence: BigInt(1),
     simulationTick: BigInt(11),
     animationTimeMicros: BigInt(0),
-    camera: Object.freeze({ position: [0, 0, 0] as const, orientation: [0, 0, 0, 1] as const, verticalFovRadians: 1, near: 0.1, far: 128, viewport: [800, 600] as const }),
     environment: Object.freeze({ clearRgba8: [0, 0, 0, 255] as const, ambientRgb8: [0, 0, 0] as const, ambientIntensity: 0, sunDirection: [0, 1, 0] as const, sunRgb8: [0, 0, 0] as const, sunIntensity: 0, fogRgb8: [0, 0, 0] as const, fogNear: 0, fogFar: 128, underwater: 0, caveOcclusion: 0 }),
   });
   const first = extraction(domainBundle());
-  assert.equal(composer.submitRuntimeExtraction(first, context), true);
-  assert.equal(composer.authoritativeMetadata().views.length, 8);
-  assert.equal(composer.diagnostics().domainBlockers, 1);
-  const revision = composer.authoritativeMetadata().revision;
-  assert.equal(composer.submitRuntimeExtraction(first, context), true);
-  assert.equal(composer.authoritativeMetadata().revision, revision, "exact replay is idempotent");
-  const changedPayload = domainPayload(BigInt("0x0102030405060709"));
-  assert.throws(() => composer.submitRuntimeExtraction(extraction(domainBundle(changedPayload)), context), /stale authoritative/);
-  assert.equal(composer.authoritativeMetadata().revision, revision, "divergent replay cannot partially install metadata");
+  assert.throws(() => composer.submitRuntimeExtraction(first, context), /camera view is not armed/u);
+  assert.equal(composer.authoritativeMetadata().views.length, 0);
+  assert.equal(composer.authoritativeMetadata().revision, BigInt(0), "unarmed metadata cannot partially install");
 });

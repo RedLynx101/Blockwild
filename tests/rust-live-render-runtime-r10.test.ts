@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { Item } from "../app/game/data.ts";
 import { TypeScriptCanonicalHasher } from "../app/game/rust-kernel-shadow.ts";
+import {
+  compareCanonicalUtf8R10,
+  decodeRustDomainBundleR10,
+  type RustDomainValueR10,
+} from "../app/game/rust-authoritative-extraction-r10.ts";
 import { requireBlockwildProductionContent } from "../app/game/rust-integrated-runtime-content.ts";
 import type { RustIntegratedRuntimeExtractionV1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import {
@@ -16,7 +22,7 @@ import {
   attestRenderPresentationCatalogV1,
   type AttestedRenderPresentationCatalogV1,
 } from "../app/game/rust-render-presentation-profile.ts";
-import { type RenderEntityFrameContextR10 } from "../app/game/rust-render-entity-extraction-r10.ts";
+import { type RenderRuntimeFrameContextR10 } from "../app/game/rust-render-scene-composer-r10.ts";
 import { encodeRustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-codec-r6.ts";
 import type { RustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-contract-r6.ts";
 import {
@@ -39,6 +45,11 @@ const CONTENT_HASH = CONTENT.manifest.manifestHash;
 const PLAYER_ARTIFACT = CONTENT.artifacts.find((artifact) =>
   artifact.domain === "creature-profile" && artifact.id === PLAYER_RENDER_PROFILE_ID_V1)!;
 const IDENTITY_ROTATION = Object.freeze([0, 0, 0, 1] as const);
+const CAMERA_VIEW = Object.freeze({ viewportWidth: 1_280, viewportHeight: 720, viewRevision: 11 });
+const GOLDEN_BWX0 = Uint8Array.from(Buffer.from(readFileSync(
+  new URL("./fixtures/rust-engine/r10-authoritative-extraction/bound-camera-view-bwx0-v1.hex", import.meta.url),
+  "utf8",
+).trim(), "hex"));
 let profilePromise: Promise<AttestedPlayerRenderProfileV1> | null = null;
 let presentationPromise: Promise<AttestedRenderPresentationCatalogV1> | null = null;
 
@@ -55,6 +66,11 @@ class DomainWriter {
       remaining >>= BigInt(8);
     }
     return this;
+  }
+  f64(value: number) {
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setFloat64(0, value, true);
+    return this.raw(bytes);
   }
   string(value: string) {
     const bytes = new TextEncoder().encode(value);
@@ -76,40 +92,64 @@ function hex(value: string) {
   return Uint8Array.from(value.match(/../gu)!.map((part) => Number.parseInt(part, 16)));
 }
 
-function heldPlayerDomain(revision: number, tick: number, itemCode: number) {
-  const entityId = BigInt("4294967297");
-  const playerId = BigInt("8589934593");
-  const fields = [
-    ["entityId", new DomainWriter().u8(1).u64(entityId).finish()],
-    ["entityRevision", new DomainWriter().u8(1).u64(revision).finish()],
-    ["held.count", new DomainWriter().u8(1).u64(1).finish()],
-    ["held.durability.present", new DomainWriter().u8(0).u8(1).finish()],
-    ["held.durability.value", new DomainWriter().u8(1).u64(900_000).finish()],
-    ["held.itemCode", new DomainWriter().u8(1).u64(itemCode).finish()],
-    ["held.metadataHash", new DomainWriter().u8(5).raw(Uint8Array.from({ length: 16 }, () => 3)).finish()],
-    ["held.present", new DomainWriter().u8(0).u8(1).finish()],
-    ["playerId", new DomainWriter().u8(1).u64(playerId).finish()],
-  ] as const;
-  const canonicalFields = [...fields].sort(([left], [right]) => left.localeCompare(right));
-  const rowHasher = new TypeScriptCanonicalHasher("blockwild.r10.domain-row-revision.v1")
-    .writeU16(2).writeString(`binding:${playerId}`).writeU16(canonicalFields.length);
-  for (const [name, value] of canonicalFields) rowHasher.writeString(name).writeBytes(value);
-  const rowHash = rowHasher.finish();
-  const rowRevision = new DataView(rowHash.buffer, rowHash.byteOffset, 8).getBigUint64(0, true);
-  const row = new DomainWriter().u16(2).string(`binding:${playerId}`).u64(rowRevision).u16(canonicalFields.length);
-  for (const [name, value] of canonicalFields) row.string(name).raw(value);
-  const payload = row.finish();
-  const output = new DomainWriter().raw(new TextEncoder().encode("BWX0")).u16(1)
-    .u64(revision).u64(tick).raw(Uint8Array.from({ length: 16 }, () => 7)).raw(hex(CONTENT_HASH)).u8(1).u16(8);
-  for (let domain = 1; domain <= 8; domain += 1) {
-    const viewPayload = domain === 2 ? payload : new Uint8Array();
-    const selected = domain === 2 ? 1 : 0;
-    const payloadHash = new TypeScriptCanonicalHasher("blockwild.r10.domain-view-payload.v1")
-      .writeBytes(viewPayload).finish();
-    output.u8(domain).u16(1).u8(0).u64(revision)
-      .u32(selected).u32(selected).u32(0).u32(selected).u16(0)
-      .u32(viewPayload.byteLength).raw(payloadHash).raw(viewPayload);
+function encodeDomainValue(value: RustDomainValueR10) {
+  const writer = new DomainWriter();
+  if (typeof value === "boolean") return writer.u8(0).u8(value ? 1 : 0).finish();
+  if (typeof value === "bigint") return writer.u8(1).u64(value).finish();
+  if (typeof value === "number") return writer.u8(3).f64(value).finish();
+  if (typeof value === "string") return writer.u8(4).string(value).finish();
+  return writer.u8(5).raw(value).finish();
+}
+
+function cameraPlayerDomain(revision: number, tick: number, itemCode?: number) {
+  const source = decodeRustDomainBundleR10(GOLDEN_BWX0);
+  const views = source.views.map((view) => view.rows.map((row) => ({
+    kind: row.kind,
+    key: row.key,
+    fields: new Map(row.fields.map(([key, value]) => [
+      key,
+      value instanceof Uint8Array ? Uint8Array.from(value) : value,
+    ])),
+  })));
+  const binding = views[1].find((row) => row.kind === 2)!;
+  binding.fields.set("entityRevision", BigInt(revision));
+  if (itemCode === undefined) {
+    for (const key of [...binding.fields.keys()]) if (key.startsWith("held.")) binding.fields.delete(key);
+    binding.fields.set("held.present", false);
+  } else {
+    binding.fields.set("held.present", true);
+    binding.fields.set("held.itemCode", BigInt(itemCode));
+    binding.fields.set("held.count", BigInt(1));
+    binding.fields.set("held.durability.present", true);
+    binding.fields.set("held.durability.value", BigInt(900_000));
+    binding.fields.set("held.metadataHash", Uint8Array.from({ length: 16 }, () => 3));
   }
+
+  const output = new DomainWriter().raw(new TextEncoder().encode("BWX0")).u16(1)
+    .u64(revision).u64(tick).raw(source.stateHash).raw(hex(CONTENT_HASH)).u8(1).u16(source.views.length);
+  source.views.forEach((view, index) => {
+    const payloadWriter = new DomainWriter();
+    for (const row of views[index]) {
+      const fields = [...row.fields]
+        .sort(([left], [right]) => compareCanonicalUtf8R10(left, right))
+        .map(([name, value]) => [name, encodeDomainValue(value)] as const);
+      const rowHasher = new TypeScriptCanonicalHasher("blockwild.r10.domain-row-revision.v1")
+        .writeU16(row.kind).writeString(row.key).writeU16(fields.length);
+      for (const [name, value] of fields) rowHasher.writeString(name).writeBytes(value);
+      const rowHash = rowHasher.finish();
+      const rowRevision = new DataView(rowHash.buffer, rowHash.byteOffset, 8).getBigUint64(0, true);
+      payloadWriter.u16(row.kind).string(row.key).u64(rowRevision).u16(fields.length);
+      for (const [name, value] of fields) payloadWriter.string(name).raw(value);
+    }
+    const payload = payloadWriter.finish();
+    const payloadHash = new TypeScriptCanonicalHasher("blockwild.r10.domain-view-payload.v1")
+      .writeBytes(payload).finish();
+    const status = view.status === "complete" ? 0 : view.status === "partial" ? 1 : 2;
+    output.u8(view.domain).u16(view.schema).u8(status).u64(BigInt(revision))
+      .u32(view.total).u32(view.selected).u32(view.omitted).u32(view.nextCursor).u16(view.blockers.length);
+    for (const blocker of view.blockers) output.string(blocker);
+    output.u32(payload.byteLength).raw(payloadHash).raw(payload);
+  });
   return output.finish();
 }
 
@@ -155,20 +195,12 @@ function options(sink: CaptureSink, overrides: Partial<Parameters<typeof createR
   } satisfies Parameters<typeof createRustLiveRenderRuntimeR10>[0];
 }
 
-function context(input: Readonly<{ epoch?: bigint; sequence?: bigint; tick?: bigint; time?: bigint }> = {}): RenderEntityFrameContextR10 {
+function context(input: Readonly<{ epoch?: bigint; sequence?: bigint; tick?: bigint; time?: bigint }> = {}): RenderRuntimeFrameContextR10 {
   return Object.freeze({
     epoch: input.epoch ?? EPOCH,
     frameSequence: input.sequence ?? BigInt(1),
-    simulationTick: input.tick ?? BigInt(10),
+    simulationTick: input.tick ?? BigInt(0),
     animationTimeMicros: input.time ?? BigInt(500_000),
-    camera: Object.freeze({
-      position: [0, 4, 12] as const,
-      orientation: IDENTITY_ROTATION,
-      verticalFovRadians: 1,
-      near: 0.1,
-      far: 512,
-      viewport: [1280, 720] as const,
-    }),
     environment: Object.freeze({
       clearRgba8: [80, 130, 170, 255] as const,
       ambientRgb8: [160, 170, 180] as const,
@@ -185,7 +217,18 @@ function context(input: Readonly<{ epoch?: bigint; sequence?: bigint; tick?: big
   });
 }
 
-function extraction(revision = 1, tick = 10, heldItemCode?: number): RustIntegratedRuntimeExtractionV1 {
+function terrainCamera() {
+  return Object.freeze({
+    position: [999, 999, 999] as const,
+    orientation: IDENTITY_ROTATION,
+    verticalFovRadians: 0.5,
+    near: 0.5,
+    far: 64,
+    viewport: [1, 1] as const,
+  });
+}
+
+function extraction(revision = 1, tick = 0, heldItemCode?: number): RustIntegratedRuntimeExtractionV1 {
   const entities: RustEntityExtractionR6V3 = Object.freeze({
     schema: 3,
     extractionRevision: BigInt(revision),
@@ -202,8 +245,8 @@ function extraction(revision = 1, tick = 10, heldItemCode?: number): RustIntegra
       simulationTier: "hero" as const,
       protection: BigInt(1),
       entityRevision: BigInt(revision),
-      externalEntityId: "player-live-render-test",
-      specimenId: "player-live-render-test",
+      externalEntityId: "player:extraction",
+      specimenId: "player:extraction",
       kindKey: PLAYER_RENDER_PROFILE_ID_V1,
       variantKey: null,
       name: "Renderer Test Player",
@@ -237,7 +280,7 @@ function extraction(revision = 1, tick = 10, heldItemCode?: number): RustIntegra
     }),
     extractionRevision: revision,
     render: encodeRustEntityExtractionR6V3(entities),
-    hud: heldItemCode === undefined ? new Uint8Array() : heldPlayerDomain(revision, tick, heldItemCode),
+    hud: cameraPlayerDomain(revision, tick, heldItemCode),
     audio: new Uint8Array(),
     platformRequests: new Uint8Array(),
     diagnostics: new Uint8Array(),
@@ -247,6 +290,10 @@ function extraction(revision = 1, tick = 10, heldItemCode?: number): RustIntegra
 
 async function dispose(runtime: RustLiveRenderRuntimeR10 | null) {
   if (runtime) await runtime.dispose();
+}
+
+function arm(runtime: RustLiveRenderRuntimeR10) {
+  return runtime.armRequiredView(GENERATION, "player:extraction", CAMERA_VIEW);
 }
 
 test("attestation failure releases the renderer sink lease", async () => {
@@ -277,15 +324,16 @@ test("terrain and authoritative runtime extraction share the sole composer", asy
   const sink = new CaptureSink();
   const runtime = await createRustLiveRenderRuntimeR10(options(sink));
   try {
+    assert.equal(arm(runtime), true);
     assert.equal(await runtime.submitRuntimeExtraction(GENERATION, extraction(), context()), true);
     assert.equal(runtime.terrain.resources(createRenderResourceBatchV2({ epoch: EPOCH, revision: BigInt(1), operations: [] })), true);
     assert.equal(runtime.terrain.frame(createRenderFrameV2({
       epoch: EPOCH,
       frameSequence: BigInt(1),
-      simulationTick: BigInt(10),
+      simulationTick: BigInt(0),
       animationTimeMicros: BigInt(500_000),
       resourceRevision: BigInt(1),
-      camera: context().camera,
+      camera: terrainCamera(),
       environment: context().environment,
       instances: [],
       particles: [],
@@ -293,13 +341,9 @@ test("terrain and authoritative runtime extraction share the sole composer", asy
     const diagnostics = runtime.diagnostics();
     assert.equal(diagnostics.submittedExtractions, 1);
     assert.equal(diagnostics.heldEquipmentModels, 11);
-    assert.deepEqual(diagnostics.presentation?.heldBlockers, [{
-      id: "held-item:unavailable:player-domain-envelope-absent",
-      status: "unavailable",
-      entityId: null,
-      itemId: null,
-      blockerId: "domain-extraction-not-submitted",
-    }]);
+    assert.deepEqual(diagnostics.presentation?.heldBlockers, []);
+    assert.equal(diagnostics.presentation?.droppedBindings, 0);
+    assert.deepEqual(diagnostics.presentation?.droppedBlockers, []);
     assert.equal(diagnostics.composer?.entityExtractionRevision, BigInt(1));
     assert.equal(diagnostics.composer?.terrainFrameSequence, BigInt(1));
     assert.equal(sink.framesSeen.length, 1);
@@ -313,9 +357,10 @@ test("live runtime submits an exact same-envelope held model to the composed ren
   const sink = new CaptureSink();
   const runtime = await createRustLiveRenderRuntimeR10(options(sink));
   try {
+    arm(runtime);
     assert.equal(await runtime.submitRuntimeExtraction(
       GENERATION,
-      extraction(1, 10, Item.StonePickaxe),
+      extraction(1, 0, Item.StonePickaxe),
       context(),
     ), true);
     const held = runtime.metadata(GENERATION).entity.entries[0]?.equipment[0];
@@ -333,12 +378,13 @@ test("stale and future generations, epochs, and authority contexts fail closed",
   const sink = new CaptureSink();
   const runtime = await createRustLiveRenderRuntimeR10(options(sink));
   try {
+    arm(runtime);
     await assert.rejects(runtime.submitRuntimeExtraction(GENERATION - 1, extraction(), context()), /stale live render world generation/u);
     await assert.rejects(runtime.submitRuntimeExtraction(GENERATION + 1, extraction(), context()), /future live render world generation/u);
     await assert.rejects(runtime.submitRuntimeExtraction(GENERATION, extraction(), context({ epoch: EPOCH + BigInt(1) })), /context epoch/u);
-    await assert.rejects(runtime.submitRuntimeExtraction(GENERATION, extraction(), context({ tick: BigInt(11) })), /context tick/u);
+    await assert.rejects(runtime.submitRuntimeExtraction(GENERATION, extraction(), context({ tick: BigInt(1) })), /context tick/u);
     assert.equal(await runtime.submitRuntimeExtraction(GENERATION, extraction(), context()), true);
-    await assert.rejects(runtime.submitRuntimeExtraction(GENERATION, extraction(2, 10), context({ sequence: BigInt(1) })), /stale runtime extraction frame sequence/u);
+    await assert.rejects(runtime.submitRuntimeExtraction(GENERATION, extraction(2, 0), context({ sequence: BigInt(1) })), /stale runtime extraction frame sequence/u);
   } finally {
     await runtime.dispose();
   }
@@ -348,12 +394,19 @@ test("recovery and store reset stay on the owned composer", async () => {
   const sink = new CaptureSink();
   const runtime = await createRustLiveRenderRuntimeR10(options(sink));
   try {
+    arm(runtime);
     assert.equal(runtime.requestRecovery(GENERATION, "device lost"), true);
     assert.equal(runtime.resetRendererStore(GENERATION, "store replay"), true);
     runtime.resize(GENERATION, 900, 600);
     assert.deepEqual(sink.recoveries, ["device lost", "store replay"]);
-    assert.deepEqual(sink.sizes, [[900, 600]]);
+    assert.deepEqual(sink.sizes, [[1_280, 720], [900, 600]]);
     assert.equal(runtime.diagnostics().composer?.recoveryRequests, 2);
+    assert.deepEqual(runtime.diagnostics().composer?.requiredView, {
+      expectedExternalEntityId: "player:extraction",
+      viewportWidth: 900,
+      viewportHeight: 600,
+      viewRevision: 12,
+    });
   } finally {
     await runtime.dispose();
   }
@@ -362,6 +415,7 @@ test("recovery and store reset stay on the owned composer", async () => {
 test("dispose drains accepted submissions, rejects new work, and releases ownership", async () => {
   const sink = new CaptureSink();
   const runtime = await createRustLiveRenderRuntimeR10(options(sink));
+  arm(runtime);
   const accepted = runtime.submitRuntimeExtraction(GENERATION, extraction(), context());
   const disposing = runtime.dispose();
   assert.equal(await accepted, true);
@@ -375,7 +429,7 @@ test("dispose drains accepted submissions, rejects new work, and releases owners
     simulationTick: BigInt(10),
     animationTimeMicros: BigInt(1),
     resourceRevision: BigInt(0),
-    camera: context().camera,
+    camera: terrainCamera(),
     environment: context().environment,
     instances: [],
     particles: [],

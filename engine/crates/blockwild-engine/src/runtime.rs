@@ -28,14 +28,15 @@ use blockwild_entity::{
 };
 use blockwild_gameplay::{
     ActorGrant, ActorRole, ApplyBlockActionV1, CombatCommand, ContainerKey, ContainerKind, ContentActionToolKind,
-    ContentArtifact, ContentDomain, ContentDomainDigest, ContentItemUseKind, ContentRuntimeRegistry,
-    CreatePlayerCustodyCommand, DropRemovalReasonV1, DroppedItemSpatialV1, ExpectedStack, FixedVec3, FixedWorldVec3V1,
-    GameplayActor, GameplayAuthority, GameplayBatch, GameplayCommand, GameplayReceipt, GameplayScheduleAdvanceV1,
-    GameplayState, InventoryCommand, ItemDefinition, ItemInstanceMetadataV1, ItemStack, MetadataBlobStore,
-    PlayerDropStageRequestV1, PlayerInventoryBindingV1, RejectionCode, RemoveEmptyDropCustodyCommand,
-    RotationMicroturnsV1, SlotRef, TransferCommand, WorldKey, WorldViewAcceptedReceiptV1, WorldViewAuthorityV1,
-    WorldViewBatchV1, WorldViewCommandV1, WorldViewReceiptV1, compile_content_bundle,
-    decode_gameplay_authority_snapshot, install_content_bundle, materialize_content_runtime, stage_player_drop_v1,
+    ContentArtifact, ContentDomain, ContentDomainDigest, ContentItemUseKind, ContentRenderPresentationBinding,
+    ContentRenderPresentationRole, ContentRuntimeRegistry, CreatePlayerCustodyCommand, DropRemovalReasonV1,
+    DroppedItemSpatialV1, ExpectedStack, FixedVec3, FixedWorldVec3V1, GameplayActor, GameplayAuthority, GameplayBatch,
+    GameplayCommand, GameplayReceipt, GameplayScheduleAdvanceV1, GameplayState, InventoryCommand, ItemDefinition,
+    ItemInstanceMetadataV1, ItemStack, MetadataBlobStore, PlayerDropStageRequestV1, PlayerInventoryBindingV1,
+    RejectionCode, RemoveEmptyDropCustodyCommand, RotationMicroturnsV1, SlotRef, TransferCommand, WorldKey,
+    WorldViewAcceptedReceiptV1, WorldViewAuthorityV1, WorldViewBatchV1, WorldViewCommandV1, WorldViewReceiptV1,
+    compile_content_bundle, decode_gameplay_authority_snapshot, install_content_bundle, materialize_content_runtime,
+    stage_player_drop_v1,
 };
 use blockwild_generation::{
     Block as GeneratedBlock, ChunkPayloadV2, GENERATOR_VERSION, GenerateChunkRequestV2, GenerationDiagnostics,
@@ -784,6 +785,25 @@ pub enum RuntimeCommandCacheLookupV1 {
     Conflict,
 }
 
+/// Exact renderer-facing ownership for one role-specific presentation binding.
+///
+/// The hash and revision identify the distinct render-presentation content
+/// record. `model_id` identifies the pinned BWM2 model inside that record's
+/// catalog; neither field borrows creature-profile identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegratedRuntimeRenderPresentationBindingV1<'a> {
+    Exact {
+        profile_id: &'a str,
+        model_id: &'a str,
+        content_hash: CanonicalHash,
+        content_version: u32,
+    },
+    Missing {
+        blocker_id: &'a str,
+    },
+    Unmapped,
+}
+
 #[derive(Clone, Debug)]
 struct IntegratedRuntimeCoreSnapshotV1 {
     schema: u16,
@@ -1217,6 +1237,38 @@ impl IntegratedRuntimeV2 {
             let blob = self.gameplay_content_store.get(*hash)?;
             Some((blob.hash, blob.content_version))
         })
+    }
+
+    /// Resolves a dropped stack through the installed role-specific
+    /// presentation catalog. Missing and unmapped items remain distinguishable
+    /// so extraction callers can fail closed without borrowing creature model
+    /// identity or inventing a fallback.
+    #[must_use]
+    pub fn dropped_item_render_presentation_binding_v1(
+        &self,
+        item_code: u32,
+    ) -> IntegratedRuntimeRenderPresentationBindingV1<'_> {
+        let item_id = item_code.to_string();
+        match self.gameplay_content_runtime.render_presentation_binding(
+            ContentRenderPresentationRole::DroppedItem,
+            ContentDomain::Item,
+            &item_id,
+        ) {
+            ContentRenderPresentationBinding::Exact { catalog, profile } => {
+                IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                    profile_id: &profile.id,
+                    model_id: &profile.model.model_id,
+                    content_hash: catalog.core.blob_hash,
+                    content_version: catalog.core.content_version,
+                }
+            }
+            ContentRenderPresentationBinding::Missing { blocker, .. } => {
+                IntegratedRuntimeRenderPresentationBindingV1::Missing {
+                    blocker_id: &blocker.id,
+                }
+            }
+            ContentRenderPresentationBinding::Unmapped => IntegratedRuntimeRenderPresentationBindingV1::Unmapped,
+        }
     }
 
     #[must_use]
@@ -10572,7 +10624,7 @@ mod tests {
     }
 
     fn runtime_with_bound_player_item(count: u32) -> IntegratedRuntimeV2 {
-        let artifact = ContentArtifact {
+        let item = ContentArtifact {
             domain: ContentDomain::Item,
             id: "42".into(),
             schema_id: "item-definition".into(),
@@ -10582,7 +10634,38 @@ mod tests {
             canonical_bytes: br#"{"id":42,"maxStack":64,"name":"Test Drop"}"#.to_vec(),
             unknown_extension_bytes: Vec::new(),
         };
-        let bundle = compile_content_bundle("test-drop-content-v1", vec![artifact.clone()]).unwrap();
+        let missing_item = ContentArtifact {
+            domain: ContentDomain::Item,
+            id: "43".into(),
+            schema_id: "item-definition".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["item:43".into()],
+            canonical_bytes: br#"{"id":43,"maxStack":64,"name":"Missing Test Drop"}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let unmapped_item = ContentArtifact {
+            domain: ContentDomain::Item,
+            id: "44".into(),
+            schema_id: "item-definition".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["item:44".into()],
+            canonical_bytes: br#"{"id":44,"maxStack":64,"name":"Unmapped Test Drop"}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let presentation = ContentArtifact {
+            domain: ContentDomain::MachineProfile,
+            id: blockwild_gameplay::RENDER_PRESENTATION_CATALOG_ID.into(),
+            schema_id: "render-presentation-catalog".into(),
+            schema_version: 1,
+            content_version: 7,
+            aliases: vec!["machine-profile:render-presentations".into()],
+            canonical_bytes: br#"{"catalog":{"byteLength":785824,"canonicalHash":"52fd4aebb0c457f3c83af79af6b83c93","format":"blockwild-compiled-model-catalog-v2","modelCount":252,"nodeCount":13121,"revision":1,"schema":2,"sha256":"12c522f880e94c1ae527de701ae3e710fee13701d66fbb0a4ad24895557011b4","source":"renderer-neutral test catalog"},"integrationBlockers":["dropped-item-r6-model-binding-runtime"],"missingProfiles":[{"contentRefs":[{"domain":"item","id":"43"}],"id":"missing:dropped-item:test-missing","reason":"Fixture intentionally has no exact BWM2 identity.","role":"dropped-item","sourcePresentationIds":["fixture:test-missing"]}],"profiles":[{"contentRefs":[{"domain":"item","id":"42"}],"id":"drop:test","model":{"category":4,"groundYBits":null,"id":"test-drop-model","label":"Test Drop Model","nodeCount":3},"role":"dropped-item"}],"schema":1}"#.to_vec(),
+            unknown_extension_bytes: vec![0, 0x80, 0xff, 17],
+        };
+        let artifacts = vec![item, missing_item, unmapped_item, presentation];
+        let bundle = compile_content_bundle("test-drop-content-v1", artifacts.clone()).unwrap();
         let mut runtime = runtime_with_bound_player_config(IntegratedRuntimeConfigV2 {
             content_hash: bundle.manifest.manifest_hash,
             ..IntegratedRuntimeConfigV2::default()
@@ -10595,7 +10678,7 @@ mod tests {
             domains: bundle.manifest.domains,
             page_index: 0,
             page_count: 1,
-            artifacts: vec![artifact],
+            artifacts,
         };
         let page_bytes = crate::encode_content_install_page_v1(&page).unwrap();
         runtime
@@ -11996,6 +12079,62 @@ mod tests {
         assert_eq!(future_extraction.dropped_items[0].spatial.drop_id, drop_id);
         assert_eq!(future_extraction.dropped_items[0].stack.count, 1);
         assert_eq!(future_extraction.players[0].held_stack.as_ref().unwrap().count, 1);
+    }
+
+    #[test]
+    fn dropped_item_presentation_resolver_is_role_specific_and_checkpoint_stable() {
+        let runtime = runtime_with_bound_player_item(1);
+        let expected_hash = *runtime
+            .gameplay_content_index
+            .get(&(
+                ContentDomain::MachineProfile,
+                blockwild_gameplay::RENDER_PRESENTATION_CATALOG_ID.into(),
+            ))
+            .unwrap();
+        assert_eq!(
+            runtime.dropped_item_render_presentation_binding_v1(42),
+            IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                profile_id: "drop:test",
+                model_id: "test-drop-model",
+                content_hash: expected_hash,
+                content_version: 7,
+            }
+        );
+        assert_eq!(
+            runtime.dropped_item_render_presentation_binding_v1(43),
+            IntegratedRuntimeRenderPresentationBindingV1::Missing {
+                blocker_id: "missing:dropped-item:test-missing",
+            }
+        );
+        assert_eq!(
+            runtime.dropped_item_render_presentation_binding_v1(44),
+            IntegratedRuntimeRenderPresentationBindingV1::Unmapped
+        );
+        assert_eq!(
+            runtime.entity_model_content_identity("test-drop-model", "dropped-item"),
+            None,
+            "dropped presentation identity must not leak through creature-profile lookup"
+        );
+
+        let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.dropped_item_render_presentation_binding_v1(42),
+            runtime.dropped_item_render_presentation_binding_v1(42)
+        );
+        assert_eq!(
+            restored
+                .gameplay_content_store()
+                .get_by_alias("machine-profile:render-presentations")
+                .unwrap()
+                .exact_bytes()
+                .1,
+            [0, 0x80, 0xff, 17]
+        );
     }
 
     #[test]

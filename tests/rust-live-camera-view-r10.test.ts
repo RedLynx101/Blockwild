@@ -9,10 +9,12 @@ import {
   type RustDomainValueR10,
 } from "../app/game/rust-authoritative-extraction-r10.ts";
 import { encodeRustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-codec-r6.ts";
+import { decodeRustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-codec-r6.ts";
 import type {
   RustEntityExtractionR6V3,
   RustEntityExtractionRecordR6V3,
 } from "../app/game/rust-entity-authority-contract-r6.ts";
+import type { RenderEntityFrameContextR10 } from "../app/game/rust-render-entity-extraction-r10.ts";
 import {
   rustIntegratedCameraStateHashR10,
   type RustIntegratedCameraModeR10,
@@ -27,6 +29,17 @@ import {
   rustLiveCameraPoseHashR10,
 } from "../app/game/rust-live-camera-view-r10.ts";
 import { TypeScriptCanonicalHasher } from "../app/game/rust-kernel-shadow.ts";
+import {
+  createRenderFrameV2,
+  createRenderResourceBatchV2,
+  type RenderFrameV2,
+  type RenderResourceBatchV2,
+} from "../app/game/rust-render-extraction-v2.ts";
+import {
+  RustRenderSceneComposerR10,
+  type RenderSceneExtractionSinkR10,
+  type RenderRuntimeFrameContextR10,
+} from "../app/game/rust-render-scene-composer-r10.ts";
 
 const encoder = new TextEncoder();
 const ZERO = new Uint8Array(16);
@@ -134,7 +147,7 @@ function mutateBundle(mutate: (rows: {
   runtime: MutableRow;
   binding: MutableRow;
   camera: MutableRow;
-}) => void) {
+}) => void, overrides: Readonly<{ extractionRevision?: bigint; authorityTick?: bigint }> = {}) {
   const decoded = decodeRustDomainBundleR10(GOLDEN_BWX0);
   const rowsByDomain = decoded.views.map((view) => view.rows.map((row) => ({
     kind: row.kind,
@@ -151,7 +164,11 @@ function mutateBundle(mutate: (rows: {
   const binding = playerRows.find((row) => row.kind === 2)!;
   const camera = playerRows.find((row) => row.kind === 3)!;
   mutate({ runtime, binding, camera });
-  return reencodeBundle(decoded, rowsByDomain);
+  return reencodeBundle(Object.freeze({
+    ...decoded,
+    extractionRevision: overrides.extractionRevision ?? decoded.extractionRevision,
+    authorityTick: overrides.authorityTick ?? decoded.authorityTick,
+  }), rowsByDomain);
 }
 
 function record(overrides: Partial<RustEntityExtractionRecordR6V3> = {}): RustEntityExtractionRecordR6V3 {
@@ -193,11 +210,13 @@ function extraction(
   hud = GOLDEN_BWX0,
   entityRecords: readonly RustEntityExtractionRecordR6V3[] = [record()],
   omitted = 0,
+  extractionRevision = 1,
+  authorityTick = 0,
 ): RustIntegratedRuntimeExtractionV1 {
   const entities: RustEntityExtractionR6V3 = Object.freeze({
     schema: 3,
-    extractionRevision: BigInt(1),
-    authorityTick: BigInt(0),
+    extractionRevision: BigInt(extractionRevision),
+    authorityTick: BigInt(authorityTick),
     contentManifestHash: ZERO,
     contentReady: false,
     total: entityRecords.length + omitted,
@@ -210,10 +229,10 @@ function extraction(
       universeId: "1",
       locationId: "surface",
       revision: Object.freeze({ epoch: 1, world: 1, entities: 1, gameplay: 1, persistence: 1, network: 1, simulation: 1 }),
-      tick: 0,
+      tick: authorityTick,
       stateHash: "b7e3adc7018facd8c83a579e605472b4",
     }),
-    extractionRevision: 1,
+    extractionRevision,
     render: encodeRustEntityExtractionR6V3(entities),
     hud,
     audio: new Uint8Array(),
@@ -424,4 +443,231 @@ test("camera decoder recomputes state and pose hashes and validates pose semanti
     refreshCameraHashes(camera.fields);
   });
   assert.throws(() => decode(impossibleFirstPersonCollision), /impossible collision state/u);
+});
+
+const COMPOSER_EPOCH = BigInt(31);
+const COMPOSER_MODEL_HASH = "ab".repeat(16);
+const COMPOSER_ENVIRONMENT = Object.freeze({
+  clearRgba8: [40, 80, 120, 255] as const,
+  ambientRgb8: [120, 130, 140] as const,
+  ambientIntensity: 0.6,
+  sunDirection: [0.1, 0.9, 0.3] as const,
+  sunRgb8: [255, 240, 210] as const,
+  sunIntensity: 0.8,
+  fogRgb8: [50, 90, 120] as const,
+  fogNear: 20,
+  fogFar: 240,
+  underwater: 0,
+  caveOcclusion: 0,
+});
+
+class ComposerSink implements RenderSceneExtractionSinkR10 {
+  readonly resourcesSeen: RenderResourceBatchV2[] = [];
+  readonly framesSeen: RenderFrameV2[] = [];
+  readonly sizes: Array<readonly [number, number]> = [];
+  rejectNextFrame = false;
+  resources(batch: RenderResourceBatchV2) { this.resourcesSeen.push(batch); return true; }
+  frame(frame: RenderFrameV2) {
+    if (this.rejectNextFrame) { this.rejectNextFrame = false; return false; }
+    this.framesSeen.push(frame); return true;
+  }
+  resize(width: number, height: number) { this.sizes.push([width, height]); }
+  requestRecovery() { return true; }
+  diagnostics() { return Object.freeze({ state: "ready" }); }
+}
+
+class EmptyEntityExtractor {
+  extractBytes(bytes: Uint8Array | ArrayBuffer, context: RenderEntityFrameContextR10) {
+    const source = decodeRustEntityExtractionR6V3(bytes);
+    const revision = source.extractionRevision;
+    return Object.freeze({
+      extractionRevision: revision,
+      authorityTick: source.authorityTick,
+      contentManifestHash: Uint8Array.from(source.contentManifestHash),
+      modelCatalogHash: COMPOSER_MODEL_HASH,
+      modelCatalogRevision: BigInt(1),
+      resources: createRenderResourceBatchV2({
+        epoch: context.epoch,
+        revision,
+        operations: [],
+      }),
+      frame: createRenderFrameV2({
+        epoch: context.epoch,
+        frameSequence: context.frameSequence,
+        simulationTick: context.simulationTick,
+        animationTimeMicros: context.animationTimeMicros,
+        resourceRevision: revision,
+        camera: context.camera,
+        environment: context.environment,
+        instances: [],
+        particles: [],
+      }),
+      presentations: Object.freeze([]),
+      stats: Object.freeze({
+        sourceRecords: source.records.length,
+        resourceOperations: 0,
+        instances: 0,
+        hiddenDormant: 0,
+        tiers: Object.freeze({ hero: 0, nearby: 0, coarse: 0, dormant: 0 }),
+      }),
+    });
+  }
+  resetResourceReplay() { /* No resources in this focused fixture. */ }
+  resetRevisionGuard() { /* The source revision itself is canonical. */ }
+}
+
+function composerContext(frameSequence: bigint, simulationTick: bigint): RenderRuntimeFrameContextR10 {
+  return Object.freeze({
+    epoch: COMPOSER_EPOCH,
+    frameSequence,
+    simulationTick,
+    animationTimeMicros: simulationTick * BigInt(16_667),
+    environment: COMPOSER_ENVIRONMENT,
+  });
+}
+
+function terrainFrame(frameSequence: bigint, simulationTick: bigint) {
+  return createRenderFrameV2({
+    epoch: COMPOSER_EPOCH,
+    frameSequence,
+    simulationTick,
+    animationTimeMicros: simulationTick * BigInt(16_667),
+    resourceRevision: BigInt(1),
+    camera: Object.freeze({
+      position: [999, 998, 997] as const,
+      orientation: [0, 1, 0, 0] as const,
+      verticalFovRadians: 0.25,
+      near: 4,
+      far: 8,
+      viewport: [1, 1] as const,
+    }),
+    environment: COMPOSER_ENVIRONMENT,
+    instances: [],
+    particles: [],
+  });
+}
+
+function composerExtraction(hud: Uint8Array, revision: number, tick: number) {
+  return extraction(Uint8Array.from(hud), [record()], 0, revision, tick);
+}
+
+function cameraHud(
+  extractionRevision: number,
+  authorityTick: number,
+  view: RustIntegratedRuntimeExtractionViewV1,
+) {
+  return mutateBundle(({ camera }) => {
+    camera.fields.set("viewport.width", BigInt(view.viewportWidth));
+    camera.fields.set("viewport.height", BigInt(view.viewportHeight));
+    camera.fields.set("viewRevision", BigInt(view.viewRevision));
+    refreshCameraHashes(camera.fields);
+  }, { extractionRevision: BigInt(extractionRevision), authorityTick: BigInt(authorityTick) });
+}
+
+test("scene composition waits for exact camera authority, ignores terrain camera, and deduplicates", () => {
+  const sink = new ComposerSink();
+  const composer = new RustRenderSceneComposerR10({
+    sink,
+    epoch: COMPOSER_EPOCH,
+    trustedContentManifestHash: ZERO,
+    trustedModelCatalogHash: COMPOSER_MODEL_HASH,
+    trustedModelCatalogRevision: BigInt(1),
+    entityExtractor: new EmptyEntityExtractor(),
+  });
+  assert.equal(composer.armRequiredView("player:extraction", VIEW), true);
+  assert.equal(composer.resources(createRenderResourceBatchV2({
+    epoch: COMPOSER_EPOCH,
+    revision: BigInt(1),
+    operations: [],
+  })), true);
+
+  const firstTerrain = terrainFrame(BigInt(1), BigInt(0));
+  assert.equal(composer.frame(firstTerrain), true);
+  assert.equal(sink.framesSeen.length, 0, "terrain must remain held before its camera extraction");
+  assert.equal(composer.submitRuntimeExtraction(
+    composerExtraction(GOLDEN_BWX0, 1, 0),
+    composerContext(BigInt(1), BigInt(0)),
+  ), true);
+  assert.equal(sink.framesSeen.length, 1);
+  const authoritative = decodeRustLiveCameraViewR10(composerExtraction(GOLDEN_BWX0, 1, 0), "player:extraction", VIEW);
+  assert.deepEqual(sink.framesSeen[0].camera.position, [
+    Math.fround(authoritative.position.x),
+    Math.fround(authoritative.position.y),
+    Math.fround(authoritative.position.z),
+  ]);
+  assert.notDeepEqual(sink.framesSeen[0].camera.position, firstTerrain.camera.position,
+    "the untrusted terrain camera must never reach the composed frame");
+  assert.equal(composer.frame(firstTerrain), true);
+  assert.equal(sink.framesSeen.length, 1, "same terrain sequence and camera pose must deduplicate");
+  assert.equal(composer.diagnostics().deduplicatedCompositions, 1);
+});
+
+test("resize gates the old view, view-only extraction recomposes, and only the latest terrain waits", () => {
+  const sink = new ComposerSink();
+  const composer = new RustRenderSceneComposerR10({
+    sink,
+    epoch: COMPOSER_EPOCH,
+    trustedContentManifestHash: ZERO,
+    trustedModelCatalogHash: COMPOSER_MODEL_HASH,
+    trustedModelCatalogRevision: BigInt(1),
+    entityExtractor: new EmptyEntityExtractor(),
+  });
+  composer.armRequiredView("player:extraction", VIEW);
+  composer.resources(createRenderResourceBatchV2({ epoch: COMPOSER_EPOCH, revision: BigInt(1), operations: [] }));
+  composer.frame(terrainFrame(BigInt(1), BigInt(0)));
+  composer.submitRuntimeExtraction(
+    composerExtraction(GOLDEN_BWX0, 1, 0),
+    composerContext(BigInt(1), BigInt(0)),
+  );
+  assert.equal(sink.framesSeen.length, 1);
+
+  const resizedView = Object.freeze({ viewportWidth: 800, viewportHeight: 600, viewRevision: 12 });
+  assert.equal(composer.armRequiredView("player:extraction", resizedView), true);
+  assert.deepEqual(sink.sizes, [[1_280, 720], [800, 600]]);
+  assert.equal(sink.framesSeen.length, 1, "arming resize must gate the previous camera immediately");
+  assert.throws(() => composer.submitRuntimeExtraction(
+    composerExtraction(GOLDEN_BWX0, 1, 0),
+    composerContext(BigInt(2), BigInt(0)),
+  ), /does not echo the requested view/u);
+
+  const resizedHud = cameraHud(2, 0, resizedView);
+  assert.equal(composer.submitRuntimeExtraction(
+    composerExtraction(resizedHud, 2, 0),
+    composerContext(BigInt(2), BigInt(0)),
+  ), true);
+  assert.equal(sink.framesSeen.length, 2, "view-only camera authority must recompose cached terrain");
+  assert.deepEqual(sink.framesSeen[1].camera.viewport, [800, 600]);
+  assert.equal(sink.framesSeen[1].frameSequence, BigInt(2), "composed output owns an independent sequence");
+
+  composer.frame(terrainFrame(BigInt(2), BigInt(1)));
+  composer.frame(terrainFrame(BigInt(3), BigInt(1)));
+  assert.equal(sink.framesSeen.length, 2, "terrain at the wrong camera tick remains held");
+  assert.equal(composer.diagnostics().supersededTerrainFrames, 1);
+  assert.equal(composer.diagnostics().pendingTerrainFrameSequence, BigInt(3));
+
+  const tickOneHud = cameraHud(3, 1, resizedView);
+  const tickOneExtraction = composerExtraction(tickOneHud, 3, 1);
+  sink.rejectNextFrame = true;
+  assert.equal(composer.submitRuntimeExtraction(
+    tickOneExtraction,
+    composerContext(BigInt(3), BigInt(1)),
+  ), false);
+  assert.equal(sink.framesSeen.length, 2);
+  assert.equal(composer.diagnostics().cameraAuthorityTick, BigInt(0),
+    "a rejected sink frame cannot advance the authoritative camera cursor");
+  assert.equal(composer.diagnostics().domainExtractionRevision, BigInt(2),
+    "a rejected sink frame cannot advance domain metadata");
+  assert.equal(composer.diagnostics().entityExtractionRevision, BigInt(3),
+    "entity resources remain recoverably staged after the sink accepted their upload");
+  assert.equal(composer.diagnostics().pendingTerrainFrameSequence, BigInt(3));
+
+  assert.equal(composer.submitRuntimeExtraction(
+    tickOneExtraction,
+    composerContext(BigInt(3), BigInt(1)),
+  ), true);
+  assert.equal(sink.framesSeen.length, 3);
+  assert.equal(sink.framesSeen[2].simulationTick, BigInt(1));
+  assert.equal(composer.diagnostics().entityExtractionRevision, BigInt(3),
+    "an exact retry deduplicates the staged entity extraction");
+  assert.equal(composer.diagnostics().pendingTerrainFrameSequence, null);
 });

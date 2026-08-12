@@ -35,8 +35,11 @@ const CONTENT = requireBlockwildProductionContent();
 const CONTENT_HASH = CONTENT.manifest.manifestHash;
 const PLAYER_ARTIFACT = CONTENT.artifacts.find((artifact) =>
   artifact.domain === "creature-profile" && artifact.id === PLAYER_RENDER_PROFILE_ID_V1)!;
+const PRESENTATION_ARTIFACT = CONTENT.artifacts.find((artifact) =>
+  artifact.domain === "machine-profile" && artifact.id === "render-presentations")!;
 const ENTITY_ID = BigInt("4294967297");
 const PLAYER_ID = BigInt("8589934593");
+const DROP_ENTITY_ID = BigInt("4294967298");
 const EPOCH = BigInt(31);
 let catalogsPromise: Promise<readonly [AttestedPlayerRenderProfileV1, AttestedRenderPresentationCatalogV1]> | null = null;
 
@@ -76,6 +79,7 @@ function hex(value: string) {
 
 function boolField(value: boolean) { return new Writer().u8(0).u8(value ? 1 : 0).finish(); }
 function u64Field(value: bigint | number) { return new Writer().u8(1).u64(value).finish(); }
+function stringField(value: string) { return new Writer().u8(4).string(value).finish(); }
 function hashField(value: Uint8Array) { assert.equal(value.byteLength, 16); return new Writer().u8(5).raw(value).finish(); }
 
 function domainRow(kind: number, key: string, fields: readonly (readonly [string, Uint8Array])[]) {
@@ -90,9 +94,32 @@ function domainRow(kind: number, key: string, fields: readonly (readonly [string
   return writer.finish();
 }
 
-function playerDomain(
+function domainBundle(
   extractionRevision: number,
   authorityTick: number,
+  rowsByDomain: ReadonlyMap<number, readonly Uint8Array[]>,
+  blockersByDomain: ReadonlyMap<number, readonly string[]> = new Map(),
+) {
+  const writer = new Writer().raw(new TextEncoder().encode("BWX0")).u16(1)
+    .u64(extractionRevision).u64(authorityTick)
+    .raw(Uint8Array.from({ length: 16 }, () => 7)).raw(hex(CONTENT_HASH)).u8(1).u16(8);
+  for (let domain = 1; domain <= 8; domain += 1) {
+    const rows = rowsByDomain.get(domain) ?? [];
+    const payload = new Writer();
+    for (const row of rows) payload.raw(row);
+    const payloadBytes = payload.finish();
+    const blockers = blockersByDomain.get(domain) ?? [];
+    const payloadHash = new TypeScriptCanonicalHasher("blockwild.r10.domain-view-payload.v1")
+      .writeBytes(payloadBytes).finish();
+    writer.u8(domain).u16(1).u8(blockers.length === 0 ? 0 : 1).u64(extractionRevision)
+      .u32(rows.length).u32(rows.length).u32(0).u32(rows.length).u16(blockers.length);
+    for (const blocker of blockers) writer.string(blocker);
+    writer.u32(payloadBytes.byteLength).raw(payloadHash).raw(payloadBytes);
+  }
+  return writer.finish();
+}
+
+function playerRow(
   entityRevision: bigint,
   itemCode: number,
   options: Readonly<{ count?: number; durability?: number | null; metadataHash?: Uint8Array }> = {},
@@ -109,20 +136,40 @@ function playerDomain(
     ["playerId", u64Field(PLAYER_ID)],
   ];
   if (durability !== null) fields.push(["held.durability.value", u64Field(durability)]);
-  const row = domainRow(2, `binding:${PLAYER_ID}`, fields);
-  const writer = new Writer().raw(new TextEncoder().encode("BWX0")).u16(1)
-    .u64(extractionRevision).u64(authorityTick)
-    .raw(Uint8Array.from({ length: 16 }, () => 7)).raw(hex(CONTENT_HASH)).u8(1).u16(8);
-  for (let domain = 1; domain <= 8; domain += 1) {
-    const payload = domain === 2 ? row : new Uint8Array();
-    const selected = domain === 2 ? 1 : 0;
-    const payloadHash = new TypeScriptCanonicalHasher("blockwild.r10.domain-view-payload.v1")
-      .writeBytes(payload).finish();
-    writer.u8(domain).u16(1).u8(0).u64(entityRevision)
-      .u32(selected).u32(selected).u32(0).u32(selected).u16(0)
-      .u32(payload.byteLength).raw(payloadHash).raw(payload);
+  return domainRow(2, `binding:${PLAYER_ID}`, fields);
+}
+
+function playerDomain(extractionRevision: number, authorityTick: number, entityRevision: bigint, itemCode: number) {
+  return domainBundle(extractionRevision, authorityTick, new Map([[2, [playerRow(entityRevision, itemCode)]]]));
+}
+
+function dropRow(input: Readonly<{
+  itemCode: number;
+  entityRevision: bigint;
+  status: "exact" | "missing" | "unmapped";
+  profileId?: string;
+  modelId?: string;
+  blockerId?: string;
+}>) {
+  const dropId = "drop:presentation-test";
+  const fields: Array<readonly [string, Uint8Array]> = [
+    ["dropId", stringField(dropId)],
+    ["entityId", u64Field(DROP_ENTITY_ID)],
+    ["entityRevision", u64Field(input.entityRevision)],
+    ["stack.itemCode", u64Field(input.itemCode)],
+    ["presentation.role", stringField("dropped-item")],
+    ["presentation.contentDomain", stringField("item")],
+    ["presentation.contentId", stringField(String(input.itemCode))],
+    ["presentation.status", stringField(input.status)],
+  ];
+  if (input.profileId !== undefined) fields.push(["presentation.profileId", stringField(input.profileId)]);
+  if (input.modelId !== undefined) fields.push(["presentation.modelId", stringField(input.modelId)]);
+  if (input.blockerId !== undefined) fields.push(["presentation.blockerId", stringField(input.blockerId)]);
+  if (input.status === "exact") {
+    fields.push(["presentation.contentVersion", u64Field(PRESENTATION_ARTIFACT.contentVersion)]);
+    fields.push(["presentation.contentHash", hashField(hex(PRESENTATION_ARTIFACT.blobHash))]);
   }
-  return writer.finish();
+  return domainRow(6, `drop:${dropId}`, fields);
 }
 
 async function catalogs() {
@@ -137,47 +184,60 @@ async function catalogs() {
   return catalogsPromise;
 }
 
-function entityExtraction(revision = 1, tick = 10, equipment: RustEntityExtractionR6V3["records"][number]["equipment"] = []) {
+function entityRecord(
+  revision: number,
+  equipment: RustEntityExtractionR6V3["records"][number]["equipment"] = [],
+): RustEntityExtractionR6V3["records"][number] {
+  return Object.freeze({
+    entityId: ENTITY_ID,
+    residency: "hot" as const,
+    class: "player" as const,
+    simulationTier: "hero" as const,
+    protection: BigInt(1),
+    entityRevision: BigInt(revision),
+    externalEntityId: "presentation-player",
+    specimenId: "presentation-player",
+    kindKey: PLAYER_RENDER_PROFILE_ID_V1,
+    variantKey: null,
+    name: "Presentation Player",
+    modelKey: PLAYER_RENDER_MODEL_ID_V1,
+    modelRevision: PLAYER_ARTIFACT.contentVersion,
+    modelHash: hex(PLAYER_ARTIFACT.blobHash),
+    position: Object.freeze({ x: 0, y: 4, z: 0 }),
+    yaw: 0,
+    velocity: Object.freeze({ x: 0, y: 0, z: 0 }),
+    health: 20,
+    maximumHealth: 20,
+    tamed: false,
+    ageTicks: BigInt(0),
+    movementMode: "ground" as const,
+    grounded: true,
+    submerged: false,
+    lastDamageTick: BigInt(0),
+    action: Object.freeze({ key: "idle", phase: 0, startedTick: BigInt(0), endsTick: BigInt(0), target: null }),
+    equipment: Object.freeze(equipment),
+    mount: Object.freeze({ parentMount: null, occupiedSeat: null, acceptsRiders: false, saddleKey: null, seats: Object.freeze([]) }),
+    research: Object.freeze([]),
+  });
+}
+
+function entityExtraction(
+  revision = 1,
+  tick = 10,
+  equipment: RustEntityExtractionR6V3["records"][number]["equipment"] = [],
+  extraRecords: readonly RustEntityExtractionR6V3["records"][number][] = [],
+) {
+  const records = Object.freeze([entityRecord(revision, equipment), ...extraRecords]);
   return Object.freeze({
     schema: 3 as const,
     extractionRevision: BigInt(revision),
     authorityTick: BigInt(tick),
     contentManifestHash: hex(CONTENT_HASH),
     contentReady: true,
-    total: 1,
-    selected: 1,
+    total: records.length,
+    selected: records.length,
     omitted: 0,
-    records: Object.freeze([Object.freeze({
-      entityId: ENTITY_ID,
-      residency: "hot" as const,
-      class: "player" as const,
-      simulationTier: "hero" as const,
-      protection: BigInt(1),
-      entityRevision: BigInt(revision),
-      externalEntityId: "presentation-player",
-      specimenId: "presentation-player",
-      kindKey: PLAYER_RENDER_PROFILE_ID_V1,
-      variantKey: null,
-      name: "Presentation Player",
-      modelKey: PLAYER_RENDER_MODEL_ID_V1,
-      modelRevision: PLAYER_ARTIFACT.contentVersion,
-      modelHash: hex(PLAYER_ARTIFACT.blobHash),
-      position: Object.freeze({ x: 0, y: 4, z: 0 }),
-      yaw: 0,
-      velocity: Object.freeze({ x: 0, y: 0, z: 0 }),
-      health: 20,
-      maximumHealth: 20,
-      tamed: false,
-      ageTicks: BigInt(0),
-      movementMode: "ground" as const,
-      grounded: true,
-      submerged: false,
-      lastDamageTick: BigInt(0),
-      action: Object.freeze({ key: "idle", phase: 0, startedTick: BigInt(0), endsTick: BigInt(0), target: null }),
-      equipment: Object.freeze(equipment),
-      mount: Object.freeze({ parentMount: null, occupiedSeat: null, acceptsRiders: false, saddleKey: null, seats: Object.freeze([]) }),
-      research: Object.freeze([]),
-    })]),
+    records,
   } satisfies RustEntityExtractionR6V3);
 }
 
@@ -203,6 +263,68 @@ function envelope(
     diagnostics: new Uint8Array(),
     extractionHash: "2".repeat(32),
   });
+}
+
+function dropRecord(
+  revision: number,
+  modelKey: string,
+  modelRevision: number,
+  modelHash: Uint8Array,
+): RustEntityExtractionR6V3["records"][number] {
+  return Object.freeze({
+    ...entityRecord(revision),
+    entityId: DROP_ENTITY_ID,
+    class: "construct" as const,
+    externalEntityId: "drop:presentation-test",
+    specimenId: "drop:presentation-test",
+    kindKey: "dropped-item",
+    name: null,
+    modelKey,
+    modelRevision,
+    modelHash,
+    position: Object.freeze({ x: 2, y: 4, z: 0 }),
+    equipment: Object.freeze([]),
+  });
+}
+
+function dropEnvelope(input: Readonly<{
+  itemCode: number;
+  status: "exact" | "missing" | "unmapped";
+  profileId?: string;
+  modelId?: string;
+  blockerId?: string;
+  entityRevision?: bigint;
+  recordEntityRevision?: bigint;
+  modelKey: string;
+  modelRevision: number;
+  modelHash: Uint8Array;
+  blockers?: readonly string[];
+}>) {
+  const revision = 1;
+  const entityRevision = input.entityRevision ?? BigInt(revision);
+  const entities = entityExtraction(revision, 10, [], [
+    dropRecord(Number(input.recordEntityRevision ?? entityRevision), input.modelKey, input.modelRevision, input.modelHash),
+  ]);
+  const hud = domainBundle(revision, 10, new Map([
+    [2, [playerRow(BigInt(revision), Item.StonePickaxe)]],
+    [3, [dropRow({ ...input, entityRevision })]],
+  ]), new Map(input.blockers === undefined ? [] : [[3, input.blockers]]));
+  return Object.freeze({
+    identity: Object.freeze({
+      universeId: "presentation-universe",
+      locationId: "presentation-location",
+      revision: Object.freeze({ epoch: 1, world: 1, entities: 1, gameplay: 1, persistence: 1, network: 1, simulation: 1 }),
+      tick: 10,
+      stateHash: "1".repeat(32),
+    }),
+    extractionRevision: revision,
+    render: encodeRustEntityExtractionR6V3(entities),
+    hud,
+    audio: new Uint8Array(),
+    platformRequests: new Uint8Array(),
+    diagnostics: new Uint8Array(),
+    extractionHash: "2".repeat(32),
+  } satisfies RustIntegratedRuntimeExtractionV1);
 }
 
 function context(): RenderEntityFrameContextR10 {
@@ -240,10 +362,16 @@ async function createAdapter() {
   const base = new RustEntityRenderExtractionR10({
     catalog: profile.catalog,
     expectedContentManifestHash: hex(CONTENT_HASH),
-    modelAttestations: createProductionRenderModelAttestationsR10(profile, CONTENT.artifacts),
+    modelAttestations: createProductionRenderModelAttestationsR10(profile, presentations, CONTENT.artifacts),
     equipmentModels: createProductionHeldEquipmentModelsR10(presentations),
   });
-  return { adapter: new RustPresentationEntityExtractionR10(base, presentations.registry), presentations };
+  return {
+    adapter: new RustPresentationEntityExtractionR10(base, presentations.registry, {
+      contentVersion: PRESENTATION_ARTIFACT.contentVersion,
+      contentHash: hex(PRESENTATION_ARTIFACT.blobHash),
+    }),
+    presentations,
+  };
 }
 
 test("same-envelope held item joins one exact BWM2 attachment into the R6 player", async () => {
@@ -291,6 +419,126 @@ test("explicit missing held profile emits a sorted blocker and never fabricates 
     itemId,
     blockerId: missing.id,
   }]);
+});
+
+test("same-envelope dropped item keeps exact presentation identity on its R6 entity", async () => {
+  const { adapter, presentations } = await createAdapter();
+  const exact = presentations.registry.resolve("dropped-item", { domain: "item", id: String(Item.CaptureOrb) });
+  assert.equal(exact.status, "exact");
+  assert.ok(exact.status === "exact");
+  const source = dropEnvelope({
+    itemCode: Item.CaptureOrb,
+    status: "exact",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    modelKey: exact.profile.model.id,
+    modelRevision: PRESENTATION_ARTIFACT.contentVersion,
+    modelHash: hex(PRESENTATION_ARTIFACT.blobHash),
+  });
+  const token = adapter.prepareRuntimeExtraction(source);
+  const result = adapter.extractBytes(source.render, context());
+  adapter.finishPreparedRuntimeExtraction(token, true);
+
+  assert.equal(result.presentations.find((value) => value.entityId === DROP_ENTITY_ID)?.modelKey,
+    exact.profile.model.id);
+  assert.equal(adapter.diagnostics().droppedBindings, 1);
+  assert.deepEqual(adapter.diagnostics().droppedBlockers, []);
+});
+
+test("production model attestations include every exact dropped BWM2 identity under catalog ownership", async () => {
+  const [profile, presentations] = await catalogs();
+  const attestations = createProductionRenderModelAttestationsR10(profile, presentations, CONTENT.artifacts);
+  const byModel = new Map(attestations.map((attestation) => [attestation.modelKey, attestation]));
+  const exactModels = [...new Set(presentations.profileCatalog.profiles
+    .filter((candidate) => candidate.role === "dropped-item")
+    .map((candidate) => candidate.model.id))].sort();
+  assert.equal(exactModels.length, 7);
+  for (const modelId of exactModels) {
+    const attestation = byModel.get(modelId);
+    assert.ok(attestation, modelId);
+    assert.equal(attestation.revision, PRESENTATION_ARTIFACT.contentVersion);
+    assert.deepEqual(attestation.contentHash, hex(PRESENTATION_ARTIFACT.blobHash));
+  }
+});
+
+test("dropped model attestation rejects a conflicting creature-profile identity", async () => {
+  const [profile, presentations] = await catalogs();
+  const droppedModel = presentations.profileCatalog.profiles.find((candidate) =>
+    candidate.role === "dropped-item")?.model.id;
+  assert.ok(droppedModel);
+  const conflict = Object.freeze({
+    ...PLAYER_ARTIFACT,
+    id: droppedModel,
+    aliases: Object.freeze([`creature-profile:${droppedModel}`]),
+    blobHash: "f".repeat(32),
+  });
+  assert.throws(
+    () => createProductionRenderModelAttestationsR10(
+      profile,
+      presentations,
+      [...CONTENT.artifacts, conflict],
+    ),
+    /ambiguous content identities/u,
+  );
+});
+
+test("dropped item missing and unmapped bindings stay explicit and never borrow a model", async () => {
+  const [, presentations] = await catalogs();
+  const missing = presentations.profileCatalog.missingProfiles.find((candidate) =>
+    candidate.role === "dropped-item" && candidate.contentRefs.length > 0);
+  assert.ok(missing);
+  const missingId = missing.contentRefs[0]?.id;
+  assert.ok(missingId);
+
+  for (const [itemId, status, blockerId] of [
+    [missingId, "missing", missing.id],
+    ["4294967295", "unmapped", undefined],
+  ] as const) {
+    const { adapter } = await createAdapter();
+    const source = dropEnvelope({
+      itemCode: Number(itemId),
+      status,
+      blockerId,
+      modelKey: "unresolved:dropped-item",
+      modelRevision: 0,
+      modelHash: new Uint8Array(16),
+      blockers: [`dropped-item-presentation-${status}`],
+    });
+    const token = adapter.prepareRuntimeExtraction(source);
+    assert.throws(() => adapter.extractBytes(source.render, context()), /BWR6 extraction is not promotable/u);
+    adapter.finishPreparedRuntimeExtraction(token, true);
+    assert.equal(adapter.diagnostics().droppedBindings, 0);
+    assert.deepEqual(adapter.diagnostics().droppedBlockers, [{
+      id: `dropped-item:${status}:item:${itemId}:drop:drop:presentation-test:entity:${DROP_ENTITY_ID}${blockerId === undefined ? "" : `:${blockerId}`}`,
+      status,
+      dropId: "drop:presentation-test",
+      entityId: DROP_ENTITY_ID,
+      itemId,
+      blockerId: blockerId ?? null,
+    }]);
+  }
+});
+
+test("dropped item entity revision and model identity mismatches reject the prepared envelope", async () => {
+  const { adapter, presentations } = await createAdapter();
+  const exact = presentations.registry.resolve("dropped-item", { domain: "item", id: String(Item.CaptureOrb) });
+  assert.ok(exact.status === "exact");
+  const mismatch = (overrides: Partial<Parameters<typeof dropEnvelope>[0]> = {}) => dropEnvelope({
+    itemCode: Item.CaptureOrb,
+    status: "exact",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    modelKey: exact.profile.model.id,
+    modelRevision: PRESENTATION_ARTIFACT.contentVersion,
+    modelHash: hex(PRESENTATION_ARTIFACT.blobHash),
+    ...overrides,
+  });
+  assert.throws(() => adapter.prepareRuntimeExtraction(mismatch({ entityRevision: BigInt(2), recordEntityRevision: BigInt(1) })),
+    /entity revision differs from BWR6/u);
+
+  const other = await createAdapter();
+  assert.throws(() => other.adapter.prepareRuntimeExtraction(mismatch({ modelKey: "wrong-drop-model" })),
+    /model key differs from its presentation profile/u);
 });
 
 test("same-envelope revision mismatch, reserved-slot collision, and byte substitution fail closed", async () => {

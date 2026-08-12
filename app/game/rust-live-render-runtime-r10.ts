@@ -2,7 +2,10 @@ import {
   requireBlockwildProductionContent,
   type RustContentArtifact,
 } from "./rust-integrated-runtime-content.ts";
-import type { RustIntegratedRuntimeExtractionV1 } from "./rust-integrated-runtime-contract.ts";
+import type {
+  RustIntegratedRuntimeExtractionV1,
+  RustIntegratedRuntimeExtractionViewV1,
+} from "./rust-integrated-runtime-contract.ts";
 import {
   PLAYER_RENDER_MODEL_ID_V1,
   PLAYER_RENDER_PROFILE_ID_V1,
@@ -11,7 +14,6 @@ import {
 } from "./rust-player-render-profile.ts";
 import {
   RustEntityRenderExtractionR10,
-  type RenderEntityFrameContextR10,
   type RenderEntityModelAttestationR10,
 } from "./rust-render-entity-extraction-r10.ts";
 import {
@@ -29,6 +31,7 @@ import {
 import {
   RustRenderSceneComposerR10,
   type RenderSceneExtractionSinkR10,
+  type RenderRuntimeFrameContextR10,
   type RustRenderSceneComposerOptionsR10,
 } from "./rust-render-scene-composer-r10.ts";
 
@@ -100,6 +103,13 @@ function hex16(value: string, label: string) {
   return Uint8Array.from(value.match(/../gu)!.map((part) => Number.parseInt(part, 16)));
 }
 
+function equalBytes(left: Uint8Array, right: Uint8Array) {
+  if (left.byteLength !== right.byteLength) return false;
+  let difference = 0;
+  for (let index = 0; index < left.byteLength; index += 1) difference |= left[index] ^ right[index];
+  return difference === 0;
+}
+
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -121,18 +131,35 @@ function contentArtifactKey(artifact: RustContentArtifact) {
 }
 
 /**
- * Derive only identities that both authorities actually publish: a BWM2 model
- * and an installed creature-profile blob. Unmatched prop/equipment models are
- * not assigned fabricated content identities.
+ * Derive only identities that both authorities publish: creature/player
+ * models use their owning profiles, while dropped-item models use the distinct
+ * attested render-presentation catalog. Unmatched roles receive no identity.
  */
 export function createProductionRenderModelAttestationsR10(
   profile: AttestedPlayerRenderProfileV1,
+  presentations: AttestedRenderPresentationCatalogV1,
   artifacts: readonly RustContentArtifact[],
 ) {
+  const presentationArtifact = attestProductionRenderPresentationsR10(profile, presentations, artifacts);
   const models = new Set(profile.catalog.models.map((model) => model.modelId));
   const artifactKeys = new Set<string>();
   const attestations = new Map<string, RenderEntityModelAttestationR10>();
   let playerArtifact: RustContentArtifact | null = null;
+
+  const installAttestation = (modelKey: string, artifact: RustContentArtifact) => {
+    invariant(artifact.contentVersion > 0 && Number.isSafeInteger(artifact.contentVersion),
+      `content revision for render model '${modelKey}' is invalid`);
+    const candidate = Object.freeze({
+      modelKey,
+      revision: artifact.contentVersion,
+      contentHash: hex16(artifact.blobHash, `content hash for render model '${modelKey}'`),
+    });
+    const existing = attestations.get(modelKey);
+    invariant(existing === undefined || (existing.revision === candidate.revision
+      && equalBytes(existing.contentHash, candidate.contentHash)),
+    `render model '${modelKey}' has ambiguous content identities`);
+    attestations.set(modelKey, candidate);
+  };
 
   for (const artifact of artifacts) {
     const key = contentArtifactKey(artifact);
@@ -141,13 +168,7 @@ export function createProductionRenderModelAttestationsR10(
     if (artifact.domain !== "creature-profile") continue;
     if (artifact.id === PLAYER_RENDER_PROFILE_ID_V1) playerArtifact = artifact;
     if (!models.has(artifact.id)) continue;
-    invariant(artifact.contentVersion > 0 && Number.isSafeInteger(artifact.contentVersion),
-      `content revision for render model '${artifact.id}' is invalid`);
-    attestations.set(artifact.id, Object.freeze({
-      modelKey: artifact.id,
-      revision: artifact.contentVersion,
-      contentHash: hex16(artifact.blobHash, `content hash for render model '${artifact.id}'`),
-    }));
+    installAttestation(artifact.id, artifact);
   }
 
   invariant(playerArtifact !== null, "production content has no attested player render profile");
@@ -155,11 +176,16 @@ export function createProductionRenderModelAttestationsR10(
   invariant(playerArtifact.contentVersion > 0 && Number.isSafeInteger(playerArtifact.contentVersion),
     "production player render content revision is invalid");
   invariant(!attestations.has(PLAYER_RENDER_MODEL_ID_V1), "production player model attestation is ambiguous");
-  attestations.set(PLAYER_RENDER_MODEL_ID_V1, Object.freeze({
-    modelKey: PLAYER_RENDER_MODEL_ID_V1,
-    revision: playerArtifact.contentVersion,
-    contentHash: hex16(playerArtifact.blobHash, "production player render content hash"),
-  }));
+  installAttestation(PLAYER_RENDER_MODEL_ID_V1, playerArtifact);
+
+  for (const presentation of presentations.profileCatalog.profiles) {
+    if (presentation.role !== "dropped-item") continue;
+    invariant(presentations.modelsByProfileId.get(presentation.id)?.modelId === presentation.model.id,
+      `dropped presentation '${presentation.id}' has no exact attested BWM2 model`);
+    invariant(models.has(presentation.model.id),
+      `dropped presentation '${presentation.id}' references a model outside the attested BWM2 catalog`);
+    installAttestation(presentation.model.id, presentationArtifact);
+  }
 
   return Object.freeze([...attestations.values()].sort((left, right) => left.modelKey.localeCompare(right.modelKey)));
 }
@@ -194,6 +220,7 @@ function attestProductionRenderPresentationsR10(
   }
   invariant(canonicalJson(installed) === canonicalJson(presentations.profileCatalog),
     "production render presentation content differs from the attested registry");
+  return artifact;
 }
 
 /**
@@ -259,7 +286,7 @@ export class RustLiveRenderRuntimeR10 {
   async submitRuntimeExtraction(
     worldGeneration: number,
     extraction: RustIntegratedRuntimeExtractionV1,
-    context: RenderEntityFrameContextR10,
+    context: RenderRuntimeFrameContextR10,
   ): Promise<boolean> {
     this.requireGeneration(worldGeneration);
     this.requireAccepting();
@@ -301,6 +328,15 @@ export class RustLiveRenderRuntimeR10 {
   resize(worldGeneration: number, width: number, height: number) {
     this.requireGeneration(worldGeneration);
     this.requireComposer().resize(width, height);
+  }
+
+  armRequiredView(
+    worldGeneration: number,
+    expectedExternalEntityId: string,
+    view: RustIntegratedRuntimeExtractionViewV1,
+  ) {
+    this.requireGeneration(worldGeneration);
+    return this.requireComposer().armRequiredView(expectedExternalEntityId, view);
   }
 
   requestRecovery(worldGeneration: number, reason?: string) {
@@ -382,8 +418,8 @@ export class RustLiveRenderRuntimeR10 {
         invariant(this.options.expectedContentManifestHash === manifestHash,
           "live renderer content manifest differs from the active Rust runtime");
       }
-      attestProductionRenderPresentationsR10(profile, presentations, content.artifacts);
-      const attestations = createProductionRenderModelAttestationsR10(profile, content.artifacts);
+      const presentationArtifact = attestProductionRenderPresentationsR10(profile, presentations, content.artifacts);
+      const attestations = createProductionRenderModelAttestationsR10(profile, presentations, content.artifacts);
       const equipmentModels = createProductionHeldEquipmentModelsR10(presentations);
       const entityExtractor = new RustEntityRenderExtractionR10({
         catalog: profile.catalog,
@@ -393,7 +429,10 @@ export class RustLiveRenderRuntimeR10 {
         maxInstances: this.options.maxInstances,
         maxResourceOperations: this.options.maxResourceOperations,
       });
-      const extractor = new RustPresentationEntityExtractionR10(entityExtractor, presentations.registry);
+      const extractor = new RustPresentationEntityExtractionR10(entityExtractor, presentations.registry, {
+        contentVersion: presentationArtifact.contentVersion,
+        contentHash: hex16(presentationArtifact.blobHash, "production render presentation content hash"),
+      });
       const composer = new RustRenderSceneComposerR10({
         sink: this.sink,
         epoch: this.epoch,
@@ -464,7 +503,7 @@ export class RustLiveRenderRuntimeR10 {
 
   private validateAuthoritativeContext(
     extraction: RustIntegratedRuntimeExtractionV1,
-    context: RenderEntityFrameContextR10,
+    context: RenderRuntimeFrameContextR10,
   ) {
     invariant(context.epoch === this.epoch, "runtime extraction context epoch does not match its world composer");
     invariant(Number.isSafeInteger(extraction.identity.tick) && extraction.identity.tick >= 0,

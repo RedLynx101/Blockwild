@@ -15,11 +15,11 @@ use blockwild_engine::{
     ENTITY_COMPATIBILITY_EXPORT_TYPE_V1, ENTITY_COMPATIBILITY_IMPORT_TYPE_V1, ENTITY_COMPATIBILITY_RECORD_TYPE_V1,
     INTEGRATED_RUNTIME_LEGACY_MIGRATION_SCHEMA_V1, IntegratedRuntimeBatchV2, IntegratedRuntimeConfigV2,
     IntegratedRuntimeError, IntegratedRuntimeIdentityV2, IntegratedRuntimeLegacyMigrationV1,
-    IntegratedRuntimeReceiptV2, IntegratedRuntimeV2, PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
-    PLAYER_BOOTSTRAP_STATUS_TYPE_V1, PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1, PLAYER_INVENTORY_IMPORT_TYPE_V1,
-    RuntimeCommandCacheLookupV1, SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1, SIMULATION_CAMERA_CONFIG_TYPE_V1,
-    SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3, SIMULATION_PLAYER_BIND_TYPE_V3, TERRAIN_RESIDENCY_BATCH_TYPE_V1,
-    TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2,
+    IntegratedRuntimeReceiptV2, IntegratedRuntimeRenderPresentationBindingV1, IntegratedRuntimeV2,
+    PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1, PLAYER_BOOTSTRAP_STATUS_TYPE_V1, PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1,
+    PLAYER_INVENTORY_IMPORT_TYPE_V1, RuntimeCommandCacheLookupV1, SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1,
+    SIMULATION_CAMERA_CONFIG_TYPE_V1, SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3, SIMULATION_PLAYER_BIND_TYPE_V3,
+    TERRAIN_RESIDENCY_BATCH_TYPE_V1, TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2,
     TERRAIN_RESIDENCY_RECONCILE_RECEIPT_TYPE_V2, WorldViewExtractionInputV1, decode_content_install_page_v1,
     decode_entity_authority_export_v1, decode_entity_authority_import_v2, decode_entity_command_batch_v1,
     decode_entity_compatibility_export_v1, decode_entity_compatibility_import_v1, decode_gameplay_actor_grant_v1,
@@ -615,11 +615,12 @@ pub fn blockwild_runtime_extract_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8
                 }
             },
         };
+        let world_view = runtime.world_view_extraction();
         let mut extraction = RuntimeExtractionV1 {
             identity: identity.clone(),
             extraction_revision,
-            render: encode_render_extraction_at(runtime, extraction_revision),
-            hud: encode_hud_extraction_at(runtime, extraction_revision, camera.as_ref()),
+            render: encode_render_extraction_at(runtime, extraction_revision, world_view.as_ref().ok()),
+            hud: encode_hud_extraction_at(runtime, extraction_revision, world_view.as_ref().ok(), camera.as_ref()),
             audio: encode_audio_extraction(runtime),
             platform_requests: encode_platform_extraction(runtime),
             diagnostics: encode_diagnostics(runtime),
@@ -1971,8 +1972,40 @@ struct RenderEntityExtractionSourceV3<'a> {
     components: &'a blockwild_entity::EntityComponents,
 }
 
-fn encode_render_extraction_at(runtime: &IntegratedRuntimeV2, extraction_revision: u64) -> Vec<u8> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DroppedItemRenderBindingV1<'a> {
+    entity_revision: u64,
+    binding: IntegratedRuntimeRenderPresentationBindingV1<'a>,
+}
+
+fn dropped_item_render_bindings_v1<'a>(
+    runtime: &'a IntegratedRuntimeV2,
+    world_view: Option<&'a WorldViewExtractionInputV1>,
+) -> BTreeMap<u64, DroppedItemRenderBindingV1<'a>> {
+    world_view.map_or_else(BTreeMap::new, |world_view| {
+        world_view
+            .dropped_items
+            .iter()
+            .map(|dropped| {
+                (
+                    dropped.spatial.entity_id.packed(),
+                    DroppedItemRenderBindingV1 {
+                        entity_revision: dropped.entity_revision,
+                        binding: runtime.dropped_item_render_presentation_binding_v1(dropped.stack.item_code),
+                    },
+                )
+            })
+            .collect()
+    })
+}
+
+fn encode_render_extraction_at(
+    runtime: &IntegratedRuntimeV2,
+    extraction_revision: u64,
+    world_view: Option<&WorldViewExtractionInputV1>,
+) -> Vec<u8> {
     let entities = runtime.entities();
+    let dropped_item_bindings = dropped_item_render_bindings_v1(runtime, world_view);
     let total = entities.len();
     let mut records = Vec::with_capacity(total.min(MAX_ENTITY_EXTRACTION_RECORDS_V3).saturating_mul(256));
     let mut selected = 0_usize;
@@ -2006,7 +2039,7 @@ fn encode_render_extraction_at(runtime: &IntegratedRuntimeV2, extraction_revisio
         if selected >= MAX_ENTITY_EXTRACTION_RECORDS_V3 {
             break;
         }
-        let encoded = encode_render_entity_record(runtime, &candidate);
+        let encoded = encode_render_entity_record(runtime, &candidate, &dropped_item_bindings);
         if ENTITY_EXTRACTION_HEADER_BYTES_V3
             .saturating_add(records.len())
             .saturating_add(encoded.len())
@@ -2043,17 +2076,39 @@ fn encode_render_extraction_at(runtime: &IntegratedRuntimeV2, extraction_revisio
     output
 }
 
-fn encode_render_entity_record(runtime: &IntegratedRuntimeV2, source: &RenderEntityExtractionSourceV3<'_>) -> Vec<u8> {
+fn encode_render_entity_record(
+    runtime: &IntegratedRuntimeV2,
+    source: &RenderEntityExtractionSourceV3<'_>,
+    dropped_item_bindings: &BTreeMap<u64, DroppedItemRenderBindingV1<'_>>,
+) -> Vec<u8> {
     let record = source.record;
     let components = source.components;
-    let model_key = record
+    let is_dropped_item = record.class == blockwild_entity::EntityClass::Construct && record.kind_key == "dropped-item";
+    let default_model_key = record
         .custom
         .get("modelKey")
         .or_else(|| record.custom.get("model"))
         .map_or(record.kind_key.as_str(), String::as_str);
-    let (model_hash, model_revision) = runtime
-        .entity_model_content_identity(model_key, &record.kind_key)
-        .unwrap_or_default();
+    let (model_key, model_hash, model_revision) = if is_dropped_item {
+        match dropped_item_bindings.get(&source.entity_id) {
+            Some(DroppedItemRenderBindingV1 {
+                entity_revision,
+                binding:
+                    IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                        model_id,
+                        content_hash,
+                        content_version,
+                        ..
+                    },
+            }) if *entity_revision == source.entity_revision => (*model_id, *content_hash, *content_version),
+            _ => ("unresolved:dropped-item", CanonicalHash::default(), 0),
+        }
+    } else {
+        let (model_hash, model_revision) = runtime
+            .entity_model_content_identity(default_model_key, &record.kind_key)
+            .unwrap_or_default();
+        (default_model_key, model_hash, model_revision)
+    };
     let mut output = Vec::with_capacity(256);
     output.extend_from_slice(&source.entity_id.to_le_bytes());
     output.push(source.residency);
@@ -2348,7 +2403,7 @@ macro_rules! printing_view_key {
 }
 
 macro_rules! dropped_item_world_view_row {
-    ($dropped:expr) => {{
+    ($dropped:expr, $presentation:expr) => {{
         let dropped = $dropped;
         let spatial = &dropped.spatial;
         let stack = &dropped.stack;
@@ -2379,6 +2434,30 @@ macro_rules! dropped_item_world_view_row {
         u64_field(&mut row, "stack.count", u64::from(stack.count));
         option_u64_field(&mut row, "stack.durability", stack.durability_millionths.map(u64::from));
         hash_field(&mut row, "stack.metadataHash", stack.metadata_hash);
+        string_field(&mut row, "presentation.role", "dropped-item");
+        string_field(&mut row, "presentation.contentDomain", "item");
+        string_field(&mut row, "presentation.contentId", stack.item_code.to_string());
+        match $presentation {
+            IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                profile_id,
+                model_id,
+                content_hash,
+                content_version,
+            } => {
+                string_field(&mut row, "presentation.status", "exact");
+                string_field(&mut row, "presentation.profileId", profile_id);
+                string_field(&mut row, "presentation.modelId", model_id);
+                hash_field(&mut row, "presentation.contentHash", content_hash);
+                u64_field(&mut row, "presentation.contentVersion", u64::from(content_version));
+            }
+            IntegratedRuntimeRenderPresentationBindingV1::Missing { blocker_id } => {
+                string_field(&mut row, "presentation.status", "missing");
+                string_field(&mut row, "presentation.blockerId", blocker_id);
+            }
+            IntegratedRuntimeRenderPresentationBindingV1::Unmapped => {
+                string_field(&mut row, "presentation.status", "unmapped");
+            }
+        }
         row
     }};
 }
@@ -2776,19 +2855,33 @@ fn inventory_domain_view(
         bool_field(&mut row, "active", furnace.active);
         rows.push(row);
     }
+    let mut presentation_missing = false;
+    let mut presentation_unmapped = false;
     if let Some(world_view) = world_view {
         for dropped in &world_view.dropped_items {
-            rows.push(dropped_item_world_view_row!(dropped));
+            let presentation = runtime.dropped_item_render_presentation_binding_v1(dropped.stack.item_code);
+            presentation_missing |= matches!(
+                presentation,
+                IntegratedRuntimeRenderPresentationBindingV1::Missing { .. }
+            );
+            presentation_unmapped |= matches!(presentation, IntegratedRuntimeRenderPresentationBindingV1::Unmapped);
+            rows.push(dropped_item_world_view_row!(dropped, presentation));
         }
     }
-    let blockers = if world_view.is_some() {
-        Vec::new()
-    } else {
-        vec![
+    let mut blockers = Vec::new();
+    if world_view.is_none() {
+        blockers.extend([
             "dropped-item-spatial-state-not-authoritative".into(),
+            "dropped-item-presentation-unavailable".into(),
             "world-view-extraction-invariant-rejected".into(),
-        ]
-    };
+        ]);
+    }
+    if presentation_missing {
+        blockers.push("dropped-item-presentation-missing".into());
+    }
+    if presentation_unmapped {
+        blockers.push("dropped-item-presentation-unmapped".into());
+    }
     DomainViewV1 {
         domain: 3,
         revision: runtime_extraction_revision(runtime),
@@ -3511,17 +3604,23 @@ fn domain_views_with_context(
 
 #[cfg(test)]
 fn encode_hud_extraction(runtime: &IntegratedRuntimeV2) -> Vec<u8> {
-    encode_hud_extraction_at(runtime, runtime_extraction_revision(runtime), None)
+    let world_view = runtime.world_view_extraction();
+    encode_hud_extraction_at(
+        runtime,
+        runtime_extraction_revision(runtime),
+        world_view.as_ref().ok(),
+        None,
+    )
 }
 
 fn encode_hud_extraction_at(
     runtime: &IntegratedRuntimeV2,
     extraction_revision: u64,
+    world_view: Option<&WorldViewExtractionInputV1>,
     camera: Option<&CameraExtractionV1>,
 ) -> Vec<u8> {
     let identity = runtime.identity();
-    let world_view = runtime.world_view_extraction();
-    let views = domain_views_with_context(runtime, world_view.as_ref().ok(), extraction_revision, camera);
+    let views = domain_views_with_context(runtime, world_view, extraction_revision, camera);
     assert_eq!(views.len(), usize::from(DOMAIN_VIEW_COUNT_V1));
     let mut output = Vec::with_capacity(512);
     output.extend_from_slice(b"BWX0");
@@ -5955,7 +6054,7 @@ mod tests {
         };
 
         let rows = [
-            dropped_item_world_view_row!(&drop),
+            dropped_item_world_view_row!(&drop, IntegratedRuntimeRenderPresentationBindingV1::Unmapped),
             machine_anchor_world_view_row!(&machine),
             celestial_body_world_view_row!(&celestial, 8),
         ];
@@ -5965,9 +6064,138 @@ mod tests {
                 .all(|row| !row.fields.is_empty() && domain_row_revision(row) != 0)
         );
         assert!(rows[0].fields.contains_key("stack.metadataHash"));
+        assert!(matches!(
+            rows[0].fields.get("presentation.status"),
+            Some(DomainViewValueV1::String(value)) if value == "unmapped"
+        ));
+        assert!(matches!(
+            rows[0].fields.get("presentation.contentId"),
+            Some(DomainViewValueV1::String(value)) if value == "42"
+        ));
         assert!(rows[1].fields.contains_key("light.luminousFluxMillilumens"));
         assert!(rows[2].fields.contains_key("angularRadiusMicrodegrees"));
         assert!(rows.iter().all(|row| encode_domain_row(row).is_some()));
+
+        let identity = CanonicalHash([0x55; 16]);
+        let exact = dropped_item_world_view_row!(
+            &drop,
+            IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                profile_id: "drop:test",
+                model_id: "test-drop-model",
+                content_hash: identity,
+                content_version: 7,
+            }
+        );
+        assert!(matches!(
+            exact.fields.get("presentation.profileId"),
+            Some(DomainViewValueV1::String(value)) if value == "drop:test"
+        ));
+        assert!(matches!(
+            exact.fields.get("presentation.modelId"),
+            Some(DomainViewValueV1::String(value)) if value == "test-drop-model"
+        ));
+        assert!(matches!(
+            exact.fields.get("presentation.contentHash"),
+            Some(DomainViewValueV1::Hash(value)) if *value == identity
+        ));
+        let missing = dropped_item_world_view_row!(
+            &drop,
+            IntegratedRuntimeRenderPresentationBindingV1::Missing {
+                blocker_id: "missing:dropped-item:test",
+            }
+        );
+        assert!(matches!(
+            missing.fields.get("presentation.blockerId"),
+            Some(DomainViewValueV1::String(value)) if value == "missing:dropped-item:test"
+        ));
+    }
+
+    #[test]
+    fn dropped_item_bwr6_identity_is_exact_or_zero_without_creature_fallback() {
+        let runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        let mut record = EntityCompatibilityRecord::new("drop:test", "drop:test", "dropped-item");
+        record.class = EntityClass::Construct;
+        record
+            .custom
+            .insert("modelKey".into(), "creature-looking-fallback".into());
+        let components = EntityComponents::from_compatibility(&record, blockwild_entity::ProtectionState::from_bits(0));
+        let source = RenderEntityExtractionSourceV3 {
+            entity_id: 0x1_0000_0001,
+            residency: 0,
+            simulation_tier: 0,
+            protection: 0,
+            entity_revision: 5,
+            record: &record,
+            components: &components,
+        };
+        let identity = CanonicalHash([0x55; 16]);
+        let read_model = |bytes: &[u8]| {
+            let mut reader = ExtractionReader::new(bytes);
+            reader.u64();
+            reader.take(1 + 1 + 2 + 8 + 8);
+            reader.string();
+            reader.string();
+            reader.string();
+            reader.optional_string();
+            reader.optional_string();
+            (
+                reader.string(),
+                reader.u32(),
+                CanonicalHash(reader.take(16).try_into().unwrap()),
+            )
+        };
+        let exact = BTreeMap::from([(
+            source.entity_id,
+            DroppedItemRenderBindingV1 {
+                entity_revision: source.entity_revision,
+                binding: IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                    profile_id: "drop:test",
+                    model_id: "test-drop-model",
+                    content_hash: identity,
+                    content_version: 7,
+                },
+            },
+        )]);
+        assert_eq!(
+            read_model(&encode_render_entity_record(&runtime, &source, &exact)),
+            ("test-drop-model".into(), 7, identity)
+        );
+
+        for binding in [
+            IntegratedRuntimeRenderPresentationBindingV1::Missing {
+                blocker_id: "missing:dropped-item:test",
+            },
+            IntegratedRuntimeRenderPresentationBindingV1::Unmapped,
+        ] {
+            let unresolved = BTreeMap::from([(
+                source.entity_id,
+                DroppedItemRenderBindingV1 {
+                    entity_revision: source.entity_revision,
+                    binding,
+                },
+            )]);
+            assert_eq!(
+                read_model(&encode_render_entity_record(&runtime, &source, &unresolved)),
+                ("unresolved:dropped-item".into(), 0, CanonicalHash::default())
+            );
+        }
+
+        let stale = BTreeMap::from([(
+            source.entity_id,
+            DroppedItemRenderBindingV1 {
+                entity_revision: source.entity_revision + 1,
+                binding: IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                    profile_id: "drop:test",
+                    model_id: "test-drop-model",
+                    content_hash: identity,
+                    content_version: 7,
+                },
+            },
+        )]);
+        assert_eq!(
+            read_model(&encode_render_entity_record(&runtime, &source, &stale)),
+            ("unresolved:dropped-item".into(), 0, CanonicalHash::default())
+        );
     }
 
     #[test]
@@ -6068,7 +6296,11 @@ mod tests {
         assert_eq!(first.extraction_revision, 1);
         assert!(!first.render.is_empty());
         let camera = camera_extraction(&baseline, view).unwrap();
-        assert_eq!(first.hud, encode_hud_extraction_at(&baseline, 1, Some(&camera)));
+        let baseline_world_view = baseline.world_view_extraction().unwrap();
+        assert_eq!(
+            first.hud,
+            encode_hud_extraction_at(&baseline, 1, Some(&baseline_world_view), Some(&camera))
+        );
 
         let retry = extraction_from(extract_response(
             handle,
@@ -6179,7 +6411,10 @@ mod tests {
             },
         ));
         assert_eq!(legacy.extraction_revision, 4);
-        assert_eq!(legacy.hud, encode_hud_extraction_at(&baseline, 4, None));
+        assert_eq!(
+            legacy.hud,
+            encode_hud_extraction_at(&baseline, 4, Some(&baseline_world_view), None)
+        );
         let legacy_player =
             domain_views_with_context(&baseline, baseline.world_view_extraction().as_ref().ok(), 4, None).remove(1);
         assert_eq!(legacy_player.status, DomainViewStatusV1::Partial);
@@ -6307,7 +6542,7 @@ mod tests {
                 .external_entity_id,
             player.binding.external_entity_id
         );
-        let render = encode_render_extraction_at(&runtime, 1);
+        let render = encode_render_extraction_at(&runtime, 1, Some(&world_view));
         let mut render_reader = ExtractionReader::new(&render);
         assert_eq!(render_reader.take(4), b"BWR6");
         assert_eq!(render_reader.u16(), ENTITY_EXTRACTION_SCHEMA_V3);
@@ -6630,7 +6865,8 @@ mod tests {
             },
         )
         .unwrap();
-        encode_hud_extraction_at(&runtime, 1, Some(&camera))
+        let world_view = runtime.world_view_extraction().unwrap();
+        encode_hud_extraction_at(&runtime, 1, Some(&world_view), Some(&camera))
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect()
