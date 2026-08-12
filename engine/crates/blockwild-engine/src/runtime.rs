@@ -12,11 +12,12 @@ use std::sync::Arc;
 
 use blockwild_authority::{
     BlockCatalogV1, CellPositionV1, ChunkAuxiliaryDataV1, LiquidMetadataV1, ReadOriginV1, ReadSizeV1, SectionInstallV1,
-    WORLD_AIR_BLOCK_ID_V1, WORLD_BEDROCK_BLOCK_ID_V1, WORLD_MAX_Y_V1, WORLD_MIN_Y_V1, WORLD_SECTION_CELL_COUNT_V1,
-    WorldAddressV1 as AuthorityWorldAddressV1, WorldAuthorityRevisionV1, WorldAuthorityStoreR4V1, WorldCellReadV1,
-    WorldCellV1, WorldChunkAddressV1 as AuthorityChunkAddressV1, WorldLiquidKindV1, WorldMutationBatchR4V1,
-    WorldMutationCommandR4V1, WorldMutationReceiptR4V1, WorldReadPageV1, WorldSectionAddressV1,
-    decode_compatibility_save_binary_v1, decode_world_authority_snapshot_r4_v1, encode_world_authority_snapshot_r4_v1,
+    WORLD_AIR_BLOCK_ID_V1, WORLD_BEDROCK_BLOCK_ID_V1, WORLD_MAX_Y_V1, WORLD_MIN_Y_V1, WORLD_READ_WINDOW_MAX_CELLS_V1,
+    WORLD_SECTION_CELL_COUNT_V1, WorldAddressV1 as AuthorityWorldAddressV1, WorldAuthorityRevisionV1,
+    WorldAuthorityStoreR4V1, WorldCellReadV1, WorldCellV1, WorldChunkAddressV1 as AuthorityChunkAddressV1,
+    WorldLiquidKindV1, WorldMutationBatchR4V1, WorldMutationCommandR4V1, WorldMutationReceiptR4V1, WorldReadPageV1,
+    WorldSectionAddressV1, decode_compatibility_save_binary_v1, decode_world_authority_snapshot_r4_v1,
+    encode_world_authority_snapshot_r4_v1,
 };
 use blockwild_entity::{
     ActionState, DespawnReason, ENTITY_COMMAND_SCHEMA, EcologyJobQueue, EntityAuthority, EntityClass, EntityCommand,
@@ -27,14 +28,14 @@ use blockwild_entity::{
 };
 use blockwild_gameplay::{
     ActorGrant, ActorRole, ApplyBlockActionV1, CombatCommand, ContainerKey, ContainerKind, ContentActionToolKind,
-    ContentArtifact, ContentDomain, ContentDomainDigest, ContentRuntimeRegistry, CreatePlayerCustodyCommand,
-    DropRemovalReasonV1, DroppedItemSpatialV1, ExpectedStack, FixedVec3, FixedWorldVec3V1, GameplayActor,
-    GameplayAuthority, GameplayBatch, GameplayCommand, GameplayReceipt, GameplayScheduleAdvanceV1, GameplayState,
-    InventoryCommand, ItemDefinition, ItemInstanceMetadataV1, ItemStack, MetadataBlobStore, PlayerDropStageRequestV1,
-    PlayerInventoryBindingV1, RejectionCode, RemoveEmptyDropCustodyCommand, RotationMicroturnsV1, SlotRef,
-    TransferCommand, WorldKey, WorldViewAcceptedReceiptV1, WorldViewAuthorityV1, WorldViewBatchV1, WorldViewCommandV1,
-    WorldViewReceiptV1, compile_content_bundle, decode_gameplay_authority_snapshot, install_content_bundle,
-    materialize_content_runtime, stage_player_drop_v1,
+    ContentArtifact, ContentDomain, ContentDomainDigest, ContentItemUseKind, ContentRuntimeRegistry,
+    CreatePlayerCustodyCommand, DropRemovalReasonV1, DroppedItemSpatialV1, ExpectedStack, FixedVec3, FixedWorldVec3V1,
+    GameplayActor, GameplayAuthority, GameplayBatch, GameplayCommand, GameplayReceipt, GameplayScheduleAdvanceV1,
+    GameplayState, InventoryCommand, ItemDefinition, ItemInstanceMetadataV1, ItemStack, MetadataBlobStore,
+    PlayerDropStageRequestV1, PlayerInventoryBindingV1, RejectionCode, RemoveEmptyDropCustodyCommand,
+    RotationMicroturnsV1, SlotRef, TransferCommand, WorldKey, WorldViewAcceptedReceiptV1, WorldViewAuthorityV1,
+    WorldViewBatchV1, WorldViewCommandV1, WorldViewReceiptV1, compile_content_bundle,
+    decode_gameplay_authority_snapshot, install_content_bundle, materialize_content_runtime, stage_player_drop_v1,
 };
 use blockwild_generation::{
     Block as GeneratedBlock, ChunkPayloadV2, GENERATOR_VERSION, GenerateChunkRequestV2, GenerationDiagnostics,
@@ -58,24 +59,26 @@ use blockwild_persistence::{
     encode_checkpoint,
 };
 use blockwild_runtime_wire::{
-    MAX_INPUT_FRAMES, MAX_WIRE_BYTES, RUNTIME_BULK_MAX_ATTACHMENT_BYTES_V1, RUNTIME_BULK_MAX_SAVE_CHUNKS_V1,
-    RUNTIME_BULK_SAVE_CHUNK_BYTES_V1, RUNTIME_INPUT_BUTTON_ASCEND_V1, RUNTIME_INPUT_BUTTON_CREATIVE_FLIGHT_TOGGLE_V1,
-    RUNTIME_INPUT_BUTTON_CROUCH_V1, RUNTIME_INPUT_BUTTON_DESCEND_V1, RUNTIME_INPUT_BUTTON_DROP_V1,
-    RUNTIME_INPUT_BUTTON_INTERACT_V1, RUNTIME_INPUT_BUTTON_JUMP_V1, RUNTIME_INPUT_BUTTON_MASK_V1,
-    RUNTIME_INPUT_BUTTON_MOUNT_TOGGLE_V1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1,
+    MAX_INPUT_FRAMES, MAX_SAFE_U64, MAX_WIRE_BYTES, RUNTIME_BULK_MAX_ATTACHMENT_BYTES_V1,
+    RUNTIME_BULK_MAX_SAVE_CHUNKS_V1, RUNTIME_BULK_SAVE_CHUNK_BYTES_V1, RUNTIME_INPUT_BUTTON_ASCEND_V1,
+    RUNTIME_INPUT_BUTTON_CREATIVE_FLIGHT_TOGGLE_V1, RUNTIME_INPUT_BUTTON_CROUCH_V1, RUNTIME_INPUT_BUTTON_DESCEND_V1,
+    RUNTIME_INPUT_BUTTON_DROP_V1, RUNTIME_INPUT_BUTTON_INTERACT_V1, RUNTIME_INPUT_BUTTON_JUMP_V1,
+    RUNTIME_INPUT_BUTTON_MASK_V1, RUNTIME_INPUT_BUTTON_MOUNT_TOGGLE_V1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1,
     RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1, RUNTIME_INPUT_BUTTON_SPRINT_V1, RUNTIME_INPUT_FLAG_CREATIVE_V1,
     RUNTIME_INPUT_FLAG_FLYING_V1, RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_INPUT_FLAG_MOUNTED_V1, RuntimeCommandReceiptV1,
     RuntimeInputActionKindV1, RuntimeInputActionOutcomeV1, RuntimeInputActionReceiptV1, RuntimeInputFrameV1, WireHash,
     decode_command_receipt_v1, encode_command_receipt_v1, validate_command_receipt_hash_v1,
 };
 use blockwild_simulation::{
-    AabbV1, ActionRayEntityTargetV1, ActionRayTargetV1, AirZoneTopologyJobV1, AirZoneTopologyResultV1, ContractError,
+    AabbV1, ActionRayEntityTargetV1, ActionRayTargetV1, AirZoneTopologyJobV1, AirZoneTopologyResultV1,
+    CAMERA_MAX_VIEWPORT_V1, CameraModeV1, CameraPoseInputV1, CameraPoseV1, CameraProfileV1, ContractError,
     GravityProfileV1, LiquidFrontierResultV1, LiquidFrontierStepV1, PHYSICS_CONTACT_HEAD_SUBMERGED,
     PHYSICS_CONTACT_IN_LIQUID, PHYSICS_CONTROL_CROUCH, PHYSICS_CONTROL_JUMP, PHYSICS_CONTROL_SPRINT, PathJobResultV1,
     PathJobV1, PhysicsBodyV1, PhysicsControlsV1, PhysicsEventKindV1, PhysicsStepInputV1, PhysicsStepResultV1,
-    PhysicsSwimProfileV1, SimulationJobIdentityV1, Vec3 as SimulationVec3, VoxelRayHitKindV1, VoxelRaycastQueryV1,
-    WorldAddressV1 as SimulationWorldAddressV1, WorldIdentityV1, WorldReadWindowV1, WorldRevisionV1, find_path,
-    raycast_action_target, solve_air_zones, step_liquid_frontier, step_physics,
+    PhysicsSwimProfileV1, RAYCAST_MAX_VISITED_CELLS_V1, SimulationJobIdentityV1, Vec3 as SimulationVec3,
+    VoxelRayHitKindV1, VoxelRaycastQueryV1, WorldAddressV1 as SimulationWorldAddressV1, WorldIdentityV1,
+    WorldReadWindowV1, WorldRevisionV1, derive_camera_pose_v1, find_path, raycast_action_target, solve_air_zones,
+    step_liquid_frontier, step_physics,
 };
 use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, PlayerId, seed_stream};
 
@@ -84,10 +87,11 @@ use crate::{
     EntityAuthorityImportReceiptWireV1, EntityCompatibilityImportWireV1, PlayerBindingStageRequestV1,
     PlayerBootstrapCustodyWireV1, PlayerBootstrapEntityWireV1, PlayerBootstrapRuntimePlayerWireV1,
     PlayerBootstrapStatusQueryWireV1, PlayerBootstrapStatusWireV1, PlayerInventoryImportReceiptWireV1,
-    PlayerInventoryImportWireV1, RuntimePersistenceDispatchReceiptWireV1, RuntimePersistenceDispatchWireV1,
-    RuntimePlayerBindingWireV1, WorldViewExtractionInputV1, collect_world_view_extraction_v1,
-    decode_world_view_native_record_v1, encode_world_view_native_record_v1, initialize_world_view_authority_v1,
-    player_inventory_result_hash_v1, stage_player_binding_v1, stage_world_view_batches_v1,
+    PlayerInventoryImportWireV1, RuntimeCameraConfigReceiptWireV1, RuntimeCameraConfigWireV1,
+    RuntimePersistenceDispatchReceiptWireV1, RuntimePersistenceDispatchWireV1, RuntimePlayerBindingWireV1,
+    WorldViewExtractionInputV1, collect_world_view_extraction_v1, decode_world_view_native_record_v1,
+    encode_world_view_native_record_v1, initialize_world_view_authority_v1, player_inventory_result_hash_v1,
+    runtime_camera_config_state_hash_v1, stage_player_binding_v1, stage_world_view_batches_v1,
     validate_world_view_runtime_links_v1,
 };
 
@@ -140,6 +144,7 @@ const NATIVE_RUNTIME_CORE_SCHEMA_V3: u16 = 3;
 const NATIVE_RUNTIME_CORE_SCHEMA_V4: u16 = 4;
 const NATIVE_RUNTIME_CORE_SCHEMA_V5: u16 = 5;
 const NATIVE_RUNTIME_CORE_SCHEMA_V6: u16 = 6;
+const NATIVE_RUNTIME_CORE_SCHEMA_V7: u16 = 7;
 const DURABLE_SESSION_NEUTRAL_ID_V1: &str = "blockwild-durable-session-neutral-v1";
 const DEFAULT_TERRAIN_CONTENT_HASH_V2: CanonicalHash = CanonicalHash([
     0xcc, 0x59, 0x90, 0x3b, 0xe7, 0x7d, 0xfe, 0x30, 0x10, 0x9d, 0x15, 0xbf, 0xaf, 0x0e, 0x30, 0x22,
@@ -196,6 +201,31 @@ pub struct IntegratedRuntimePlayerStateV2 {
     pub buttons: u32,
     pub flags: u8,
     pub last_input_sequence: u64,
+}
+
+/// Persistent renderer-neutral camera authority. The revision is the
+/// compare-and-set cursor for absolute mode/profile configuration only; look
+/// values are replaced by every applied absolute input frame without making
+/// browser configuration race the fixed-step input cadence.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct IntegratedRuntimeCameraStateV1 {
+    pub revision: u64,
+    pub mode: CameraModeV1,
+    pub profile: CameraProfileV1,
+    pub look_yaw: i16,
+    pub look_pitch: i16,
+}
+
+impl Default for IntegratedRuntimeCameraStateV1 {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            mode: CameraModeV1::FirstPerson,
+            profile: CameraProfileV1::default(),
+            look_yaw: 0,
+            look_pitch: 0,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -767,6 +797,7 @@ struct IntegratedRuntimeCoreSnapshotV1 {
     simulation_revision: u64,
     gameplay_authority_revision: u64,
     entity_command_sequence: u64,
+    camera: IntegratedRuntimeCameraStateV1,
     player: Option<IntegratedRuntimePlayerStateV2>,
     effect_events: VecDeque<IntegratedRuntimeEffectEventV2>,
     next_effect_sequence: u64,
@@ -864,6 +895,7 @@ pub struct IntegratedRuntimeV2 {
     entity_sector_counts: BTreeMap<[i32; 2], u32>,
     entity_path_jobs: PathJobQueue,
     entity_schedule_diagnostics: IntegratedRuntimeEntityScheduleDiagnosticsV1,
+    camera: IntegratedRuntimeCameraStateV1,
     player: Option<IntegratedRuntimePlayerStateV2>,
     effect_events: VecDeque<IntegratedRuntimeEffectEventV2>,
     next_effect_sequence: u64,
@@ -965,6 +997,7 @@ impl IntegratedRuntimeV2 {
             entity_sector_counts: BTreeMap::new(),
             entity_path_jobs: PathJobQueue::default(),
             entity_schedule_diagnostics: IntegratedRuntimeEntityScheduleDiagnosticsV1::default(),
+            camera: IntegratedRuntimeCameraStateV1::default(),
             player: None,
             effect_events: VecDeque::new(),
             next_effect_sequence: 1,
@@ -1664,6 +1697,228 @@ impl IntegratedRuntimeV2 {
     }
 
     #[must_use]
+    pub const fn camera_state(&self) -> &IntegratedRuntimeCameraStateV1 {
+        &self.camera
+    }
+
+    /// Applies one absolute renderer-neutral camera configuration through a
+    /// staged compare-and-set boundary. Input-owned look values are not part
+    /// of this CAS cursor and remain untouched by configuration changes.
+    pub fn apply_camera_config(
+        &mut self,
+        request: RuntimeCameraConfigWireV1,
+        request_payload_hash: CanonicalHash,
+    ) -> Result<RuntimeCameraConfigReceiptWireV1, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        validate_runtime_camera_profile_bounds_v1(request.profile)?;
+        let previous_camera_revision = self.camera.revision;
+        if request.expected_camera_revision != previous_camera_revision {
+            return Err(IntegratedRuntimeError::new(
+                "camera-revision-conflict",
+                "camera configuration expected revision is stale",
+            ));
+        }
+        let unchanged =
+            request.mode == self.camera.mode && camera_profile_bits_equal_v1(request.profile, self.camera.profile);
+        if unchanged {
+            return Ok(RuntimeCameraConfigReceiptWireV1 {
+                request_payload_hash,
+                previous_camera_revision,
+                resulting_camera_revision: previous_camera_revision,
+                mode: self.camera.mode,
+                profile: self.camera.profile,
+                camera_state_hash: runtime_camera_config_state_hash_v1(
+                    self.camera.revision,
+                    self.camera.mode,
+                    self.camera.profile,
+                ),
+            });
+        }
+        let resulting_camera_revision = previous_camera_revision
+            .checked_add(1)
+            .filter(|revision| *revision <= MAX_SAFE_U64)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "camera-revision-exhausted",
+                    "camera configuration revision cannot advance within the browser-safe range",
+                )
+            })?;
+        let mut candidate = self.clone();
+        candidate.camera.revision = resulting_camera_revision;
+        candidate.camera.mode = request.mode;
+        candidate.camera.profile = request.profile;
+        candidate.simulation_revision = candidate.simulation_revision.checked_add(1).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "camera-simulation-revision-exhausted",
+                "simulation revision is exhausted while staging camera configuration",
+            )
+        })?;
+        candidate.invalidate_state_hash();
+        let receipt = RuntimeCameraConfigReceiptWireV1 {
+            request_payload_hash,
+            previous_camera_revision,
+            resulting_camera_revision,
+            mode: candidate.camera.mode,
+            profile: candidate.camera.profile,
+            camera_state_hash: runtime_camera_config_state_hash_v1(
+                candidate.camera.revision,
+                candidate.camera.mode,
+                candidate.camera.profile,
+            ),
+        };
+        *self = candidate;
+        Ok(receipt)
+    }
+
+    /// Derives a deterministic renderer-neutral pose from persistent camera
+    /// configuration, the exact hot player body, absolute look input, and one
+    /// ephemeral browser viewport. Viewport dimensions never mutate authority
+    /// state or checkpoint bytes.
+    pub fn camera_pose(&self, viewport: [u32; 2]) -> Result<CameraPoseV1, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        if viewport
+            .iter()
+            .any(|value| *value == 0 || *value > CAMERA_MAX_VIEWPORT_V1)
+        {
+            return Err(IntegratedRuntimeError::new(
+                "camera-viewport",
+                "camera viewport dimensions are outside the bounded browser contract",
+            ));
+        }
+        let player = self.player.as_ref().ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "camera-player-binding",
+                "camera pose requires a complete authoritative player binding",
+            )
+        })?;
+        self.entities
+            .hot()
+            .get(&player.entity_id)
+            .filter(|entity| {
+                entity.record.class == EntityClass::Player
+                    && entity.record.external_entity_id == player.binding.external_entity_id
+            })
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "camera-player-residency",
+                    "camera pose requires the exact bound player to remain hot and generationally valid",
+                )
+            })?;
+        let body_height_scale = player.body.height / player.binding.standing_height;
+        if !body_height_scale.is_finite() || body_height_scale <= 0.0 {
+            return Err(IntegratedRuntimeError::new(
+                "camera-body-height",
+                "authoritative player body height cannot produce a finite camera scale",
+            ));
+        }
+        let mut profile = self.camera.profile;
+        profile.eye_height *= body_height_scale;
+        profile.third_person_target_height *= body_height_scale;
+        let input = CameraPoseInputV1 {
+            body_position: player.body.position,
+            look_yaw: normalized_i16(self.camera.look_yaw) * std::f64::consts::PI,
+            look_pitch: normalized_i16(self.camera.look_pitch) * std::f64::consts::FRAC_PI_2,
+            mode: self.camera.mode,
+            aiming: self.camera_aiming(),
+            viewport,
+            profile,
+        };
+        let window = if input.mode == CameraModeV1::FirstPerson {
+            None
+        } else {
+            Some(self.capture_camera_collision_window_v1(input)?)
+        };
+        derive_camera_pose_v1(window.as_ref(), input)
+            .map_err(|error| IntegratedRuntimeError::new("camera-pose", error.to_string()))
+    }
+
+    /// Returns the exact native aiming presentation bit. It is true only while
+    /// secondary input is held and the selected installed item has the typed
+    /// ranged-weapon action; callers must not infer it from equal FOV values.
+    #[must_use]
+    pub fn camera_aiming(&self) -> bool {
+        let Some(player) = self.player.as_ref() else {
+            return false;
+        };
+        if player.buttons & RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1 == 0 {
+            return false;
+        }
+        let Some((_, _, Some(held))) = self.held_stack_and_binding() else {
+            return false;
+        };
+        self.gameplay_content_runtime
+            .items
+            .values()
+            .find(|item| item.item_code == held.item_code)
+            .is_some_and(|item| item.action.use_kind == Some(ContentItemUseKind::RangedWeapon))
+    }
+
+    fn capture_camera_collision_window_v1(
+        &self,
+        input: CameraPoseInputV1,
+    ) -> Result<WorldReadWindowV1, IntegratedRuntimeError> {
+        let (origin, end) = camera_collision_segment_v1(input)?;
+        let radius = input.profile.collision_radius;
+        let minimum = SimulationVec3::new(
+            origin.x.min(end.x) - radius,
+            origin.y.min(end.y) - radius,
+            origin.z.min(end.z) - radius,
+        );
+        let maximum = SimulationVec3::new(
+            origin.x.max(end.x) + radius,
+            origin.y.max(end.y) + radius,
+            origin.z.max(end.z) + radius,
+        );
+        let low = [
+            camera_ray_cell_component_v1(minimum.x)?,
+            camera_ray_cell_component_v1(minimum.y)?,
+            camera_ray_cell_component_v1(minimum.z)?,
+        ];
+        let high = [
+            camera_ray_cell_component_v1(maximum.x)?,
+            camera_ray_cell_component_v1(maximum.y)?,
+            camera_ray_cell_component_v1(maximum.z)?,
+        ];
+        let mut dimensions = [0_u16; 3];
+        let mut cell_count = 1_usize;
+        for index in 0..3 {
+            let span = high[index]
+                .checked_sub(low[index])
+                .and_then(|value| value.checked_add(1))
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or_else(|| {
+                    IntegratedRuntimeError::new("camera-capture-overflow", "camera collision capture bounds overflowed")
+                })?;
+            dimensions[index] = span;
+            cell_count = cell_count.checked_mul(usize::from(span)).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "camera-capture-overflow",
+                    "camera collision capture cell count overflowed",
+                )
+            })?;
+        }
+        let maximum_cells = WORLD_READ_WINDOW_MAX_CELLS_V1.min(RAYCAST_MAX_VISITED_CELLS_V1);
+        if cell_count > maximum_cells {
+            return Err(IntegratedRuntimeError::new(
+                "camera-capture-capacity",
+                "camera collision capture exceeds the shared R4/raycast cell budget",
+            ));
+        }
+        self.capture_simulation_window(
+            ReadOriginV1 {
+                x: low[0],
+                y: low[1],
+                z: low[2],
+            },
+            ReadSizeV1 {
+                x: dimensions[0],
+                y: dimensions[1],
+                z: dimensions[2],
+            },
+        )
+    }
+
+    #[must_use]
     pub fn effect_events(&self) -> &VecDeque<IntegratedRuntimeEffectEventV2> {
         &self.effect_events
     }
@@ -1894,6 +2149,7 @@ impl IntegratedRuntimeV2 {
         candidate.simulation_revision = core.simulation_revision;
         candidate.gameplay_authority_revision = core.gameplay_authority_revision;
         candidate.entity_command_sequence = core.entity_command_sequence;
+        candidate.camera = core.camera;
         candidate.player = core.player;
         candidate.effect_events = core.effect_events;
         candidate.next_effect_sequence = core.next_effect_sequence;
@@ -2963,6 +3219,7 @@ impl IntegratedRuntimeV2 {
         hasher.write_bytes(self.world.canonical_state_hash().as_bytes());
         hasher.write_bytes(self.entities.canonical_hash().as_bytes());
         hasher.write_u64(self.entity_command_sequence);
+        write_camera_state_v1(&mut hasher, self.camera);
         if let Some(player) = &self.player {
             hasher.write_u16(1);
             write_player_state(&mut hasher, player);
@@ -3925,7 +4182,7 @@ impl IntegratedRuntimeV2 {
             body,
             contact_flags: existing.map_or(0, |player| player.contact_flags),
             selected_slot: existing.map_or(selected_slot as u8, |player| player.selected_slot),
-            look_pitch: existing.map_or(0, |player| player.look_pitch),
+            look_pitch: existing.map_or(self.camera.look_pitch, |player| player.look_pitch),
             buttons: existing.map_or(0, |player| player.buttons),
             flags,
             last_input_sequence: existing.map_or(0, |player| player.last_input_sequence),
@@ -5201,6 +5458,8 @@ impl IntegratedRuntimeV2 {
             }
             self.push_effect_event(&binding_id, event.kind, event.amount);
         }
+        self.camera.look_yaw = input.look_yaw;
+        self.camera.look_pitch = input.look_pitch;
         self.player = Some(IntegratedRuntimePlayerStateV2 {
             binding: player.binding,
             entity_id: player.entity_id,
@@ -7646,6 +7905,20 @@ fn write_player_state(hasher: &mut CanonicalHasher, player: &IntegratedRuntimePl
     hasher.write_u64(player.last_input_sequence);
 }
 
+fn write_camera_state_v1(hasher: &mut CanonicalHasher, camera: IntegratedRuntimeCameraStateV1) {
+    hasher.write_u64(camera.revision);
+    hasher.write_u16(match camera.mode {
+        CameraModeV1::FirstPerson => 0,
+        CameraModeV1::ThirdRear => 1,
+        CameraModeV1::ThirdFront => 2,
+    });
+    for value in camera_profile_values_v1(camera.profile) {
+        hasher.write_u64(value.to_bits());
+    }
+    hasher.write_i32(i32::from(camera.look_yaw));
+    hasher.write_i32(i32::from(camera.look_pitch));
+}
+
 fn write_effect_event(hasher: &mut CanonicalHasher, event: &IntegratedRuntimeEffectEventV2) {
     hasher.write_u64(event.sequence);
     hasher.write_u64(event.tick);
@@ -7656,6 +7929,129 @@ fn write_effect_event(hasher: &mut CanonicalHasher, event: &IntegratedRuntimeEff
 
 fn normalized_i16(value: i16) -> f64 {
     (f64::from(value) / 32_767.0).clamp(-1.0, 1.0)
+}
+
+fn camera_profile_values_v1(profile: CameraProfileV1) -> [f64; 12] {
+    [
+        profile.eye_height,
+        profile.third_person_target_height,
+        profile.third_person_distance,
+        profile.third_person_pitch_scale,
+        profile.rear_shoulder_offset,
+        profile.collision_radius,
+        profile.collision_padding,
+        profile.minimum_distance,
+        profile.base_vertical_fov_radians,
+        profile.aim_vertical_fov_radians,
+        profile.near,
+        profile.far,
+    ]
+}
+
+fn camera_profile_bits_equal_v1(left: CameraProfileV1, right: CameraProfileV1) -> bool {
+    camera_profile_values_v1(left)
+        .into_iter()
+        .zip(camera_profile_values_v1(right))
+        .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
+fn validate_runtime_camera_profile_bounds_v1(profile: CameraProfileV1) -> Result<(), IntegratedRuntimeError> {
+    derive_camera_pose_v1(
+        None,
+        CameraPoseInputV1 {
+            body_position: SimulationVec3::new(0.0, 0.0, 0.0),
+            look_yaw: 0.0,
+            look_pitch: 0.0,
+            mode: CameraModeV1::FirstPerson,
+            aiming: false,
+            viewport: [1, 1],
+            profile,
+        },
+    )
+    .map_err(|error| IntegratedRuntimeError::new("camera-profile", error.to_string()))?;
+
+    // Prove a conservative upper bound for every legal yaw and clamped
+    // third-person pitch before accepting the profile. Each horizontal axis
+    // is bounded by the complete horizontal offset magnitude; this is more
+    // conservative than any one orientation but cannot under-count cells.
+    let horizontal_displacement = profile.third_person_distance.hypot(profile.rear_shoulder_offset.abs());
+    let vertical_displacement = profile.third_person_distance * 0.78_f64.sin();
+    let span_bound = |displacement: f64| -> Result<usize, IntegratedRuntimeError> {
+        let span = (displacement + profile.collision_radius * 2.0).ceil() + 2.0;
+        if !span.is_finite() || !(1.0..=256.0).contains(&span) {
+            return Err(IntegratedRuntimeError::new(
+                "camera-profile-capacity",
+                "camera profile can exceed one bounded capture dimension",
+            ));
+        }
+        Ok(span as usize)
+    };
+    let horizontal_span = span_bound(horizontal_displacement)?;
+    let vertical_span = span_bound(vertical_displacement)?;
+    let maximum_cells = WORLD_READ_WINDOW_MAX_CELLS_V1.min(RAYCAST_MAX_VISITED_CELLS_V1);
+    let cells = horizontal_span
+        .checked_mul(horizontal_span)
+        .and_then(|value| value.checked_mul(vertical_span))
+        .ok_or_else(|| {
+            IntegratedRuntimeError::new("camera-profile-capacity", "camera profile capture bound overflowed")
+        })?;
+    if cells > maximum_cells {
+        return Err(IntegratedRuntimeError::new(
+            "camera-profile-capacity",
+            "camera profile can exceed the shared R4/raycast capture budget",
+        ));
+    }
+    Ok(())
+}
+
+fn camera_collision_segment_v1(
+    input: CameraPoseInputV1,
+) -> Result<(SimulationVec3, SimulationVec3), IntegratedRuntimeError> {
+    if input.mode == CameraModeV1::FirstPerson {
+        return Err(IntegratedRuntimeError::new(
+            "camera-capture-mode",
+            "first-person camera does not require a collision capture",
+        ));
+    }
+    let target = input.body_position + SimulationVec3::new(0.0, input.profile.third_person_target_height, 0.0);
+    let pitch = (-input.look_pitch * input.profile.third_person_pitch_scale).clamp(-0.78, 0.78);
+    let forward = SimulationVec3::new(-input.look_yaw.sin(), 0.0, -input.look_yaw.cos());
+    let outward = if input.mode == CameraModeV1::ThirdRear {
+        forward * -1.0
+    } else {
+        forward
+    };
+    let shoulder = if input.mode == CameraModeV1::ThirdRear {
+        input.profile.rear_shoulder_offset
+    } else {
+        0.0
+    };
+    let right = SimulationVec3::new(input.look_yaw.cos(), 0.0, -input.look_yaw.sin());
+    let offset = outward * (pitch.cos() * input.profile.third_person_distance)
+        + SimulationVec3::new(0.0, pitch.sin() * input.profile.third_person_distance, 0.0)
+        + right * shoulder;
+    if ![target.x, target.y, target.z, offset.x, offset.y, offset.z]
+        .iter()
+        .all(|value| value.is_finite())
+        || offset.length() == 0.0
+    {
+        return Err(IntegratedRuntimeError::new(
+            "camera-capture-number",
+            "camera collision segment is not finite",
+        ));
+    }
+    Ok((target, target + offset))
+}
+
+fn camera_ray_cell_component_v1(value: f64) -> Result<i32, IntegratedRuntimeError> {
+    let cell = (value + 0.5).floor();
+    if !cell.is_finite() || cell < f64::from(i32::MIN) || cell > f64::from(i32::MAX) {
+        return Err(IntegratedRuntimeError::new(
+            "camera-capture-coordinate",
+            "camera collision capture lies outside the R4 coordinate range",
+        ));
+    }
+    Ok(cell as i32)
 }
 
 fn system_gameplay_actor_v1() -> GameplayActor {
@@ -8625,6 +9021,76 @@ fn read_mining_state_native_v1(
     Ok(state)
 }
 
+fn write_camera_state_native_v1(
+    writer: &mut NativeWriterV1,
+    camera: IntegratedRuntimeCameraStateV1,
+) -> Result<(), IntegratedRuntimeError> {
+    if camera.revision > MAX_SAFE_U64 {
+        return Err(IntegratedRuntimeError::new(
+            "native-camera-revision",
+            "camera configuration revision exceeds the browser-safe range",
+        ));
+    }
+    validate_runtime_camera_profile_bounds_v1(camera.profile)?;
+    writer.u64(camera.revision);
+    writer.u8(match camera.mode {
+        CameraModeV1::FirstPerson => 0,
+        CameraModeV1::ThirdRear => 1,
+        CameraModeV1::ThirdFront => 2,
+    });
+    for value in camera_profile_values_v1(camera.profile) {
+        writer.f64(value);
+    }
+    writer.i16(camera.look_yaw);
+    writer.i16(camera.look_pitch);
+    Ok(())
+}
+
+fn read_camera_state_native_v1(
+    reader: &mut NativeReaderV1<'_>,
+) -> Result<IntegratedRuntimeCameraStateV1, IntegratedRuntimeError> {
+    let revision = reader.u64()?;
+    if revision > MAX_SAFE_U64 {
+        return Err(IntegratedRuntimeError::new(
+            "native-camera-revision",
+            "camera configuration revision exceeds the browser-safe range",
+        ));
+    }
+    let mode = match reader.u8()? {
+        0 => CameraModeV1::FirstPerson,
+        1 => CameraModeV1::ThirdRear,
+        2 => CameraModeV1::ThirdFront,
+        _ => {
+            return Err(IntegratedRuntimeError::new(
+                "native-camera-mode",
+                "runtime core contains an unknown camera mode",
+            ));
+        }
+    };
+    let profile = CameraProfileV1 {
+        eye_height: reader.f64()?,
+        third_person_target_height: reader.f64()?,
+        third_person_distance: reader.f64()?,
+        third_person_pitch_scale: reader.f64()?,
+        rear_shoulder_offset: reader.f64()?,
+        collision_radius: reader.f64()?,
+        collision_padding: reader.f64()?,
+        minimum_distance: reader.f64()?,
+        base_vertical_fov_radians: reader.f64()?,
+        aim_vertical_fov_radians: reader.f64()?,
+        near: reader.f64()?,
+        far: reader.f64()?,
+    };
+    validate_runtime_camera_profile_bounds_v1(profile)?;
+    Ok(IntegratedRuntimeCameraStateV1 {
+        revision,
+        mode,
+        profile,
+        look_yaw: reader.i16()?,
+        look_pitch: reader.i16()?,
+    })
+}
+
 fn write_runtime_player_v1(
     writer: &mut NativeWriterV1,
     player: &IntegratedRuntimePlayerStateV2,
@@ -8850,7 +9316,7 @@ fn read_compatibility_journal_v1(
 
 fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> IntegratedRuntimeCoreSnapshotV1 {
     IntegratedRuntimeCoreSnapshotV1 {
-        schema: NATIVE_RUNTIME_CORE_SCHEMA_V6,
+        schema: NATIVE_RUNTIME_CORE_SCHEMA_V7,
         config: runtime.config.clone(),
         expected_revision: runtime.revision(),
         tick: runtime.tick,
@@ -8861,6 +9327,7 @@ fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> Integ
         simulation_revision: runtime.simulation_revision,
         gameplay_authority_revision: runtime.gameplay_authority_revision,
         entity_command_sequence: runtime.entity_command_sequence,
+        camera: runtime.camera,
         player: runtime.player.clone(),
         effect_events: runtime.effect_events.clone(),
         next_effect_sequence: runtime.next_effect_sequence,
@@ -8893,6 +9360,17 @@ fn encode_runtime_core_snapshot_body_v1(
         return Err(IntegratedRuntimeError::new(
             "native-runtime-capacity",
             "runtime core state exceeds its checkpoint bounds",
+        ));
+    }
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V7
+        && core
+            .player
+            .as_ref()
+            .is_some_and(|player| player.look_pitch != core.camera.look_pitch)
+    {
+        return Err(IntegratedRuntimeError::new(
+            "native-camera-look-projection",
+            "legacy player pitch projection contradicts authoritative camera look state",
         ));
     }
     validate_runtime_command_receipt_cache_v1(
@@ -8981,6 +9459,9 @@ fn encode_runtime_core_snapshot_body_v1(
             write_mining_state_native_v1(&mut writer, state);
         }
     }
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V7 {
+        write_camera_state_native_v1(&mut writer, core.camera)?;
+    }
     writer.bytes(&core.unknown_extension_bytes)?;
     Ok(writer.finish())
 }
@@ -8995,7 +9476,12 @@ fn durable_runtime_core_state_proof_v1(
     let mut normalized = core.clone();
     normalized.config.session_id = DURABLE_SESSION_NEUTRAL_ID_V1.into();
     normalized.durable_network_drained_proof = None;
-    let proof_schema = if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V6 {
+    let proof_schema = if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V7 {
+        normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V7;
+        normalized.durable_state_proof = Some(CanonicalHash::default());
+        normalized.durable_replay_proof = Some(CanonicalHash::default());
+        NATIVE_RUNTIME_CORE_SCHEMA_V7
+    } else if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V6 {
         normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V6;
         normalized.durable_state_proof = Some(CanonicalHash::default());
         normalized.durable_replay_proof = Some(CanonicalHash::default());
@@ -9028,7 +9514,7 @@ fn encode_runtime_core_snapshot_v1(runtime: &IntegratedRuntimeV2) -> Result<Vec<
     core.durable_network_drained_proof = runtime.durable_network_save_boundary_proof().ok();
     core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&core)?);
     core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&core));
-    encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V6)
+    encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V7)
 }
 
 fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCoreSnapshotV1, IntegratedRuntimeError> {
@@ -9041,6 +9527,7 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V4
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V5
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V6
+        && schema != NATIVE_RUNTIME_CORE_SCHEMA_V7
     {
         return Err(IntegratedRuntimeError::new(
             "native-runtime-schema",
@@ -9243,6 +9730,21 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
     } else {
         None
     };
+    let camera = if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V7 {
+        read_camera_state_native_v1(&mut reader)?
+    } else {
+        IntegratedRuntimeCameraStateV1::default()
+    };
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V7
+        && player
+            .as_ref()
+            .is_some_and(|player| player.look_pitch != camera.look_pitch)
+    {
+        return Err(IntegratedRuntimeError::new(
+            "native-camera-look-projection",
+            "legacy player pitch projection contradicts authoritative camera look state",
+        ));
+    }
     let unknown_extension_bytes = reader.bytes(NATIVE_EXTENSION_MAX_BYTES_V1)?;
     reader.finish()?;
     let core = IntegratedRuntimeCoreSnapshotV1 {
@@ -9257,6 +9759,7 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         simulation_revision,
         gameplay_authority_revision,
         entity_command_sequence,
+        camera,
         player,
         effect_events,
         next_effect_sequence,
@@ -9812,6 +10315,222 @@ mod tests {
     }
 
     #[test]
+    fn camera_config_cas_is_stale_first_idempotent_and_capacity_bounded() {
+        let mut runtime = runtime_with_bound_player();
+        let initial_identity = runtime.identity();
+        let initial_simulation_revision = runtime.simulation_revision;
+        let initial_profile = CameraProfileV1::default();
+
+        let unchanged = runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 0,
+                    mode: CameraModeV1::FirstPerson,
+                    profile: initial_profile,
+                },
+                CanonicalHash([0x11; 16]),
+            )
+            .unwrap();
+        assert_eq!(unchanged.previous_camera_revision, 0);
+        assert_eq!(unchanged.resulting_camera_revision, 0);
+        assert_eq!(runtime.identity(), initial_identity);
+        assert_eq!(runtime.simulation_revision, initial_simulation_revision);
+
+        let changed = runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 0,
+                    mode: CameraModeV1::ThirdRear,
+                    profile: initial_profile,
+                },
+                CanonicalHash([0x12; 16]),
+            )
+            .unwrap();
+        assert_eq!(changed.previous_camera_revision, 0);
+        assert_eq!(changed.resulting_camera_revision, 1);
+        assert_eq!(runtime.camera.revision, 1);
+        assert_eq!(runtime.simulation_revision, initial_simulation_revision + 1);
+        assert_ne!(runtime.state_hash(), initial_identity.state_hash);
+
+        let changed_identity = runtime.identity();
+        let stale = runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 0,
+                    mode: CameraModeV1::ThirdRear,
+                    profile: initial_profile,
+                },
+                CanonicalHash([0x13; 16]),
+            )
+            .unwrap_err();
+        assert_eq!(stale.code, "camera-revision-conflict");
+        assert_eq!(runtime.identity(), changed_identity);
+
+        let idempotent = runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 1,
+                    mode: CameraModeV1::ThirdRear,
+                    profile: initial_profile,
+                },
+                CanonicalHash([0x14; 16]),
+            )
+            .unwrap();
+        assert_eq!(idempotent.previous_camera_revision, 1);
+        assert_eq!(idempotent.resulting_camera_revision, 1);
+        assert_eq!(runtime.identity(), changed_identity);
+
+        let mut near_capacity = initial_profile;
+        near_capacity.third_person_distance = 32.0;
+        near_capacity.rear_shoulder_offset = 4.0;
+        near_capacity.collision_radius = 4.0;
+        validate_runtime_camera_profile_bounds_v1(near_capacity).unwrap();
+        let accepted = runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 1,
+                    mode: CameraModeV1::ThirdRear,
+                    profile: near_capacity,
+                },
+                CanonicalHash([0x15; 16]),
+            )
+            .unwrap();
+        assert_eq!(accepted.resulting_camera_revision, 2);
+        let profile_identity = runtime.identity();
+
+        let mut over_capacity = near_capacity;
+        over_capacity.third_person_distance = 33.0;
+        let rejected = runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 2,
+                    mode: CameraModeV1::ThirdRear,
+                    profile: over_capacity,
+                },
+                CanonicalHash([0x16; 16]),
+            )
+            .unwrap_err();
+        assert_eq!(rejected.code, "camera-profile-capacity");
+        assert_eq!(runtime.identity(), profile_identity);
+    }
+
+    #[test]
+    fn camera_pose_covers_modes_look_crouch_collision_unloaded_and_negative_states() {
+        let mut runtime = runtime_with_bound_player();
+        runtime.camera.look_yaw = i16::MAX;
+        runtime.camera.look_pitch = i16::MIN;
+        runtime.player.as_mut().unwrap().body.crouching = true;
+        runtime.player.as_mut().unwrap().body.height = runtime.player.as_ref().unwrap().binding.crouching_height;
+        runtime.player.as_mut().unwrap().look_pitch = i16::MIN;
+        runtime.invalidate_state_hash();
+        let body = runtime.player.as_ref().unwrap().body.clone();
+        let first = runtime.camera_pose([1_280, 720]).unwrap();
+        let crouch_scale = body.height / runtime.player.as_ref().unwrap().binding.standing_height;
+        assert_eq!(first.position.x, body.position.x);
+        assert_eq!(
+            first.position.y,
+            body.position.y + CameraProfileV1::default().eye_height * crouch_scale
+        );
+        assert_eq!(first.position.z, body.position.z);
+        assert!(!first.collided);
+        assert_eq!(first.resolved_distance, 0.0);
+
+        runtime.player.as_mut().unwrap().body.crouching = false;
+        runtime.player.as_mut().unwrap().body.height = runtime.player.as_ref().unwrap().binding.standing_height;
+        runtime.camera.look_yaw = 0;
+        runtime.camera.look_pitch = 0;
+        runtime.player.as_mut().unwrap().look_pitch = 0;
+        runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 0,
+                    mode: CameraModeV1::ThirdRear,
+                    profile: CameraProfileV1::default(),
+                },
+                CanonicalHash([0x21; 16]),
+            )
+            .unwrap();
+        set_loaded_block(
+            &mut runtime,
+            "camera-rear-obstruction",
+            CellPositionV1 { x: 8, y: 65, z: 10 },
+            1,
+        );
+        let rear = runtime.camera_pose([800, 600]).unwrap();
+        assert!(rear.collided);
+        assert!(rear.resolved_distance < CameraProfileV1::default().third_person_distance);
+
+        runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 1,
+                    mode: CameraModeV1::ThirdFront,
+                    profile: CameraProfileV1::default(),
+                },
+                CanonicalHash([0x22; 16]),
+            )
+            .unwrap();
+        let front = runtime.camera_pose([800, 600]).unwrap();
+        assert!(!front.collided);
+        assert!(front.position.z < runtime.player.as_ref().unwrap().body.position.z);
+
+        runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 2,
+                    mode: CameraModeV1::ThirdRear,
+                    profile: CameraProfileV1::default(),
+                },
+                CanonicalHash([0x23; 16]),
+            )
+            .unwrap();
+        runtime.camera.look_yaw = i16::MAX / 2;
+        runtime.player.as_mut().unwrap().look_pitch = runtime.camera.look_pitch;
+        runtime.player.as_mut().unwrap().body.position.x = 15.0;
+        let unloaded = runtime.camera_pose([800, 600]).unwrap();
+        assert!(
+            unloaded.collided,
+            "unknown residency must shorten the camera fail closed"
+        );
+
+        for look_yaw in [i16::MIN + 1, -16_384, 0, 16_384, i16::MAX] {
+            for look_pitch in [i16::MIN, -16_384, 0, 16_384, i16::MAX] {
+                runtime.camera.look_yaw = look_yaw;
+                runtime.camera.look_pitch = look_pitch;
+                runtime.player.as_mut().unwrap().look_pitch = look_pitch;
+                assert!(runtime.camera_pose([16_384, 16_384]).is_ok());
+            }
+        }
+        assert_eq!(runtime.camera_pose([0, 600]).unwrap_err().code, "camera-viewport");
+        assert_eq!(runtime.camera_pose([16_385, 600]).unwrap_err().code, "camera-viewport");
+
+        let mut cold = runtime.clone();
+        cold.entities
+            .apply_batch(&EntityCommandBatch {
+                schema: ENTITY_COMMAND_SCHEMA,
+                sequence: cold.entity_command_sequence.saturating_add(1),
+                expected_revision: cold.entities.revision(),
+                tick: cold.tick,
+                commands: vec![EntityCommand::Hibernate {
+                    id: cold.player.as_ref().unwrap().entity_id,
+                }],
+            })
+            .unwrap();
+        assert_eq!(
+            cold.camera_pose([800, 600]).unwrap_err().code,
+            "camera-player-residency"
+        );
+
+        let mut unbound = runtime_with_section();
+        assert_eq!(
+            unbound.camera_pose([800, 600]).unwrap_err().code,
+            "camera-player-binding"
+        );
+        unbound.stopped = true;
+        assert_eq!(unbound.camera_pose([800, 600]).unwrap_err().code, "engine-stopped");
+    }
+
+    #[test]
     fn dedicated_player_inventory_import_is_atomic_and_attests_selected_slot() {
         let mut runtime = runtime_with_bound_player();
         let inventory = ContainerKey::player("player:one");
@@ -10085,6 +10804,16 @@ mod tests {
             },
             ContentArtifact {
                 domain: ContentDomain::Item,
+                id: "40".into(),
+                schema_id: "item-definition".into(),
+                schema_version: 1,
+                content_version: 1,
+                aliases: vec!["item:40".into()],
+                canonical_bytes: br#"{"ammoItem":30,"damage":7,"id":40,"magazineSize":1,"maxDurability":50,"maxStack":1,"name":"Test Bow","toolKind":"bow","useKind":"ranged-weapon"}"#.to_vec(),
+                unknown_extension_bytes: Vec::new(),
+            },
+            ContentArtifact {
+                domain: ContentDomain::Item,
                 id: blockwild_gameplay::BLOCK_ACTION_CATALOG_ID.into(),
                 schema_id: "block-action-catalog".into(),
                 schema_version: 1,
@@ -10180,6 +10909,147 @@ mod tests {
             durability_millionths: Some(tier_durability_millionths),
             metadata_hash: CanonicalHash::default(),
         }
+    }
+
+    #[test]
+    fn camera_aiming_requires_exact_selected_ranged_action_and_held_secondary_input() {
+        let ranged = ItemStack {
+            item_code: 40,
+            count: 1,
+            durability_millionths: Some(1_000_000),
+            metadata_hash: CanonicalHash::default(),
+        };
+        let mut runtime = runtime_with_action_content(false, Some(ranged));
+        let profile = runtime.camera.profile;
+        let base = runtime.camera_pose([1_920, 1_080]).unwrap();
+        assert_eq!(base.vertical_fov_radians, profile.base_vertical_fov_radians);
+
+        runtime.player.as_mut().unwrap().buttons = RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1;
+        let aimed = runtime.camera_pose([1_920, 1_080]).unwrap();
+        assert_eq!(aimed.vertical_fov_radians, profile.aim_vertical_fov_radians);
+        assert_ne!(aimed.pose_hash, base.pose_hash);
+
+        let mut ordinary = runtime_with_action_content(false, Some(ItemStack::simple(30, 1)));
+        ordinary.player.as_mut().unwrap().buttons = RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1;
+        let ordinary_pose = ordinary.camera_pose([1_920, 1_080]).unwrap();
+        assert_eq!(ordinary_pose.vertical_fov_radians, profile.base_vertical_fov_radians);
+    }
+
+    #[test]
+    fn camera_profile_sweep_stays_inside_shared_capture_and_raycast_caps() {
+        let mut runtime = runtime_with_bound_player();
+        let profile = CameraProfileV1 {
+            third_person_distance: 32.0,
+            rear_shoulder_offset: 4.0,
+            collision_radius: 4.0,
+            ..CameraProfileV1::default()
+        };
+        runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 0,
+                    mode: CameraModeV1::ThirdRear,
+                    profile,
+                },
+                CanonicalHash([0x31; 16]),
+            )
+            .unwrap();
+        let maximum_cells = WORLD_READ_WINDOW_MAX_CELLS_V1.min(RAYCAST_MAX_VISITED_CELLS_V1);
+        for mode in [CameraModeV1::ThirdRear, CameraModeV1::ThirdFront] {
+            for look_yaw in [
+                -std::f64::consts::PI,
+                -std::f64::consts::FRAC_PI_2,
+                0.0,
+                std::f64::consts::FRAC_PI_2,
+                std::f64::consts::PI,
+            ] {
+                for look_pitch in [
+                    -std::f64::consts::FRAC_PI_2,
+                    -std::f64::consts::FRAC_PI_4,
+                    0.0,
+                    std::f64::consts::FRAC_PI_4,
+                    std::f64::consts::FRAC_PI_2,
+                ] {
+                    let input = CameraPoseInputV1 {
+                        body_position: runtime.player.as_ref().unwrap().body.position,
+                        look_yaw,
+                        look_pitch,
+                        mode,
+                        aiming: false,
+                        viewport: [800, 600],
+                        profile,
+                    };
+                    let window = runtime.capture_camera_collision_window_v1(input).unwrap();
+                    assert!(window.blocks.len() <= maximum_cells);
+                    assert!(derive_camera_pose_v1(Some(&window), input).is_ok());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn camera_v7_checkpoint_round_trip_is_exact_and_viewport_is_ephemeral() {
+        let mut runtime = runtime_with_bound_player();
+        runtime
+            .apply_camera_config(
+                RuntimeCameraConfigWireV1 {
+                    expected_camera_revision: 0,
+                    mode: CameraModeV1::ThirdRear,
+                    profile: CameraProfileV1::default(),
+                },
+                CanonicalHash([0x41; 16]),
+            )
+            .unwrap();
+        runtime
+            .accept_inputs(&[RuntimeInputFrameV1 {
+                sequence: 1,
+                target_tick: 1,
+                look_yaw: 12_345,
+                look_pitch: -6_789,
+                ..RuntimeInputFrameV1::default()
+            }])
+            .unwrap();
+        runtime.step(1_000_000, 8_000).unwrap();
+        runtime.step(1_050_000, 8_000).unwrap();
+        assert_eq!(
+            runtime.camera.revision, 1,
+            "fixed-step look must not advance config CAS"
+        );
+        assert_eq!(runtime.camera.look_yaw, 12_345);
+        assert_eq!(runtime.camera.look_pitch, -6_789);
+        assert_eq!(runtime.player.as_ref().unwrap().look_pitch, -6_789);
+
+        accept_all_authority_commits(&mut runtime);
+        let authority_hash = runtime.state_hash();
+        let checkpoint_before = runtime.export_runtime_checkpoint().unwrap();
+        let pose_wide = runtime.camera_pose([1_920, 1_080]).unwrap();
+        let pose_tall = runtime.camera_pose([800, 1_200]).unwrap();
+        assert_ne!(pose_wide.pose_hash, pose_tall.pose_hash);
+        assert_eq!(runtime.state_hash(), authority_hash);
+        assert_eq!(runtime.export_runtime_checkpoint().unwrap(), checkpoint_before);
+
+        let core_bytes = encode_runtime_core_snapshot_v1(&runtime).unwrap();
+        let decoded_core = decode_runtime_core_snapshot_v1(&core_bytes).unwrap();
+        assert_eq!(decoded_core.schema, NATIVE_RUNTIME_CORE_SCHEMA_V7);
+        assert_eq!(decoded_core.camera, runtime.camera);
+        let mut contradictory = runtime_core_snapshot_from_runtime_v1(&runtime);
+        contradictory.camera.look_pitch = contradictory.camera.look_pitch.saturating_add(1);
+        assert_eq!(
+            encode_runtime_core_snapshot_body_v1(&contradictory, NATIVE_RUNTIME_CORE_SCHEMA_V7)
+                .unwrap_err()
+                .code,
+            "native-camera-look-projection"
+        );
+
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint_before,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint_before),
+        )
+        .unwrap();
+        assert_eq!(restored.camera, runtime.camera);
+        assert_eq!(restored.state_hash(), authority_hash);
+        assert_eq!(restored.camera_pose([1_920, 1_080]).unwrap(), pose_wide);
+        assert_eq!(restored.export_runtime_checkpoint().unwrap(), checkpoint_before);
     }
 
     #[test]
@@ -10475,7 +11345,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_core_v1_through_v5_decode_without_mining_state() {
+    fn runtime_core_v1_through_v6_decode_with_canonical_camera_and_mining_defaults() {
         let runtime = runtime_with_bound_player();
         for schema in [
             NATIVE_RECORD_SCHEMA_V1,
@@ -10483,6 +11353,7 @@ mod tests {
             NATIVE_RUNTIME_CORE_SCHEMA_V3,
             NATIVE_RUNTIME_CORE_SCHEMA_V4,
             NATIVE_RUNTIME_CORE_SCHEMA_V5,
+            NATIVE_RUNTIME_CORE_SCHEMA_V6,
         ] {
             let mut core = runtime_core_snapshot_from_runtime_v1(&runtime);
             core.schema = schema;
@@ -10501,6 +11372,11 @@ mod tests {
             let decoded = decode_runtime_core_snapshot_v1(&bytes).unwrap();
             assert_eq!(decoded.schema, schema);
             assert!(decoded.mining_state.is_none(), "schema {schema} must default mining");
+            assert_eq!(
+                decoded.camera,
+                IntegratedRuntimeCameraStateV1::default(),
+                "schema {schema} must default camera authority"
+            );
         }
     }
 
