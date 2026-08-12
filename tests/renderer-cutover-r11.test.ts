@@ -67,6 +67,60 @@ test("compatibility selection performs no artifact or backend work", async () =>
   assert.equal(runtime.diagnostics().state, "compatibility");
 });
 
+test("wgpu primary remains selected but inactive until ready and after backend failure", async () => {
+  let backendState: "starting" | "ready" | "failed" = "starting";
+  let resolveReady!: () => void;
+  let signalCreated!: () => void;
+  const created = new Promise<void>((resolve) => { signalCreated = resolve; });
+  const ready = new Promise<void>((resolve) => { resolveReady = resolve; });
+  const backend: RendererBackendR11 = {
+    kind: "rust-webgpu",
+    ready: () => ready,
+    resources: () => undefined,
+    frame: () => true,
+    resize: () => undefined,
+    requestRecovery: () => undefined,
+    switchEpoch: () => undefined,
+    dispose: () => undefined,
+    diagnostics: () => ({ state: backendState, replacementSurfaceRequired: false }) as never,
+  };
+  const runtime = new RendererCutoverRuntimeR11({
+    request: "wgpu", canvas: {} as HTMLCanvasElement, canvasRole: "primary", epoch: BigInt(3), width: 640, height: 360,
+    capability: CAPABLE, allowWgpuPrimary: true, promotionGates: ALL_GATES,
+    loadArtifact: async () => ({ hash: "a".repeat(64) }) as never,
+    createBackend: () => { signalCreated(); return backend; },
+  });
+
+  const starting = runtime.start();
+  await created;
+  assert.deepEqual({ state: runtime.diagnostics().state, selected: runtime.diagnostics().selectedPrimary, active: runtime.diagnostics().activePrimary }, {
+    state: "starting", selected: "wgpu", active: null,
+  });
+  backendState = "ready";
+  resolveReady();
+  await starting;
+  assert.deepEqual({ state: runtime.diagnostics().state, active: runtime.diagnostics().activePrimary }, { state: "ready", active: "wgpu" });
+  backendState = "failed";
+  assert.deepEqual({ state: runtime.diagnostics().state, active: runtime.diagnostics().activePrimary }, { state: "failed", active: null });
+});
+
+test("wgpu startup transfer failure never claims an automatic Three fallback", async () => {
+  const runtime = new RendererCutoverRuntimeR11({
+    request: "wgpu", canvas: {} as HTMLCanvasElement, canvasRole: "primary", epoch: BigInt(4), width: 640, height: 360,
+    capability: CAPABLE, allowWgpuPrimary: true, promotionGates: ALL_GATES,
+    loadArtifact: async () => ({ hash: "b".repeat(64) }) as never,
+    createBackend: () => { throw new DOMException("OffscreenCanvas transfer failed", "DataCloneError"); },
+  });
+  await runtime.start();
+  assert.deepEqual({
+    state: runtime.diagnostics().state,
+    selected: runtime.diagnostics().selectedPrimary,
+    active: runtime.diagnostics().activePrimary,
+    replacement: runtime.diagnostics().replacementSurfaceRequired,
+    automatic: runtime.diagnostics().automaticSurfaceReplacement,
+  }, { state: "failed", selected: "wgpu", active: null, replacement: true, automatic: false });
+});
+
 test("shadow runtime queues immutable extraction until its distinct backend is ready", async () => {
   const commands: string[] = [];
   let resolveArtifact!: (value: { hash: string }) => void;

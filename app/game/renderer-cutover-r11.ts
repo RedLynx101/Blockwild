@@ -101,7 +101,7 @@ export interface RendererWorldExtractionSinkR11 extends RendererExtractionSinkR1
   switchEpoch(epoch: bigint): boolean;
 }
 
-type RendererRuntimeStateR11 = "compatibility" | "starting" | "ready" | "failed" | "stopped";
+type RendererRuntimeStateR11 = "compatibility" | "starting" | "ready" | "recovering" | "failed" | "stopped";
 
 export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11 {
   readonly decision: RendererCutoverDecisionR11;
@@ -115,6 +115,9 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
   private artifactHash: string | null = null;
   private epoch: bigint;
   private readonly canvasRole: "primary" | "shadow";
+  private startPromise: Promise<void> | null = null;
+  private lifecycleGeneration = 0;
+  private replacementSurfaceRequired = false;
 
   constructor(private readonly options: Readonly<{
     request: RendererRequestR11;
@@ -147,32 +150,59 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
 
   get needsExtraction() { return this.decision.shadow === "wgpu" || this.decision.primary === "wgpu"; }
 
-  async start() {
-    if (!this.needsExtraction || this.state === "ready" || this.state === "starting") return;
+  start(): Promise<void> {
+    if (!this.needsExtraction || this.state === "ready") return Promise.resolve();
+    if (this.state === "starting" && this.startPromise) return this.startPromise;
     if (this.state === "stopped") throw new Error("renderer cutover runtime is stopped");
     this.state = "starting";
+    this.startError = null;
+    this.replacementSurfaceRequired = false;
+    const generation = ++this.lifecycleGeneration;
+    const starting = this.startInternal(generation);
+    this.startPromise = starting;
+    void starting.finally(() => { if (this.startPromise === starting) this.startPromise = null; });
+    return starting;
+  }
+
+  private async startInternal(generation: number) {
+    let surfaceCreationAttempted = false;
     try {
       const artifact = await (this.options.loadArtifact ?? (() => loadRustRendererArtifactR11()))();
-      if (this.isStopped()) return;
+      if (!this.isCurrentLifecycle(generation)) return;
+      this.artifactHash = artifact.hash;
+      surfaceCreationAttempted = true;
       const backend = (this.options.createBackend ?? createRustRendererBackendR11)({
         canvas: this.options.canvas, artifact, epoch: this.epoch, width: this.width, height: this.height,
       });
       if (!backend) throw new Error("Rust WebGPU backend rejected the selected canvas capability");
-      if (this.isStopped()) { backend.dispose(); return; }
-      this.backend = backend; this.artifactHash = artifact.hash; this.state = "ready";
+      if (!this.isCurrentLifecycle(generation)) { backend.dispose(); return; }
+      this.backend = backend;
       for (const bytes of this.pendingResources) backend.resources(bytes);
       this.pendingResources.length = 0;
       if (this.pendingFrame) { backend.frame(this.pendingFrame); this.pendingFrame = null; }
       backend.resize(this.width, this.height);
+      if (backend.ready) await backend.ready();
+      else if (backend.diagnostics().state !== "ready") throw new Error("Rust WebGPU backend did not expose a ready lifecycle");
+      if (!this.isCurrentLifecycle(generation)) return;
+      const diagnostics = backend.diagnostics();
+      if (diagnostics.state !== "ready") {
+        throw new Error(typeof diagnostics.lastError === "string" ? diagnostics.lastError : `Rust WebGPU backend entered ${String(diagnostics.state)}`);
+      }
+      this.state = "ready";
     } catch (error) {
-      if (this.isStopped()) return;
+      if (!this.isCurrentLifecycle(generation)) return;
       this.startError = error instanceof Error ? error.message : String(error);
-      this.state = "failed"; this.pendingResources.length = 0; this.pendingFrame = null;
+      this.state = "failed";
+      const backendDiagnostics = this.backend?.diagnostics();
+      this.replacementSurfaceRequired = backendDiagnostics?.replacementSurfaceRequired === true
+        || (surfaceCreationAttempted && /canvas|dataclone|offscreen|surface|transfer/iu.test(this.startError));
+      this.pendingResources.length = 0; this.pendingFrame = null;
     }
   }
 
   resources(batch: RenderResourceBatchV2) {
-    if (!this.needsExtraction || this.state === "failed" || this.state === "stopped") return false;
+    const effectiveState = this.effectiveState();
+    if (!this.needsExtraction || effectiveState === "failed" || effectiveState === "stopped") return false;
     if (batch.epoch !== this.epoch) throw new Error("renderer extraction resource epoch does not match the active world");
     const bytes = encodeRenderResourceBatchV2(batch);
     if (this.backend) this.backend.resources(bytes);
@@ -184,7 +214,8 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
   }
 
   frame(frame: RenderFrameV2) {
-    if (!this.needsExtraction || this.state === "failed" || this.state === "stopped") return false;
+    const effectiveState = this.effectiveState();
+    if (!this.needsExtraction || effectiveState === "failed" || effectiveState === "stopped") return false;
     if (frame.epoch !== this.epoch) return false;
     const bytes = encodeRenderFrameV2(frame);
     if (this.backend) return this.backend.frame(bytes);
@@ -198,13 +229,14 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
   }
 
   requestRecovery(reason = "normal-path renderer recovery request") {
-    if (!this.backend || this.state !== "ready") return false;
+    if (!this.backend || this.effectiveState() !== "ready") return false;
     this.backend.requestRecovery(reason); return true;
   }
 
   switchEpoch(epoch: bigint) {
     const next = checkedRendererEpoch(epoch);
-    if (!this.needsExtraction || this.state === "failed" || this.state === "stopped") return false;
+    const effectiveState = this.effectiveState();
+    if (!this.needsExtraction || effectiveState === "failed" || effectiveState === "stopped") return false;
     this.backend?.switchEpoch(next);
     this.epoch = next;
     this.pendingResources.length = 0;
@@ -214,20 +246,29 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
 
   diagnostics() {
     const backend = this.backend?.diagnostics() ?? null;
+    const state = this.effectiveState(backend);
+    const activePrimary = this.decision.primary === "wgpu"
+      ? state === "ready" ? "wgpu" : null
+      : "three";
+    const replacementSurfaceRequired = this.replacementSurfaceRequired || backend?.replacementSurfaceRequired === true;
     return Object.freeze({
       schema: 1,
       requested: this.decision.requested,
       selectedPrimary: this.decision.primary,
-      activePrimary: this.state === "failed" ? "three" : this.decision.primary,
+      activePrimary,
       shadow: this.decision.shadow,
+      activeShadow: this.decision.shadow === "wgpu" && state === "ready" ? "wgpu" : null,
       compatibilityRole: this.decision.compatibilityRole,
       fallback: this.decision.fallback,
       openPromotionGates: this.decision.openPromotionGates,
-      state: this.state,
+      state,
       epoch: this.epoch,
       artifactHash: this.artifactHash,
       startError: this.startError,
       canvasRole: this.canvasRole,
+      replacementSurfaceRequired,
+      replacementSurfaceApi: this.backend?.restartSurface ? "explicit-offscreen-canvas" : null,
+      automaticSurfaceReplacement: false,
       extractionCoverage: "terrain-camera-environment",
       fullGameParity: false,
       backend,
@@ -236,10 +277,21 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
 
   stop() {
     if (this.state === "stopped") return;
+    this.lifecycleGeneration += 1;
     this.backend?.dispose(); this.backend = null; this.pendingResources.length = 0; this.pendingFrame = null; this.state = "stopped";
+    this.startPromise = null;
   }
 
-  private isStopped() { return this.state === "stopped"; }
+  private effectiveState(backend = this.backend?.diagnostics() ?? null): RendererRuntimeStateR11 {
+    if (this.state === "stopped" || this.state === "compatibility" || this.state === "starting" || this.state === "failed") return this.state;
+    if (backend?.state === "failed") return "failed";
+    if (backend?.state === "recovering" || backend?.state === "starting") return "recovering";
+    return this.state;
+  }
+
+  private isCurrentLifecycle(generation: number) {
+    return this.state !== "stopped" && generation === this.lifecycleGeneration;
+  }
 }
 
 export type RendererShellSnapshotR11 = Readonly<{

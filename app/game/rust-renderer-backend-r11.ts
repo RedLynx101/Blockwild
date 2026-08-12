@@ -8,6 +8,8 @@ import { RustRendererServiceR11, supportsRustRendererWorkerR11, type RustRendere
 
 export type RendererBackendR11 = Readonly<{
   kind: "rust-webgpu";
+  /** Resolves only after the dedicated worker reports a live WebGPU surface. */
+  ready?: () => Promise<void>;
   resources(batch: RenderResourceBatchV2 | Uint8Array): void;
   frame(frame: RenderFrameV2 | Uint8Array): boolean;
   resize(width: number, height: number): void;
@@ -47,6 +49,7 @@ export function createRustRendererBackendR11(options: Readonly<{
   service.start(options.canvas.transferControlToOffscreen(), options.artifact, options.epoch, options.width, options.height);
   return Object.freeze({
     kind: "rust-webgpu" as const,
+    ready: () => service.ready(),
     resources: (batch: RenderResourceBatchV2 | Uint8Array) => service.applyResources(batch),
     frame: (frame: RenderFrameV2 | Uint8Array) => service.present(frame),
     resize: (width: number, height: number) => service.resize(width, height),
