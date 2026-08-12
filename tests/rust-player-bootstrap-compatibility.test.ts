@@ -155,8 +155,8 @@ test("new-world player compatibility produces one canonical hot player and revis
   assert.equal(plan.intent.entity.legacyNumericId, null);
   assert.equal(plan.intent.entity.variantKey, null);
   assert.deepEqual(plan.intent.entity.velocity, RUST_NEW_WORLD_PLAYER_ENTITY_DEFAULTS_V1.velocity);
-  assert.equal(plan.intent.entity.health, 20);
-  assert.equal(plan.intent.entity.maximumHealth, 20);
+  assert.equal(plan.intent.entity.health, 10);
+  assert.equal(plan.intent.entity.maximumHealth, 10);
   assert.equal(plan.intent.entity.ageTicks, BigInt(0));
   assert.equal(plan.intent.entity.position.y, Math.fround(source.position.y), "new authority starts at its canonical R6 f32 position");
   assert.deepEqual(plan.intent.entity.custom, [

@@ -61,7 +61,11 @@ const textEncoder = new TextEncoder();
  * saves whose health, velocity, or age units were never persisted.
  */
 export const RUST_NEW_WORLD_PLAYER_ENTITY_DEFAULTS_V1 = Object.freeze({
-  health: Object.freeze({ current: 20, maximum: 20 }),
+  // Player health is already a shared heart-unit contract: the legacy and
+  // Rust fall/drowning kernels emit the same damage amounts, and the browser
+  // player/HUD maximum is ten. Keep new native players on that exact scale so
+  // presentation never needs an invented conversion.
+  health: Object.freeze({ current: 10, maximum: 10 }),
   ageTicks: BigInt(0),
   velocity: Object.freeze({ x: 0, y: 0, z: 0 }),
   grounded: false,
