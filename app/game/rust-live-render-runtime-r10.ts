@@ -429,9 +429,12 @@ export class RustLiveRenderRuntimeR10 {
         maxInstances: this.options.maxInstances,
         maxResourceOperations: this.options.maxResourceOperations,
       });
-      const extractor = new RustPresentationEntityExtractionR10(entityExtractor, presentations.registry, {
+      const extractor = new RustPresentationEntityExtractionR10(entityExtractor, presentations, {
         contentVersion: presentationArtifact.contentVersion,
         contentHash: hex16(presentationArtifact.blobHash, "production render presentation content hash"),
+      }, {
+        maxInstances: this.options.maxInstances,
+        maxResourceOperations: this.options.maxResourceOperations,
       });
       const composer = new RustRenderSceneComposerR10({
         sink: this.sink,

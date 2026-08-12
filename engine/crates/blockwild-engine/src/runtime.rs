@@ -1249,11 +1249,55 @@ impl IntegratedRuntimeV2 {
         item_code: u32,
     ) -> IntegratedRuntimeRenderPresentationBindingV1<'_> {
         let item_id = item_code.to_string();
-        match self.gameplay_content_runtime.render_presentation_binding(
+        self.render_presentation_binding_v1(
             ContentRenderPresentationRole::DroppedItem,
             ContentDomain::Item,
             &item_id,
-        ) {
+        )
+    }
+
+    /// Resolves one role/content-reference binding from the installed immutable
+    /// presentation catalog. Callers must still choose the authoritative role;
+    /// this method never crosses roles or falls back through creature content.
+    #[must_use]
+    pub fn render_presentation_binding_v1(
+        &self,
+        role: ContentRenderPresentationRole,
+        domain: ContentDomain,
+        id: &str,
+    ) -> IntegratedRuntimeRenderPresentationBindingV1<'_> {
+        Self::integrated_render_presentation_binding_v1(
+            self.gameplay_content_runtime
+                .render_presentation_binding(role, domain, id),
+        )
+    }
+
+    /// Resolves a persisted presentation profile id for an authoritative role.
+    /// The id is deliberately not reinterpreted as a content-ref or BWM2 model.
+    #[must_use]
+    pub fn render_presentation_profile_binding_v1(
+        &self,
+        role: ContentRenderPresentationRole,
+        presentation_id: &str,
+    ) -> IntegratedRuntimeRenderPresentationBindingV1<'_> {
+        Self::integrated_render_presentation_binding_v1(
+            self.gameplay_content_runtime
+                .render_presentation_profile_binding(role, presentation_id),
+        )
+    }
+
+    #[must_use]
+    pub fn machine_anchor_render_presentation_binding_v1(
+        &self,
+        presentation_id: &str,
+    ) -> IntegratedRuntimeRenderPresentationBindingV1<'_> {
+        self.render_presentation_profile_binding_v1(ContentRenderPresentationRole::Machine, presentation_id)
+    }
+
+    fn integrated_render_presentation_binding_v1<'a>(
+        binding: ContentRenderPresentationBinding<'a>,
+    ) -> IntegratedRuntimeRenderPresentationBindingV1<'a> {
+        match binding {
             ContentRenderPresentationBinding::Exact { catalog, profile } => {
                 IntegratedRuntimeRenderPresentationBindingV1::Exact {
                     profile_id: &profile.id,
@@ -10654,6 +10698,16 @@ mod tests {
             canonical_bytes: br#"{"id":44,"maxStack":64,"name":"Unmapped Test Drop"}"#.to_vec(),
             unknown_extension_bytes: Vec::new(),
         };
+        let machine_profile = ContentArtifact {
+            domain: ContentDomain::MachineProfile,
+            id: "machine-test".into(),
+            schema_id: "machine-profile".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["machine-profile:machine-test".into()],
+            canonical_bytes: br#"{"inputItemIds":[42]}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
         let presentation = ContentArtifact {
             domain: ContentDomain::MachineProfile,
             id: blockwild_gameplay::RENDER_PRESENTATION_CATALOG_ID.into(),
@@ -10661,10 +10715,10 @@ mod tests {
             schema_version: 1,
             content_version: 7,
             aliases: vec!["machine-profile:render-presentations".into()],
-            canonical_bytes: br#"{"catalog":{"byteLength":785824,"canonicalHash":"52fd4aebb0c457f3c83af79af6b83c93","format":"blockwild-compiled-model-catalog-v2","modelCount":252,"nodeCount":13121,"revision":1,"schema":2,"sha256":"12c522f880e94c1ae527de701ae3e710fee13701d66fbb0a4ad24895557011b4","source":"renderer-neutral test catalog"},"integrationBlockers":["dropped-item-r6-model-binding-runtime"],"missingProfiles":[{"contentRefs":[{"domain":"item","id":"43"}],"id":"missing:dropped-item:test-missing","reason":"Fixture intentionally has no exact BWM2 identity.","role":"dropped-item","sourcePresentationIds":["fixture:test-missing"]}],"profiles":[{"contentRefs":[{"domain":"item","id":"42"}],"id":"drop:test","model":{"category":4,"groundYBits":null,"id":"test-drop-model","label":"Test Drop Model","nodeCount":3},"role":"dropped-item"}],"schema":1}"#.to_vec(),
+            canonical_bytes: br#"{"catalog":{"byteLength":785824,"canonicalHash":"52fd4aebb0c457f3c83af79af6b83c93","format":"blockwild-compiled-model-catalog-v2","modelCount":252,"nodeCount":13121,"revision":1,"schema":2,"sha256":"12c522f880e94c1ae527de701ae3e710fee13701d66fbb0a4ad24895557011b4","source":"renderer-neutral test catalog"},"integrationBlockers":["dropped-item-r6-model-binding-runtime","machine-world-view-presentation-binding-runtime"],"missingProfiles":[{"contentRefs":[{"domain":"item","id":"43"}],"id":"missing:dropped-item:test-missing","reason":"Fixture intentionally has no exact BWM2 identity.","role":"dropped-item","sourcePresentationIds":["fixture:test-missing"]},{"contentRefs":[],"id":"missing:machine:test-missing","reason":"Fixture intentionally has no exact machine BWM2 identity.","role":"machine","sourcePresentationIds":["machine.test-missing.v1"]}],"profiles":[{"contentRefs":[{"domain":"item","id":"42"}],"id":"drop:test","model":{"category":4,"groundYBits":null,"id":"test-drop-model","label":"Test Drop Model","nodeCount":3},"role":"dropped-item"},{"contentRefs":[{"domain":"machine-profile","id":"machine-test"}],"id":"machine:test","model":{"category":4,"groundYBits":null,"id":"test-machine-model","label":"Test Machine Model","nodeCount":4},"role":"machine"}],"schema":1}"#.to_vec(),
             unknown_extension_bytes: vec![0, 0x80, 0xff, 17],
         };
-        let artifacts = vec![item, missing_item, unmapped_item, presentation];
+        let artifacts = vec![item, missing_item, unmapped_item, machine_profile, presentation];
         let bundle = compile_content_bundle("test-drop-content-v1", artifacts.clone()).unwrap();
         let mut runtime = runtime_with_bound_player_config(IntegratedRuntimeConfigV2 {
             content_hash: bundle.manifest.manifest_hash,
@@ -12115,6 +12169,31 @@ mod tests {
             None,
             "dropped presentation identity must not leak through creature-profile lookup"
         );
+        assert_eq!(
+            runtime.machine_anchor_render_presentation_binding_v1("machine:test"),
+            IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                profile_id: "machine:test",
+                model_id: "test-machine-model",
+                content_hash: expected_hash,
+                content_version: 7,
+            }
+        );
+        assert_eq!(
+            runtime.machine_anchor_render_presentation_binding_v1("missing:machine:test-missing"),
+            IntegratedRuntimeRenderPresentationBindingV1::Missing {
+                blocker_id: "missing:machine:test-missing",
+            }
+        );
+        assert_eq!(
+            runtime.machine_anchor_render_presentation_binding_v1("test-machine-model"),
+            IntegratedRuntimeRenderPresentationBindingV1::Unmapped,
+            "machine model ids are never reinterpreted as presentation ids"
+        );
+        assert_eq!(
+            runtime.render_presentation_profile_binding_v1(ContentRenderPresentationRole::WorldProp, "machine:test",),
+            IntegratedRuntimeRenderPresentationBindingV1::Unmapped,
+            "profile ids cannot cross presentation roles"
+        );
 
         let checkpoint = runtime.export_runtime_checkpoint().unwrap();
         let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
@@ -12125,6 +12204,10 @@ mod tests {
         assert_eq!(
             restored.dropped_item_render_presentation_binding_v1(42),
             runtime.dropped_item_render_presentation_binding_v1(42)
+        );
+        assert_eq!(
+            restored.machine_anchor_render_presentation_binding_v1("machine:test"),
+            runtime.machine_anchor_render_presentation_binding_v1("machine:test")
         );
         assert_eq!(
             restored

@@ -112,6 +112,25 @@ export type RenderPresentationBindingV1 =
     reference: RenderPresentationContentRefV1;
   }>;
 
+export type RenderPresentationProfileIdBindingV1 =
+  | Readonly<{
+    status: "exact";
+    role: RenderPresentationRoleV1;
+    presentationId: string;
+    profile: RenderPresentationProfileV1;
+  }>
+  | Readonly<{
+    status: "missing";
+    role: RenderPresentationRoleV1;
+    presentationId: string;
+    blocker: MissingRenderPresentationProfileV1;
+  }>
+  | Readonly<{
+    status: "unmapped";
+    role: RenderPresentationRoleV1;
+    presentationId: string;
+  }>;
+
 const itemRef = (item: ItemCode): RenderPresentationContentRefV1 => Object.freeze({ domain: "item", id: String(item) });
 const machineRef = (id: string): RenderPresentationContentRefV1 => Object.freeze({ domain: "machine-profile", id });
 const creatureRef = (id: string): RenderPresentationContentRefV1 => Object.freeze({ domain: "creature-profile", id });
@@ -385,10 +404,12 @@ function frozenReference(reference: RenderPresentationContentRefV1): RenderPrese
 /** Immutable role-and-content lookup that never substitutes one presentation role for another. */
 export class RenderPresentationRegistryV1 {
   private readonly bindings: ReadonlyMap<string, RenderPresentationBindingV1>;
+  private readonly profileBindings: ReadonlyMap<string, RenderPresentationProfileIdBindingV1>;
 
   constructor(readonly catalog: RenderPresentationCatalogV1) {
     validateProfileShape(catalog);
     const bindings = new Map<string, RenderPresentationBindingV1>();
+    const profileBindings = new Map<string, RenderPresentationProfileIdBindingV1>();
     for (const profile of catalog.profiles) for (const reference of profile.contentRefs) {
       const canonicalReference = frozenReference(reference);
       const key = presentationBindingKey(profile.role, canonicalReference);
@@ -397,6 +418,16 @@ export class RenderPresentationRegistryV1 {
         status: "exact",
         role: profile.role,
         reference: canonicalReference,
+        profile,
+      }));
+    }
+    for (const profile of catalog.profiles) {
+      const key = presentationBindingKey(profile.role, { domain: "machine-profile", id: profile.id });
+      invariant(!profileBindings.has(key), `ambiguous ${profile.role} presentation profile id`);
+      profileBindings.set(key, Object.freeze({
+        status: "exact",
+        role: profile.role,
+        presentationId: profile.id,
         profile,
       }));
     }
@@ -411,7 +442,18 @@ export class RenderPresentationRegistryV1 {
         blocker,
       }));
     }
+    for (const blocker of catalog.missingProfiles) {
+      const key = presentationBindingKey(blocker.role, { domain: "machine-profile", id: blocker.id });
+      invariant(!profileBindings.has(key), `ambiguous ${blocker.role} missing presentation profile id`);
+      profileBindings.set(key, Object.freeze({
+        status: "missing",
+        role: blocker.role,
+        presentationId: blocker.id,
+        blocker,
+      }));
+    }
     this.bindings = bindings;
+    this.profileBindings = profileBindings;
     Object.freeze(this);
   }
 
@@ -425,6 +467,15 @@ export class RenderPresentationRegistryV1 {
       role,
       reference: canonicalReference,
     });
+  }
+
+  /** Resolves a persisted role-specific profile id, never a ref or model id. */
+  resolveProfileId(
+    role: RenderPresentationRoleV1,
+    presentationId: string,
+  ): RenderPresentationProfileIdBindingV1 {
+    const key = presentationBindingKey(role, { domain: "machine-profile", id: presentationId });
+    return this.profileBindings.get(key) ?? Object.freeze({ status: "unmapped", role, presentationId });
   }
 }
 

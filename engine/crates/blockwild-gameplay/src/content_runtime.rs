@@ -932,6 +932,39 @@ impl ContentRuntimeRegistry {
         }
         ContentRenderPresentationBinding::Unmapped
     }
+
+    /// Resolves an authored presentation identifier without treating it as a
+    /// content reference or model identifier.
+    ///
+    /// World-view anchors persist the role-specific presentation profile id.
+    /// Keeping this lookup separate from [`Self::render_presentation_binding`]
+    /// prevents legacy descriptive ids from accidentally matching a model or
+    /// a source/content reference after a catalog update.
+    #[must_use]
+    pub fn render_presentation_profile_binding(
+        &self,
+        role: ContentRenderPresentationRole,
+        presentation_id: &str,
+    ) -> ContentRenderPresentationBinding<'_> {
+        let Some(catalog) = self.render_presentation_catalogs.get(RENDER_PRESENTATION_CATALOG_ID) else {
+            return ContentRenderPresentationBinding::Unmapped;
+        };
+        if let Some(profile) = catalog.profiles.get(presentation_id) {
+            return if profile.role == role {
+                ContentRenderPresentationBinding::Exact { catalog, profile }
+            } else {
+                ContentRenderPresentationBinding::Unmapped
+            };
+        }
+        if let Some(blocker) = catalog.missing_profiles.get(presentation_id) {
+            return if blocker.role == role {
+                ContentRenderPresentationBinding::Missing { catalog, blocker }
+            } else {
+                ContentRenderPresentationBinding::Unmapped
+            };
+        }
+        ContentRenderPresentationBinding::Unmapped
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -6478,7 +6511,7 @@ mod tests {
             RENDER_PRESENTATION_CATALOG_ID,
             "render-presentation-catalog",
             1,
-            r#"{"catalog":{"byteLength":785824,"canonicalHash":"52fd4aebb0c457f3c83af79af6b83c93","format":"blockwild-compiled-model-catalog-v2","modelCount":252,"nodeCount":13121,"revision":1,"schema":2,"sha256":"12c522f880e94c1ae527de701ae3e710fee13701d66fbb0a4ad24895557011b4","source":"renderer-neutral model specs and offline production captures"},"integrationBlockers":["dropped-item-r6-model-binding-runtime","machine-world-view-presentation-binding-runtime"],"missingProfiles":[{"contentRefs":[{"domain":"item","id":"2"}],"id":"missing:world-prop:board","reason":"No exact BWM2 identity is authored for this fixture item.","role":"world-prop","sourcePresentationIds":["fixture:board"]}],"profiles":[{"contentRefs":[{"domain":"item","id":"1"}],"id":"held:survey-pick","model":{"category":0,"groundYBits":null,"id":"held-pickaxe","label":"Stone Pickaxe","nodeCount":5},"role":"held-item"},{"contentRefs":[{"domain":"machine-profile","id":"furnace"}],"id":"machine:furnace","model":{"category":3,"groundYBits":null,"id":"stone-block","label":"Stone Block","nodeCount":1},"role":"machine"},{"contentRefs":[{"domain":"ability-spell","id":"move:gust"},{"domain":"creature-profile","id":"fox"}],"id":"summon:fox","model":{"category":1,"groundYBits":0,"id":"fox","label":"Fox","nodeCount":16},"role":"summon"}],"schema":1}"#,
+            r#"{"catalog":{"byteLength":785824,"canonicalHash":"52fd4aebb0c457f3c83af79af6b83c93","format":"blockwild-compiled-model-catalog-v2","modelCount":252,"nodeCount":13121,"revision":1,"schema":2,"sha256":"12c522f880e94c1ae527de701ae3e710fee13701d66fbb0a4ad24895557011b4","source":"renderer-neutral model specs and offline production captures"},"integrationBlockers":["dropped-item-r6-model-binding-runtime","machine-world-view-presentation-binding-runtime"],"missingProfiles":[{"contentRefs":[],"id":"missing:machine:legacy","reason":"Legacy fixture machine has no exact BWM2 identity.","role":"machine","sourcePresentationIds":["machine.legacy.v1"]},{"contentRefs":[{"domain":"item","id":"2"}],"id":"missing:world-prop:board","reason":"No exact BWM2 identity is authored for this fixture item.","role":"world-prop","sourcePresentationIds":["fixture:board"]}],"profiles":[{"contentRefs":[{"domain":"item","id":"1"}],"id":"held:survey-pick","model":{"category":0,"groundYBits":null,"id":"held-pickaxe","label":"Stone Pickaxe","nodeCount":5},"role":"held-item"},{"contentRefs":[{"domain":"machine-profile","id":"furnace"}],"id":"machine:furnace","model":{"category":3,"groundYBits":null,"id":"stone-block","label":"Stone Block","nodeCount":1},"role":"machine"},{"contentRefs":[{"domain":"ability-spell","id":"move:gust"},{"domain":"creature-profile","id":"fox"}],"id":"summon:fox","model":{"category":1,"groundYBits":0,"id":"fox","label":"Fox","nodeCount":16},"role":"summon"}],"schema":1}"#,
         );
         catalog.unknown_extension_bytes = vec![0, 0x80, 0xff, 13];
         artifacts.push(catalog);
@@ -6929,7 +6962,7 @@ mod tests {
         assert_eq!(catalog.catalog_model_count, 252);
         assert_eq!(catalog.catalog_node_count, 13_121);
         assert_eq!(catalog.profiles.len(), 3);
-        assert_eq!(catalog.missing_profiles.len(), 1);
+        assert_eq!(catalog.missing_profiles.len(), 2);
         assert_eq!(catalog.integration_blockers.len(), 2);
         let held = &catalog.profiles["held:survey-pick"];
         assert_eq!(held.role, ContentRenderPresentationRole::HeldItem);
@@ -6986,6 +7019,29 @@ mod tests {
         assert_eq!(
             registry.render_presentation_binding(ContentRenderPresentationRole::HeldItem, ContentDomain::Item, "999",),
             ContentRenderPresentationBinding::Unmapped
+        );
+
+        let ContentRenderPresentationBinding::Exact { profile, .. } =
+            registry.render_presentation_profile_binding(ContentRenderPresentationRole::Machine, "machine:furnace")
+        else {
+            panic!("machine:furnace should resolve only as an exact machine profile id");
+        };
+        assert_eq!(profile.model.model_id, "stone-block");
+        let ContentRenderPresentationBinding::Missing { blocker, .. } = registry
+            .render_presentation_profile_binding(ContentRenderPresentationRole::Machine, "missing:machine:legacy")
+        else {
+            panic!("explicit missing machine profile should retain its blocker");
+        };
+        assert_eq!(blocker.id, "missing:machine:legacy");
+        assert_eq!(
+            registry.render_presentation_profile_binding(ContentRenderPresentationRole::Machine, "stone-block"),
+            ContentRenderPresentationBinding::Unmapped,
+            "model ids are not presentation ids"
+        );
+        assert_eq!(
+            registry.render_presentation_profile_binding(ContentRenderPresentationRole::WorldProp, "machine:furnace"),
+            ContentRenderPresentationBinding::Unmapped,
+            "presentation ids remain role-specific"
         );
     }
 

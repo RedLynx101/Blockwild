@@ -18,19 +18,39 @@ import type {
   RustEntityExtractionR6V3,
 } from "./rust-entity-authority-contract-r6.ts";
 import {
+  compileRenderEntityModelResourcesR10,
+  renderEntityPaletteKeyR10,
+  type RenderEntityCompiledModelR10,
+  type RenderEntityModelResourcesR10,
+} from "./rust-render-entity-catalog-r10.ts";
+import {
   RustEntityRenderExtractionR10,
   type RenderEntityEquipmentModelR10,
+  type RenderEntityExtractionResultR10,
   type RenderEntityFrameContextR10,
 } from "./rust-render-entity-extraction-r10.ts";
+import {
+  createRenderFrameV2,
+  createRenderResourceBatchV2,
+  RENDER_MAX_INSTANCES_V2,
+  RENDER_MAX_RESOURCE_OPERATIONS_V2,
+  type RenderInstanceV2,
+  type RenderResourceOperationV2,
+  type RenderTransformV2,
+} from "./rust-render-extraction-v2.ts";
 import type {
   AttestedRenderPresentationCatalogV1,
   RenderPresentationProfileV1,
-  RenderPresentationRegistryV1,
 } from "./rust-render-presentation-profile.ts";
+import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow.ts";
 
 export const RUST_HELD_PRESENTATION_SLOT_R10 = "world-view-held-right-hand" as const;
 
 const U32_MAX = BigInt(0xffff_ffff);
+const U64_MAX = BigInt("0xffffffffffffffff");
+const MICROTURN_SCALE = 1_000_000;
+const WORLD_VIEW_COORDINATE_LIMIT_MILLI = BigInt(33_554_432_000);
+const WHITE = Object.freeze([255, 255, 255, 255] as const);
 
 export type RustHeldPresentationBlockerR10 = Readonly<{
   id: string;
@@ -47,6 +67,9 @@ export type RustPresentationExtractionDiagnosticsR10 = Readonly<{
   heldBlockers: readonly RustHeldPresentationBlockerR10[];
   droppedBindings: number;
   droppedBlockers: readonly RustDroppedPresentationBlockerR10[];
+  machineBindings: number;
+  machineBlockers: readonly RustMachinePresentationBlockerR10[];
+  machines: readonly RustMachinePresentationR10[];
 }>;
 
 export type RustDroppedPresentationBlockerR10 = Readonly<{
@@ -63,6 +86,46 @@ export type RustPresentationContentIdentityR10 = Readonly<{
   contentHash: Uint8Array;
 }>;
 
+export type RustMachineLightPresentationR10 = Readonly<{
+  kind: number;
+  colorMillionths: readonly [number, number, number];
+  luminousFluxMillilumens: bigint;
+  rangeMilli: number;
+  innerConeMicroturns: number;
+  outerConeMicroturns: number;
+  castsShadows: boolean;
+  enabled: boolean;
+}>;
+
+export type RustMachinePresentationR10 = Readonly<{
+  machineId: string;
+  anchorRevision: bigint;
+  presentationId: string;
+  profileId: string;
+  modelId: string;
+  contentVersion: number;
+  contentHash: Uint8Array;
+  positionMilli: readonly [bigint, bigint, bigint];
+  rotationMicroturns: readonly [number, number, number];
+  halfExtentsMilli: readonly [number, number, number];
+  gameplayRevision: bigint;
+  gameplayActive: boolean;
+  light: RustMachineLightPresentationR10 | null;
+  instanceIds: readonly bigint[];
+}>;
+
+export type RustMachinePresentationBlockerR10 = Readonly<{
+  id: string;
+  status: "missing" | "unmapped" | "unavailable";
+  machineId: string | null;
+  presentationId: string | null;
+  blockerId: string | null;
+}>;
+
+export type RustPresentationEntityExtractionResultR10 = RenderEntityExtractionResultR10 & Readonly<{
+  machinePresentations: readonly RustMachinePresentationR10[];
+}>;
+
 type PreparedPresentationExtractionR10 = Readonly<{
   token: symbol;
   renderBytes: Uint8Array;
@@ -72,6 +135,13 @@ type PreparedPresentationExtractionR10 = Readonly<{
   heldBlockers: readonly RustHeldPresentationBlockerR10[];
   droppedBindings: number;
   droppedBlockers: readonly RustDroppedPresentationBlockerR10[];
+  machines: readonly PreparedMachinePresentationR10[];
+  machineBindings: number;
+  machineBlockers: readonly RustMachinePresentationBlockerR10[];
+}>;
+
+type PreparedMachinePresentationR10 = Omit<RustMachinePresentationR10, "instanceIds"> & Readonly<{
+  model: RenderEntityCompiledModelR10;
 }>;
 
 type HeldStackR10 = Readonly<{
@@ -133,6 +203,460 @@ function exactU32(row: RustDomainRowR10, name: string, allowZero = true) {
   invariant(value >= BigInt(allowZero ? 0 : 1) && value <= U32_MAX,
     `R10 player binding '${row.key}' ${name} is not u32`);
   return Number(value);
+}
+
+function exactTypedField(row: RustDomainRowR10, name: string, type: NonNullable<RustDomainRowR10["fieldTypes"]>[number]) {
+  const index = row.fields.findIndex(([field]) => field === name);
+  invariant(index >= 0, `R10 domain row '${row.key}' has no ${name} field`);
+  invariant(row.fieldTypes?.[index] === type, `R10 domain row '${row.key}' ${name} has the wrong wire type`);
+  return row.fields[index][1];
+}
+
+function exactMachineString(row: RustDomainRowR10, name: string) {
+  const value = exactTypedField(row, name, "string");
+  invariant(typeof value === "string" && value.length > 0, `R10 machine anchor '${row.key}' ${name} is invalid`);
+  return value;
+}
+
+function exactMachineU64(row: RustDomainRowR10, name: string) {
+  const value = exactTypedField(row, name, "u64");
+  invariant(typeof value === "bigint" && value >= BigInt(0) && value <= U64_MAX,
+    `R10 machine anchor '${row.key}' ${name} is not u64`);
+  return value;
+}
+
+function exactMachineU32(row: RustDomainRowR10, name: string, allowZero = true) {
+  const value = exactMachineU64(row, name);
+  invariant(value >= BigInt(allowZero ? 0 : 1) && value <= U32_MAX,
+    `R10 machine anchor '${row.key}' ${name} is not u32`);
+  return Number(value);
+}
+
+function exactMachineI64(row: RustDomainRowR10, name: string) {
+  const value = exactTypedField(row, name, "i64");
+  invariant(typeof value === "bigint", `R10 machine anchor '${row.key}' ${name} is not i64`);
+  return value;
+}
+
+function exactMachineBool(row: RustDomainRowR10, name: string) {
+  const value = exactTypedField(row, name, "bool");
+  invariant(typeof value === "boolean", `R10 machine anchor '${row.key}' ${name} is not bool`);
+  return value;
+}
+
+function exactMachineHash(row: RustDomainRowR10, name: string) {
+  const value = exactTypedField(row, name, "hash");
+  invariant(value instanceof Uint8Array && value.byteLength === 16,
+    `R10 machine anchor '${row.key}' ${name} is not a canonical hash`);
+  return Uint8Array.from(value);
+}
+
+function machineBlocker(
+  status: "missing" | "unmapped",
+  machineId: string,
+  presentationId: string,
+  blockerId: string,
+): RustMachinePresentationBlockerR10 {
+  return Object.freeze({
+    id: `machine:${status}:anchor:${machineId}:presentation:${presentationId}:${blockerId}`,
+    status,
+    machineId,
+    presentationId,
+    blockerId,
+  });
+}
+
+function machineUnavailableBlocker(id: string, blockerId: string | null): RustMachinePresentationBlockerR10 {
+  return Object.freeze({
+    id: `machine:unavailable:${id}`,
+    status: "unavailable",
+    machineId: null,
+    presentationId: null,
+    blockerId,
+  });
+}
+
+function parseMachineLight(row: RustDomainRowR10): RustMachineLightPresentationR10 | null {
+  const present = exactMachineBool(row, "light.present");
+  const lightFields = row.fields.filter(([name]) => name.startsWith("light.")).map(([name]) => name);
+  if (!present) {
+    invariant(lightFields.length === 1, `R10 machine anchor '${row.key}' has fields for an absent light`);
+    return null;
+  }
+  invariant(lightFields.length === 11, `R10 machine anchor '${row.key}' light fields are incomplete`);
+  const kind = exactMachineU32(row, "light.kind");
+  invariant(kind <= 3, `R10 machine anchor '${row.key}' light kind is invalid`);
+  const colorMillionths = Object.freeze([
+    exactMachineU32(row, "light.color.redMillionths"),
+    exactMachineU32(row, "light.color.greenMillionths"),
+    exactMachineU32(row, "light.color.blueMillionths"),
+  ] as const);
+  invariant(colorMillionths.every((value) => value <= MICROTURN_SCALE),
+    `R10 machine anchor '${row.key}' light color is outside millionths`);
+  const rangeMilli = exactMachineU32(row, "light.rangeMilli", false);
+  const innerConeMicroturns = exactMachineU32(row, "light.innerConeMicroturns");
+  const outerConeMicroturns = exactMachineU32(row, "light.outerConeMicroturns");
+  invariant(rangeMilli <= 1_024_000, `R10 machine anchor '${row.key}' light range exceeds authority bounds`);
+  invariant(outerConeMicroturns <= 500_000 && innerConeMicroturns <= outerConeMicroturns
+    && (kind === 1 || innerConeMicroturns === 0 && outerConeMicroturns === 0),
+    `R10 machine anchor '${row.key}' light cone is invalid`);
+  const luminousFluxMillilumens = exactMachineU64(row, "light.luminousFluxMillilumens");
+  invariant(luminousFluxMillilumens > BigInt(0),
+    `R10 machine anchor '${row.key}' light intensity is outside authority bounds`);
+  return Object.freeze({
+    kind,
+    colorMillionths,
+    luminousFluxMillilumens,
+    rangeMilli,
+    innerConeMicroturns,
+    outerConeMicroturns,
+    castsShadows: exactMachineBool(row, "light.castsShadows"),
+    enabled: exactMachineBool(row, "light.enabled"),
+  });
+}
+
+function parseExactMachine(
+  row: RustDomainRowR10,
+  presentations: AttestedRenderPresentationCatalogV1,
+  presentationContent: RustPresentationContentIdentityR10,
+): PreparedMachinePresentationR10 {
+  const machineId = exactMachineString(row, "machineId");
+  invariant(row.key === `anchor:${machineId}`, `R10 machine anchor '${row.key}' key does not match machineId`);
+  const presentationId = exactMachineString(row, "presentationId");
+  invariant(exactMachineString(row, "presentation.role") === "machine",
+    `R10 machine anchor '${row.key}' presentation role is not machine`);
+  const binding = presentations.registry.resolveProfileId("machine", presentationId);
+  invariant(binding.status === "exact", `R10 machine anchor '${row.key}' suppresses a non-exact catalog binding`);
+  invariant(exactMachineString(row, "presentation.status") === "exact",
+    `R10 machine anchor '${row.key}' suppresses an exact presentation`);
+  invariant(exactMachineString(row, "presentation.profileId") === binding.profile.id
+    && binding.profile.id === presentationId,
+  `R10 machine anchor '${row.key}' profile id differs from the attested registry`);
+  invariant(exactMachineString(row, "presentation.modelId") === binding.profile.model.id,
+    `R10 machine anchor '${row.key}' model id differs from the attested registry`);
+  invariant(exactMachineU32(row, "presentation.contentVersion", false) === presentationContent.contentVersion,
+    `R10 machine anchor '${row.key}' content version differs from the installed catalog`);
+  const contentHash = exactMachineHash(row, "presentation.contentHash");
+  invariant(equalBytes(contentHash, presentationContent.contentHash),
+    `R10 machine anchor '${row.key}' content hash differs from the installed catalog`);
+  const model = presentations.modelsByProfileId.get(binding.profile.id);
+  invariant(model !== undefined && model.modelId === binding.profile.model.id,
+    `R10 machine anchor '${row.key}' has no attested BWM2 model`);
+  const positionMilli = Object.freeze([
+    exactMachineI64(row, "position.xMilli"),
+    exactMachineI64(row, "position.yMilli"),
+    exactMachineI64(row, "position.zMilli"),
+  ] as const);
+  invariant(positionMilli.every((value) => (value < BigInt(0) ? -value : value) <= WORLD_VIEW_COORDINATE_LIMIT_MILLI),
+    `R10 machine anchor '${row.key}' position exceeds authority bounds`);
+  const rotationMicroturns = Object.freeze([
+    exactMachineU32(row, "rotation.yawMicroturns"),
+    exactMachineU32(row, "rotation.pitchMicroturns"),
+    exactMachineU32(row, "rotation.rollMicroturns"),
+  ] as const);
+  invariant(rotationMicroturns.every((value) => value < MICROTURN_SCALE),
+    `R10 machine anchor '${row.key}' rotation is not canonical`);
+  const halfExtentsMilli = Object.freeze([
+    exactMachineU32(row, "halfExtents.xMilli", false),
+    exactMachineU32(row, "halfExtents.yMilli", false),
+    exactMachineU32(row, "halfExtents.zMilli", false),
+  ] as const);
+  invariant(halfExtentsMilli.every((value) => value <= 1_024_000),
+    `R10 machine anchor '${row.key}' extents exceed authority bounds`);
+  const light = parseMachineLight(row);
+  const expectedFields = light === null ? 21 : 31;
+  invariant(row.fields.length === expectedFields, `R10 machine anchor '${row.key}' has unknown fields`);
+  return Object.freeze({
+    machineId,
+    anchorRevision: exactMachineU64(row, "anchorRevision"),
+    presentationId,
+    profileId: binding.profile.id,
+    modelId: binding.profile.model.id,
+    contentVersion: presentationContent.contentVersion,
+    contentHash,
+    positionMilli,
+    rotationMicroturns,
+    halfExtentsMilli,
+    gameplayRevision: exactMachineU64(row, "gameplayRevision"),
+    gameplayActive: exactMachineBool(row, "gameplayActive"),
+    light,
+    model,
+  });
+}
+
+function validateBlockedMachine(
+  row: RustDomainRowR10,
+  presentations: AttestedRenderPresentationCatalogV1,
+): RustMachinePresentationBlockerR10 {
+  const machineId = exactMachineString(row, "machineId");
+  invariant(row.key === `anchor:${machineId}`, `R10 machine anchor '${row.key}' key does not match machineId`);
+  exactMachineU64(row, "anchorRevision");
+  const presentationId = exactMachineString(row, "presentationId");
+  invariant(exactMachineString(row, "presentation.role") === "machine",
+    `R10 machine anchor '${row.key}' presentation role is not machine`);
+  for (const name of ["position.xMilli", "position.yMilli", "position.zMilli"] as const) exactMachineI64(row, name);
+  for (const name of ["rotation.yawMicroturns", "rotation.pitchMicroturns", "rotation.rollMicroturns"] as const) {
+    invariant(exactMachineU32(row, name) < MICROTURN_SCALE,
+      `R10 machine anchor '${row.key}' rotation is not canonical`);
+  }
+  for (const name of ["halfExtents.xMilli", "halfExtents.yMilli", "halfExtents.zMilli"] as const) {
+    invariant(exactMachineU32(row, name, false) <= 1_024_000,
+      `R10 machine anchor '${row.key}' extents exceed authority bounds`);
+  }
+  exactMachineU64(row, "gameplayRevision");
+  exactMachineBool(row, "gameplayActive");
+  const light = parseMachineLight(row);
+  invariant(row.fields.length === (light === null ? 18 : 28),
+    `R10 machine anchor '${row.key}' has unknown blocked fields`);
+  const status = exactMachineString(row, "presentation.status");
+  const blockerId = exactMachineString(row, "presentation.blockerId");
+  const binding = presentations.registry.resolveProfileId("machine", presentationId);
+  if (binding.status === "missing") {
+    invariant(status === "missing" && blockerId === binding.blocker.id,
+      `R10 machine anchor '${row.key}' missing blocker differs from the attested registry`);
+    return machineBlocker("missing", machineId, presentationId, blockerId);
+  }
+  invariant(binding.status === "unmapped" && status === "unmapped"
+    && blockerId === "machine-presentation-profile-unmapped",
+  `R10 machine anchor '${row.key}' unmapped blocker is inconsistent`);
+  return machineBlocker("unmapped", machineId, presentationId, blockerId);
+}
+
+function canonicalU64(domain: string, ...values: readonly (string | number | bigint | Uint8Array)[]) {
+  const hasher = new TypeScriptCanonicalHasher(domain);
+  for (const value of values) {
+    if (typeof value === "string") hasher.writeString(value);
+    else if (typeof value === "bigint") hasher.writeU64(value);
+    else if (typeof value === "number") hasher.writeU32(value);
+    else hasher.writeBytes(value);
+  }
+  const bytes = hasher.finish();
+  const id = new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true);
+  invariant(id !== BigInt(0), `${domain} produced the reserved zero id`);
+  return id;
+}
+
+function machineInstanceStableId(machineId: string, nodeId: number) {
+  invariant(Number.isInteger(nodeId) && nodeId > 0 && nodeId <= 0xffff_ffff, "machine node id is invalid");
+  return canonicalU64("blockwild.render.machine-instance.r10", machineId, nodeId);
+}
+
+function microturnQuaternion(yaw: number, pitch: number, roll: number) {
+  const scale = Math.PI * 2 / MICROTURN_SCALE;
+  const y = yaw * scale * 0.5;
+  const x = pitch * scale * 0.5;
+  const z = roll * scale * 0.5;
+  const cx = Math.cos(x), sx = Math.sin(x);
+  const cy = Math.cos(y), sy = Math.sin(y);
+  const cz = Math.cos(z), sz = Math.sin(z);
+  const quaternion = [
+    sx * cy * cz + cx * sy * sz,
+    cx * sy * cz - sx * cy * sz,
+    cx * cy * sz - sx * sy * cz,
+    cx * cy * cz + sx * sy * sz,
+  ] as const;
+  const length = Math.hypot(...quaternion);
+  invariant(Number.isFinite(length) && length > 0, "machine rotation is not finite");
+  return Object.freeze(quaternion.map((value) => Math.fround(value / length)) as unknown as [number, number, number, number]);
+}
+
+function multiplyQuaternion(
+  left: readonly [number, number, number, number],
+  right: readonly [number, number, number, number],
+) {
+  const [ax, ay, az, aw] = left, [bx, by, bz, bw] = right;
+  const result = [
+    aw * bx + ax * bw + ay * bz - az * by,
+    aw * by - ax * bz + ay * bw + az * bx,
+    aw * bz + ax * by - ay * bx + az * bw,
+    aw * bw - ax * bx - ay * by - az * bz,
+  ] as const;
+  const length = Math.hypot(...result);
+  invariant(Number.isFinite(length) && length > 0, "machine node rotation is not finite");
+  return Object.freeze(result.map((value) => Math.fround(value / length)) as unknown as [number, number, number, number]);
+}
+
+function multiplyScale(left: readonly number[], right: readonly number[]) {
+  return Object.freeze(left.map((value, index) => Math.fround(value * right[index])) as unknown as [number, number, number]);
+}
+
+function rotateVector(
+  rotation: readonly [number, number, number, number],
+  vector: readonly [number, number, number],
+) {
+  const [x, y, z, w] = rotation;
+  const [vx, vy, vz] = vector;
+  const tx = 2 * (y * vz - z * vy);
+  const ty = 2 * (z * vx - x * vz);
+  const tz = 2 * (x * vy - y * vx);
+  return Object.freeze([
+    Math.fround(vx + w * tx + y * tz - z * ty),
+    Math.fround(vy + w * ty + z * tx - x * tz),
+    Math.fround(vz + w * tz + x * ty - y * tx),
+  ] as const);
+}
+
+function rootMachineTransform(machine: PreparedMachinePresentationR10, local: RenderTransformV2): RenderTransformV2 {
+  const rotation = microturnQuaternion(...machine.rotationMicroturns);
+  const extentScale = [
+    machine.halfExtentsMilli[0] * 2 / 1_000,
+    machine.halfExtentsMilli[1] * 2 / 1_000,
+    machine.halfExtentsMilli[2] * 2 / 1_000,
+  ] as const;
+  const localTranslation = rotateVector(rotation, [
+    local.translation[0] * extentScale[0],
+    local.translation[1] * extentScale[1],
+    local.translation[2] * extentScale[2],
+  ]);
+  return Object.freeze({
+    translation: Object.freeze([
+      Math.fround(Number(machine.positionMilli[0]) / 1_000 + localTranslation[0]),
+      Math.fround(Number(machine.positionMilli[1]) / 1_000 + localTranslation[1]),
+      Math.fround(Number(machine.positionMilli[2]) / 1_000 + localTranslation[2]),
+    ] as const),
+    rotation: multiplyQuaternion(rotation, local.rotation),
+    scale: multiplyScale(extentScale, local.scale),
+  });
+}
+
+function prefixMachineResourceOperation(
+  machineResources: RenderEntityModelResourcesR10,
+  operation: RenderResourceOperationV2,
+): RenderResourceOperationV2 {
+  if (operation.kind === "upsert-geometry") return Object.freeze({
+    kind: operation.kind,
+    geometry: Object.freeze({
+      ...operation.geometry,
+      id: canonicalU64("blockwild.render.machine-geometry.r10", machineResources.modelId, operation.geometry.id),
+    }),
+  });
+  if (operation.kind === "upsert-material") return Object.freeze({
+    kind: operation.kind,
+    material: Object.freeze({
+      ...operation.material,
+      id: canonicalU64("blockwild.render.machine-material.r10", machineResources.modelId, operation.material.id),
+    }),
+  });
+  throw new TypeError("compiled machine model unexpectedly contains a removal or texture resource");
+}
+
+function augmentMachineFrame(
+  result: RenderEntityExtractionResultR10,
+  machines: readonly PreparedMachinePresentationR10[],
+  presentations: AttestedRenderPresentationCatalogV1,
+  currentResourceRevision: bigint,
+  emittedMachineModels: ReadonlySet<string>,
+  maxInstances: number,
+  maxResourceOperations: number,
+) {
+  const resourcesByModel = new Map<string, Readonly<{
+    compiled: RenderEntityModelResourcesR10;
+    geometry: bigint;
+    materials: ReadonlyMap<string, bigint>;
+    operations: readonly RenderResourceOperationV2[];
+  }>>();
+  for (const machine of machines) {
+    if (resourcesByModel.has(machine.modelId)) continue;
+    const compiled = compileRenderEntityModelResourcesR10(presentations.modelCatalog, machine.model);
+    const operations = Object.freeze(compiled.operations.map((operation) => prefixMachineResourceOperation(compiled, operation)));
+    const geometry = (operations.find((operation) => operation.kind === "upsert-geometry") as
+      Extract<RenderResourceOperationV2, { kind: "upsert-geometry" }> | undefined)?.geometry.id;
+    invariant(geometry !== undefined, `machine model '${machine.modelId}' has no geometry`);
+    const materials = new Map<string, bigint>();
+    for (const [palette, original] of compiled.materialByPaletteKey) {
+      materials.set(palette, canonicalU64("blockwild.render.machine-material.r10", compiled.modelId, original));
+    }
+    resourcesByModel.set(machine.modelId, Object.freeze({ compiled, geometry, materials, operations }));
+  }
+  const instanceIds = new Set(result.frame.instances.map((instance) => instance.stableId));
+  const resourceIds = new Set<bigint>();
+  for (const operation of result.resources?.operations ?? []) {
+    resourceIds.add(operation.kind === "upsert-geometry" ? operation.geometry.id
+      : operation.kind === "upsert-material" ? operation.material.id
+        : operation.kind === "upsert-texture" ? operation.texture.id : operation.id);
+  }
+  const operations: RenderResourceOperationV2[] = [...(result.resources?.operations ?? [])];
+  for (const resources of [...resourcesByModel.values()].sort((left, right) => compareCanonicalUtf8R10(left.compiled.modelId, right.compiled.modelId))) {
+    if (emittedMachineModels.has(resources.compiled.modelId)) continue;
+    for (const operation of resources.operations) {
+      const id = operation.kind === "upsert-geometry" ? operation.geometry.id
+        : operation.kind === "upsert-material" ? operation.material.id
+          : operation.kind === "upsert-texture" ? operation.texture.id : operation.id;
+      invariant(!resourceIds.has(id), `machine renderer resource id collision at ${id}`);
+      resourceIds.add(id);
+      operations.push(operation);
+    }
+  }
+  const machinePresentations: RustMachinePresentationR10[] = [];
+  const machineInstances: RenderInstanceV2[] = [];
+  for (const machine of machines) {
+    const resources = resourcesByModel.get(machine.modelId)!;
+    const ids: bigint[] = [];
+    for (const node of machine.model.nodes) {
+      const stableId = machineInstanceStableId(machine.machineId, node.nodeId);
+      invariant(!instanceIds.has(stableId), `machine renderer instance id collision at ${stableId}`);
+      instanceIds.add(stableId);
+      const material = resources.materials.get(renderEntityPaletteKeyR10(node.colorRgba8, node.emissive));
+      invariant(material !== undefined, `machine model '${machine.modelId}' palette is incomplete`);
+      machineInstances.push(Object.freeze({
+        stableId,
+        domain: 5,
+        geometry: resources.geometry,
+        material,
+        parent: node.parentNodeId === null ? null : machineInstanceStableId(machine.machineId, node.parentNodeId),
+        transform: node.parentNodeId === null ? rootMachineTransform(machine, node.transform) : node.transform,
+        tintRgba8: WHITE,
+        visibilityMask: node.colorRgba8[3] === 0 ? 0 : 0xffff_ffff,
+        sortKey: node.partTag,
+        animationFlags: machine.gameplayActive ? 1 : 0,
+      }));
+      ids.push(stableId);
+    }
+    machinePresentations.push(Object.freeze({
+      machineId: machine.machineId,
+      anchorRevision: machine.anchorRevision,
+      presentationId: machine.presentationId,
+      profileId: machine.profileId,
+      modelId: machine.modelId,
+      contentVersion: machine.contentVersion,
+      contentHash: Uint8Array.from(machine.contentHash),
+      positionMilli: machine.positionMilli,
+      rotationMicroturns: machine.rotationMicroturns,
+      halfExtentsMilli: machine.halfExtentsMilli,
+      gameplayRevision: machine.gameplayRevision,
+      gameplayActive: machine.gameplayActive,
+      light: machine.light,
+      instanceIds: Object.freeze(ids),
+    }));
+  }
+  invariant(result.frame.instances.length + machineInstances.length <= RENDER_MAX_INSTANCES_V2,
+    "presentation frame machine instance cap exceeded");
+  invariant(result.frame.instances.length + machineInstances.length <= maxInstances,
+    "configured presentation frame instance cap exceeded");
+  invariant(operations.length <= maxResourceOperations,
+    "configured presentation resource operation cap exceeded");
+  const resourceRevision = operations.length > 0 ? currentResourceRevision + BigInt(1) : currentResourceRevision;
+  const resources = operations.length > 0 ? createRenderResourceBatchV2({
+    epoch: result.frame.epoch,
+    revision: resourceRevision,
+    operations: Object.freeze(operations),
+  }) : null;
+  const frame = createRenderFrameV2({
+    ...result.frame,
+    resourceRevision,
+    instances: Object.freeze([...result.frame.instances, ...machineInstances]),
+  });
+  const augmentedResult: RustPresentationEntityExtractionResultR10 = Object.freeze({
+    ...result,
+    resources,
+    frame,
+    machinePresentations: Object.freeze(machinePresentations),
+  });
+  return Object.freeze({
+    result: augmentedResult,
+    resourceRevision,
+    emittedMachineModelIds: Object.freeze(machines.map((machine) => machine.modelId)),
+  });
 }
 
 function parseHeldStack(row: RustDomainRowR10): HeldStackR10 | null {
@@ -241,22 +765,27 @@ function assertExactDroppedPresentation(
 
 function augmentPresentations(
   extraction: RustIntegratedRuntimeExtractionV1,
-  registry: RenderPresentationRegistryV1,
+  presentations: AttestedRenderPresentationCatalogV1,
   presentationContent: RustPresentationContentIdentityR10,
 ): Omit<PreparedPresentationExtractionR10, "token"> {
   const decoded = decodeRustAuthoritativeExtractionR10(extraction);
+  const registry = presentations.registry;
   let source = decoded.entities;
   let heldAttachments = 0;
   let droppedBindings = 0;
   const heldBlockers: RustHeldPresentationBlockerR10[] = [];
   const droppedBlockers: RustDroppedPresentationBlockerR10[] = [];
+  const machines: PreparedMachinePresentationR10[] = [];
+  const machineBlockers: RustMachinePresentationBlockerR10[] = [];
   if (decoded.domains === null) {
     heldBlockers.push(unavailableBlocker("player-domain-envelope-absent", "domain-extraction-not-submitted"));
     droppedBlockers.push(droppedUnavailableBlocker("inventory-domain-envelope-absent", "domain-extraction-not-submitted"));
+    machineBlockers.push(machineUnavailableBlocker("machine-domain-envelope-absent", "domain-extraction-not-submitted"));
     return Object.freeze({
       renderBytes: Uint8Array.from(extraction.render), source, extractionRevision: decoded.extractionRevision,
       heldAttachments, heldBlockers: Object.freeze(heldBlockers),
       droppedBindings, droppedBlockers: Object.freeze(droppedBlockers),
+      machines: Object.freeze(machines), machineBindings: 0, machineBlockers: Object.freeze(machineBlockers),
     });
   }
   invariant(decoded.domains.contentReady, "R10 presentation content is not installed and attested");
@@ -383,8 +912,40 @@ function augmentPresentations(
       droppedBlockers.push(droppedBlocker("unmapped", dropId, entityId, itemId, null));
     }
   }
+
+  const machineView = decoded.domains.views.find((view) => view.domain === 4);
+  invariant(machineView !== undefined, "R10 domain bundle has no machine view");
+  const presentationOnlyMachineBlockers = new Set([
+    "machine-presentation-missing",
+    "machine-presentation-unmapped",
+    "world-prop-presentation-not-authoritative",
+  ]);
+  const unavailableMachines = machineView.blockers.filter((value) => !presentationOnlyMachineBlockers.has(value));
+  if (machineView.status === "absent" || unavailableMachines.length > 0) {
+    const blockerId = machineView.blockers.join(",");
+    machineBlockers.push(machineUnavailableBlocker(
+      `machine-domain-${machineView.status}:${blockerId}`,
+      blockerId || null,
+    ));
+  } else {
+    const machineIds = new Set<string>();
+    for (const row of machineView.rows.filter((candidate) => candidate.kind === 5)) {
+      const machineId = exactMachineString(row, "machineId");
+      invariant(!machineIds.has(machineId), `R10 machine anchor '${machineId}' is duplicated`);
+      machineIds.add(machineId);
+      const status = exactMachineString(row, "presentation.status");
+      if (status === "exact") machines.push(parseExactMachine(row, presentations, presentationContent));
+      else {
+        invariant(status === "missing" || status === "unmapped",
+          `R10 machine anchor '${row.key}' presentation status is invalid`);
+        machineBlockers.push(validateBlockedMachine(row, presentations));
+      }
+    }
+  }
   heldBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
   droppedBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
+  machines.sort((left, right) => compareCanonicalUtf8R10(left.machineId, right.machineId));
+  machineBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
   if (source !== null && records !== null) source = Object.freeze({ ...source, records: Object.freeze(records) });
   return Object.freeze({
     renderBytes: Uint8Array.from(extraction.render),
@@ -394,6 +955,9 @@ function augmentPresentations(
     heldBlockers: Object.freeze(heldBlockers),
     droppedBindings,
     droppedBlockers: Object.freeze(droppedBlockers),
+    machines: Object.freeze(machines),
+    machineBindings: machines.length,
+    machineBlockers: Object.freeze(machineBlockers),
   });
 }
 
@@ -422,6 +986,17 @@ export function createProductionHeldEquipmentModelsR10(
  */
 export class RustPresentationEntityExtractionR10 {
   private pending: PreparedPresentationExtractionR10 | null = null;
+  private pendingMachinePresentations: readonly RustMachinePresentationR10[] | null = null;
+  private pendingMachineResourceState: Readonly<{
+    epoch: bigint;
+    revision: bigint;
+    emittedModelIds: ReadonlySet<string>;
+  }> | null = null;
+  private machineResourceEpoch: bigint | null = null;
+  private machineResourceRevision = BigInt(0);
+  private readonly emittedMachineModelIds = new Set<string>();
+  private readonly maxInstances: number;
+  private readonly maxResourceOperations: number;
   private lastDiagnostics: RustPresentationExtractionDiagnosticsR10 = Object.freeze({
     schema: 1,
     extractionRevision: null,
@@ -429,22 +1004,33 @@ export class RustPresentationEntityExtractionR10 {
     heldBlockers: Object.freeze([]),
     droppedBindings: 0,
     droppedBlockers: Object.freeze([]),
+    machineBindings: 0,
+    machineBlockers: Object.freeze([]),
+    machines: Object.freeze([]),
   });
 
   constructor(
     private readonly entityExtractor: RustEntityRenderExtractionR10,
-    private readonly registry: RenderPresentationRegistryV1,
+    private readonly presentations: AttestedRenderPresentationCatalogV1,
     private readonly presentationContent: RustPresentationContentIdentityR10,
+    limits: Readonly<{ maxInstances?: number; maxResourceOperations?: number }> = {},
   ) {
     invariant(Number.isSafeInteger(presentationContent.contentVersion) && presentationContent.contentVersion > 0
       && presentationContent.contentVersion <= Number(U32_MAX), "render presentation content version is invalid");
     invariant(presentationContent.contentHash.byteLength === 16
       && presentationContent.contentHash.some((value) => value !== 0), "render presentation content hash is invalid");
+    this.maxInstances = limits.maxInstances ?? RENDER_MAX_INSTANCES_V2;
+    this.maxResourceOperations = limits.maxResourceOperations ?? RENDER_MAX_RESOURCE_OPERATIONS_V2;
+    invariant(Number.isInteger(this.maxInstances) && this.maxInstances > 0 && this.maxInstances <= RENDER_MAX_INSTANCES_V2,
+      "presentation instance cap is invalid");
+    invariant(Number.isInteger(this.maxResourceOperations) && this.maxResourceOperations > 0
+      && this.maxResourceOperations <= RENDER_MAX_RESOURCE_OPERATIONS_V2,
+    "presentation resource operation cap is invalid");
   }
 
   prepareRuntimeExtraction(extraction: RustIntegratedRuntimeExtractionV1) {
     invariant(this.pending === null, "a render presentation extraction is already prepared");
-    const augmented = augmentPresentations(extraction, this.registry, this.presentationContent);
+    const augmented = augmentPresentations(extraction, this.presentations, this.presentationContent);
     const token = Symbol("rust-presentation-extraction-r10");
     this.pending = Object.freeze({ ...augmented, token });
     return token;
@@ -459,8 +1045,19 @@ export class RustPresentationEntityExtractionR10 {
       heldBlockers: this.pending.heldBlockers,
       droppedBindings: this.pending.droppedBindings,
       droppedBlockers: this.pending.droppedBlockers,
+      machineBindings: this.pending.machineBindings,
+      machineBlockers: this.pending.machineBlockers,
+      machines: this.pendingMachinePresentations ?? Object.freeze([]),
     });
+    if (accepted && this.pendingMachineResourceState !== null) {
+      this.machineResourceEpoch = this.pendingMachineResourceState.epoch;
+      this.machineResourceRevision = this.pendingMachineResourceState.revision;
+      this.emittedMachineModelIds.clear();
+      for (const modelId of this.pendingMachineResourceState.emittedModelIds) this.emittedMachineModelIds.add(modelId);
+    }
     this.pending = null;
+    this.pendingMachinePresentations = null;
+    this.pendingMachineResourceState = null;
   }
 
   extractBytes(bytes: Uint8Array | ArrayBuffer, context: RenderEntityFrameContextR10) {
@@ -469,7 +1066,28 @@ export class RustPresentationEntityExtractionR10 {
     const actualBytes = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
     invariant(equalBytes(actualBytes, pending.renderBytes), "BWR6 bytes differ from the prepared Worker envelope");
     invariant(pending.source !== null, "prepared Worker envelope has no BWR6 entity extraction");
-    return this.entityExtractor.extract(pending.source, context);
+    invariant(this.pendingMachinePresentations === null, "prepared render presentation extraction was consumed twice");
+    const epochChanged = this.machineResourceEpoch === null || context.epoch > this.machineResourceEpoch;
+    invariant(this.machineResourceEpoch === null || context.epoch >= this.machineResourceEpoch,
+      "stale machine presentation resource epoch");
+    const emitted = epochChanged ? new Set<string>() : new Set(this.emittedMachineModelIds);
+    const augmented = augmentMachineFrame(
+      this.entityExtractor.extract(pending.source, context),
+      pending.machines,
+      this.presentations,
+      epochChanged ? BigInt(0) : this.machineResourceRevision,
+      emitted,
+      this.maxInstances,
+      this.maxResourceOperations,
+    );
+    for (const modelId of augmented.emittedMachineModelIds) emitted.add(modelId);
+    this.pendingMachinePresentations = augmented.result.machinePresentations;
+    this.pendingMachineResourceState = Object.freeze({
+      epoch: context.epoch,
+      revision: augmented.resourceRevision,
+      emittedModelIds: emitted,
+    });
+    return augmented.result;
   }
 
   resetRevisionGuard() {
@@ -480,6 +1098,9 @@ export class RustPresentationEntityExtractionR10 {
   resetResourceReplay() {
     invariant(this.pending === null, "cannot reset entity resources during a prepared presentation join");
     this.entityExtractor.resetResourceReplay();
+    this.machineResourceEpoch = null;
+    this.machineResourceRevision = BigInt(0);
+    this.emittedMachineModelIds.clear();
   }
 
   diagnostics(): RustPresentationExtractionDiagnosticsR10 {

@@ -2463,12 +2463,40 @@ macro_rules! dropped_item_world_view_row {
 }
 
 macro_rules! machine_anchor_world_view_row {
-    ($machine:expr) => {{
+    ($machine:expr, $presentation:expr) => {{
         let machine = $machine;
         let anchor = &machine.anchor;
         let mut row = domain_row(5, format!("anchor:{}", anchor.machine_id), anchor.revision);
         string_field(&mut row, "machineId", &anchor.machine_id);
+        u64_field(&mut row, "anchorRevision", anchor.revision);
         string_field(&mut row, "presentationId", &anchor.presentation_id);
+        string_field(&mut row, "presentation.role", "machine");
+        match $presentation {
+            IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                profile_id,
+                model_id,
+                content_hash,
+                content_version,
+            } => {
+                string_field(&mut row, "presentation.status", "exact");
+                string_field(&mut row, "presentation.profileId", profile_id);
+                string_field(&mut row, "presentation.modelId", model_id);
+                hash_field(&mut row, "presentation.contentHash", content_hash);
+                u64_field(&mut row, "presentation.contentVersion", u64::from(content_version));
+            }
+            IntegratedRuntimeRenderPresentationBindingV1::Missing { blocker_id } => {
+                string_field(&mut row, "presentation.status", "missing");
+                string_field(&mut row, "presentation.blockerId", blocker_id);
+            }
+            IntegratedRuntimeRenderPresentationBindingV1::Unmapped => {
+                string_field(&mut row, "presentation.status", "unmapped");
+                string_field(
+                    &mut row,
+                    "presentation.blockerId",
+                    "machine-presentation-profile-unmapped",
+                );
+            }
+        }
         for (key, value) in [
             ("position.xMilli", anchor.position.x_milli),
             ("position.yMilli", anchor.position.y_milli),
@@ -2970,9 +2998,17 @@ fn machine_domain_view(runtime: &IntegratedRuntimeV2, world_view: Option<&WorldV
         }
         rows.push(row);
     }
+    let mut presentation_missing = false;
+    let mut presentation_unmapped = false;
     if let Some(world_view) = world_view {
         for machine in &world_view.machines {
-            rows.push(machine_anchor_world_view_row!(machine));
+            let presentation = runtime.machine_anchor_render_presentation_binding_v1(&machine.anchor.presentation_id);
+            presentation_missing |= matches!(
+                presentation,
+                IntegratedRuntimeRenderPresentationBindingV1::Missing { .. }
+            );
+            presentation_unmapped |= matches!(presentation, IntegratedRuntimeRenderPresentationBindingV1::Unmapped);
+            rows.push(machine_anchor_world_view_row!(machine, presentation));
         }
     }
     let mut blockers = vec!["world-prop-presentation-not-authoritative".into()];
@@ -2982,6 +3018,12 @@ fn machine_domain_view(runtime: &IntegratedRuntimeV2, world_view: Option<&WorldV
             "machine-spatial-anchors-not-authoritative".into(),
             "world-view-extraction-invariant-rejected".into(),
         ]);
+    }
+    if presentation_missing {
+        blockers.push("machine-presentation-missing".into());
+    }
+    if presentation_unmapped {
+        blockers.push("machine-presentation-unmapped".into());
     }
     DomainViewV1 {
         domain: 4,
@@ -6055,7 +6097,7 @@ mod tests {
 
         let rows = [
             dropped_item_world_view_row!(&drop, IntegratedRuntimeRenderPresentationBindingV1::Unmapped),
-            machine_anchor_world_view_row!(&machine),
+            machine_anchor_world_view_row!(&machine, IntegratedRuntimeRenderPresentationBindingV1::Unmapped),
             celestial_body_world_view_row!(&celestial, 8),
         ];
         assert_eq!(rows.iter().map(|row| row.kind).collect::<Vec<_>>(), [6, 5, 5]);
@@ -6073,6 +6115,14 @@ mod tests {
             Some(DomainViewValueV1::String(value)) if value == "42"
         ));
         assert!(rows[1].fields.contains_key("light.luminousFluxMillilumens"));
+        assert!(matches!(
+            rows[1].fields.get("presentation.status"),
+            Some(DomainViewValueV1::String(value)) if value == "unmapped"
+        ));
+        assert!(matches!(
+            rows[1].fields.get("presentation.blockerId"),
+            Some(DomainViewValueV1::String(value)) if value == "machine-presentation-profile-unmapped"
+        ));
         assert!(rows[2].fields.contains_key("angularRadiusMicrodegrees"));
         assert!(rows.iter().all(|row| encode_domain_row(row).is_some()));
 
@@ -6107,6 +6157,37 @@ mod tests {
         assert!(matches!(
             missing.fields.get("presentation.blockerId"),
             Some(DomainViewValueV1::String(value)) if value == "missing:dropped-item:test"
+        ));
+        let exact_machine = machine_anchor_world_view_row!(
+            &machine,
+            IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                profile_id: "machine:test",
+                model_id: "test-machine-model",
+                content_hash: identity,
+                content_version: 7,
+            }
+        );
+        assert!(matches!(
+            exact_machine.fields.get("presentation.profileId"),
+            Some(DomainViewValueV1::String(value)) if value == "machine:test"
+        ));
+        assert!(matches!(
+            exact_machine.fields.get("presentation.modelId"),
+            Some(DomainViewValueV1::String(value)) if value == "test-machine-model"
+        ));
+        assert!(matches!(
+            exact_machine.fields.get("presentation.contentHash"),
+            Some(DomainViewValueV1::Hash(value)) if *value == identity
+        ));
+        let missing_machine = machine_anchor_world_view_row!(
+            &machine,
+            IntegratedRuntimeRenderPresentationBindingV1::Missing {
+                blocker_id: "missing:machine:test",
+            }
+        );
+        assert!(matches!(
+            missing_machine.fields.get("presentation.blockerId"),
+            Some(DomainViewValueV1::String(value)) if value == "missing:machine:test"
         ));
     }
 
@@ -6195,6 +6276,22 @@ mod tests {
         assert_eq!(
             read_model(&encode_render_entity_record(&runtime, &source, &stale)),
             ("unresolved:dropped-item".into(), 0, CanonicalHash::default())
+        );
+    }
+
+    #[test]
+    fn empty_authoritative_machine_anchor_set_has_no_machine_presentation_blocker() {
+        let runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        let world_view = runtime.world_view_extraction().unwrap();
+        assert!(world_view.machines.is_empty());
+        let view = machine_domain_view(&runtime, Some(&world_view));
+        assert_eq!(view.status, DomainViewStatusV1::Partial);
+        assert_eq!(view.blockers, ["world-prop-presentation-not-authoritative"]);
+        assert!(
+            !view
+                .blockers
+                .iter()
+                .any(|blocker| blocker.starts_with("machine-presentation-"))
         );
     }
 

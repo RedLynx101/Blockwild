@@ -57,6 +57,7 @@ class Writer {
     }
     return this;
   }
+  i64(value: bigint | number) { return this.u64(BigInt.asUintN(64, BigInt(value))); }
   string(value: string) {
     const encoded = new TextEncoder().encode(value);
     return this.u32(encoded.byteLength).raw(encoded);
@@ -79,6 +80,7 @@ function hex(value: string) {
 
 function boolField(value: boolean) { return new Writer().u8(0).u8(value ? 1 : 0).finish(); }
 function u64Field(value: bigint | number) { return new Writer().u8(1).u64(value).finish(); }
+function i64Field(value: bigint | number) { return new Writer().u8(2).i64(value).finish(); }
 function stringField(value: string) { return new Writer().u8(4).string(value).finish(); }
 function hashField(value: Uint8Array) { assert.equal(value.byteLength, 16); return new Writer().u8(5).raw(value).finish(); }
 
@@ -170,6 +172,59 @@ function dropRow(input: Readonly<{
     fields.push(["presentation.contentHash", hashField(hex(PRESENTATION_ARTIFACT.blobHash))]);
   }
   return domainRow(6, `drop:${dropId}`, fields);
+}
+
+function machineRow(input: Readonly<{
+  machineId: string;
+  presentationId: string;
+  status: "exact" | "missing" | "unmapped";
+  profileId?: string;
+  modelId?: string;
+  blockerId?: string;
+  anchorRevision?: bigint;
+  xMilli?: bigint;
+  halfExtentXMilli?: number;
+  withLight?: boolean;
+}>) {
+  const fields: Array<readonly [string, Uint8Array]> = [
+    ["anchorRevision", u64Field(input.anchorRevision ?? BigInt(9))],
+    ["gameplayActive", boolField(true)],
+    ["gameplayRevision", u64Field(12)],
+    ["halfExtents.xMilli", u64Field(input.halfExtentXMilli ?? 500)],
+    ["halfExtents.yMilli", u64Field(1_000)],
+    ["halfExtents.zMilli", u64Field(750)],
+    ["light.present", boolField(input.withLight ?? false)],
+    ["machineId", stringField(input.machineId)],
+    ["position.xMilli", i64Field(input.xMilli ?? BigInt(4_000))],
+    ["position.yMilli", i64Field(65_000)],
+    ["position.zMilli", i64Field(-8_000)],
+    ["presentation.role", stringField("machine")],
+    ["presentation.status", stringField(input.status)],
+    ["presentationId", stringField(input.presentationId)],
+    ["rotation.pitchMicroturns", u64Field(0)],
+    ["rotation.rollMicroturns", u64Field(0)],
+    ["rotation.yawMicroturns", u64Field(250_000)],
+  ];
+  if (input.withLight) fields.push(
+    ["light.castsShadows", boolField(true)],
+    ["light.color.blueMillionths", u64Field(300_000)],
+    ["light.color.greenMillionths", u64Field(700_000)],
+    ["light.color.redMillionths", u64Field(1_000_000)],
+    ["light.enabled", boolField(true)],
+    ["light.innerConeMicroturns", u64Field(0)],
+    ["light.kind", u64Field(0)],
+    ["light.luminousFluxMillilumens", u64Field(900_000)],
+    ["light.outerConeMicroturns", u64Field(0)],
+    ["light.rangeMilli", u64Field(12_000)],
+  );
+  if (input.profileId !== undefined) fields.push(["presentation.profileId", stringField(input.profileId)]);
+  if (input.modelId !== undefined) fields.push(["presentation.modelId", stringField(input.modelId)]);
+  if (input.blockerId !== undefined) fields.push(["presentation.blockerId", stringField(input.blockerId)]);
+  if (input.status === "exact") {
+    fields.push(["presentation.contentVersion", u64Field(PRESENTATION_ARTIFACT.contentVersion)]);
+    fields.push(["presentation.contentHash", hashField(hex(PRESENTATION_ARTIFACT.blobHash))]);
+  }
+  return domainRow(5, `anchor:${input.machineId}`, fields);
 }
 
 async function catalogs() {
@@ -327,10 +382,38 @@ function dropEnvelope(input: Readonly<{
   } satisfies RustIntegratedRuntimeExtractionV1);
 }
 
-function context(): RenderEntityFrameContextR10 {
+function machineEnvelope(
+  rows: readonly Uint8Array[],
+  blockers: readonly string[] = ["world-prop-presentation-not-authoritative"],
+  revision = 1,
+) {
+  const entities = entityExtraction(revision, 10);
+  const hud = domainBundle(revision, 10, new Map([
+    [2, [playerRow(BigInt(revision), Item.StonePickaxe)]],
+    [4, rows],
+  ]), new Map([[4, blockers]]));
   return Object.freeze({
-    epoch: EPOCH,
-    frameSequence: BigInt(1),
+    identity: Object.freeze({
+      universeId: "presentation-universe",
+      locationId: "presentation-location",
+      revision: Object.freeze({ epoch: 1, world: 1, entities: 1, gameplay: 1, persistence: 1, network: 1, simulation: 1 }),
+      tick: 10,
+      stateHash: "1".repeat(32),
+    }),
+    extractionRevision: revision,
+    render: encodeRustEntityExtractionR6V3(entities),
+    hud,
+    audio: new Uint8Array(),
+    platformRequests: new Uint8Array(),
+    diagnostics: new Uint8Array(),
+    extractionHash: "2".repeat(32),
+  } satisfies RustIntegratedRuntimeExtractionV1);
+}
+
+function context(frameSequence = 1, epoch = EPOCH): RenderEntityFrameContextR10 {
+  return Object.freeze({
+    epoch,
+    frameSequence: BigInt(frameSequence),
     simulationTick: BigInt(10),
     animationTimeMicros: BigInt(500_000),
     camera: Object.freeze({
@@ -357,7 +440,7 @@ function context(): RenderEntityFrameContextR10 {
   });
 }
 
-async function createAdapter() {
+async function createAdapter(limits: Readonly<{ maxInstances?: number; maxResourceOperations?: number }> = {}) {
   const [profile, presentations] = await catalogs();
   const base = new RustEntityRenderExtractionR10({
     catalog: profile.catalog,
@@ -366,10 +449,10 @@ async function createAdapter() {
     equipmentModels: createProductionHeldEquipmentModelsR10(presentations),
   });
   return {
-    adapter: new RustPresentationEntityExtractionR10(base, presentations.registry, {
+    adapter: new RustPresentationEntityExtractionR10(base, presentations, {
       contentVersion: PRESENTATION_ARTIFACT.contentVersion,
       contentHash: hex(PRESENTATION_ARTIFACT.blobHash),
-    }),
+    }, limits),
     presentations,
   };
 }
@@ -443,6 +526,158 @@ test("same-envelope dropped item keeps exact presentation identity on its R6 ent
     exact.profile.model.id);
   assert.equal(adapter.diagnostics().droppedBindings, 1);
   assert.deepEqual(adapter.diagnostics().droppedBlockers, []);
+});
+
+test("same-envelope exact machine anchor compiles stable machine resources and instances without an R6 entity", async () => {
+  const { adapter, presentations } = await createAdapter();
+  const exact = presentations.registry.resolveProfileId("machine", "machine:apiary");
+  assert.equal(exact.status, "exact");
+  assert.ok(exact.status === "exact");
+  const row = machineRow({
+    machineId: "machine:apiary:alpha",
+    presentationId: exact.profile.id,
+    status: "exact",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    withLight: true,
+  });
+  const source = machineEnvelope([row]);
+  const token = adapter.prepareRuntimeExtraction(source);
+  const result = adapter.extractBytes(source.render, context());
+  adapter.finishPreparedRuntimeExtraction(token, true);
+
+  assert.equal(result.presentations.some((value) => value.kindKey === "machine"), false,
+    "machine anchors must not invent BWR6 entities");
+  assert.equal(result.machinePresentations.length, 1);
+  const machine = result.machinePresentations[0]!;
+  assert.equal(machine.machineId, "machine:apiary:alpha");
+  assert.equal(machine.profileId, exact.profile.id);
+  assert.equal(machine.modelId, exact.profile.model.id);
+  assert.equal(machine.anchorRevision, BigInt(9));
+  assert.equal(machine.contentVersion, PRESENTATION_ARTIFACT.contentVersion);
+  assert.deepEqual(machine.contentHash, hex(PRESENTATION_ARTIFACT.blobHash));
+  assert.deepEqual(machine.positionMilli, [BigInt(4_000), BigInt(65_000), BigInt(-8_000)]);
+  assert.deepEqual(machine.rotationMicroturns, [250_000, 0, 0]);
+  assert.deepEqual(machine.halfExtentsMilli, [500, 1_000, 750]);
+  assert.equal(machine.gameplayRevision, BigInt(12));
+  assert.equal(machine.gameplayActive, true);
+  assert.deepEqual(machine.light, {
+    kind: 0,
+    colorMillionths: [1_000_000, 700_000, 300_000],
+    luminousFluxMillilumens: BigInt(900_000),
+    rangeMilli: 12_000,
+    innerConeMicroturns: 0,
+    outerConeMicroturns: 0,
+    castsShadows: true,
+    enabled: true,
+  });
+  assert.equal(machine.instanceIds.length, exact.profile.model.nodeCount);
+  const machineInstances = result.frame.instances.filter((instance) => instance.domain === 5);
+  assert.equal(machineInstances.length, exact.profile.model.nodeCount);
+  assert.deepEqual(machineInstances.map((instance) => instance.stableId).sort((a, b) => a < b ? -1 : 1),
+    [...machine.instanceIds].sort((a, b) => a < b ? -1 : 1));
+  const entityIds = new Set(result.frame.instances.filter((instance) => instance.domain !== 5).map((instance) => instance.stableId));
+  assert.ok(machine.instanceIds.every((id) => !entityIds.has(id)), "machine ids collided with the entity namespace");
+  const resourceIds = (result.resources?.operations ?? []).map((operation) => operation.kind === "upsert-geometry"
+    ? operation.geometry.id : operation.kind === "upsert-material" ? operation.material.id
+      : operation.kind === "upsert-texture" ? operation.texture.id : operation.id);
+  assert.equal(new Set(resourceIds).size, resourceIds.length);
+  assert.equal(adapter.diagnostics().machineBindings, 1);
+  assert.deepEqual(adapter.diagnostics().machineBlockers, []);
+  assert.deepEqual(adapter.diagnostics().machines[0]?.instanceIds, machine.instanceIds);
+});
+
+test("machine presentation resource replay is stable, ordered, and resets by epoch", async () => {
+  const { adapter, presentations } = await createAdapter();
+  const apiary = presentations.registry.resolveProfileId("machine", "machine:apiary");
+  const rack = presentations.registry.resolveProfileId("machine", "machine:capture-orb-rack");
+  assert.ok(apiary.status === "exact" && rack.status === "exact");
+  const rows = [
+    machineRow({ machineId: "machine:a", presentationId: rack.profile.id, status: "exact",
+      profileId: rack.profile.id, modelId: rack.profile.model.id, xMilli: BigInt(1_000) }),
+    machineRow({ machineId: "machine:z", presentationId: apiary.profile.id, status: "exact",
+      profileId: apiary.profile.id, modelId: apiary.profile.model.id, xMilli: BigInt(2_000) }),
+  ];
+  const first = machineEnvelope(rows);
+  const firstToken = adapter.prepareRuntimeExtraction(first);
+  const firstResult = adapter.extractBytes(first.render, context(1));
+  adapter.finishPreparedRuntimeExtraction(firstToken, true);
+  assert.ok(firstResult.resources && firstResult.resources.operations.length > 0);
+  assert.deepEqual(firstResult.machinePresentations.map((machine) => machine.machineId), ["machine:a", "machine:z"]);
+
+  const second = machineEnvelope(rows, ["world-prop-presentation-not-authoritative"], 2);
+  const secondToken = adapter.prepareRuntimeExtraction(second);
+  const secondResult = adapter.extractBytes(second.render, context(2));
+  adapter.finishPreparedRuntimeExtraction(secondToken, true);
+  assert.equal(secondResult.resources, null, "unchanged catalog-owned machine resources should not replay");
+  assert.equal(secondResult.frame.resourceRevision, firstResult.frame.resourceRevision);
+  assert.deepEqual(secondResult.machinePresentations.map((machine) => machine.instanceIds),
+    firstResult.machinePresentations.map((machine) => machine.instanceIds));
+
+  adapter.resetRevisionGuard();
+  adapter.resetResourceReplay();
+  const third = machineEnvelope(rows, ["world-prop-presentation-not-authoritative"], 3);
+  const thirdToken = adapter.prepareRuntimeExtraction(third);
+  const thirdResult = adapter.extractBytes(third.render, context(3, EPOCH + BigInt(1)));
+  adapter.finishPreparedRuntimeExtraction(thirdToken, true);
+  assert.ok(thirdResult.resources && thirdResult.resources.operations.length > 0,
+    "new renderer epoch must replay exact machine resources");
+});
+
+test("missing and unmapped machine anchors stay loadable blockers and emit no instances", async () => {
+  const [, presentations] = await catalogs();
+  const missing = presentations.profileCatalog.missingProfiles.find((candidate) => candidate.role === "machine");
+  assert.ok(missing);
+  for (const [presentationId, status, blockerId] of [
+    [missing.id, "missing", missing.id],
+    ["machine.legacy.unmapped.v1", "unmapped", "machine-presentation-profile-unmapped"],
+  ] as const) {
+    const { adapter } = await createAdapter();
+    const source = machineEnvelope([machineRow({
+      machineId: `machine:${status}`,
+      presentationId,
+      status,
+      blockerId,
+    })], [`machine-presentation-${status}`, "world-prop-presentation-not-authoritative"]);
+    const token = adapter.prepareRuntimeExtraction(source);
+    const result = adapter.extractBytes(source.render, context());
+    adapter.finishPreparedRuntimeExtraction(token, true);
+    assert.equal(result.frame.instances.some((instance) => instance.domain === 5), false);
+    assert.deepEqual(result.machinePresentations, []);
+    assert.deepEqual(adapter.diagnostics().machineBlockers, [{
+      id: `machine:${status}:anchor:machine:${status}:presentation:${presentationId}:${blockerId}`,
+      status,
+      machineId: `machine:${status}`,
+      presentationId,
+      blockerId,
+    }]);
+  }
+});
+
+test("machine anchor duplicate identity, extent capacity, and configured instance capacity fail closed", async () => {
+  const { presentations } = await createAdapter();
+  const exact = presentations.registry.resolveProfileId("machine", "machine:apiary");
+  assert.ok(exact.status === "exact");
+  const exactRow = machineRow({ machineId: "machine:collision", presentationId: exact.profile.id,
+    status: "exact", profileId: exact.profile.id, modelId: exact.profile.model.id });
+  const duplicate = await createAdapter();
+  assert.throws(() => duplicate.adapter.prepareRuntimeExtraction(machineEnvelope([exactRow, exactRow])),
+    /domain rows are not canonical and unique|duplicated/u);
+
+  const oversized = await createAdapter();
+  assert.throws(() => oversized.adapter.prepareRuntimeExtraction(machineEnvelope([machineRow({
+    machineId: "machine:oversized",
+    presentationId: exact.profile.id,
+    status: "exact",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    halfExtentXMilli: 1_024_001,
+  })])), /extents exceed authority bounds/u);
+  const capped = await createAdapter({ maxInstances: 1 });
+  const cappedSource = machineEnvelope([exactRow]);
+  const token = capped.adapter.prepareRuntimeExtraction(cappedSource);
+  assert.throws(() => capped.adapter.extractBytes(cappedSource.render, context()), /configured presentation frame instance cap/u);
+  capped.adapter.finishPreparedRuntimeExtraction(token, false);
 });
 
 test("production model attestations include every exact dropped BWM2 identity under catalog ownership", async () => {
