@@ -60,6 +60,12 @@ export const MAX_RUST_CONTENT_ALIASES = 16;
 export const RUST_BLOCK_ACTION_CATALOG_ID = "block-actions" as const;
 export const RUST_BLOCK_ACTION_CATALOG_SCHEMA = 2 as const;
 export const RUST_BLOCK_ACTION_RNG_SCALE = 1_000_000 as const;
+export const RUST_ACTION_PROMOTION_REPORT_SCHEMA_V1 = 1 as const;
+export const RUST_ACTION_PROMOTION_RUNTIME_SEMANTIC_FEATURE_ID_V1 = "block-action-runtime-semantics-v1" as const;
+export const RUST_ACTION_PROMOTION_RNG_SEMANTICS_VERSION_ID_V1 = "block-action-rng-semantics-v1" as const;
+export const MAX_RUST_ACTION_PROMOTION_BLOCKER_RECORDS_V1 = 64;
+export const MAX_RUST_ACTION_PROMOTION_AFFECTED_BLOCK_IDS_V1 = 4_096;
+export const MAX_RUST_ACTION_PROMOTION_TOTAL_AFFECTED_BLOCK_IDS_V1 = 65_536;
 
 export const RUST_CONTENT_DOMAINS = Object.freeze([
   "item", "crafting-recipe", "machine-recipe", "machine-profile", "ability-spell", "creature-profile",
@@ -116,6 +122,55 @@ export type RustContentAuditReport = Readonly<{
   domains: Readonly<Partial<Record<RustContentDomain, RustContentDomainDigest>>>;
   blockers: readonly RustContentBlocker[];
 }>;
+
+export type RustActionPromotionBlockerScopeV1 = "global" | "profile";
+export type RustActionPromotionDispositionV1 = "implementation-gap" | "content-unresolved" | "runtime-context" | "transient";
+export type RustActionPromotionSupportLevelV1 = "legacy-unproven" | "declared-blocked" | "declared-ready";
+
+export type RustActionPromotionBlockerRecordV1 = Readonly<{
+  scope: RustActionPromotionBlockerScopeV1;
+  blockerId: string;
+  disposition: RustActionPromotionDispositionV1;
+  affectedBlockIds: readonly number[];
+  affectedBlockCount: number;
+}>;
+
+/** Immutable content support evidence. This is deliberately not a capability. */
+export type RustActionPromotionReportV1 = Readonly<{
+  schemaVersion: 1;
+  manifestHash: string;
+  installedRegistryHash: string | null;
+  blockActionCatalogSchemaVersion: number;
+  blockActionCatalogContentVersion: number;
+  blockActionCatalogBlobHash: string;
+  rngSemanticsVersionId: string | null;
+  rngSemanticsHash: string | null;
+  runtimeSemanticFeatureId: string;
+  supportLevel: RustActionPromotionSupportLevelV1;
+  blockers: readonly RustActionPromotionBlockerRecordV1[];
+  reportHash: string;
+}>;
+
+export type RustActionPromotionReportErrorCodeV1 =
+  | "unsupported-schema" | "unknown-blocker" | "classification" | "capacity" | "ordering"
+  | "descriptor-mismatch" | "hash-mismatch";
+
+export type RustActionPromotionReportErrorV1 = Readonly<{
+  code: RustActionPromotionReportErrorCodeV1;
+  path: string;
+  expected: string;
+  actual: string;
+}>;
+
+export class RustActionPromotionReportCompilationErrorV1 extends Error {
+  readonly errors: readonly RustActionPromotionReportErrorV1[];
+
+  constructor(errors: readonly RustActionPromotionReportErrorV1[]) {
+    super(`Rust action-promotion report rejected with ${errors.length} error(s).`);
+    this.name = "RustActionPromotionReportCompilationErrorV1";
+    this.errors = errors;
+  }
+}
 
 export class RustContentCompilationError extends Error {
   readonly report: RustContentAuditReport;
@@ -874,6 +929,391 @@ export function blockwildBlockActionCatalogV2() {
 
 /** Compatibility name retained for callers; it now returns the explicit V2 catalog. */
 export const blockwildBlockActionCatalogV1 = blockwildBlockActionCatalogV2;
+
+const ACTION_PROMOTION_DISPOSITIONS_V1 = Object.freeze({
+  "authoritative-rng-context-unbound": "runtime-context",
+  "column-world-state-runtime": "runtime-context",
+  "dynamic-block-state-runtime": "runtime-context",
+  "dynamic-session-dispatch-runtime": "implementation-gap",
+  "game-mode-host-custody-runtime": "runtime-context",
+  "legacy-block-action-catalog-schema-unproven": "content-unresolved",
+  "legacy-computed-loot-source-runtime": "implementation-gap",
+  "legacy-loot-item-reference-unresolved": "content-unresolved",
+  "liquid-source-state-runtime": "runtime-context",
+  "network-topology-state-runtime": "runtime-context",
+  "paired-world-state-runtime": "runtime-context",
+  "player-luck-context-runtime": "runtime-context",
+  "rooted-tree-discovery-runtime": "runtime-context",
+  "world-support-collision-runtime": "runtime-context",
+} satisfies Readonly<Record<string, RustActionPromotionDispositionV1>>);
+
+type ActionPromotionCatalogV1 = Readonly<{
+  schema: number;
+  rngSemantics?: unknown;
+  authorityBlockers?: unknown;
+  profiles: readonly unknown[];
+}>;
+
+function actionPromotionErrorV1(
+  code: RustActionPromotionReportErrorCodeV1,
+  path: string,
+  expected: string,
+  actual: string,
+): RustActionPromotionReportErrorV1 {
+  return Object.freeze({ code, path, expected, actual });
+}
+
+function rejectActionPromotionV1(
+  code: RustActionPromotionReportErrorCodeV1,
+  path: string,
+  expected: string,
+  actual: unknown,
+): never {
+  throw new RustActionPromotionReportCompilationErrorV1([
+    actionPromotionErrorV1(code, path, expected, String(actual)),
+  ]);
+}
+
+function actionPromotionDispositionV1(blockerId: string): RustActionPromotionDispositionV1 | null {
+  return ACTION_PROMOTION_DISPOSITIONS_V1[blockerId as keyof typeof ACTION_PROMOTION_DISPOSITIONS_V1] ?? null;
+}
+
+function actionPromotionRngSemanticsHashV1(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return rejectActionPromotionV1("descriptor-mismatch", "$.catalog.rngSemantics", "exact RNG semantics object", value);
+  }
+  const semantics = value as Record<string, unknown>;
+  const expected = RUST_BLOCK_ACTION_RNG_SEMANTICS_V2;
+  for (const key of Object.keys(expected) as (keyof typeof expected)[]) {
+    if (semantics[key] !== expected[key]) {
+      return rejectActionPromotionV1("descriptor-mismatch", `$.catalog.rngSemantics.${key}`, String(expected[key]), semantics[key]);
+    }
+  }
+  if (Object.keys(semantics).sort().join("\u0000") !== Object.keys(expected).sort().join("\u0000")) {
+    return rejectActionPromotionV1(
+      "descriptor-mismatch",
+      "$.catalog.rngSemantics",
+      "exact RNG semantic fields",
+      Object.keys(semantics).sort().join(","),
+    );
+  }
+  const writer = new CanonicalHashWriter("blockwild.gameplay.block-action-rng-semantics.v1");
+  writer.writeString(RUST_ACTION_PROMOTION_RNG_SEMANTICS_VERSION_ID_V1);
+  writer.writeString(expected.algorithm);
+  writer.writeString(expected.seedDerivation);
+  writer.writeString(expected.stream);
+  writer.writeString(expected.unit);
+  writer.writeString(expected.ordering);
+  writer.writeString(expected.randomDropGate);
+  writer.writeString(expected.exclusiveSelection);
+  writer.writeU64(BigInt(expected.plantYieldClampMaximumMillionths));
+  return writer.finish();
+}
+
+function actionPromotionScopeTagV1(scope: RustActionPromotionBlockerScopeV1) { return scope === "global" ? 0 : 1; }
+function actionPromotionDispositionTagV1(disposition: RustActionPromotionDispositionV1) {
+  return disposition === "implementation-gap" ? 0 : disposition === "content-unresolved" ? 1
+    : disposition === "runtime-context" ? 2 : 3;
+}
+function actionPromotionSupportTagV1(support: RustActionPromotionSupportLevelV1) {
+  return support === "legacy-unproven" ? 0 : support === "declared-blocked" ? 1 : 2;
+}
+
+export function canonicalRustActionPromotionReportHashV1(report: Omit<RustActionPromotionReportV1, "reportHash">) {
+  const writer = new CanonicalHashWriter("blockwild.gameplay.action-promotion-report.v1");
+  writer.writeU16(report.schemaVersion);
+  writer.writeBytes(hexToBytes(report.manifestHash));
+  if (report.installedRegistryHash === null) writer.writeU16(0);
+  else { writer.writeU16(1); writer.writeBytes(hexToBytes(report.installedRegistryHash)); }
+  writer.writeU16(report.blockActionCatalogSchemaVersion);
+  writer.writeU32(report.blockActionCatalogContentVersion);
+  writer.writeBytes(hexToBytes(report.blockActionCatalogBlobHash));
+  if (report.rngSemanticsVersionId === null || report.rngSemanticsHash === null) writer.writeU16(0);
+  else {
+    writer.writeU16(1);
+    writer.writeString(report.rngSemanticsVersionId);
+    writer.writeBytes(hexToBytes(report.rngSemanticsHash));
+  }
+  writer.writeString(report.runtimeSemanticFeatureId);
+  writer.writeU16(actionPromotionSupportTagV1(report.supportLevel));
+  writer.writeU64(BigInt(report.blockers.length));
+  for (const blocker of report.blockers) {
+    writer.writeU16(actionPromotionScopeTagV1(blocker.scope));
+    writer.writeString(blocker.blockerId);
+    writer.writeU16(actionPromotionDispositionTagV1(blocker.disposition));
+    writer.writeU32(blocker.affectedBlockCount);
+    writer.writeU64(BigInt(blocker.affectedBlockIds.length));
+    for (const blockId of blocker.affectedBlockIds) writer.writeU16(blockId);
+  }
+  return writer.finish();
+}
+
+function validateActionPromotionHashV1(value: unknown, path: string, errors: RustActionPromotionReportErrorV1[]) {
+  if (typeof value !== "string" || !/^[0-9a-f]{32}$/u.test(value)) {
+    errors.push(actionPromotionErrorV1("descriptor-mismatch", path, "32 lowercase hexadecimal digits", String(value)));
+  }
+}
+
+export function validateRustActionPromotionReportV1(report: RustActionPromotionReportV1) {
+  const errors: RustActionPromotionReportErrorV1[] = [];
+  if (report.schemaVersion !== RUST_ACTION_PROMOTION_REPORT_SCHEMA_V1) {
+    errors.push(actionPromotionErrorV1("unsupported-schema", "$.schemaVersion", "1", String(report.schemaVersion)));
+  }
+  validateActionPromotionHashV1(report.manifestHash, "$.manifestHash", errors);
+  if (report.installedRegistryHash !== null) validateActionPromotionHashV1(report.installedRegistryHash, "$.installedRegistryHash", errors);
+  validateActionPromotionHashV1(report.blockActionCatalogBlobHash, "$.blockActionCatalogBlobHash", errors);
+  if (report.rngSemanticsHash !== null) validateActionPromotionHashV1(report.rngSemanticsHash, "$.rngSemanticsHash", errors);
+  validateActionPromotionHashV1(report.reportHash, "$.reportHash", errors);
+  if (report.runtimeSemanticFeatureId !== RUST_ACTION_PROMOTION_RUNTIME_SEMANTIC_FEATURE_ID_V1) {
+    errors.push(actionPromotionErrorV1(
+      "descriptor-mismatch", "$.runtimeSemanticFeatureId", RUST_ACTION_PROMOTION_RUNTIME_SEMANTIC_FEATURE_ID_V1,
+      report.runtimeSemanticFeatureId,
+    ));
+  }
+  if (report.blockers.length > MAX_RUST_ACTION_PROMOTION_BLOCKER_RECORDS_V1) {
+    errors.push(actionPromotionErrorV1(
+      "capacity", "$.blockers", String(MAX_RUST_ACTION_PROMOTION_BLOCKER_RECORDS_V1), String(report.blockers.length),
+    ));
+  }
+  let previousKey: string | null = null;
+  let totalAffected = 0;
+  for (const [index, blocker] of report.blockers.entries()) {
+    const path = `$.blockers[${index}]`;
+    const scopeTag = blocker.scope === "global" ? "0" : blocker.scope === "profile" ? "1" : "?";
+    if (scopeTag === "?") errors.push(actionPromotionErrorV1("descriptor-mismatch", `${path}.scope`, "global or profile", String(blocker.scope)));
+    const key = `${scopeTag}\u0000${blocker.blockerId}`;
+    if (previousKey !== null && previousKey >= key) {
+      errors.push(actionPromotionErrorV1("ordering", `${path}.blockerId`, "strict scope then blocker-id order", blocker.blockerId));
+    }
+    previousKey = key;
+    const disposition = actionPromotionDispositionV1(blocker.blockerId);
+    if (disposition === null) {
+      errors.push(actionPromotionErrorV1("unknown-blocker", `${path}.blockerId`, "registered blocker id", blocker.blockerId));
+    } else if (disposition !== blocker.disposition) {
+      errors.push(actionPromotionErrorV1("classification", `${path}.disposition`, disposition, blocker.disposition));
+    }
+    if (blocker.affectedBlockIds.length < 1 || blocker.affectedBlockIds.length > MAX_RUST_ACTION_PROMOTION_AFFECTED_BLOCK_IDS_V1) {
+      errors.push(actionPromotionErrorV1(
+        "capacity", `${path}.affectedBlockIds`, `1..=${MAX_RUST_ACTION_PROMOTION_AFFECTED_BLOCK_IDS_V1}`,
+        String(blocker.affectedBlockIds.length),
+      ));
+    }
+    if (blocker.affectedBlockCount !== blocker.affectedBlockIds.length) {
+      errors.push(actionPromotionErrorV1(
+        "descriptor-mismatch", `${path}.affectedBlockCount`, String(blocker.affectedBlockIds.length),
+        String(blocker.affectedBlockCount),
+      ));
+    }
+    for (const [affectedIndex, blockId] of blocker.affectedBlockIds.entries()) {
+      if (!Number.isInteger(blockId) || blockId < 0 || blockId > 0xffff) {
+        errors.push(actionPromotionErrorV1("descriptor-mismatch", `${path}.affectedBlockIds[${affectedIndex}]`, "u16", String(blockId)));
+      }
+      if (affectedIndex && blocker.affectedBlockIds[affectedIndex - 1] >= blockId) {
+        errors.push(actionPromotionErrorV1("ordering", `${path}.affectedBlockIds`, "strict ascending unique block ids", String(blockId)));
+      }
+    }
+    totalAffected += blocker.affectedBlockIds.length;
+  }
+  if (totalAffected > MAX_RUST_ACTION_PROMOTION_TOTAL_AFFECTED_BLOCK_IDS_V1) {
+    errors.push(actionPromotionErrorV1(
+      "capacity", "$.blockers[*].affectedBlockIds", String(MAX_RUST_ACTION_PROMOTION_TOTAL_AFFECTED_BLOCK_IDS_V1),
+      String(totalAffected),
+    ));
+  }
+  const rngExact = report.rngSemanticsVersionId === RUST_ACTION_PROMOTION_RNG_SEMANTICS_VERSION_ID_V1
+    && report.rngSemanticsHash !== null;
+  if (report.blockActionCatalogSchemaVersion === 1) {
+    const legacy = report.blockers[0];
+    if (report.supportLevel !== "legacy-unproven" || report.rngSemanticsVersionId !== null || report.rngSemanticsHash !== null
+      || report.blockers.length !== 1 || legacy?.scope !== "global"
+      || legacy?.blockerId !== "legacy-block-action-catalog-schema-unproven") {
+      errors.push(actionPromotionErrorV1(
+        "descriptor-mismatch", "$.supportLevel", "legacy-unproven with one legacy schema blocker and no RNG proof",
+        report.supportLevel,
+      ));
+    }
+  } else if (report.blockActionCatalogSchemaVersion === 2) {
+    const expected = report.blockers.length ? "declared-blocked" : "declared-ready";
+    if (report.blockers.some((blocker) => blocker.blockerId === "legacy-block-action-catalog-schema-unproven")) {
+      errors.push(actionPromotionErrorV1(
+        "descriptor-mismatch", "$.blockers", "schema-2 blocker evidence without the legacy-schema sentinel",
+        "legacy-block-action-catalog-schema-unproven",
+      ));
+    }
+    if (report.supportLevel !== expected || !rngExact) {
+      errors.push(actionPromotionErrorV1(
+        "descriptor-mismatch", "$.supportLevel/rngSemantics", `${expected} with exact V1 RNG proof`, report.supportLevel,
+      ));
+    }
+  } else {
+    errors.push(actionPromotionErrorV1(
+      "unsupported-schema", "$.blockActionCatalogSchemaVersion", "1 or 2", String(report.blockActionCatalogSchemaVersion),
+    ));
+  }
+  if (!Number.isInteger(report.blockActionCatalogContentVersion)
+    || report.blockActionCatalogContentVersion < 0 || report.blockActionCatalogContentVersion > 0xffff_ffff) {
+    errors.push(actionPromotionErrorV1(
+      "descriptor-mismatch", "$.blockActionCatalogContentVersion", "u32", String(report.blockActionCatalogContentVersion),
+    ));
+  }
+  if (!errors.some((error) => error.path.endsWith("Hash") || error.path === "$.manifestHash")) {
+    try {
+      const expectedHash = canonicalRustActionPromotionReportHashV1(report);
+      if (report.reportHash !== expectedHash) {
+        errors.push(actionPromotionErrorV1("hash-mismatch", "$.reportHash", expectedHash, report.reportHash));
+      }
+    } catch (error) {
+      errors.push(actionPromotionErrorV1("descriptor-mismatch", "$.reportHash", "canonical hashable report", String(error)));
+    }
+  }
+  return Object.freeze(errors);
+}
+
+function validateCatalogBlockerIdsV1(value: unknown, path: string, required: boolean) {
+  if (value === undefined && !required) return [] as string[];
+  if (!Array.isArray(value) || value.length > 32) {
+    return rejectActionPromotionV1("capacity", path, "sorted blocker array with at most 32 entries", value);
+  }
+  const result: string[] = [];
+  for (const [index, entry] of value.entries()) {
+    if (typeof entry !== "string" || entry === "legacy-block-action-catalog-schema-unproven"
+      || actionPromotionDispositionV1(entry) === null) {
+      return rejectActionPromotionV1("unknown-blocker", `${path}[${index}]`, "registered catalog blocker id", entry);
+    }
+    if (index && result[index - 1] >= entry) {
+      return rejectActionPromotionV1("ordering", `${path}[${index}]`, "strict ascending unique blocker ids", entry);
+    }
+    result.push(entry);
+  }
+  return result;
+}
+
+function exactManifestHashV1(manifest: RustProductionContentManifest) {
+  const writer = new CanonicalHashWriter("blockwild.gameplay.content-manifest.v1");
+  writer.writeU16(manifest.schemaVersion);
+  writer.writeString(manifest.sourceRevision);
+  writer.writeU64(BigInt(RUST_CONTENT_DOMAINS.length));
+  for (const domain of RUST_CONTENT_DOMAINS) {
+    const digest = manifest.domains[domain];
+    writer.writeString(domain);
+    writer.writeU32(digest.count);
+    writer.writeBytes(hexToBytes(digest.hash));
+  }
+  return writer.finish();
+}
+
+export function createRustActionPromotionReportV1(
+  bundle: RustProductionContentBundle,
+  installedRegistryHash: string | null = null,
+): RustActionPromotionReportV1 {
+  if (!bundle.manifest || bundle.blockers.length) {
+    return rejectActionPromotionV1("descriptor-mismatch", "$.manifest", "compiled content manifest without blockers", "absent or blocked");
+  }
+  if (exactManifestHashV1(bundle.manifest) !== bundle.manifest.manifestHash) {
+    return rejectActionPromotionV1("hash-mismatch", "$.manifestHash", exactManifestHashV1(bundle.manifest), bundle.manifest.manifestHash);
+  }
+  if (installedRegistryHash !== null && !/^[0-9a-f]{32}$/u.test(installedRegistryHash)) {
+    return rejectActionPromotionV1("descriptor-mismatch", "$.installedRegistryHash", "32 lowercase hexadecimal digits or null", installedRegistryHash);
+  }
+  const matching = bundle.artifacts.filter((artifact) => artifact.domain === "item" && artifact.id === RUST_BLOCK_ACTION_CATALOG_ID);
+  if (matching.length !== 1) {
+    return rejectActionPromotionV1("descriptor-mismatch", "$.catalog", "one installed block-action catalog", matching.length);
+  }
+  const artifact = matching[0];
+  if (artifact.schemaId !== "block-action-catalog" || (artifact.schemaVersion !== 1 && artifact.schemaVersion !== 2)) {
+    return rejectActionPromotionV1(
+      "unsupported-schema", "$.catalog.schema", "block-action-catalog@1 or block-action-catalog@2",
+      `${artifact.schemaId}@${artifact.schemaVersion}`,
+    );
+  }
+  const computedBlobHash = canonicalRustMetadataHash({
+    domain: artifact.domain, id: artifact.id, schemaId: artifact.schemaId, schemaVersion: artifact.schemaVersion,
+    contentVersion: artifact.contentVersion, aliases: artifact.aliases, canonicalBytes: artifact.canonicalBytes,
+    unknownExtensionBytes: artifact.unknownExtensionBytes,
+  });
+  if (computedBlobHash !== artifact.blobHash) {
+    return rejectActionPromotionV1("hash-mismatch", "$.catalog.blobHash", computedBlobHash, artifact.blobHash);
+  }
+  const manifestEntry = bundle.manifest.entries.find((entry) => entry.domain === "item" && entry.id === RUST_BLOCK_ACTION_CATALOG_ID);
+  if (!manifestEntry || manifestEntry.blobHash !== artifact.blobHash
+    || manifestEntry.byteLength !== artifact.canonicalBytes.byteLength + artifact.unknownExtensionBytes.byteLength) {
+    return rejectActionPromotionV1("descriptor-mismatch", "$.manifest.entries.block-actions", "exact catalog descriptor", manifestEntry?.blobHash);
+  }
+  let decoded: unknown;
+  try { decoded = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(artifact.canonicalBytes)); }
+  catch (error) { return rejectActionPromotionV1("descriptor-mismatch", "$.catalog.canonicalBytes", "canonical JSON", error); }
+  if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) {
+    return rejectActionPromotionV1("descriptor-mismatch", "$.catalog", "catalog object", decoded);
+  }
+  const catalog = decoded as ActionPromotionCatalogV1;
+  if (catalog.schema !== artifact.schemaVersion || !Array.isArray(catalog.profiles)
+    || catalog.profiles.length < 1 || catalog.profiles.length > MAX_RUST_ACTION_PROMOTION_AFFECTED_BLOCK_IDS_V1) {
+    return rejectActionPromotionV1("descriptor-mismatch", "$.catalog.schema/profiles", "matching schema and 1..4096 profiles", catalog.schema);
+  }
+  const profileRows = catalog.profiles.map((profile, index) => {
+    if (!profile || typeof profile !== "object" || Array.isArray(profile)) {
+      return rejectActionPromotionV1("descriptor-mismatch", `$.catalog.profiles[${index}]`, "profile object", profile);
+    }
+    const row = profile as Record<string, unknown>;
+    if (!Number.isInteger(row.id) || (row.id as number) < 0 || (row.id as number) > 0xffff) {
+      return rejectActionPromotionV1("descriptor-mismatch", `$.catalog.profiles[${index}].id`, "u16", row.id);
+    }
+    return { id: row.id as number, blockers: validateCatalogBlockerIdsV1(row.authorityBlockers, `$.catalog.profiles[${index}].authorityBlockers`, false) };
+  }).sort((left, right) => left.id - right.id);
+  if (profileRows.some((row, index) => index > 0 && profileRows[index - 1].id === row.id)) {
+    return rejectActionPromotionV1("ordering", "$.catalog.profiles[*].id", "unique block ids", "duplicate");
+  }
+  const allBlockIds = Object.freeze(profileRows.map((row) => row.id));
+  const records: RustActionPromotionBlockerRecordV1[] = [];
+  let rngSemanticsVersionId: string | null = null;
+  let rngSemanticsHash: string | null = null;
+  if (artifact.schemaVersion === 1) {
+    records.push(Object.freeze({
+      scope: "global", blockerId: "legacy-block-action-catalog-schema-unproven", disposition: "content-unresolved",
+      affectedBlockIds: allBlockIds, affectedBlockCount: allBlockIds.length,
+    }));
+  } else {
+    const globalBlockers = validateCatalogBlockerIdsV1(catalog.authorityBlockers, "$.catalog.authorityBlockers", true);
+    for (const blockerId of globalBlockers) records.push(Object.freeze({
+      scope: "global", blockerId, disposition: actionPromotionDispositionV1(blockerId)!,
+      affectedBlockIds: allBlockIds, affectedBlockCount: allBlockIds.length,
+    }));
+    const affectedByProfile = new Map<string, number[]>();
+    for (const profile of profileRows) for (const blockerId of profile.blockers) {
+      const affected = affectedByProfile.get(blockerId) ?? [];
+      affected.push(profile.id);
+      affectedByProfile.set(blockerId, affected);
+    }
+    for (const [blockerId, affectedBlockIds] of [...affectedByProfile]
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)) {
+      records.push(Object.freeze({
+        scope: "profile", blockerId, disposition: actionPromotionDispositionV1(blockerId)!,
+        affectedBlockIds: Object.freeze(affectedBlockIds), affectedBlockCount: affectedBlockIds.length,
+      }));
+    }
+    rngSemanticsVersionId = RUST_ACTION_PROMOTION_RNG_SEMANTICS_VERSION_ID_V1;
+    rngSemanticsHash = actionPromotionRngSemanticsHashV1(catalog.rngSemantics);
+  }
+  const supportLevel: RustActionPromotionSupportLevelV1 = artifact.schemaVersion === 1 ? "legacy-unproven"
+    : records.length ? "declared-blocked" : "declared-ready";
+  const withoutHash = Object.freeze({
+    schemaVersion: RUST_ACTION_PROMOTION_REPORT_SCHEMA_V1,
+    manifestHash: bundle.manifest.manifestHash,
+    installedRegistryHash,
+    blockActionCatalogSchemaVersion: artifact.schemaVersion,
+    blockActionCatalogContentVersion: artifact.contentVersion,
+    blockActionCatalogBlobHash: artifact.blobHash,
+    rngSemanticsVersionId,
+    rngSemanticsHash,
+    runtimeSemanticFeatureId: RUST_ACTION_PROMOTION_RUNTIME_SEMANTIC_FEATURE_ID_V1,
+    supportLevel,
+    blockers: Object.freeze(records),
+  });
+  const report = Object.freeze({ ...withoutHash, reportHash: canonicalRustActionPromotionReportHashV1(withoutHash) });
+  const errors = validateRustActionPromotionReportV1(report);
+  if (errors.length) throw new RustActionPromotionReportCompilationErrorV1(errors);
+  return report;
+}
 
 export function blockwildProductionContentSources(): readonly RustContentSourceEntry[] {
   const entries: RustContentSourceEntry[] = [];

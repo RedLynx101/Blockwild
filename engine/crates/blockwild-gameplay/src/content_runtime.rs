@@ -18,6 +18,12 @@ pub const MAX_BLOCK_LOOT_THRESHOLD_BONUSES: usize = 16;
 pub const MAX_BLOCK_PLANTING_RULES: usize = 512;
 pub const MAX_BLOCK_ACTION_INTENTS: usize = 32;
 pub const MAX_BLOCK_AUTHORITY_BLOCKERS: usize = 32;
+pub const ACTION_PROMOTION_REPORT_SCHEMA_VERSION_V1: u16 = 1;
+pub const ACTION_PROMOTION_RUNTIME_SEMANTIC_FEATURE_ID_V1: &str = "block-action-runtime-semantics-v1";
+pub const ACTION_PROMOTION_RNG_SEMANTICS_VERSION_ID_V1: &str = "block-action-rng-semantics-v1";
+pub const MAX_ACTION_PROMOTION_BLOCKER_RECORDS_V1: usize = 64;
+pub const MAX_ACTION_PROMOTION_AFFECTED_BLOCK_IDS_V1: usize = MAX_BLOCK_ACTION_PROFILES;
+pub const MAX_ACTION_PROMOTION_TOTAL_AFFECTED_BLOCK_IDS_V1: usize = 65_536;
 pub const MAX_RENDER_PRESENTATION_PROFILES: usize = 4_096;
 pub const MAX_MISSING_RENDER_PRESENTATION_PROFILES: usize = 4_096;
 pub const MAX_RENDER_PRESENTATION_REFS: usize = 4_096;
@@ -666,6 +672,74 @@ pub struct ContentBlockActionCatalogRecord {
     pub profiles: BTreeMap<u16, ContentBlockActionProfile>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentActionPromotionBlockerScopeV1 {
+    Global,
+    Profile,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentActionPromotionDispositionV1 {
+    ImplementationGap,
+    ContentUnresolved,
+    RuntimeContext,
+    Transient,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentActionPromotionSupportLevelV1 {
+    LegacyUnproven,
+    DeclaredBlocked,
+    DeclaredReady,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentActionPromotionBlockerRecordV1 {
+    pub scope: ContentActionPromotionBlockerScopeV1,
+    pub blocker_id: String,
+    pub disposition: ContentActionPromotionDispositionV1,
+    pub affected_block_ids: Vec<u16>,
+    pub affected_block_count: u32,
+}
+
+/// Immutable, content-bound evidence about whether the installed block-action
+/// catalog still declares authority work. This is a support declaration, not
+/// a live runtime capability or a promotion decision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentActionPromotionReportV1 {
+    pub schema_version: u16,
+    pub manifest_hash: CanonicalHash,
+    pub installed_registry_hash: Option<CanonicalHash>,
+    pub block_action_catalog_schema_version: u16,
+    pub block_action_catalog_content_version: u32,
+    pub block_action_catalog_blob_hash: CanonicalHash,
+    pub rng_semantics_version_id: Option<String>,
+    pub rng_semantics_hash: Option<CanonicalHash>,
+    pub runtime_semantic_feature_id: String,
+    pub support_level: ContentActionPromotionSupportLevelV1,
+    pub blockers: Vec<ContentActionPromotionBlockerRecordV1>,
+    pub report_hash: CanonicalHash,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentActionPromotionReportErrorCodeV1 {
+    UnsupportedSchema,
+    UnknownBlocker,
+    Classification,
+    Capacity,
+    Ordering,
+    DescriptorMismatch,
+    HashMismatch,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentActionPromotionReportErrorV1 {
+    pub code: ContentActionPromotionReportErrorCodeV1,
+    pub path: String,
+    pub expected: String,
+    pub actual: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContentItemRecord {
     pub core: ContentRecordCore,
@@ -1079,6 +1153,439 @@ impl ContentRuntimeRegistry {
         }
         ContentRenderPresentationBinding::Unmapped
     }
+
+    /// Derives immutable action-promotion evidence from the exact installed
+    /// content registry. Absence means that this (typically legacy) manifest
+    /// did not install a block-action catalog at all.
+    pub fn action_promotion_report_v1(
+        &self,
+    ) -> Result<Option<ContentActionPromotionReportV1>, Vec<ContentActionPromotionReportErrorV1>> {
+        let Some(catalog) = self.block_action_catalogs.get(BLOCK_ACTION_CATALOG_ID) else {
+            return Ok(None);
+        };
+        build_action_promotion_report_v1(self.manifest_hash, Some(self.registry_hash), catalog).map(Some)
+    }
+}
+
+fn action_promotion_error(
+    code: ContentActionPromotionReportErrorCodeV1,
+    path: impl Into<String>,
+    expected: impl Into<String>,
+    actual: impl Into<String>,
+) -> ContentActionPromotionReportErrorV1 {
+    ContentActionPromotionReportErrorV1 {
+        code,
+        path: path.into(),
+        expected: expected.into(),
+        actual: actual.into(),
+    }
+}
+
+fn action_promotion_disposition_v1(blocker_id: &str) -> Option<ContentActionPromotionDispositionV1> {
+    match blocker_id {
+        "dynamic-session-dispatch-runtime" | "legacy-computed-loot-source-runtime" => {
+            Some(ContentActionPromotionDispositionV1::ImplementationGap)
+        }
+        "legacy-block-action-catalog-schema-unproven" | "legacy-loot-item-reference-unresolved" => {
+            Some(ContentActionPromotionDispositionV1::ContentUnresolved)
+        }
+        "authoritative-rng-context-unbound"
+        | "column-world-state-runtime"
+        | "dynamic-block-state-runtime"
+        | "game-mode-host-custody-runtime"
+        | "liquid-source-state-runtime"
+        | "network-topology-state-runtime"
+        | "paired-world-state-runtime"
+        | "player-luck-context-runtime"
+        | "rooted-tree-discovery-runtime"
+        | "world-support-collision-runtime" => Some(ContentActionPromotionDispositionV1::RuntimeContext),
+        _ => None,
+    }
+}
+
+fn action_promotion_catalog_schema_v1(
+    catalog: &ContentBlockActionCatalogRecord,
+) -> Result<u16, Vec<ContentActionPromotionReportErrorV1>> {
+    match catalog.core.schema {
+        ContentSchema::BlockActionCatalog => Ok(1),
+        ContentSchema::BlockActionCatalogV2 => Ok(2),
+        schema => Err(vec![action_promotion_error(
+            ContentActionPromotionReportErrorCodeV1::UnsupportedSchema,
+            "$.blockActionCatalogSchemaVersion",
+            "block-action-catalog@1 or block-action-catalog@2",
+            schema.as_id(),
+        )]),
+    }
+}
+
+fn action_promotion_rng_semantics_hash_v1(semantics: &ContentBlockActionRngSemantics) -> CanonicalHash {
+    let mut hasher = CanonicalHasher::new("blockwild.gameplay.block-action-rng-semantics.v1");
+    hasher.write_str(ACTION_PROMOTION_RNG_SEMANTICS_VERSION_ID_V1);
+    hasher.write_str(&semantics.algorithm);
+    hasher.write_str(&semantics.seed_derivation);
+    hasher.write_str(&semantics.stream);
+    hasher.write_str(&semantics.unit);
+    hasher.write_str(&semantics.ordering);
+    hasher.write_str(&semantics.random_drop_gate);
+    hasher.write_str(&semantics.exclusive_selection);
+    hasher.write_u64(semantics.plant_yield_clamp_maximum_millionths);
+    hasher.finish()
+}
+
+fn action_promotion_scope_tag_v1(scope: ContentActionPromotionBlockerScopeV1) -> u16 {
+    match scope {
+        ContentActionPromotionBlockerScopeV1::Global => 0,
+        ContentActionPromotionBlockerScopeV1::Profile => 1,
+    }
+}
+
+fn action_promotion_disposition_tag_v1(disposition: ContentActionPromotionDispositionV1) -> u16 {
+    match disposition {
+        ContentActionPromotionDispositionV1::ImplementationGap => 0,
+        ContentActionPromotionDispositionV1::ContentUnresolved => 1,
+        ContentActionPromotionDispositionV1::RuntimeContext => 2,
+        ContentActionPromotionDispositionV1::Transient => 3,
+    }
+}
+
+fn action_promotion_support_tag_v1(support: ContentActionPromotionSupportLevelV1) -> u16 {
+    match support {
+        ContentActionPromotionSupportLevelV1::LegacyUnproven => 0,
+        ContentActionPromotionSupportLevelV1::DeclaredBlocked => 1,
+        ContentActionPromotionSupportLevelV1::DeclaredReady => 2,
+    }
+}
+
+#[must_use]
+pub fn canonical_action_promotion_report_hash_v1(report: &ContentActionPromotionReportV1) -> CanonicalHash {
+    let mut hasher = CanonicalHasher::new("blockwild.gameplay.action-promotion-report.v1");
+    hasher.write_u16(report.schema_version);
+    hasher.write_bytes(report.manifest_hash.as_bytes());
+    match report.installed_registry_hash {
+        Some(hash) => {
+            hasher.write_u16(1);
+            hasher.write_bytes(hash.as_bytes());
+        }
+        None => hasher.write_u16(0),
+    }
+    hasher.write_u16(report.block_action_catalog_schema_version);
+    hasher.write_u32(report.block_action_catalog_content_version);
+    hasher.write_bytes(report.block_action_catalog_blob_hash.as_bytes());
+    match (&report.rng_semantics_version_id, report.rng_semantics_hash) {
+        (Some(version), Some(hash)) => {
+            hasher.write_u16(1);
+            hasher.write_str(version);
+            hasher.write_bytes(hash.as_bytes());
+        }
+        _ => hasher.write_u16(0),
+    }
+    hasher.write_str(&report.runtime_semantic_feature_id);
+    hasher.write_u16(action_promotion_support_tag_v1(report.support_level));
+    hasher.write_u64(report.blockers.len() as u64);
+    for blocker in &report.blockers {
+        hasher.write_u16(action_promotion_scope_tag_v1(blocker.scope));
+        hasher.write_str(&blocker.blocker_id);
+        hasher.write_u16(action_promotion_disposition_tag_v1(blocker.disposition));
+        hasher.write_u32(blocker.affected_block_count);
+        hasher.write_u64(blocker.affected_block_ids.len() as u64);
+        for block_id in &blocker.affected_block_ids {
+            hasher.write_u16(*block_id);
+        }
+    }
+    hasher.finish()
+}
+
+fn validate_action_promotion_catalog_blockers_v1(
+    path: &str,
+    blockers: &[String],
+    errors: &mut Vec<ContentActionPromotionReportErrorV1>,
+) {
+    let mut previous: Option<&str> = None;
+    for (index, blocker) in blockers.iter().enumerate() {
+        if action_promotion_disposition_v1(blocker).is_none()
+            || blocker == "legacy-block-action-catalog-schema-unproven"
+        {
+            errors.push(action_promotion_error(
+                ContentActionPromotionReportErrorCodeV1::UnknownBlocker,
+                format!("{path}[{index}]"),
+                "registered block-action authority blocker",
+                blocker,
+            ));
+        }
+        if previous.is_some_and(|value| value >= blocker) {
+            errors.push(action_promotion_error(
+                ContentActionPromotionReportErrorCodeV1::Ordering,
+                format!("{path}[{index}]"),
+                "strict ascending unique blocker ids",
+                blocker,
+            ));
+        }
+        previous = Some(blocker);
+    }
+}
+
+fn build_action_promotion_report_v1(
+    manifest_hash: CanonicalHash,
+    installed_registry_hash: Option<CanonicalHash>,
+    catalog: &ContentBlockActionCatalogRecord,
+) -> Result<ContentActionPromotionReportV1, Vec<ContentActionPromotionReportErrorV1>> {
+    let catalog_schema = action_promotion_catalog_schema_v1(catalog)?;
+    let all_block_ids = catalog.profiles.keys().copied().collect::<Vec<_>>();
+    let mut errors = Vec::new();
+    let mut records = Vec::new();
+    let (rng_semantics_version_id, rng_semantics_hash) = if catalog_schema == 1 {
+        records.push(ContentActionPromotionBlockerRecordV1 {
+            scope: ContentActionPromotionBlockerScopeV1::Global,
+            blocker_id: "legacy-block-action-catalog-schema-unproven".to_owned(),
+            disposition: ContentActionPromotionDispositionV1::ContentUnresolved,
+            affected_block_ids: all_block_ids.clone(),
+            affected_block_count: all_block_ids.len() as u32,
+        });
+        (None, None)
+    } else {
+        validate_action_promotion_catalog_blockers_v1(
+            "$.catalog.authorityBlockers",
+            &catalog.authority_blockers,
+            &mut errors,
+        );
+        for blocker_id in &catalog.authority_blockers {
+            if let Some(disposition) = action_promotion_disposition_v1(blocker_id) {
+                records.push(ContentActionPromotionBlockerRecordV1 {
+                    scope: ContentActionPromotionBlockerScopeV1::Global,
+                    blocker_id: blocker_id.clone(),
+                    disposition,
+                    affected_block_ids: all_block_ids.clone(),
+                    affected_block_count: all_block_ids.len() as u32,
+                });
+            }
+        }
+        let mut profile_blockers = BTreeMap::<String, Vec<u16>>::new();
+        for (block_id, profile) in &catalog.profiles {
+            validate_action_promotion_catalog_blockers_v1(
+                &format!("$.catalog.profiles[{block_id}].authorityBlockers"),
+                &profile.authority_blockers,
+                &mut errors,
+            );
+            for blocker_id in &profile.authority_blockers {
+                if action_promotion_disposition_v1(blocker_id).is_some() {
+                    profile_blockers.entry(blocker_id.clone()).or_default().push(*block_id);
+                }
+            }
+        }
+        for (blocker_id, affected_block_ids) in profile_blockers {
+            let disposition =
+                action_promotion_disposition_v1(&blocker_id).expect("profile blocker was checked before aggregation");
+            records.push(ContentActionPromotionBlockerRecordV1 {
+                scope: ContentActionPromotionBlockerScopeV1::Profile,
+                blocker_id,
+                disposition,
+                affected_block_count: affected_block_ids.len() as u32,
+                affected_block_ids,
+            });
+        }
+        match &catalog.rng_semantics {
+            Some(semantics) => (
+                Some(ACTION_PROMOTION_RNG_SEMANTICS_VERSION_ID_V1.to_owned()),
+                Some(action_promotion_rng_semantics_hash_v1(semantics)),
+            ),
+            None => {
+                errors.push(action_promotion_error(
+                    ContentActionPromotionReportErrorCodeV1::DescriptorMismatch,
+                    "$.catalog.rngSemantics",
+                    "block-action RNG semantics for catalog schema 2",
+                    "absent",
+                ));
+                (None, None)
+            }
+        }
+    };
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    records.sort_by(|left, right| (left.scope, &left.blocker_id).cmp(&(right.scope, &right.blocker_id)));
+    let support_level = if catalog_schema == 1 {
+        ContentActionPromotionSupportLevelV1::LegacyUnproven
+    } else if records.is_empty() {
+        ContentActionPromotionSupportLevelV1::DeclaredReady
+    } else {
+        ContentActionPromotionSupportLevelV1::DeclaredBlocked
+    };
+    let mut report = ContentActionPromotionReportV1 {
+        schema_version: ACTION_PROMOTION_REPORT_SCHEMA_VERSION_V1,
+        manifest_hash,
+        installed_registry_hash,
+        block_action_catalog_schema_version: catalog_schema,
+        block_action_catalog_content_version: catalog.core.content_version,
+        block_action_catalog_blob_hash: catalog.core.blob_hash,
+        rng_semantics_version_id,
+        rng_semantics_hash,
+        runtime_semantic_feature_id: ACTION_PROMOTION_RUNTIME_SEMANTIC_FEATURE_ID_V1.to_owned(),
+        support_level,
+        blockers: records,
+        report_hash: CanonicalHash([0; 16]),
+    };
+    report.report_hash = canonical_action_promotion_report_hash_v1(&report);
+    validate_action_promotion_report_v1(&report)?;
+    Ok(report)
+}
+
+pub fn validate_action_promotion_report_v1(
+    report: &ContentActionPromotionReportV1,
+) -> Result<(), Vec<ContentActionPromotionReportErrorV1>> {
+    let mut errors = Vec::new();
+    if report.schema_version != ACTION_PROMOTION_REPORT_SCHEMA_VERSION_V1 {
+        errors.push(action_promotion_error(
+            ContentActionPromotionReportErrorCodeV1::UnsupportedSchema,
+            "$.schemaVersion",
+            ACTION_PROMOTION_REPORT_SCHEMA_VERSION_V1.to_string(),
+            report.schema_version.to_string(),
+        ));
+    }
+    if report.runtime_semantic_feature_id != ACTION_PROMOTION_RUNTIME_SEMANTIC_FEATURE_ID_V1 {
+        errors.push(action_promotion_error(
+            ContentActionPromotionReportErrorCodeV1::DescriptorMismatch,
+            "$.runtimeSemanticFeatureId",
+            ACTION_PROMOTION_RUNTIME_SEMANTIC_FEATURE_ID_V1,
+            &report.runtime_semantic_feature_id,
+        ));
+    }
+    if report.blockers.len() > MAX_ACTION_PROMOTION_BLOCKER_RECORDS_V1 {
+        errors.push(action_promotion_error(
+            ContentActionPromotionReportErrorCodeV1::Capacity,
+            "$.blockers",
+            MAX_ACTION_PROMOTION_BLOCKER_RECORDS_V1.to_string(),
+            report.blockers.len().to_string(),
+        ));
+    }
+    let mut previous: Option<(ContentActionPromotionBlockerScopeV1, &str)> = None;
+    let mut total_affected = 0_usize;
+    for (index, blocker) in report.blockers.iter().enumerate() {
+        let path = format!("$.blockers[{index}]");
+        let current = (blocker.scope, blocker.blocker_id.as_str());
+        if previous.is_some_and(|value| value >= current) {
+            errors.push(action_promotion_error(
+                ContentActionPromotionReportErrorCodeV1::Ordering,
+                format!("{path}.blockerId"),
+                "strict scope then blocker-id order",
+                &blocker.blocker_id,
+            ));
+        }
+        previous = Some(current);
+        let expected_disposition = action_promotion_disposition_v1(&blocker.blocker_id);
+        match expected_disposition {
+            None => errors.push(action_promotion_error(
+                ContentActionPromotionReportErrorCodeV1::UnknownBlocker,
+                format!("{path}.blockerId"),
+                "registered blocker id",
+                &blocker.blocker_id,
+            )),
+            Some(expected) if expected != blocker.disposition => errors.push(action_promotion_error(
+                ContentActionPromotionReportErrorCodeV1::Classification,
+                format!("{path}.disposition"),
+                format!("{expected:?}"),
+                format!("{:?}", blocker.disposition),
+            )),
+            Some(_) => {}
+        }
+        if blocker.affected_block_ids.is_empty()
+            || blocker.affected_block_ids.len() > MAX_ACTION_PROMOTION_AFFECTED_BLOCK_IDS_V1
+        {
+            errors.push(action_promotion_error(
+                ContentActionPromotionReportErrorCodeV1::Capacity,
+                format!("{path}.affectedBlockIds"),
+                format!("1..={MAX_ACTION_PROMOTION_AFFECTED_BLOCK_IDS_V1}"),
+                blocker.affected_block_ids.len().to_string(),
+            ));
+        }
+        if blocker.affected_block_count as usize != blocker.affected_block_ids.len() {
+            errors.push(action_promotion_error(
+                ContentActionPromotionReportErrorCodeV1::DescriptorMismatch,
+                format!("{path}.affectedBlockCount"),
+                blocker.affected_block_ids.len().to_string(),
+                blocker.affected_block_count.to_string(),
+            ));
+        }
+        if blocker.affected_block_ids.windows(2).any(|ids| ids[0] >= ids[1]) {
+            errors.push(action_promotion_error(
+                ContentActionPromotionReportErrorCodeV1::Ordering,
+                format!("{path}.affectedBlockIds"),
+                "strict ascending unique block ids",
+                "unordered or duplicate",
+            ));
+        }
+        total_affected = total_affected.saturating_add(blocker.affected_block_ids.len());
+    }
+    if total_affected > MAX_ACTION_PROMOTION_TOTAL_AFFECTED_BLOCK_IDS_V1 {
+        errors.push(action_promotion_error(
+            ContentActionPromotionReportErrorCodeV1::Capacity,
+            "$.blockers[*].affectedBlockIds",
+            MAX_ACTION_PROMOTION_TOTAL_AFFECTED_BLOCK_IDS_V1.to_string(),
+            total_affected.to_string(),
+        ));
+    }
+    let rng_is_exact = report.rng_semantics_version_id.as_deref() == Some(ACTION_PROMOTION_RNG_SEMANTICS_VERSION_ID_V1)
+        && report.rng_semantics_hash.is_some();
+    match report.block_action_catalog_schema_version {
+        1 => {
+            if report.support_level != ContentActionPromotionSupportLevelV1::LegacyUnproven
+                || report.rng_semantics_version_id.is_some()
+                || report.rng_semantics_hash.is_some()
+                || report.blockers.len() != 1
+                || report.blockers[0].scope != ContentActionPromotionBlockerScopeV1::Global
+                || report.blockers[0].blocker_id != "legacy-block-action-catalog-schema-unproven"
+            {
+                errors.push(action_promotion_error(
+                    ContentActionPromotionReportErrorCodeV1::DescriptorMismatch,
+                    "$.supportLevel",
+                    "legacy-unproven with one legacy schema blocker and no RNG proof",
+                    format!("{:?}", report.support_level),
+                ));
+            }
+        }
+        2 => {
+            let expected_support = if report.blockers.is_empty() {
+                ContentActionPromotionSupportLevelV1::DeclaredReady
+            } else {
+                ContentActionPromotionSupportLevelV1::DeclaredBlocked
+            };
+            if report
+                .blockers
+                .iter()
+                .any(|blocker| blocker.blocker_id == "legacy-block-action-catalog-schema-unproven")
+            {
+                errors.push(action_promotion_error(
+                    ContentActionPromotionReportErrorCodeV1::DescriptorMismatch,
+                    "$.blockers",
+                    "schema-2 blocker evidence without the legacy-schema sentinel",
+                    "legacy-block-action-catalog-schema-unproven",
+                ));
+            }
+            if report.support_level != expected_support || !rng_is_exact {
+                errors.push(action_promotion_error(
+                    ContentActionPromotionReportErrorCodeV1::DescriptorMismatch,
+                    "$.supportLevel/rngSemantics",
+                    format!("{expected_support:?} with exact V1 RNG proof"),
+                    format!("{:?}", report.support_level),
+                ));
+            }
+        }
+        version => errors.push(action_promotion_error(
+            ContentActionPromotionReportErrorCodeV1::UnsupportedSchema,
+            "$.blockActionCatalogSchemaVersion",
+            "1 or 2",
+            version.to_string(),
+        )),
+    }
+    let expected_hash = canonical_action_promotion_report_hash_v1(report);
+    if report.report_hash != expected_hash {
+        errors.push(action_promotion_error(
+            ContentActionPromotionReportErrorCodeV1::HashMismatch,
+            "$.reportHash",
+            expected_hash.to_hex(),
+            report.report_hash.to_hex(),
+        ));
+    }
+    if errors.is_empty() { Ok(()) } else { Err(errors) }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1092,6 +1599,7 @@ pub struct ContentRuntimeInstallReport {
     pub references: u32,
     pub domain_counts: BTreeMap<ContentDomain, u32>,
     pub completed_stages: Vec<ContentRuntimeStage>,
+    pub action_promotion_report: Option<ContentActionPromotionReportV1>,
 }
 
 #[derive(Clone, Debug)]
@@ -1660,6 +2168,37 @@ pub fn materialize_content_runtime(
         return Err(blockers);
     }
     registry.registry_hash = canonical_registry_hash(&registry);
+    let action_promotion_report = match registry.action_promotion_report_v1() {
+        Ok(report) => report,
+        Err(report_errors) => {
+            blockers.extend(report_errors.into_iter().map(|error| {
+                let code = match error.code {
+                    ContentActionPromotionReportErrorCodeV1::Capacity => ContentRuntimeBlockerCode::Capacity,
+                    ContentActionPromotionReportErrorCodeV1::UnsupportedSchema => {
+                        ContentRuntimeBlockerCode::UnsupportedSchema
+                    }
+                    ContentActionPromotionReportErrorCodeV1::UnknownBlocker
+                    | ContentActionPromotionReportErrorCodeV1::Classification => ContentRuntimeBlockerCode::InvalidEnum,
+                    ContentActionPromotionReportErrorCodeV1::Ordering
+                    | ContentActionPromotionReportErrorCodeV1::DescriptorMismatch
+                    | ContentActionPromotionReportErrorCodeV1::HashMismatch => {
+                        ContentRuntimeBlockerCode::DescriptorMismatch
+                    }
+                };
+                runtime_blocker(
+                    code,
+                    ContentRuntimeStage::Attestation,
+                    Some(ContentDomain::Item),
+                    Some(BLOCK_ACTION_CATALOG_ID.to_owned()),
+                    &format!("$.actionPromotionReport{}", error.path.trim_start_matches('$')),
+                    Some(error.expected),
+                    Some(error.actual),
+                )
+            }));
+            sort_blockers(&mut blockers);
+            return Err(blockers);
+        }
+    };
     let domain_counts = ALL_CONTENT_DOMAINS
         .into_iter()
         .map(|domain| {
@@ -1680,6 +2219,7 @@ pub fn materialize_content_runtime(
         references: u32::try_from(reference_count).expect("reference bound fits u32"),
         domain_counts,
         completed_stages: CONTENT_RUNTIME_STAGES.to_vec(),
+        action_promotion_report,
     };
     Ok((registry, report))
 }
@@ -7384,6 +7924,18 @@ mod tests {
         vec![place_item, plant_item, ranged_item, catalog]
     }
 
+    fn action_promotion_parity_fixture() -> Vec<ContentArtifact> {
+        let mut catalog = artifact(
+            ContentDomain::Item,
+            BLOCK_ACTION_CATALOG_ID,
+            "block-action-catalog",
+            2,
+            r#"{"authorityBlockers":["game-mode-host-custody-runtime"],"profiles":[{"authorityBlockers":["dynamic-block-state-runtime"],"breakProfile":{"contextualOverride":"none","durabilityCost":{"kind":"none"},"loot":{"mode":"none","rules":[],"selfDropMode":"absent","silkTouch":"not-authored"},"replacement":"blocked","wrongTool":"break-no-loot"},"hardness":0,"id":7,"placementIntent":"none","preferredTool":"hand","replaceable":true,"requiredTier":0,"solid":false,"topologyFlags":[]}],"rngSemantics":{"algorithm":"xorshift32","exclusiveSelection":"less-than-cumulative-v1","ordering":"stable-profile-rule-order-v1","plantYieldClampMaximumMillionths":999900,"randomDropGate":"less-than-or-equal-v1","seedDerivation":"blockwild-seed-stream-v1","stream":"block-action-loot-v1","unit":"u32-open-upper-v1"},"schema":2}"#,
+        );
+        catalog.unknown_extension_bytes = vec![0, 0x80, 0xff, 23];
+        vec![catalog]
+    }
+
     fn installed(artifacts: Vec<ContentArtifact>) -> (ProductionContentManifest, MetadataBlobStore) {
         let bundle = compile_content_bundle("content-runtime-fixture-v1", artifacts).expect("fixture compiles");
         let mut store = MetadataBlobStore::default();
@@ -7575,6 +8127,196 @@ mod tests {
         assert_eq!(
             exclusive.break_profile.as_ref().expect("break profile").loot.mode,
             ContentBlockLootMode::Exclusive
+        );
+    }
+
+    #[test]
+    fn action_promotion_report_is_content_bound_bounded_and_restore_stable() {
+        let (manifest, store) = installed(contextual_action_fixture());
+        let (registry, install) =
+            materialize_content_runtime(&manifest, &store).expect("contextual actions materialize");
+        let report = install.action_promotion_report.expect("action promotion evidence");
+        assert_eq!(report, registry.clone().action_promotion_report_v1().unwrap().unwrap());
+        assert_eq!(report.schema_version, ACTION_PROMOTION_REPORT_SCHEMA_VERSION_V1);
+        assert_eq!(report.manifest_hash, registry.manifest_hash);
+        assert_eq!(report.installed_registry_hash, Some(registry.registry_hash));
+        assert_eq!(report.block_action_catalog_schema_version, 2);
+        assert_eq!(report.block_action_catalog_content_version, 1);
+        assert_eq!(
+            report.rng_semantics_version_id.as_deref(),
+            Some(ACTION_PROMOTION_RNG_SEMANTICS_VERSION_ID_V1)
+        );
+        assert_eq!(
+            report.rng_semantics_hash.unwrap().to_hex(),
+            "e039b2a9d2b0b2edc83a4ff74517302e"
+        );
+        assert_eq!(
+            report.runtime_semantic_feature_id,
+            ACTION_PROMOTION_RUNTIME_SEMANTIC_FEATURE_ID_V1
+        );
+        assert_eq!(
+            report.support_level,
+            ContentActionPromotionSupportLevelV1::DeclaredBlocked
+        );
+        assert_eq!(report.blockers.len(), 7);
+        assert_eq!(
+            report
+                .blockers
+                .iter()
+                .map(|blocker| (
+                    blocker.scope,
+                    blocker.blocker_id.as_str(),
+                    blocker.affected_block_ids.clone()
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    ContentActionPromotionBlockerScopeV1::Global,
+                    "authoritative-rng-context-unbound",
+                    vec![0, 1, 2, 3]
+                ),
+                (
+                    ContentActionPromotionBlockerScopeV1::Global,
+                    "dynamic-session-dispatch-runtime",
+                    vec![0, 1, 2, 3]
+                ),
+                (
+                    ContentActionPromotionBlockerScopeV1::Global,
+                    "game-mode-host-custody-runtime",
+                    vec![0, 1, 2, 3]
+                ),
+                (
+                    ContentActionPromotionBlockerScopeV1::Global,
+                    "legacy-computed-loot-source-runtime",
+                    vec![0, 1, 2, 3]
+                ),
+                (
+                    ContentActionPromotionBlockerScopeV1::Global,
+                    "world-support-collision-runtime",
+                    vec![0, 1, 2, 3]
+                ),
+                (
+                    ContentActionPromotionBlockerScopeV1::Profile,
+                    "authoritative-rng-context-unbound",
+                    vec![1, 2, 3]
+                ),
+                (
+                    ContentActionPromotionBlockerScopeV1::Profile,
+                    "player-luck-context-runtime",
+                    vec![2]
+                ),
+            ]
+        );
+        assert!(report.blockers.iter().all(|blocker| {
+            blocker.affected_block_count as usize == blocker.affected_block_ids.len()
+                && blocker.affected_block_ids.windows(2).all(|pair| pair[0] < pair[1])
+        }));
+        validate_action_promotion_report_v1(&report).expect("generated report validates");
+        assert_eq!(report.report_hash, canonical_action_promotion_report_hash_v1(&report));
+    }
+
+    #[test]
+    fn action_promotion_report_has_cross_language_golden_identity() {
+        let bundle = compile_content_bundle("action-promotion-parity-v1", action_promotion_parity_fixture())
+            .expect("parity fixture compiles");
+        let mut store = MetadataBlobStore::default();
+        install_content_bundle(&bundle, &mut store).expect("parity fixture installs");
+        let (registry, install) =
+            materialize_content_runtime(&bundle.manifest, &store).expect("parity fixture materializes");
+        let report = install.action_promotion_report.expect("parity report");
+        assert_eq!(report.manifest_hash.to_hex(), "3e26111bfcca5ed430252027558e948f");
+        assert_eq!(registry.registry_hash.to_hex(), "da713b7cf4ec184d30df943291f63316");
+        assert_eq!(
+            report.block_action_catalog_blob_hash.to_hex(),
+            "983d3b5cbaeba844c84445bcc182830b"
+        );
+        assert_eq!(
+            report.rng_semantics_hash.unwrap().to_hex(),
+            "e039b2a9d2b0b2edc83a4ff74517302e"
+        );
+        assert_eq!(report.report_hash.to_hex(), "e998ec9b932d031f48aa569e603c5b70");
+        assert_eq!(report.blockers.len(), 2);
+        assert_eq!(report.blockers[0].affected_block_ids, [7]);
+        assert_eq!(report.blockers[1].affected_block_ids, [7]);
+    }
+
+    #[test]
+    fn legacy_action_catalog_is_explicitly_unproven() {
+        let (manifest, store) = installed(action_fixture());
+        let (registry, install) = materialize_content_runtime(&manifest, &store).expect("legacy actions materialize");
+        let report = install.action_promotion_report.expect("legacy report");
+        assert_eq!(report.block_action_catalog_schema_version, 1);
+        assert_eq!(
+            report.support_level,
+            ContentActionPromotionSupportLevelV1::LegacyUnproven
+        );
+        assert_eq!(report.rng_semantics_version_id, None);
+        assert_eq!(report.rng_semantics_hash, None);
+        assert_eq!(report.blockers.len(), 1);
+        assert_eq!(report.blockers[0].scope, ContentActionPromotionBlockerScopeV1::Global);
+        assert_eq!(
+            report.blockers[0].blocker_id,
+            "legacy-block-action-catalog-schema-unproven"
+        );
+        assert_eq!(report.blockers[0].affected_block_ids, [0, 1]);
+        assert_eq!(registry.action_promotion_report_v1().unwrap(), Some(report));
+    }
+
+    #[test]
+    fn action_promotion_report_validator_rejects_tamper_order_classification_and_capacity() {
+        let (manifest, store) = installed(contextual_action_fixture());
+        let (registry, _) = materialize_content_runtime(&manifest, &store).expect("contextual actions materialize");
+        let report = registry.action_promotion_report_v1().unwrap().unwrap();
+
+        let mut tampered = report.clone();
+        tampered.manifest_hash = CanonicalHash([9; 16]);
+        assert!(
+            validate_action_promotion_report_v1(&tampered)
+                .unwrap_err()
+                .iter()
+                .any(|error| { error.code == ContentActionPromotionReportErrorCodeV1::HashMismatch })
+        );
+
+        let mut unknown = report.clone();
+        unknown.blockers[0].blocker_id = "unknown-authority-gap".to_owned();
+        unknown.report_hash = canonical_action_promotion_report_hash_v1(&unknown);
+        assert!(
+            validate_action_promotion_report_v1(&unknown)
+                .unwrap_err()
+                .iter()
+                .any(|error| { error.code == ContentActionPromotionReportErrorCodeV1::UnknownBlocker })
+        );
+
+        let mut misclassified = report.clone();
+        misclassified.blockers[0].disposition = ContentActionPromotionDispositionV1::Transient;
+        misclassified.report_hash = canonical_action_promotion_report_hash_v1(&misclassified);
+        assert!(
+            validate_action_promotion_report_v1(&misclassified)
+                .unwrap_err()
+                .iter()
+                .any(|error| { error.code == ContentActionPromotionReportErrorCodeV1::Classification })
+        );
+
+        let mut unordered = report.clone();
+        unordered.blockers.swap(0, 1);
+        unordered.report_hash = canonical_action_promotion_report_hash_v1(&unordered);
+        assert!(
+            validate_action_promotion_report_v1(&unordered)
+                .unwrap_err()
+                .iter()
+                .any(|error| { error.code == ContentActionPromotionReportErrorCodeV1::Ordering })
+        );
+
+        let mut over_capacity = report;
+        over_capacity.blockers[0].affected_block_ids =
+            (0..=MAX_ACTION_PROMOTION_AFFECTED_BLOCK_IDS_V1 as u16).collect();
+        over_capacity.blockers[0].affected_block_count = over_capacity.blockers[0].affected_block_ids.len() as u32;
+        over_capacity.report_hash = canonical_action_promotion_report_hash_v1(&over_capacity);
+        assert!(
+            validate_action_promotion_report_v1(&over_capacity)
+                .unwrap_err()
+                .iter()
+                .any(|error| { error.code == ContentActionPromotionReportErrorCodeV1::Capacity })
         );
     }
 

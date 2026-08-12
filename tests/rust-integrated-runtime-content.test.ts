@@ -7,6 +7,9 @@ import fixture from "./fixtures/rust-engine/r7/content-metadata-roundtrip-v1.jso
 import {
   canonicalMetadataBlobHashV1,
   blockwildBlockActionCatalogV2,
+  createRustActionPromotionReportV1,
+  validateRustActionPromotionReportV1,
+  RUST_BLOCK_ACTION_RNG_SEMANTICS_V2,
   RUST_BLOCK_ACTION_CATALOG_ID,
   RUST_BLOCK_ACTION_CATALOG_SCHEMA,
   compileBlockwildProductionContent,
@@ -16,6 +19,7 @@ import {
   validateRustContentExpectation,
   type RustContentDomain,
   type RustContentSourceEntry,
+  type RustActionPromotionReportV1,
 } from "../app/game/rust-integrated-runtime-content";
 import { isDirectionallyPlacedBlock } from "../app/game/block-facing";
 import { BLOCKS, ITEMS, BlockId, Item, itemForBlock, type ItemCode } from "../app/game/data";
@@ -179,6 +183,112 @@ test("production block actions are a bounded exact projection of authored block 
     }, `block ${definition.id}`);
   }
   assert.deepEqual(decoded, blockwildBlockActionCatalogV2());
+});
+
+test("production action-promotion evidence is exact, bounded, non-empty and not a capability", () => {
+  const bundle = compileBlockwildProductionContent();
+  const report = createRustActionPromotionReportV1(bundle);
+  assert.equal(report.schemaVersion, 1);
+  assert.equal(report.manifestHash, "e1fdb93aa0bd804e90284a7b66cd64fc");
+  assert.equal(report.installedRegistryHash, null, "the browser compiler cannot invent a native installed-registry hash");
+  assert.equal(report.blockActionCatalogSchemaVersion, 2);
+  assert.equal(report.blockActionCatalogContentVersion, 1);
+  assert.equal(report.blockActionCatalogBlobHash, "4292b5a0f6ef4503c83a571e121f6862");
+  assert.equal(report.rngSemanticsVersionId, "block-action-rng-semantics-v1");
+  assert.equal(report.rngSemanticsHash, "e039b2a9d2b0b2edc83a4ff74517302e");
+  assert.equal(report.runtimeSemanticFeatureId, "block-action-runtime-semantics-v1");
+  assert.equal(report.supportLevel, "declared-blocked");
+  assert.equal(report.reportHash, "2f0c433012940ae8586bf19cff2a5308");
+  assert.deepEqual(report.blockers.map(({ scope, blockerId, disposition, affectedBlockCount }) => ({
+    scope, blockerId, disposition, affectedBlockCount,
+  })), [
+    { scope: "global", blockerId: "authoritative-rng-context-unbound", disposition: "runtime-context", affectedBlockCount: 313 },
+    { scope: "global", blockerId: "dynamic-session-dispatch-runtime", disposition: "implementation-gap", affectedBlockCount: 313 },
+    { scope: "global", blockerId: "game-mode-host-custody-runtime", disposition: "runtime-context", affectedBlockCount: 313 },
+    { scope: "global", blockerId: "legacy-computed-loot-source-runtime", disposition: "implementation-gap", affectedBlockCount: 313 },
+    { scope: "global", blockerId: "world-support-collision-runtime", disposition: "runtime-context", affectedBlockCount: 313 },
+    { scope: "profile", blockerId: "authoritative-rng-context-unbound", disposition: "runtime-context", affectedBlockCount: 57 },
+    { scope: "profile", blockerId: "column-world-state-runtime", disposition: "runtime-context", affectedBlockCount: 22 },
+    { scope: "profile", blockerId: "dynamic-block-state-runtime", disposition: "runtime-context", affectedBlockCount: 23 },
+    { scope: "profile", blockerId: "legacy-loot-item-reference-unresolved", disposition: "content-unresolved", affectedBlockCount: 5 },
+    { scope: "profile", blockerId: "liquid-source-state-runtime", disposition: "runtime-context", affectedBlockCount: 4 },
+    { scope: "profile", blockerId: "network-topology-state-runtime", disposition: "runtime-context", affectedBlockCount: 2 },
+    { scope: "profile", blockerId: "paired-world-state-runtime", disposition: "runtime-context", affectedBlockCount: 24 },
+    { scope: "profile", blockerId: "player-luck-context-runtime", disposition: "runtime-context", affectedBlockCount: 12 },
+    { scope: "profile", blockerId: "rooted-tree-discovery-runtime", disposition: "runtime-context", affectedBlockCount: 9 },
+  ]);
+  assert.deepEqual(validateRustActionPromotionReportV1(report), []);
+  assert.ok(report.blockers.every((blocker) => blocker.affectedBlockCount === blocker.affectedBlockIds.length));
+  assert.equal(report.blockers.filter((blocker) => blocker.blockerId === "authoritative-rng-context-unbound").length, 2,
+    "global and profile evidence must not collapse into one record");
+  assert.deepEqual(createRustActionPromotionReportV1(compileBlockwildProductionContent()), report,
+    "fresh materialization restores identical evidence");
+  assert.equal("capability" in report, false);
+});
+
+test("action-promotion report matches the native installed-registry golden exactly", () => {
+  const catalog = {
+    authorityBlockers: ["game-mode-host-custody-runtime"],
+    profiles: [{
+      authorityBlockers: ["dynamic-block-state-runtime"],
+      breakProfile: {
+        contextualOverride: "none", durabilityCost: { kind: "none" },
+        loot: { mode: "none", rules: [], selfDropMode: "absent", silkTouch: "not-authored" },
+        replacement: "blocked", wrongTool: "break-no-loot",
+      },
+      hardness: 0, id: 7, placementIntent: "none", preferredTool: "hand", replaceable: true,
+      requiredTier: 0, solid: false, topologyFlags: [],
+    }],
+    rngSemantics: RUST_BLOCK_ACTION_RNG_SEMANTICS_V2,
+    schema: 2,
+  } as const;
+  const bundle = compileRustProductionContent("action-promotion-parity-v1", [{
+    domain: "item", id: RUST_BLOCK_ACTION_CATALOG_ID, schemaId: "block-action-catalog", schemaVersion: 2,
+    contentVersion: 1, value: catalog, unknownExtensionBytes: Uint8Array.of(0, 0x80, 0xff, 23),
+  }]);
+  const report = createRustActionPromotionReportV1(bundle, "da713b7cf4ec184d30df943291f63316");
+  assert.equal(report.manifestHash, "3e26111bfcca5ed430252027558e948f");
+  assert.equal(report.blockActionCatalogBlobHash, "983d3b5cbaeba844c84445bcc182830b");
+  assert.equal(report.rngSemanticsHash, "e039b2a9d2b0b2edc83a4ff74517302e");
+  assert.equal(report.reportHash, "e998ec9b932d031f48aa569e603c5b70");
+  assert.deepEqual(report.blockers, [
+    { scope: "global", blockerId: "game-mode-host-custody-runtime", disposition: "runtime-context", affectedBlockIds: [7], affectedBlockCount: 1 },
+    { scope: "profile", blockerId: "dynamic-block-state-runtime", disposition: "runtime-context", affectedBlockIds: [7], affectedBlockCount: 1 },
+  ]);
+});
+
+test("legacy action catalogs are unproven and report validation rejects tamper, order, classification and capacity", () => {
+  const legacy = compileRustProductionContent("legacy-action-promotion-v1", [{
+    domain: "item", id: RUST_BLOCK_ACTION_CATALOG_ID, schemaId: "block-action-catalog", schemaVersion: 1,
+    contentVersion: 1, value: { profiles: [{ id: 7 }], schema: 1 },
+  }]);
+  const legacyReport = createRustActionPromotionReportV1(legacy);
+  assert.equal(legacyReport.supportLevel, "legacy-unproven");
+  assert.equal(legacyReport.rngSemanticsVersionId, null);
+  assert.deepEqual(legacyReport.blockers, [{
+    scope: "global", blockerId: "legacy-block-action-catalog-schema-unproven", disposition: "content-unresolved",
+    affectedBlockIds: [7], affectedBlockCount: 1,
+  }]);
+
+  const report = createRustActionPromotionReportV1(compileBlockwildProductionContent());
+  const cases: Array<readonly [RustActionPromotionReportV1, string]> = [
+    [{ ...report, manifestHash: "0".repeat(32) }, "hash-mismatch"],
+    [{ ...report, blockers: [{ ...report.blockers[0], blockerId: "unknown-authority-gap" }, ...report.blockers.slice(1)] }, "unknown-blocker"],
+    [{ ...report, blockers: [{ ...report.blockers[0], disposition: "transient" }, ...report.blockers.slice(1)] }, "classification"],
+    [{ ...report, blockers: [report.blockers[1], report.blockers[0], ...report.blockers.slice(2)] }, "ordering"],
+    [{ ...report, blockers: [{ ...report.blockers[0], affectedBlockIds: Array.from({ length: 4_097 }, (_, id) => id), affectedBlockCount: 4_097 }, ...report.blockers.slice(1)] }, "capacity"],
+  ];
+  for (const [candidate, code] of cases) {
+    assert.ok(validateRustActionPromotionReportV1(candidate).some((error) => error.code === code), code);
+  }
+
+  const compiled = compileBlockwildProductionContent();
+  const artifact = compiled.artifacts.find((entry) => entry.id === RUST_BLOCK_ACTION_CATALOG_ID)!;
+  const tamperedBundle = {
+    ...compiled,
+    artifacts: compiled.artifacts.map((entry) => entry === artifact ? { ...entry, blobHash: "0".repeat(32) } : entry),
+  };
+  assert.throws(() => createRustActionPromotionReportV1(tamperedBundle), /report rejected/u);
 });
 
 type ContextualLootCount = Readonly<{
