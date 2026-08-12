@@ -36,7 +36,13 @@ test("visual coverage ledger maps every remaining normal-path Three module witho
     assert.ok(record.state.includes("pending") || record.state.includes("awaiting"), `${module} prematurely claims retirement`);
     for (const visualCase of record.cases) assert.ok(coverage.scenes[visualCase], `${module} refers to unknown case ${visualCase}`);
   }
-  assert.deepEqual(Object.keys(coverage.compatibilityModules), ["app/three-compat/visual-theme-audit.ts"]);
+  assert.deepEqual(Object.keys(coverage.compatibilityModules), [
+    "app/three-compat/PlayerAvatarPreviewThree.tsx",
+    "app/three-compat/visual-theme-audit.ts",
+  ]);
+  const avatarPreview = coverage.compatibilityModules["app/three-compat/PlayerAvatarPreviewThree.tsx"];
+  assert.ok(avatarPreview.state.includes("pending"), "avatar compatibility preview must not claim renderer retirement");
+  assert.deepEqual(avatarPreview.cases, ["overworld-day", "settlement-machinery"]);
   const visualThemeOracle = coverage.compatibilityModules["app/three-compat/visual-theme-audit.ts"];
   assert.equal(visualThemeOracle.state, "tested-build-tool-oracle");
   for (const visualCase of visualThemeOracle.cases) assert.ok(coverage.scenes[visualCase], `visual-theme oracle refers to unknown case ${visualCase}`);

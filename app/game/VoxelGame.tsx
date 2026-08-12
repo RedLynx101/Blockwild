@@ -7,12 +7,12 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ComponentType,
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import * as THREE from "three";
 import {
   BlockId,
   BLOCKS,
@@ -35,7 +35,6 @@ import {
   type ItemCode,
   type MobKind,
   type OverlayKind,
-  type PlayerVariant,
   type Recipe,
   type RecipePlanResult,
 } from "./engine";
@@ -53,7 +52,6 @@ import type { CreatureProgressionV2 } from "./creature-progression";
 import { MOUNT_PROFILES } from "./creature-mounts";
 import { PRIME_FORM_PROFILES, PRIME_ROUTE_PROFILES, type PrimeEligibleKind } from "./creature-rarity";
 import { creatureEcologyContract, normalizeCreatureWorkState, type CreatureShellModule } from "./creature-ecology";
-import { createAvatarHeldItemModel } from "./held-items";
 import { fallbackInventoryIconKind, itemPresentationFamily } from "./item-presentation";
 import { legendaryContractForItem } from "./legendary-items";
 import { captureOrbFromInventorySlot } from "./capture-orbs";
@@ -64,7 +62,6 @@ import {
   normalizeCreatureRelationship,
   preferredRelationshipFood,
 } from "./creature-relationships";
-import { BlockPlayerModel, type PlayerEquipmentAppearance } from "./player-model";
 import { GAME_RELEASE_NAME, GAME_VERSION, GAME_VERSION_LABEL } from "./version";
 import { BASIC_RENDER_DISTANCE_ENABLED } from "./performance";
 import {
@@ -73,7 +70,6 @@ import {
   rendererRequestFromSearchR11,
 } from "./renderer-cutover-r11";
 import { WHEAT_MILL_CYCLE_SECONDS } from "./wheat-mill";
-import { createBlockAtlas } from "./world";
 import {
   DEFAULT_WORLD_OPTIONS,
   WORLD_OWNERSHIP_NOTICE,
@@ -145,6 +141,8 @@ import { CharacterStudio } from "./CharacterStudio";
 import { AquariumPanel } from "./AquariumPanel";
 import { GuildPanel } from "./GuildPanel";
 import { CardforgePanel } from "./CardforgePanel";
+import { AvatarPreviewFallback } from "./AvatarPreviewFallback";
+import type { PlayerAvatarPreviewProps } from "./avatar-preview-runtime";
 import { GUILDS, createGuildBook } from "./guilds";
 import { createTcgPlayerState } from "./tcg/collection";
 import { TCG_NPC_OPPONENTS } from "./tcg/match";
@@ -153,7 +151,6 @@ import {
   CharacterProfileStore,
   FALLBACK_CHARACTER_CATALOG,
   FALLBACK_CHARACTER_PROFILE,
-  type CharacterAppearance,
   type CharacterProfile,
   type CharacterProfileCatalog,
 } from "./character-profiles";
@@ -1460,389 +1457,42 @@ function WikiPortraitImage({ src, className, lazy = false }: Readonly<{ src: str
   return <img className={className} src={src} alt="" loading={lazy ? "lazy" : "eager"} decoding="async" />;
 }
 
-let avatarPreviewAtlas: THREE.Texture | null = null;
+let avatarPreviewCompatibilityPromise: Promise<ComponentType<PlayerAvatarPreviewProps>> | null = null;
 
-function createPreviewHeldItem(item: ItemCode | undefined) {
-  if (item === undefined) return null;
-  avatarPreviewAtlas ??= createBlockAtlas();
-  return createAvatarHeldItemModel(item, { atlas: avatarPreviewAtlas });
-}
-
-function disposePreviewObject(object: THREE.Object3D | null) {
-  object?.traverse((child) => {
-    if (!(child instanceof THREE.Mesh)) return;
-    child.geometry.dispose();
-    const materials = Array.isArray(child.material) ? child.material : [child.material];
-    for (const material of materials) material.dispose();
-  });
-}
-
-const AVATAR_PREVIEW_FRAME_INTERVAL_MS = 1000 / 22;
-const AVATAR_PREVIEW_RENDERER_IDLE_MS = 30_000;
-
-type AvatarPreviewFrameTask = {
-  isConnected: () => boolean;
-  render: (now: number) => void;
-  onError?: (error: unknown) => void;
-};
-
-export function createAvatarPreviewFrameScheduler(
-  requestFrame: (callback: (now: number) => void) => number,
-  cancelFrame: (frame: number) => void,
-  frameIntervalMs = AVATAR_PREVIEW_FRAME_INTERVAL_MS,
-) {
-  type Entry = AvatarPreviewFrameTask & { visible: boolean };
-  const entries = new Set<Entry>();
-  let animationFrame: number | null = null;
-  let lastRenderedAt = Number.NEGATIVE_INFINITY;
-
-  const runnableEntries = () => [...entries].filter((entry) => entry.visible && entry.isConnected());
-  const cancelIfIdle = () => {
-    if (animationFrame === null || runnableEntries().length > 0) return;
-    cancelFrame(animationFrame);
-    animationFrame = null;
-  };
-  const schedule = () => {
-    if (animationFrame !== null || runnableEntries().length === 0) return;
-    animationFrame = requestFrame(renderFrame);
-  };
-  function renderFrame(now: number) {
-    animationFrame = null;
-    const runnable = runnableEntries();
-    if (runnable.length === 0) return;
-    if (now - lastRenderedAt >= frameIntervalMs) {
-      lastRenderedAt = now;
-      for (const entry of runnable) {
-        try {
-          entry.render(now);
-        } catch (error) {
-          entry.onError?.(error);
-        }
-      }
-    }
-    schedule();
-  }
-
-  return {
-    register(task: AvatarPreviewFrameTask, initiallyVisible = true) {
-      const entry: Entry = { ...task, visible: initiallyVisible };
-      entries.add(entry);
-      schedule();
-      return {
-        setVisible(visible: boolean) {
-          if (entry.visible === visible) return;
-          entry.visible = visible;
-          if (visible) schedule();
-          else cancelIfIdle();
-        },
-        dispose() {
-          entries.delete(entry);
-          cancelIfIdle();
-        },
-      };
-    },
-  };
-}
-
-type AvatarPreviewVisibilityEntry = Pick<IntersectionObserverEntry, "intersectionRatio" | "isIntersecting" | "target">;
-type AvatarPreviewVisibilityObserver = Pick<IntersectionObserver, "disconnect" | "observe">;
-type AvatarPreviewVisibilityObserverFactory = (
-  callback: (entries: ReadonlyArray<AvatarPreviewVisibilityEntry>) => void,
-) => AvatarPreviewVisibilityObserver | null;
-
-function createBrowserAvatarPreviewVisibilityObserver(
-  callback: (entries: ReadonlyArray<AvatarPreviewVisibilityEntry>) => void,
-): AvatarPreviewVisibilityObserver | null {
-  if (typeof IntersectionObserver === "undefined") return null;
-  return new IntersectionObserver((entries) => callback(entries));
-}
-
-export function observeAvatarPreviewVisibility(
-  element: Element,
-  onVisibilityChange: (visible: boolean) => void,
-  createObserver: AvatarPreviewVisibilityObserverFactory | null = createBrowserAvatarPreviewVisibilityObserver,
-) {
-  let observer: AvatarPreviewVisibilityObserver | null = null;
-  try {
-    observer = createObserver?.((entries) => {
-      const entry = entries.find((candidate) => candidate.target === element);
-      if (entry) onVisibilityChange(entry.isIntersecting && entry.intersectionRatio > 0);
-    }) ?? null;
-  } catch {
-    observer = null;
-  }
-  // Unsupported or broken observers should never leave a blank avatar.
-  if (!observer) {
-    onVisibilityChange(true);
-    return () => undefined;
-  }
-  try {
-    observer.observe(element);
-  } catch {
-    observer.disconnect();
-    onVisibilityChange(true);
-    return () => undefined;
-  }
-  return () => observer.disconnect();
-}
-
-type AvatarPreviewRendererResource = {
-  dispose: () => void;
-  forceContextLoss: () => void;
-};
-
-export function createAvatarPreviewRendererPool<Renderer extends AvatarPreviewRendererResource, TimerHandle>({
-  createRenderer,
-  scheduleRelease,
-  cancelRelease,
-  idleMs = AVATAR_PREVIEW_RENDERER_IDLE_MS,
-  onCreateError,
-}: {
-  createRenderer: () => Renderer;
-  scheduleRelease: (callback: () => void, delayMs: number) => TimerHandle;
-  cancelRelease: (timer: TimerHandle) => void;
-  idleMs?: number;
-  onCreateError?: (error: unknown) => void;
-}) {
-  let renderer: Renderer | null = null;
-  let users = 0;
-  let releaseTimer: TimerHandle | null = null;
-  let unavailable = false;
-
-  return {
-    acquire() {
-      if (releaseTimer !== null) {
-        cancelRelease(releaseTimer);
-        releaseTimer = null;
-      }
-      users += 1;
-      if (renderer || unavailable) return renderer;
-      try {
-        renderer = createRenderer();
-      } catch (error) {
-        unavailable = true;
-        onCreateError?.(error);
-      }
-      return renderer;
-    },
-    release() {
-      users = Math.max(0, users - 1);
-      if (users > 0 || releaseTimer !== null || !renderer) return;
-      releaseTimer = scheduleRelease(() => {
-        releaseTimer = null;
-        if (users > 0 || !renderer) return;
-        const releasedRenderer = renderer;
-        renderer = null;
-        releasedRenderer.dispose();
-        releasedRenderer.forceContextLoss();
-      }, idleMs);
-    },
-  };
-}
-
-// Character previews share one off-screen WebGL context and one capped frame
-// scheduler. Each result is copied into a cheap 2D canvas, so inactive overlays
-// add neither a context nor their own animation loop.
-const sharedAvatarPreviewFrameScheduler = createAvatarPreviewFrameScheduler(
-  (callback) => requestAnimationFrame(callback),
-  (frame) => cancelAnimationFrame(frame),
-);
-const sharedAvatarPreviewRendererPool = createAvatarPreviewRendererPool<THREE.WebGLRenderer, ReturnType<typeof setTimeout>>({
-  createRenderer: () => {
-    const surface = document.createElement("canvas");
-    const renderer = new THREE.WebGLRenderer({
-      canvas: surface,
-      alpha: true,
-      antialias: true,
-      powerPreference: "low-power",
-      preserveDrawingBuffer: true,
+/** Loads the optional Three preview only from a hydrated browser effect. */
+export function loadAvatarPreviewCompatibility() {
+  avatarPreviewCompatibilityPromise ??= import("../three-compat/PlayerAvatarPreviewThree")
+    .then((module) => module.PlayerAvatarPreviewThree)
+    .catch((error: unknown) => {
+      console.warn("Blockwild character preview compatibility module could not load; using the 2D fallback.", error);
+      throw error;
     });
-    renderer.outputColorSpace = THREE.SRGBColorSpace;
-    renderer.shadowMap.enabled = true;
-    renderer.shadowMap.type = THREE.PCFShadowMap;
-    renderer.setClearColor(0x000000, 0);
-    return renderer;
-  },
-  scheduleRelease: (callback, delayMs) => setTimeout(callback, delayMs),
-  cancelRelease: (timer) => clearTimeout(timer),
-  onCreateError: (error) => {
-    // A 2D avatar below keeps every menu usable even on hardware/browser
-    // configurations where no spare WebGL context can be allocated.
-    console.warn("Blockwild character preview is using its 2D fallback.", error);
-  },
-});
-
-function acquireAvatarPreviewRenderer() {
-  return sharedAvatarPreviewRendererPool.acquire();
+  return avatarPreviewCompatibilityPromise;
 }
 
-function releaseAvatarPreviewRenderer() {
-  sharedAvatarPreviewRendererPool.release();
-}
-
-function drawAvatarPreviewFallback(
-  context: CanvasRenderingContext2D,
-  width: number,
-  height: number,
-  variant: PlayerVariant,
-  equipmentAppearance: PlayerEquipmentAppearance,
-  heldItem: ItemCode | undefined,
-  offhandItem: ItemCode | undefined,
-  characterAppearance?: CharacterAppearance,
-) {
-  context.clearRect(0, 0, width, height);
-  const scale = Math.max(1, Math.min(width / 112, height / 180));
-  const centerX = width * 0.5;
-  const top = height * 0.09;
-  const fill = (color: THREE.ColorRepresentation | null | undefined, x: number, y: number, w: number, h: number) => {
-    context.fillStyle = color instanceof THREE.Color
-      ? `#${color.getHexString()}`
-      : typeof color === "number" ? `#${color.toString(16).padStart(6, "0")}` : color ?? "#777";
-    context.fillRect(Math.round(centerX + x * scale), Math.round(top + y * scale), Math.ceil(w * scale), Math.ceil(h * scale));
-  };
-  context.save();
-  context.translate(0.5, 0.5);
-  context.shadowColor = "rgba(21, 18, 15, .24)";
-  context.shadowBlur = 7 * scale;
-  context.shadowOffsetY = 4 * scale;
-  const colors = characterAppearance?.colors;
-  fill(colors?.hair ?? (variant === "female" ? "#171313" : "#4d3424"), -25, 0, 50, variant === "female" ? 28 : 23);
-  fill(colors?.skin ?? "#bf815e", -22, 13, 44, 38);
-  fill(equipmentAppearance.head, -26, 5, 52, 20);
-  fill(equipmentAppearance.chest ?? colors?.shirt ?? (variant === "female" ? "#674f79" : "#557080"), -25, 52, 50, 56);
-  fill(colors?.skin ?? "#bf815e", -39, 55, 13, 59);
-  fill(colors?.skin ?? "#bf815e", 26, 55, 13, 59);
-  fill(equipmentAppearance.legs ?? colors?.trousers ?? "#3a4652", -22, 108, 20, 51);
-  fill(equipmentAppearance.legs ?? colors?.trousers ?? "#3a4652", 3, 108, 20, 51);
-  fill(equipmentAppearance.feet ?? "#2f2823", -23, 157, 21, 13);
-  fill(equipmentAppearance.feet ?? "#2f2823", 3, 157, 21, 13);
-  if (heldItem !== undefined) {
-    fill(ITEMS[heldItem]?.color ?? "#9b7c4a", 36, 78, 11, 50);
-  }
-  if (offhandItem !== undefined) {
-    const shield = ITEMS[offhandItem]?.iconKind === "shield";
-    fill(ITEMS[offhandItem]?.color ?? "#9b7c4a", shield ? -48 : -45, shield ? 64 : 78, shield ? 24 : 11, shield ? 48 : 50);
-  }
-  context.restore();
-}
-
-function PlayerAvatarPreview({
-  variant,
-  appearance,
-  equipment,
-  heldItem,
-  offhandItem,
-  compact = false,
-}: {
-  variant: PlayerVariant;
-  appearance?: CharacterAppearance;
-  equipment?: HudState["equipment"];
-  heldItem?: ItemCode;
-  offhandItem?: ItemCode;
-  compact?: boolean;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const head = equipment?.head?.item;
-  const chest = equipment?.chest?.item;
-  const legs = equipment?.legs?.item;
-  const feet = equipment?.feet?.item;
+function PlayerAvatarPreview(props: PlayerAvatarPreviewProps) {
+  const [CompatibilityPreview, setCompatibilityPreview] = useState<ComponentType<PlayerAvatarPreviewProps> | null>(null);
+  const [compatibilityUnavailable, setCompatibilityUnavailable] = useState(false);
+  const handleUnavailable = useCallback(() => setCompatibilityUnavailable(true), []);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    const renderer = acquireAvatarPreviewRenderer();
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(compact ? 28 : 31, 1, 0.1, 20);
-    camera.position.set(compact ? 1.9 : 2.65, compact ? 1.92 : 2.18, compact ? -3.25 : -4.3);
-    camera.lookAt(0, 1.02, 0);
-    scene.add(new THREE.HemisphereLight(0xe7f4ff, 0x604c38, 2.1));
-    const key = new THREE.DirectionalLight(0xfff2cf, 2.6);
-    key.position.set(-3, 5, -4);
-    key.castShadow = true;
-    scene.add(key);
-    const model = new BlockPlayerModel({ variant, race: appearance?.race, colors: appearance?.colors, mode: "local", castShadow: true, receiveShadow: true });
-    if (appearance) model.setAppearance(appearance);
-    const equipmentAppearance: PlayerEquipmentAppearance = {
-      head: head === undefined ? null : ITEMS[head]?.color,
-      chest: chest === undefined ? null : ITEMS[chest]?.color,
-      legs: legs === undefined ? null : ITEMS[legs]?.color,
-      feet: feet === undefined ? null : ITEMS[feet]?.color,
-    };
-    model.setEquipmentAppearance(equipmentAppearance);
-    model.group.rotation.y = -0.32;
-    scene.add(model.group);
-    const held = createPreviewHeldItem(heldItem);
-    const offhand = createPreviewHeldItem(offhandItem);
-    model.setHeldItem(held);
-    model.setOffhandItem(offhand, offhandItem !== undefined && ITEMS[offhandItem]?.iconKind === "shield");
-    const floor = new THREE.Mesh(new THREE.CircleGeometry(1.15, 32), new THREE.ShadowMaterial({ opacity: 0.28 }));
-    floor.rotation.x = -Math.PI / 2;
-    floor.position.y = -0.01;
-    floor.receiveShadow = true;
-    scene.add(floor);
-
-    let previous = performance.now();
-    let width = 120;
-    let height = 150;
-    let pixelRatio = 1;
-    const resize = () => {
-      width = Math.max(120, Math.round(canvas.clientWidth));
-      height = Math.max(150, Math.round(canvas.clientHeight));
-      pixelRatio = Math.min(1.5, window.devicePixelRatio || 1);
-      canvas.width = Math.round(width * pixelRatio);
-      canvas.height = Math.round(height * pixelRatio);
-      renderer?.setPixelRatio(pixelRatio);
-      renderer?.setSize(width, height, false);
-      camera.aspect = width / height;
-      camera.updateProjectionMatrix();
-    };
-    const resizeObserver = new ResizeObserver(resize);
-    resizeObserver.observe(canvas);
-    resize();
-    const frameRegistration = sharedAvatarPreviewFrameScheduler.register({
-      isConnected: () => canvas.isConnected,
-      render: (now) => {
-        const dt = Math.min(0.05, (now - previous) / 1000);
-        previous = now;
-        model.update(dt, { locomotion: "idle", headYaw: Math.sin(now * 0.0007) * 0.08 });
-        model.group.rotation.y = -0.32 + Math.sin(now * 0.00035) * 0.045;
-        if (renderer && !renderer.getContext().isContextLost()) {
-          try {
-            renderer.setPixelRatio(pixelRatio);
-            renderer.setSize(width, height, false);
-            renderer.render(scene, camera);
-            context.clearRect(0, 0, canvas.width, canvas.height);
-            context.drawImage(renderer.domElement, 0, 0, canvas.width, canvas.height);
-          } catch {
-            drawAvatarPreviewFallback(context, canvas.width, canvas.height, variant, equipmentAppearance, heldItem, offhandItem, appearance);
-          }
-        } else {
-          drawAvatarPreviewFallback(context, canvas.width, canvas.height, variant, equipmentAppearance, heldItem, offhandItem, appearance);
-        }
-      },
-      onError: () => {
-        drawAvatarPreviewFallback(context, canvas.width, canvas.height, variant, equipmentAppearance, heldItem, offhandItem, appearance);
-      },
-    }, false);
-    const stopVisibilityObservation = observeAvatarPreviewVisibility(canvas, frameRegistration.setVisible);
+    let active = true;
+    void loadAvatarPreviewCompatibility()
+      .then((component) => {
+        if (active) setCompatibilityPreview(() => component);
+      })
+      .catch(() => {
+        if (active) setCompatibilityUnavailable(true);
+      });
     return () => {
-      stopVisibilityObservation();
-      frameRegistration.dispose();
-      resizeObserver.disconnect();
-      model.setHeldItem(null);
-      model.setOffhandItem(null);
-      disposePreviewObject(held);
-      disposePreviewObject(offhand);
-      model.dispose();
-      floor.geometry.dispose();
-      (floor.material as THREE.Material).dispose();
-      releaseAvatarPreviewRenderer();
+      active = false;
     };
-  }, [variant, appearance, head, chest, legs, feet, heldItem, offhandItem, compact]);
+  }, []);
 
-  return <canvas ref={canvasRef} className={`player-avatar-preview ${compact ? "compact" : ""}`} aria-label={`${variant === "female" ? "Female" : "Male"} ${appearance?.race ?? "wayfarer"} player model preview`} />;
+  if (!CompatibilityPreview || compatibilityUnavailable) {
+    return <AvatarPreviewFallback {...props} />;
+  }
+  return <CompatibilityPreview {...props} onUnavailable={handleUnavailable} />;
 }
 
 export function recipePreviewGrid(recipe: Recipe): Array<ItemCode | 0> {
@@ -2666,10 +2316,9 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
   useEffect(() => {
     const material = engineRef.current?.selection.material;
     if (!material || Array.isArray(material)) return;
-    const outline = material as THREE.LineBasicMaterial;
-    outline.opacity = uiPreferences.targetOutlineOpacity;
-    outline.transparent = uiPreferences.targetOutlineOpacity < 1;
-    outline.needsUpdate = true;
+    material.opacity = uiPreferences.targetOutlineOpacity;
+    material.transparent = uiPreferences.targetOutlineOpacity < 1;
+    material.needsUpdate = true;
   }, [uiPreferences.targetOutlineOpacity]);
 
   useEffect(() => {

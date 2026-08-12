@@ -10,13 +10,17 @@ import { VoxelEngine, bestiaryProgressSignature, isEditableKeyboardTarget, type 
 import { createAvatarHeldItemModel } from "../app/game/held-items.ts";
 import { MOB_DEFS } from "../app/game/mobs.ts";
 import { BlockPlayerModel, FEMALE_HAIR_COLOR, playerEyeHeightForVariant } from "../app/game/player-model.ts";
+import { createAvatarPreviewFallbackPlan } from "../app/game/AvatarPreviewFallback.tsx";
+import {
+  createAvatarPreviewFrameScheduler,
+  createAvatarPreviewRendererPool,
+  observeAvatarPreviewVisibility,
+} from "../app/game/avatar-preview-runtime.ts";
 import { GAME_RELEASE_NAME, GAME_VERSION, normalizeGameVersion } from "../app/game/version.ts";
 import {
   bestiaryEntryCompletion,
   bestiaryFieldNoteUnlocked,
   bestiaryKindsForFilter,
-  createAvatarPreviewFrameScheduler,
-  createAvatarPreviewRendererPool,
   createHeldStackPositionController,
   captureOrbUiState,
   clearFirstPersonHeldPresentation,
@@ -27,7 +31,6 @@ import {
   normalizeMultiplayerRoomCode,
   multiplayerViewStatesEqual,
   normalizeApiaryUiState,
-  observeAvatarPreviewVisibility,
   prepareFirstPersonHeldPresentation,
   recipeMatchesQuery,
   recipeIngredientLabels,
@@ -355,6 +358,24 @@ test("avatar preview renderer pool reuses one context across release and reacqui
   assert.notEqual(afterIdle, first);
   assert.equal(maxLiveContexts, 1, "the pool must never keep two preview WebGL contexts alive");
   pool.release();
+});
+
+test("avatar preview fallback is deterministic, visible, and preserves carried silhouettes", () => {
+  const props = {
+    variant: "female" as const,
+    heldItem: Item.StoneAxe,
+    offhandItem: Item.WoodenShield,
+  };
+  const first = createAvatarPreviewFallbackPlan(props);
+  const second = createAvatarPreviewFallbackPlan(props);
+  assert.deepEqual(second, first);
+  assert.ok(first.length >= 13, "fallback must draw a complete, nonblank paper doll");
+  assert.ok(first.every((rectangle) => rectangle.width > 0 && rectangle.height > 0 && rectangle.color !== "transparent"));
+  assert.ok(first.some((rectangle) => rectangle.x === 36 && rectangle.height === 50), "main-hand silhouette is retained");
+  assert.ok(first.some((rectangle) => rectangle.x === -48 && rectangle.width === 24 && rectangle.height === 48), "shield silhouette is retained");
+  const male = createAvatarPreviewFallbackPlan({ variant: "male" });
+  assert.equal(first[0]?.height, 28);
+  assert.equal(male[0]?.height, 23);
 });
 
 test("multiplayer actions are single-flight and title mode clears first-person held geometry", async () => {

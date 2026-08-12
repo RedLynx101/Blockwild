@@ -23,6 +23,28 @@ test("shipping runtime keeps wgpu primary policy closed and shadow opt-in explic
   assert.match(voxelGame, /request_renderer_recovery/u);
 });
 
+test("avatar previews lazy-load Three behind a deterministic no-WebGL fallback", async () => {
+  const [voxelGame, runtime, fallback, compatibility] = await Promise.all([
+    source("VoxelGame.tsx"),
+    source("avatar-preview-runtime.ts"),
+    source("AvatarPreviewFallback.tsx"),
+    readFile(new URL("../app/three-compat/PlayerAvatarPreviewThree.tsx", import.meta.url), "utf8"),
+  ]);
+  assert.doesNotMatch(voxelGame, /(?:from\s+["']three["']|import\s*\(\s*["']three["'])/u);
+  assert.doesNotMatch(voxelGame, /from\s+["']\.\/(?:held-items|player-model|world)["']/u);
+  assert.doesNotMatch(runtime, /(?:from\s+["']three["']|three-compat)/u);
+  assert.doesNotMatch(fallback, /(?:from\s+["']three["']|three-compat|player-model|held-items|createBlockAtlas)/u);
+  assert.match(voxelGame, /avatarPreviewCompatibilityPromise \?\?= import\("\.\.\/three-compat\/PlayerAvatarPreviewThree"\)/u);
+  assert.match(voxelGame, /useEffect\(\(\) => \{[\s\S]*?void loadAvatarPreviewCompatibility\(\)/u);
+  assert.match(voxelGame, /if \(!CompatibilityPreview \|\| compatibilityUnavailable\) \{\s*return <AvatarPreviewFallback/u);
+  assert.match(compatibility, /import \* as THREE from "three"/u);
+  assert.match(compatibility, /new BlockPlayerModel/u);
+  assert.match(compatibility, /createAvatarHeldItemModel/u);
+  assert.match(compatibility, /createBlockAtlas/u);
+  assert.match(compatibility, /if \(!renderer\)[\s\S]*?onUnavailable/u);
+  assert.match(compatibility, /isContextLost\(\)[\s\S]*?fail\(/u);
+});
+
 test("engine extraction copies coarse records plus renderer-neutral terrain pages", async () => {
   const engine = await source("engine.ts");
   const start = engine.indexOf("  publishRendererExtractionR11(now: number)");

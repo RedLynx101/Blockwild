@@ -30,10 +30,10 @@
     "app/game/projectiles.ts": { "family": "projectiles", "cases": ["celestial-effects"], "state": "wgpu-covered-awaiting-compat-move" },
     "app/game/shared-model-geometry.ts": { "family": "authored geometry pool", "cases": ["bestiary-cardforge", "settlement-machinery"], "state": "compiled-catalog-covered-awaiting-compat-move" },
     "app/game/tripo-creature-models.ts": { "family": "Tripo-derived authored creatures", "cases": ["living-cave", "bestiary-cardforge"], "state": "compiled-catalog-covered-awaiting-compat-move" },
-    "app/game/VoxelGame.tsx": { "family": "canvas and renderer selection", "cases": ["overworld-day"], "state": "runtime-selector-wired-primary-promotion-pending" },
     "app/game/world.ts": { "family": "world render extraction source", "cases": ["overworld-day", "living-cave", "underwater-ice"], "state": "immutable-terrain-pages-and-authored-atlas-wired-full-runtime-parity-pending" }
   },
   "compatibilityModules": {
+    "app/three-compat/PlayerAvatarPreviewThree.tsx": { "family": "menu and inventory avatar previews", "cases": ["overworld-day", "settlement-machinery"], "state": "lazy-webgl-compatibility-boundary-promotion-pending" },
     "app/three-compat/visual-theme-audit.ts": { "family": "visual theme inspection", "cases": ["overworld-day", "bestiary-cardforge", "settlement-machinery"], "state": "tested-build-tool-oracle" }
   },
   "behaviorEvidence": {
