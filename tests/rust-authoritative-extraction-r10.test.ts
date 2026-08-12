@@ -67,16 +67,17 @@ function domainBundle(
   payload = domainPayload(),
   domainOneRows = 1,
   domainEightBlockers: readonly string[] = ["celestial-sky-state-not-authoritative"],
+  contentReady = true,
 ) {
   const writer = new Writer();
   writer.raw(encoder.encode("BWX0")).u16(1).u64(17).u64(11)
     .raw(Uint8Array.from({ length: 16 }, () => 0x11))
-    .raw(Uint8Array.from({ length: 16 }, () => 0x22)).u8(1).u16(8);
+    .raw(Uint8Array.from({ length: 16 }, () => 0x22)).u8(contentReady ? 1 : 0).u16(8);
   for (let domain = 1; domain <= 8; domain += 1) {
     const blockers = domain === 8 ? domainEightBlockers : [];
     const body = domain === 1 ? payload : new Uint8Array();
     const total = domain === 1 ? domainOneRows : 0;
-    const status = domain === 8 ? 2 : 0;
+    const status = blockers.length > 0 ? (domain === 8 ? 2 : 1) : 0;
     const hash = new TypeScriptCanonicalHasher("blockwild.r10.domain-view-payload.v1").writeBytes(body).finish();
     writer.u8(domain).u16(1).u8(status).u64(domain).u32(total).u32(total).u32(0).u32(total).u16(blockers.length);
     for (const blocker of blockers) writer.string(blocker);
@@ -95,6 +96,14 @@ test("R10 domain row has exact native/TypeScript byte parity", () => {
   assert.equal(decoded.views[7].status, "absent");
   assert.deepEqual(decoded.promotion.blockers, ["domain-8:celestial-sky-state-not-authoritative"]);
   assert.equal(decoded.promotion.ready, false);
+});
+
+test("R10 promotion remains blocked until content is installed and attested", () => {
+  const decoded = decodeRustDomainBundleR10(domainBundle(new Uint8Array(), 0, [], false));
+  assert.equal(decoded.contentReady, false);
+  assert.deepEqual(decoded.promotion.blockers, ["content-not-ready"]);
+  assert.equal(decoded.promotion.ready, false);
+  assert.ok(decoded.views.every((view) => view.status === "complete"));
 });
 
 test("Rust-produced bound-player BWX0 decodes end to end in TypeScript", () => {

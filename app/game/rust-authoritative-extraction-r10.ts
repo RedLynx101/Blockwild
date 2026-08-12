@@ -242,7 +242,7 @@ export function decodeRustDomainBundleR10(value: Uint8Array | ArrayBuffer): Rust
   const domainCount = reader.u16();
   invariant(domainCount === RUST_DOMAIN_VIEW_COUNT_R10, "R10 domain bundle does not contain the canonical domain set");
   const views: RustDomainViewR10[] = [];
-  const promotionBlockers: string[] = [];
+  const promotionBlockers: string[] = contentReady ? [] : ["content-not-ready"];
   for (let index = 0; index < domainCount; index += 1) {
     const domain = reader.u8();
     invariant(domain === index + 1, "R10 domain directory is not canonical");
