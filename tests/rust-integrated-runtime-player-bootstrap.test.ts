@@ -22,16 +22,36 @@ import {
   deriveRustIntegratedPlayerIdV1,
 } from "../app/game/rust-integrated-runtime-identity.ts";
 import {
+  decodeRustIntegratedPlayerInventoryImportReceiptV1,
+  decodeRustIntegratedPlayerInventoryImportV1,
+  encodeRustIntegratedPlayerInventoryImportReceiptV1,
+  encodeRustIntegratedPlayerInventoryImportV1,
+  rustIntegratedPlayerInventoryMetadataHashV1,
+  rustIntegratedPlayerInventoryResultHashV1,
+  RUST_INTEGRATED_PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1,
+  type RustIntegratedPlayerInventoryImportV1,
+  type RustIntegratedPlayerInventoryIntentV1,
+} from "../app/game/rust-integrated-runtime-player-inventory.ts";
+import {
+  decodeRustIntegratedPlayerBootstrapStatusQueryV1,
+  decodeRustIntegratedPlayerBootstrapStatusReceiptV1,
+  encodeRustIntegratedPlayerBootstrapStatusQueryV1,
+  encodeRustIntegratedPlayerBootstrapStatusReceiptV1,
+  RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+  RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
+} from "../app/game/rust-integrated-runtime-player-status.ts";
+import {
   executeRustIntegratedPlayerBootstrapV1,
   planRustIntegratedPlayerBootstrapV1,
+  queryRustIntegratedPlayerBootstrapObservationV1,
   RustIntegratedPlayerBootstrapErrorV1,
   type RustIntegratedPlayerBootstrapIntentV1,
   type RustIntegratedPlayerBootstrapObservationV1,
   type RustIntegratedPlayerBootstrapServiceV1,
 } from "../app/game/rust-integrated-runtime-player-bootstrap.ts";
 import {
-  RUST_INTEGRATED_PLAYER_BIND_RECEIPT_TYPE_V2,
-} from "../app/game/rust-integrated-runtime-player.ts";
+  RUST_INTEGRATED_PLAYER_FINAL_BIND_RECEIPT_TYPE_V3,
+} from "../app/game/rust-integrated-runtime-player-bootstrap.ts";
 import type { RustEntityCompatibilityRecordR6 } from "../app/game/rust-entity-authority-contract-r6.ts";
 
 const ZERO_HASH = "00000000000000000000000000000000";
@@ -42,6 +62,10 @@ const FIXTURE = JSON.parse(readFileSync(
 )) as Readonly<{
   bwi5Hex: string;
 }>;
+const NATIVE_BOOTSTRAP_FIXTURE = JSON.parse(readFileSync(
+  new URL("./fixtures/rust-engine/integrated-runtime-v1/player-bootstrap-native-v1.json", import.meta.url),
+  "utf8",
+)) as Readonly<{ bws5Hex: string; bwo5Hex: string; bwp7Hex: string; bwi7Hex: string }>;
 const IDENTITY_VECTORS = readFileSync(
   new URL("../engine/crates/blockwild-types/fixtures/id-derivation-v1.txt", import.meta.url),
   "utf8",
@@ -94,6 +118,57 @@ function playerRecord(): RustEntityCompatibilityRecordR6 {
   });
 }
 
+function playerInventory(selectedSlot = 4, restoredRevision = BigInt(1)): RustIntegratedPlayerInventoryIntentV1 {
+  const inventoryContainer = Object.freeze({ kind: "player" as const, id: "player:noah", ownerId: "player:noah" });
+  const slots = Object.freeze([
+    Object.freeze({ itemCode: 1, count: 2, durabilityMillionths: null, metadata: null }),
+    ...Array.from({ length: 8 }, () => null),
+  ]);
+  const importShape: RustIntegratedPlayerInventoryImportV1 = Object.freeze({
+    inventoryContainer,
+    expectedRevision: BigInt(0),
+    selectedSlot,
+    slots: Object.freeze(slots.map((slot) => slot && Object.freeze({
+      itemCode: slot.itemCode,
+      count: slot.count,
+      durabilityMillionths: slot.durabilityMillionths,
+      metadataHash: ZERO_HASH,
+    }))),
+    metadata: Object.freeze([]),
+  });
+  return Object.freeze({
+    selectedSlot,
+    slots,
+    expectedPristineRevision: BigInt(0),
+    bootstrapImportHash: rustIntegratedPlayerInventoryResultHashV1({
+      inventoryContainer,
+      revision: BigInt(1),
+      slots: importShape.slots,
+      metadata: importShape.metadata,
+    }),
+    expectedRestoredRevision: restoredRevision,
+    restoredInventoryHash: rustIntegratedPlayerInventoryResultHashV1({
+      inventoryContainer,
+      revision: restoredRevision,
+      slots: importShape.slots,
+      metadata: importShape.metadata,
+    }),
+  });
+}
+
+function continuity() {
+  return Object.freeze({
+    lastMonotonicTimeUs: BigInt(0),
+    lastInputSequence: null,
+    nextInputSequence: BigInt(1),
+    lastActionSequence: null,
+    nextActionSequence: BigInt(1),
+    authoritativeFlags: 0,
+    lastAppliedInput: null,
+    queuedInputsEmpty: true,
+  });
+}
+
 function intent(): RustIntegratedPlayerBootstrapIntentV1 {
   const { class: _class, locationId: _locationId, ...entity } = playerRecord();
   assert.equal(_class, "player");
@@ -118,13 +193,16 @@ function intent(): RustIntegratedPlayerBootstrapIntentV1 {
       creativeFlightSpeed: 10,
       maximumOxygenSeconds: 15,
     }),
+    inventory: playerInventory(),
   });
 }
 
 function absentObservation(): RustIntegratedPlayerBootstrapObservationV1 {
   return Object.freeze({
     identity: identity("1".repeat(32), 5),
+    worldAuthorityRevision: Object.freeze({ epoch: BigInt(1), mutation: BigInt(2), residency: BigInt(3) }),
     entityAuthority: Object.freeze({ revision: BigInt(5), nextSequence: BigInt(91), tick: BigInt(8) }),
+    continuity: continuity(),
     entity: null,
     runtimePlayer: null,
     worldViewBinding: null,
@@ -141,7 +219,9 @@ function matchingObservation(): RustIntegratedPlayerBootstrapObservationV1 {
   const equipment = Object.freeze({ kind: "equipment" as const, id: `${binding.actorId}:equipment`, ownerId: binding.actorId });
   return Object.freeze({
     identity: identity("1".repeat(32), 6),
+    worldAuthorityRevision: Object.freeze({ epoch: BigInt(1), mutation: BigInt(2), residency: BigInt(3) }),
     entityAuthority: Object.freeze({ revision: BigInt(6), nextSequence: BigInt(92), tick: BigInt(8) }),
+    continuity: continuity(),
     entity: Object.freeze({ entityId: ENTITY_ID, entityRevision: BigInt(4), residency: "hot" as const, record }),
     runtimePlayer: Object.freeze({ entityId: ENTITY_ID, binding }),
     worldViewBinding: Object.freeze({
@@ -157,9 +237,15 @@ function matchingObservation(): RustIntegratedPlayerBootstrapObservationV1 {
     custody: Object.freeze({
       status: "present" as const,
       inventoryContainer: inventory,
-      inventoryRevision: BigInt(12),
+      inventoryRevision: BigInt(1),
+      inventorySlots: Object.freeze([
+        Object.freeze({ itemCode: 1, count: 2, durabilityMillionths: null, metadataHash: ZERO_HASH }),
+        ...Array.from({ length: 8 }, () => null),
+      ]),
       equipmentContainer: equipment,
       equipmentRevision: BigInt(2),
+      equipmentSlots: Object.freeze(Array.from({ length: 8 }, () => null)),
+      metadata: Object.freeze([]),
     }),
   });
 }
@@ -170,10 +256,19 @@ function bytes(hex: string) {
 
 function bindAck(requestHash: string, terminalHash: string) {
   return Uint8Array.of(
-    0x42, 0x57, 0x42, 0x36, 1, 0,
+    0x42, 0x57, 0x46, 0x36, 1, 0,
     ...bytes(requestHash),
     ...bytes(terminalHash),
   );
+}
+
+function gameplayIdentity(sequence: bigint, inventoryRevision: bigint, stateHash: string) {
+  return Object.freeze({
+    universe: "blockwild:primary",
+    location: "surface:spawn",
+    revision: Object.freeze({ epoch: 1, sequence, inventory: inventoryRevision, machines: BigInt(0), combat: BigInt(0), progression: BigInt(0), cardforge: BigInt(0) }),
+    stateHash,
+  });
 }
 
 class FakeBootstrapService implements RustIntegratedPlayerBootstrapServiceV1 {
@@ -226,11 +321,35 @@ class FakeBootstrapService implements RustIntegratedPlayerBootstrapServiceV1 {
           }),
         });
       }
+      if (operation.domain === "simulation") {
+        return createRustIntegratedRuntimeDomainOperationV1({
+          domain: "simulation",
+          typeId: RUST_INTEGRATED_PLAYER_FINAL_BIND_RECEIPT_TYPE_V3,
+          schema: 3,
+          payload: bindAck(operation.payloadHash, after.stateHash),
+        });
+      }
+      const request = decodeRustIntegratedPlayerInventoryImportV1(operation.payload);
+      const beforeGameplay = gameplayIdentity(BigInt(9), BigInt(0), "4".repeat(32));
+      const afterGameplay = gameplayIdentity(BigInt(10), BigInt(1), "5".repeat(32));
       return createRustIntegratedRuntimeDomainOperationV1({
-        domain: "simulation",
-        typeId: RUST_INTEGRATED_PLAYER_BIND_RECEIPT_TYPE_V2,
-        schema: 2,
-        payload: bindAck(operation.payloadHash, after.stateHash),
+        domain: "gameplay",
+        typeId: RUST_INTEGRATED_PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1,
+        schema: 1,
+        payload: encodeRustIntegratedPlayerInventoryImportReceiptV1({
+          requestPayloadHash: operation.payloadHash,
+          before: beforeGameplay,
+          after: afterGameplay,
+          acceptedReceiptHash: "6".repeat(32),
+          resultingInventoryRevision: BigInt(1),
+          selectedSlot: request.selectedSlot,
+          inventoryResultHash: rustIntegratedPlayerInventoryResultHashV1({
+            inventoryContainer: request.inventoryContainer,
+            revision: BigInt(1),
+            slots: request.slots,
+            metadata: request.metadata,
+          }),
+        }),
       });
     });
     const ordered = this.mode === "reverse" ? receipts.reverse() : receipts;
@@ -285,14 +404,253 @@ test("BWI5 freezes the exact envelope, round-trips, and rejects corruption", () 
   assert.throws(() => decodeRustIntegratedEntityCompatibilityImportV1(Uint8Array.of(...encoded, 0)), /length/u);
 });
 
-test("pristine bootstrap atomically orders BWI5 before BWB6 and validates both receipts", async () => {
+test("BWS5/BWO5 status codecs preserve exact cursors and fail closed", () => {
+  const query = Object.freeze({ externalEntityId: "player:primary", actorId: "player:noah", playerId: deriveRustIntegratedPlayerIdV1("blockwild:primary", "player:noah") });
+  const request = encodeRustIntegratedPlayerBootstrapStatusQueryV1(query);
+  assert.deepEqual(decodeRustIntegratedPlayerBootstrapStatusQueryV1(request), query);
+  const status = Object.freeze({
+    requestPayloadHash: rustIntegratedRuntimeWireChecksumV1(request),
+    worldAuthorityRevision: Object.freeze({ epoch: BigInt(1), mutation: BigInt(2), residency: BigInt(3) }),
+    entityAuthority: Object.freeze({ revision: BigInt(5), nextSequence: BigInt(91), tick: BigInt(8) }),
+    continuity: continuity(),
+    entity: null,
+    runtimePlayer: null,
+    worldViewBinding: null,
+    custody: Object.freeze({ status: "absent" as const }),
+  });
+  const encoded = encodeRustIntegratedPlayerBootstrapStatusReceiptV1(status);
+  assert.deepEqual(decodeRustIntegratedPlayerBootstrapStatusReceiptV1(encoded, status.requestPayloadHash), status);
+  const corrupt = Uint8Array.from(encoded); corrupt[corrupt.length - 1] ^= 1;
+  assert.throws(() => decodeRustIntegratedPlayerBootstrapStatusReceiptV1(corrupt), /checksum/u);
+  const discontinuous = Object.freeze({ ...status, continuity: Object.freeze({ ...continuity(), nextInputSequence: BigInt(2) }) });
+  assert.throws(() => encodeRustIntegratedPlayerBootstrapStatusReceiptV1(discontinuous), /discontinuous/u);
+  const queued = Object.freeze({
+    ...status,
+    continuity: Object.freeze({
+      ...continuity(),
+      lastInputSequence: BigInt(2),
+      nextInputSequence: BigInt(3),
+      lastAppliedInput: Object.freeze({ sequence: BigInt(1), targetTick: BigInt(8), moveX: 0, moveZ: 0, lookYaw: 0, lookPitch: 0, buttons: 0, selectedSlot: 0, flags: 0 }),
+      queuedInputsEmpty: false,
+    }),
+  });
+  assert.equal(decodeRustIntegratedPlayerBootstrapStatusReceiptV1(
+    encodeRustIntegratedPlayerBootstrapStatusReceiptV1(queued),
+  ).continuity.queuedInputsEmpty, false);
+});
+
+test("BWO5 round-trips full binding, nine/eight-slot custody, and referenced metadata", () => {
+  const source = matchingObservation();
+  const metadataSource = Object.freeze({
+    typeId: "legacy-instance",
+    schemaId: "legacy-instance-v1",
+    schemaVersion: 1,
+    contentVersion: 2,
+    canonicalJsonBytes: new TextEncoder().encode("{\"quality\":\"kept\"}"),
+    unknownExtensionBytes: Uint8Array.of(4, 2),
+  });
+  const metadata = Object.freeze({ hash: rustIntegratedPlayerInventoryMetadataHashV1(metadataSource), ...metadataSource });
+  const custody = source.custody as Extract<typeof source.custody, { status: "present" }>;
+  const complete = Object.freeze({
+    requestPayloadHash: "a".repeat(32),
+    worldAuthorityRevision: source.worldAuthorityRevision,
+    entityAuthority: source.entityAuthority,
+    continuity: source.continuity,
+    entity: source.entity,
+    runtimePlayer: source.runtimePlayer,
+    worldViewBinding: source.worldViewBinding,
+    custody: Object.freeze({
+      ...custody,
+      inventorySlots: Object.freeze([
+        Object.freeze({ itemCode: 17, count: 1, durabilityMillionths: 500_000, metadataHash: metadata.hash }),
+        ...Array.from({ length: 8 }, () => null),
+      ]),
+      equipmentSlots: Object.freeze([
+        Object.freeze({ itemCode: 18, count: 1, durabilityMillionths: null, metadataHash: ZERO_HASH }),
+        ...Array.from({ length: 7 }, () => null),
+      ]),
+      metadata: Object.freeze([metadata]),
+    }),
+  });
+  const encoded = encodeRustIntegratedPlayerBootstrapStatusReceiptV1(complete);
+  assert.deepEqual(decodeRustIntegratedPlayerBootstrapStatusReceiptV1(encoded), complete);
+  const missingMetadata = Object.freeze({
+    ...complete,
+    custody: Object.freeze({ ...complete.custody, metadata: Object.freeze([]) }),
+  });
+  assert.throws(() => encodeRustIntegratedPlayerBootstrapStatusReceiptV1(missingMetadata), /exactly cover/u);
+});
+
+test("BWP7/BWI7 codecs attest exact nine-slot import and result hash", () => {
+  const desired = intent();
+  const inventoryContainer = Object.freeze({ kind: "player" as const, id: desired.binding.actorId, ownerId: desired.binding.actorId });
+  const slots = Object.freeze(desired.inventory.slots.map((slot) => slot && Object.freeze({ itemCode: slot.itemCode, count: slot.count, durabilityMillionths: slot.durabilityMillionths, metadataHash: ZERO_HASH })));
+  const request = Object.freeze({ inventoryContainer, expectedRevision: BigInt(0), selectedSlot: desired.inventory.selectedSlot, slots, metadata: Object.freeze([]) });
+  const encoded = encodeRustIntegratedPlayerInventoryImportV1(request);
+  assert.deepEqual(decodeRustIntegratedPlayerInventoryImportV1(encoded), request);
+  const receipt = Object.freeze({
+    requestPayloadHash: rustIntegratedRuntimeWireChecksumV1(encoded),
+    before: gameplayIdentity(BigInt(1), BigInt(0), "7".repeat(32)),
+    after: gameplayIdentity(BigInt(2), BigInt(1), "8".repeat(32)),
+    acceptedReceiptHash: "9".repeat(32),
+    resultingInventoryRevision: BigInt(1),
+    selectedSlot: request.selectedSlot,
+    inventoryResultHash: rustIntegratedPlayerInventoryResultHashV1({ inventoryContainer, revision: BigInt(1), slots, metadata: [] }),
+  });
+  assert.deepEqual(decodeRustIntegratedPlayerInventoryImportReceiptV1(encodeRustIntegratedPlayerInventoryImportReceiptV1(receipt)), receipt);
+  assert.throws(() => encodeRustIntegratedPlayerInventoryImportV1(Object.freeze({ ...request, slots: request.slots.slice(0, 8) })), /nine/u);
+});
+
+test("BWS5/BWO5/BWP7/BWI7 match frozen native high-byte vectors", () => {
+  const max = (BigInt(1) << BigInt(64)) - BigInt(1);
+  const query = Object.freeze({
+    externalEntityId: "player:水",
+    actorId: "actor:水",
+    playerId: BigInt("0xfedcba9889abcdef"),
+  });
+  const queryBytes = encodeRustIntegratedPlayerBootstrapStatusQueryV1(query);
+  assert.equal(Buffer.from(queryBytes).toString("hex"), NATIVE_BOOTSTRAP_FIXTURE.bws5Hex);
+  const status = Object.freeze({
+    requestPayloadHash: "80".repeat(16),
+    worldAuthorityRevision: Object.freeze({ epoch: max, mutation: max, residency: max }),
+    entityAuthority: Object.freeze({ revision: max, nextSequence: null, tick: max }),
+    continuity: Object.freeze({
+      lastMonotonicTimeUs: max,
+      lastInputSequence: max,
+      nextInputSequence: null,
+      lastActionSequence: max - BigInt(1),
+      nextActionSequence: max,
+      authoritativeFlags: 7,
+      lastAppliedInput: Object.freeze({
+        sequence: max,
+        targetTick: max,
+        moveX: -0x8000,
+        moveZ: 0x7fff,
+        lookYaw: -1,
+        lookPitch: 1,
+        buttons: 0xffff_ffff,
+        selectedSlot: 8,
+        flags: 7,
+      }),
+      queuedInputsEmpty: true,
+    }),
+    entity: null,
+    runtimePlayer: null,
+    worldViewBinding: null,
+    custody: Object.freeze({ status: "absent" as const }),
+  });
+  const statusBytes = encodeRustIntegratedPlayerBootstrapStatusReceiptV1(status);
+  assert.equal(Buffer.from(statusBytes).toString("hex"), NATIVE_BOOTSTRAP_FIXTURE.bwo5Hex);
+  assert.deepEqual(decodeRustIntegratedPlayerBootstrapStatusReceiptV1(statusBytes), status);
+
+  const canonicalJsonBytes = new TextEncoder().encode("{\"name\":\"水\"}");
+  const metadataSource = Object.freeze({
+    typeId: "legacy:水",
+    schemaId: "legacy-player-item-v1",
+    schemaVersion: 1,
+    contentVersion: 0xffff_ffff,
+    canonicalJsonBytes,
+    unknownExtensionBytes: Uint8Array.of(0, 0x80, 0xff),
+  });
+  const metadata = Object.freeze({
+    hash: rustIntegratedPlayerInventoryMetadataHashV1(metadataSource),
+    ...metadataSource,
+  });
+  assert.equal(metadata.hash, "882e9e6aeccf42c3f0de791eecf30a2e");
+  const inventoryContainer = Object.freeze({ kind: "player" as const, id: "actor:水", ownerId: "actor:水" });
+  const slots = Object.freeze([
+    ...Array.from({ length: 8 }, () => null),
+    Object.freeze({ itemCode: 0xffff_ffff, count: 0xffff_ffff, durabilityMillionths: 1_000_000, metadataHash: metadata.hash }),
+  ]);
+  const inventoryRequest = Object.freeze({ inventoryContainer, expectedRevision: BigInt(0), selectedSlot: 8, slots, metadata: Object.freeze([metadata]) });
+  const inventoryBytes = encodeRustIntegratedPlayerInventoryImportV1(inventoryRequest);
+  assert.equal(Buffer.from(inventoryBytes).toString("hex"), NATIVE_BOOTSTRAP_FIXTURE.bwp7Hex);
+  assert.deepEqual(decodeRustIntegratedPlayerInventoryImportV1(inventoryBytes), inventoryRequest);
+
+  const before = Object.freeze({
+    universe: "universe:水",
+    location: "surface",
+    revision: Object.freeze({ epoch: 1, sequence: BigInt(0), inventory: BigInt(0), machines: BigInt(0), combat: BigInt(0), progression: BigInt(0), cardforge: BigInt(0) }),
+    stateHash: "f79d45c28f5c7ef3c83a571e907d2503",
+  });
+  const after = Object.freeze({
+    universe: "universe:水",
+    location: "surface",
+    revision: Object.freeze({ epoch: 1, sequence: max, inventory: max, machines: BigInt(0), combat: BigInt(0), progression: BigInt(0), cardforge: BigInt(0) }),
+    stateHash: "ff".repeat(16),
+  });
+  const inventoryResultHash = rustIntegratedPlayerInventoryResultHashV1({ inventoryContainer, revision: BigInt(1), slots, metadata: [metadata] });
+  assert.equal(inventoryResultHash, "213d5b06a014aa2038b55f7d5a206b52");
+  const inventoryReceipt = Object.freeze({
+    requestPayloadHash: "a82a5446608b477238b55f7d5a206b52",
+    before,
+    after,
+    acceptedReceiptHash: "81".repeat(16),
+    resultingInventoryRevision: BigInt(1),
+    selectedSlot: 8,
+    inventoryResultHash,
+  });
+  const receiptBytes = encodeRustIntegratedPlayerInventoryImportReceiptV1(inventoryReceipt);
+  assert.equal(Buffer.from(receiptBytes).toString("hex"), NATIVE_BOOTSTRAP_FIXTURE.bwi7Hex);
+  assert.deepEqual(decodeRustIntegratedPlayerInventoryImportReceiptV1(receiptBytes), inventoryReceipt);
+});
+
+test("bootstrap status query is an exact nonmutating BWS5 command", async () => {
+  const expected = absentObservation();
+  let commands = 0;
+  const service: RustIntegratedPlayerBootstrapServiceV1 = {
+    identity: () => expected.identity,
+    command: async (batch) => {
+      commands += 1;
+      assert.equal(batch.operations.length, 1);
+      const request = batch.operations[0];
+      assert.equal(request.domain, "simulation");
+      assert.equal(request.typeId, RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1);
+      assert.equal(request.schema, 1);
+      assert.deepEqual(decodeRustIntegratedPlayerBootstrapStatusQueryV1(request.payload), {
+        externalEntityId: "player:primary",
+        actorId: "player:noah",
+        playerId: deriveRustIntegratedPlayerIdV1("blockwild:primary", "player:noah"),
+      });
+      const payload = encodeRustIntegratedPlayerBootstrapStatusReceiptV1({
+        requestPayloadHash: request.payloadHash,
+        worldAuthorityRevision: expected.worldAuthorityRevision,
+        entityAuthority: expected.entityAuthority,
+        continuity: expected.continuity,
+        entity: expected.entity,
+        runtimePlayer: expected.runtimePlayer,
+        worldViewBinding: expected.worldViewBinding,
+        custody: expected.custody,
+      });
+      return Object.freeze({
+        status: "accepted" as const,
+        commandId: batch.commandId,
+        idempotencyKey: batch.idempotencyKey,
+        commandHash: batch.commandHash,
+        before: expected.identity,
+        after: expected.identity,
+        domainReceipts: Object.freeze([createRustIntegratedRuntimeDomainOperationV1({
+          domain: "simulation",
+          typeId: RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1,
+          schema: 1,
+          payload,
+        })]),
+        receiptHash: ZERO_HASH,
+      });
+    },
+  };
+  assert.deepEqual(await queryRustIntegratedPlayerBootstrapObservationV1(service, intent()), expected);
+  assert.equal(commands, 1);
+});
+
+test("absent bootstrap atomically orders BWI5, deferred BWF6, then BWP7", async () => {
   const observation = absentObservation();
   const service = new FakeBootstrapService(observation.identity);
   const result = await executeRustIntegratedPlayerBootstrapV1(service, observation, intent());
-  assert.equal(result.status, "spawned-and-bound");
+  assert.equal(result.status, "spawned-bound-and-imported");
   assert.equal(result.entityId, ENTITY_ID);
   assert.equal(service.batches.length, 1);
-  assert.deepEqual(service.batches[0].operations.map((operation) => operation.domain), ["entities", "simulation"]);
+  assert.deepEqual(service.batches[0].operations.map((operation) => operation.domain), ["entities", "simulation", "gameplay"]);
   assert.equal(decodeRustIntegratedEntityCompatibilityImportV1(service.batches[0].operations[0].payload).sequence, BigInt(91));
 });
 
@@ -305,7 +663,23 @@ test("matching restored state is a no-op even when simulation fields evolved", a
   assert.equal(service.batches.length, 0);
 });
 
-test("an exact unbound entity emits only BWB6", async () => {
+test("matching evolved native inventory is a no-op at its exact durable revision", async () => {
+  const source = matchingObservation();
+  const observation = Object.freeze({
+    ...source,
+    custody: Object.freeze({
+      ...source.custody as Extract<typeof source.custody, { status: "present" }>,
+      inventoryRevision: BigInt(12),
+    }),
+  });
+  const desired = Object.freeze({ ...intent(), inventory: playerInventory(4, BigInt(12)) });
+  const service = new FakeBootstrapService(observation.identity);
+  const result = await executeRustIntegratedPlayerBootstrapV1(service, observation, desired);
+  assert.equal(result.status, "already-matching");
+  assert.equal(service.batches.length, 0);
+});
+
+test("an exact unbound entity emits deferred BWF6 then BWP7", async () => {
   const source = matchingObservation();
   const observation = Object.freeze({
     ...source,
@@ -315,9 +689,29 @@ test("an exact unbound entity emits only BWB6", async () => {
   });
   const service = new FakeBootstrapService(observation.identity);
   const result = await executeRustIntegratedPlayerBootstrapV1(service, observation, intent());
-  assert.equal(result.status, "bound-existing");
+  assert.equal(result.status, "bound-and-imported");
   assert.equal(result.entityId, ENTITY_ID);
-  assert.deepEqual(service.batches[0].operations.map((operation) => operation.domain), ["simulation"]);
+  assert.deepEqual(service.batches[0].operations.map((operation) => operation.domain), ["simulation", "gameplay"]);
+});
+
+test("bound pristine custody emits only BWP7", async () => {
+  const source = matchingObservation();
+  const observation = Object.freeze({
+    ...source,
+    worldViewBinding: Object.freeze({ ...source.worldViewBinding!, selectedSlot: 0 }),
+    custody: Object.freeze({
+      ...source.custody as Extract<typeof source.custody, { status: "present" }>,
+      inventoryRevision: BigInt(0),
+      inventorySlots: Object.freeze(Array.from({ length: 9 }, () => null)),
+      metadata: Object.freeze([]),
+    }),
+  });
+  const desired = Object.freeze({ ...intent(), inventory: playerInventory(4) });
+  const service = new FakeBootstrapService(observation.identity);
+  const result = await executeRustIntegratedPlayerBootstrapV1(service, observation, desired);
+  assert.equal(result.status, "inventory-imported");
+  assert.deepEqual(service.batches[0].operations.map((operation) => operation.domain), ["gameplay"]);
+  assert.equal(decodeRustIntegratedPlayerInventoryImportV1(service.batches[0].operations[0].payload).selectedSlot, 4);
 });
 
 test("missing sequence, partial state, and contradictory restored identities fail before dispatch", async () => {
@@ -331,6 +725,16 @@ test("missing sequence, partial state, and contradictory restored identities fai
     entityAuthority: Object.freeze({ revision: BigInt(4), nextSequence: BigInt(91), tick: BigInt(8) }),
   });
   assert.throws(() => planRustIntegratedPlayerBootstrapV1(contradictoryCursor, intent()), /contradicts/u);
+  const queuedInputs = Object.freeze({
+    ...absentObservation(),
+    continuity: Object.freeze({
+      ...continuity(),
+      lastInputSequence: BigInt(1),
+      nextInputSequence: BigInt(2),
+      queuedInputsEmpty: false,
+    }),
+  });
+  assert.throws(() => planRustIntegratedPlayerBootstrapV1(queuedInputs, intent()), /empty native input queue/u);
 
   const matching = matchingObservation();
   const partial = Object.freeze({ ...matching, runtimePlayer: null });
@@ -349,6 +753,24 @@ test("missing sequence, partial state, and contradictory restored identities fai
     RustIntegratedPlayerBootstrapErrorV1,
   );
   assert.equal(service.batches.length, 0);
+
+  const slotDrift = Object.freeze({
+    ...matching,
+    custody: Object.freeze({
+      ...matching.custody as Extract<typeof matching.custody, { status: "present" }>,
+      inventorySlots: Object.freeze([
+        Object.freeze({ itemCode: 1, count: 3, durabilityMillionths: null, metadataHash: ZERO_HASH }),
+        ...Array.from({ length: 8 }, () => null),
+      ]),
+    }),
+  });
+  assert.throws(() => planRustIntegratedPlayerBootstrapV1(slotDrift, intent()), /durable import attestation/u);
+
+  const selectedSlotDrift = Object.freeze({
+    ...matching,
+    worldViewBinding: Object.freeze({ ...matching.worldViewBinding!, selectedSlot: 5 }),
+  });
+  assert.throws(() => planRustIntegratedPlayerBootstrapV1(selectedSlotDrift, intent()), /durable import attestation/u);
 
   const stale = new FakeBootstrapService(identity("3".repeat(32), 5));
   await assert.rejects(executeRustIntegratedPlayerBootstrapV1(stale, absentObservation(), intent()), /identity moved/u);
