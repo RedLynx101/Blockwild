@@ -5712,6 +5712,30 @@ export class VoxelEngine {
     this.selectSlot(selected + (event.deltaY > 0 ? 1 : -1));
   };
 
+  private openShellOverlayForKey(event: KeyboardEvent) {
+    let overlay: OverlayKind | null = null;
+    switch (event.code) {
+      case "KeyE": overlay = "inventory"; break;
+      case "KeyM": overlay = "map"; break;
+      case "KeyJ": overlay = "quests"; break;
+      case "KeyK": overlay = "magic"; break;
+      case "KeyL": overlay = "skills"; break;
+      case "KeyB": overlay = "bestiary"; break;
+      default: break;
+    }
+    if (overlay === null) return false;
+    // Consume auto-repeat without reopening or deriving a new presentation
+    // target. The initial keydown remains the single shell callback.
+    if (event.repeat) return true;
+    if (overlay !== "bestiary") this.openOverlay(overlay);
+    else if (this.targetMob) this.openOverlay("bestiary", `creature:${this.targetMob.kind}`);
+    else {
+      const plant = plantForBlock(this.target?.type);
+      this.openOverlay("bestiary", plant ? `plant:${plant.id}` : undefined);
+    }
+    return true;
+  }
+
   onKeyDown = (event: KeyboardEvent) => {
     if (!this.running) return;
     if (isEditableKeyboardTarget(event.target)) return;
@@ -5719,9 +5743,11 @@ export class VoxelEngine {
     // multiplayer, where opening a menu intentionally does not pause the host.
     if (this.titleMode || this.paused || this.gameplayOverlayOpen) return;
     if (["KeyW", "KeyA", "KeyS", "KeyD", "Space", "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "KeyF", "KeyQ", "KeyZ", "KeyX", "KeyC"].includes(event.code)) event.preventDefault();
+    if (this.openShellOverlayForKey(event)) return;
     if (this.rustLivePlayerAuthorityEnabledR5()) {
       // Once native player authority is live, unsupported legacy actions are
-      // deliberately inert. Only the exact R5 input vocabulary may proceed.
+      // deliberately inert. Every branch below is part of the exact R5 input
+      // vocabulary; shell-only overlays have already returned above.
       if (event.code === "KeyG" && !event.repeat) this.rustDropPulse = true;
       else if (event.code === "KeyF") event.preventDefault();
       else if (event.code === "KeyV" && !event.repeat) {
@@ -5745,34 +5771,6 @@ export class VoxelEngine {
         }
         if (event.code === "Space" && !event.repeat && !this.keys.has("Space")) this.recordCreativeFlightTap(performance.now());
         this.keys.add(event.code);
-      }
-      return;
-    }
-    if (event.code === "KeyE" && !event.repeat) {
-      this.openOverlay("inventory");
-      return;
-    }
-    if (event.code === "KeyM" && !event.repeat) {
-      this.openOverlay("map");
-      return;
-    }
-    if (event.code === "KeyJ" && !event.repeat) {
-      this.openOverlay("quests");
-      return;
-    }
-    if (event.code === "KeyK" && !event.repeat) {
-      this.openOverlay("magic");
-      return;
-    }
-    if (event.code === "KeyL" && !event.repeat) {
-      this.openOverlay("skills");
-      return;
-    }
-    if (event.code === "KeyB" && !event.repeat) {
-      if (this.targetMob) this.openOverlay("bestiary", `creature:${this.targetMob.kind}`);
-      else {
-        const plant = plantForBlock(this.target?.type);
-        this.openOverlay("bestiary", plant ? `plant:${plant.id}` : undefined);
       }
       return;
     }

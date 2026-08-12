@@ -986,6 +986,60 @@ test("runtime player gate routes R5 actions and does not execute direct legacy m
   assert.equal(routed.miningProgress, 0.75, "the legacy mining accumulator must stay untouched while live");
 });
 
+test("live player key routing opens shell overlays once and leaves unsupported gameplay keys inert", () => {
+  const engine = Object.create(VoxelEngine.prototype) as VoxelEngine & Record<string, unknown>;
+  const overlays: Array<readonly [string, string | undefined]> = [];
+  const forbiddenMutations: string[] = [];
+  Object.assign(engine, {
+    rustDropPulse: false,
+    keys: new Set<string>(),
+    targetMob: { kind: "ridgeback" },
+    openOverlay: (kind: string, key?: string) => overlays.push([kind, key]),
+    startRangedReload: () => { forbiddenMutations.push("reload"); },
+    castSelectedMagicSpell: () => { forbiddenMutations.push("cast"); },
+    dismountCreature: () => { forbiddenMutations.push("dismount"); },
+    triggerMountedCreatureMove: () => { forbiddenMutations.push("mounted-move"); },
+    performDragonAttack: () => { forbiddenMutations.push("dragon-attack"); },
+  });
+  Object.defineProperties(engine, {
+    spellKeyState: { get: () => { throw new Error("legacy spell state read"); }, configurable: true },
+    mountedCreatureId: { get: () => { throw new Error("legacy mount state read"); }, configurable: true },
+    mobs: { get: () => { throw new Error("legacy creature list read"); }, configurable: true },
+  });
+  const route = (engine as unknown as {
+    openShellOverlayForKey(event: KeyboardEvent): boolean;
+  }).openShellOverlayForKey.bind(engine);
+  const prevented: string[] = [];
+  const keyEvent = (code: string, repeat = false) => ({
+    code,
+    repeat,
+    preventDefault: () => { prevented.push(code); },
+  }) as unknown as KeyboardEvent;
+
+  for (const code of ["KeyE", "KeyM", "KeyJ", "KeyK", "KeyL", "KeyB"]) {
+    assert.equal(route(keyEvent(code)), true);
+    assert.equal(route(keyEvent(code, true)), true);
+  }
+  assert.deepEqual(overlays, [
+    ["inventory", undefined],
+    ["map", undefined],
+    ["quests", undefined],
+    ["magic", undefined],
+    ["skills", undefined],
+    ["bestiary", "creature:ridgeback"],
+  ]);
+  assert.deepEqual(prevented, [], "shell shortcuts retain their existing browser-default behavior");
+
+  for (const code of ["KeyQ", "KeyR", "KeyF", "KeyZ", "KeyX", "KeyC"]) {
+    assert.equal(route(keyEvent(code)), false);
+  }
+  assert.equal(overlays.length, 6);
+  assert.deepEqual(forbiddenMutations, []);
+  assert.equal((engine as unknown as { rustDropPulse: boolean }).rustDropPulse, false);
+  assert.deepEqual([...(engine as unknown as { keys: Set<string> }).keys], []);
+  assert.deepEqual(prevented, [], "the shell router cannot consume gameplay-key browser defaults");
+});
+
 test("legacy boat stepping cannot drive or overwrite the live native player mirror", () => {
   const engine = Object.create(VoxelEngine.prototype) as VoxelEngine & Record<string, unknown>;
   const visualUpdates: string[] = [];
@@ -1192,12 +1246,17 @@ test("engine source orders the exact player gate before composer and suppresses 
   const keyStart = source.indexOf("  onKeyDown = (event: KeyboardEvent) => {");
   const keyEnd = source.indexOf("\n  onKeyUp =", keyStart);
   const keys = source.slice(keyStart, keyEnd);
+  const shellRoute = keys.indexOf("if (this.openShellOverlayForKey(event)) return;");
   const liveStart = keys.indexOf("if (this.rustLivePlayerAuthorityEnabledR5()) {");
-  const legacyInventory = keys.indexOf('if (event.code === "KeyE"');
-  assert.ok(liveStart >= 0 && liveStart < legacyInventory, "the native gate must run before every legacy special key");
-  const liveBranch = keys.slice(liveStart, legacyInventory);
+  const legacySpell = keys.indexOf('if (event.code === "KeyQ"');
+  assert.ok(shellRoute >= 0 && shellRoute < liveStart, "shell-only keys must route before the native gameplay gate");
+  assert.ok(liveStart >= 0 && liveStart < legacySpell, "the native gate must run before every legacy gameplay key");
+  const liveBranch = keys.slice(liveStart, legacySpell);
+  const shellKeyRouter = source.slice(
+    source.indexOf("  private openShellOverlayForKey("),
+    source.indexOf("\n  onKeyDown =", source.indexOf("  private openShellOverlayForKey(")),
+  );
   for (const forbidden of [
-    "openOverlay(",
     "startRangedReload(",
     "performDragonAttack(",
     "triggerMountedCreatureMove(",
@@ -1208,6 +1267,12 @@ test("engine source orders the exact player gate before composer and suppresses 
   assert.match(liveBranch, /rustDropPulse = true/u);
   assert.match(liveBranch, /event\.code === "KeyF"\) event\.preventDefault\(\)/u);
   assert.match(liveBranch, /this\.keys\.add\(event\.code\)/u);
+  for (const [code, overlay] of [["KeyE", "inventory"], ["KeyM", "map"], ["KeyJ", "quests"], ["KeyK", "magic"], ["KeyL", "skills"], ["KeyB", "bestiary"]]) {
+    assert.match(shellKeyRouter, new RegExp(`case "${code}": overlay = "${overlay}"`, "u"));
+  }
+  assert.match(shellKeyRouter, /if \(event\.repeat\) return true/u);
+  assert.match(shellKeyRouter, /this\.openOverlay\("bestiary", `creature:\$\{this\.targetMob\.kind\}`\)/u);
+  assert.doesNotMatch(shellKeyRouter, /rustDropPulse|startRangedReload|castSelectedMagicSpell|dismount|triggerMounted|performDragon/u);
   assert.doesNotMatch(source, /rustInteractPulse/u);
   assert.doesNotMatch(source, /rustMountTogglePulse/u);
   assert.match(source, /interact: false,/u);

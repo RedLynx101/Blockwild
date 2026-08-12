@@ -252,6 +252,10 @@ test("ordinary, viewport, and camera-command results preserve one serialized aut
   const refresh = interval(source, "  private scheduleRustLiveViewRefreshR10(", "\n  private scheduleRustLiveCameraModeCycleR10");
   const cameraConfig = interval(source, "  private scheduleRustLiveCameraModeCycleR10(", "\n  private quarantineRustLivePlayerAuthorityR5");
   const keyDown = interval(source, "  onKeyDown = (event: KeyboardEvent) => {", "\n  onKeyUp =");
+  const liveKeyDown = keyDown.slice(
+    keyDown.indexOf("if (this.rustLivePlayerAuthorityEnabledR5()) {"),
+    keyDown.indexOf('if (event.code === "KeyQ"'),
+  );
 
   assert.match(advance, /await pump\.advance\(generation, \{ view: requestedView \}\)/u);
   assert.match(advance, /result\.cause === "authority" \|\| result\.cause === "initial"/u);
@@ -261,8 +265,8 @@ test("ordinary, viewport, and camera-command results preserve one serialized aut
   assert.match(cameraConfig, /await pump\.applyCameraConfig\(generation, \(current\) => \(\{/u);
   assert.match(cameraConfig, /current\.mode === "first" \? "third-rear"/u);
   assert.doesNotMatch(cameraConfig, /this\.cameraMode\s*=/u);
-  assert.match(keyDown, /event\.code === "KeyV"[\s\S]*this\.scheduleRustLiveCameraModeCycleR10\(\)/u);
-  assert.doesNotMatch(keyDown.slice(0, keyDown.indexOf('if (event.code === "KeyE"')), /this\.cycleCameraMode\(\)/u);
+  assert.match(liveKeyDown, /event\.code === "KeyV"[\s\S]*this\.scheduleRustLiveCameraModeCycleR10\(\)/u);
+  assert.doesNotMatch(liveKeyDown, /this\.cycleCameraMode\(\)/u);
 });
 
 test("resize during an awaited step commits refreshed player-camera authority and never queues the old view", async () => {
