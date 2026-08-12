@@ -27,12 +27,15 @@ const U64_MAX = BigInt("0xffffffffffffffff");
 export type RustDomainIdR10 = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
 export type RustDomainStatusR10 = "complete" | "partial" | "absent";
 export type RustDomainValueR10 = boolean | bigint | number | string | Uint8Array;
+export type RustDomainValueTypeR10 = "bool" | "u64" | "i64" | "f64" | "string" | "hash" | "bytes";
 
 export type RustDomainRowR10 = Readonly<{
   kind: number;
   key: string;
   revision: bigint;
   fields: readonly (readonly [string, RustDomainValueR10])[];
+  /** Exact wire tags parallel to `fields`; present on decoded BWX0 rows. */
+  fieldTypes?: readonly RustDomainValueTypeR10[];
 }>;
 
 export type RustDomainViewR10 = Readonly<{
@@ -152,7 +155,11 @@ class Reader {
   u32() { const value = new DataView(this.take(4).buffer, this.source.byteOffset + this.offset - 4, 4); return value.getUint32(0, true); }
   u64() { const value = new DataView(this.take(8).buffer, this.source.byteOffset + this.offset - 8, 8).getBigUint64(0, true); invariant(value <= U64_MAX, "R10 u64 overflow"); return value; }
   i64() { return new DataView(this.take(8).buffer, this.source.byteOffset + this.offset - 8, 8).getBigInt64(0, true); }
-  f64() { const value = new DataView(this.take(8).buffer, this.source.byteOffset + this.offset - 8, 8).getFloat64(0, true); invariant(Number.isFinite(value), "R10 extraction contains a non-finite number"); return Object.is(value, -0) ? 0 : value; }
+  // Preserve the exact IEEE-754 value, including negative zero. Domain row
+  // revisions and native camera hashes attest the encoded f64 bits, so
+  // normalizing `-0.0` here would make an otherwise valid authoritative row
+  // impossible to hash or serialize exactly in the browser.
+  f64() { const value = new DataView(this.take(8).buffer, this.source.byteOffset + this.offset - 8, 8).getFloat64(0, true); invariant(Number.isFinite(value), "R10 extraction contains a non-finite number"); return value; }
   bool() { const value = this.u8(); invariant(value <= 1, "R10 extraction contains an invalid boolean"); return value === 1; }
   string(maximum = 1_048_576) { const length = this.u32(); invariant(length <= maximum, "R10 extraction string exceeds its bound"); const value = decoder.decode(this.take(length)); invariant(!/\p{Cc}/u.test(value), "R10 extraction string contains a control character"); return value; }
   bytes(maximum = RUST_DOMAIN_VIEW_MAX_PAYLOAD_BYTES_R10) { const length = this.u32(); invariant(length <= maximum, "R10 byte field exceeds its bound"); return frozenBytes(this.take(length)); }
@@ -164,15 +171,15 @@ function expectMagic(reader: Reader, expected: string) {
   invariant(decoder.decode(reader.take(4)) === expected, `expected ${expected} extraction magic`);
 }
 
-function readDomainValue(reader: Reader): RustDomainValueR10 {
+function readDomainValue(reader: Reader): readonly [RustDomainValueTypeR10, RustDomainValueR10] {
   const tag = reader.u8();
-  if (tag === 0) return reader.bool();
-  if (tag === 1) return reader.u64();
-  if (tag === 2) return reader.i64();
-  if (tag === 3) return reader.f64();
-  if (tag === 4) return reader.string();
-  if (tag === 5) return reader.hash();
-  if (tag === 6) return reader.bytes();
+  if (tag === 0) return ["bool", reader.bool()];
+  if (tag === 1) return ["u64", reader.u64()];
+  if (tag === 2) return ["i64", reader.i64()];
+  if (tag === 3) return ["f64", reader.f64()];
+  if (tag === 4) return ["string", reader.string()];
+  if (tag === 5) return ["hash", reader.hash()];
+  if (tag === 6) return ["bytes", reader.bytes()];
   throw new TypeError(`unknown R10 domain value tag ${tag}`);
 }
 
@@ -193,6 +200,7 @@ function decodeDomainRows(payload: Uint8Array, selected: number) {
     const revisionHasher = new TypeScriptCanonicalHasher("blockwild.r10.domain-row-revision.v1")
       .writeU16(kind).writeString(key).writeU16(fieldCount);
     const fields: Array<readonly [string, RustDomainValueR10]> = [];
+    const fieldTypes: RustDomainValueTypeR10[] = [];
     let previousField: string | null = null;
     for (let fieldIndex = 0; fieldIndex < fieldCount; fieldIndex += 1) {
       const field = reader.string();
@@ -200,14 +208,21 @@ function decodeDomainRows(payload: Uint8Array, selected: number) {
         "R10 row fields are not canonical and unique");
       previousField = field;
       const valueStart = reader.position;
-      const value = readDomainValue(reader);
+      const [valueType, value] = readDomainValue(reader);
       revisionHasher.writeString(field).writeBytes(reader.span(valueStart, reader.position));
       fields.push(Object.freeze([field, value] as const));
+      fieldTypes.push(valueType);
     }
     const revisionBytes = revisionHasher.finish();
     const expectedRevision = new DataView(revisionBytes.buffer, revisionBytes.byteOffset, 8).getBigUint64(0, true);
     invariant(revision === expectedRevision, "R10 domain row revision does not attest its complete payload");
-    rows.push(Object.freeze({ kind, key, revision, fields: Object.freeze(fields) }));
+    rows.push(Object.freeze({
+      kind,
+      key,
+      revision,
+      fields: Object.freeze(fields),
+      fieldTypes: Object.freeze(fieldTypes),
+    }));
   }
   reader.finish();
   return Object.freeze(rows);
