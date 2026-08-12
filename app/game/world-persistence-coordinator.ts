@@ -70,6 +70,11 @@ function checkpointId(sequence: number, setHash: string) {
   return `cp-${sequence.toString(36).padStart(8, "0")}-${setHash.slice(0, 16)}`;
 }
 
+function migrationCheckpointCreatedAt(save: WorldSave) {
+  if (!Number.isSafeInteger(save.savedAt) || save.savedAt < 0) throw new Error("legacy migration save timestamp must be a non-negative safe integer");
+  return save.savedAt;
+}
+
 function manifestShard(checkpoint: PersistenceCheckpointV1, shards: readonly WorldSaveShardV1[]) {
   const descriptor = checkpoint.records.find((record) => record.address.kind === "location-manifest" && record.address.recordId === "manifest");
   if (!descriptor) throw new Error("checkpoint has no world-save manifest record");
@@ -94,7 +99,10 @@ export class WorldPersistenceCoordinatorV1 {
     const previous = this.queues.get(worldId) ?? Promise.resolve();
     const next = previous.catch(() => undefined).then(operation);
     this.queues.set(worldId, next);
-    void next.finally(() => { if (this.queues.get(worldId) === next) this.queues.delete(worldId); });
+    const release = () => { if (this.queues.get(worldId) === next) this.queues.delete(worldId); };
+    // A detached finally() inherits rejection and creates an unhandled promise.
+    // Observe both settlements explicitly while preserving `next` for callers.
+    void next.then(release, release);
     return next;
   }
 
@@ -177,19 +185,24 @@ export class WorldPersistenceCoordinatorV1 {
   }>) {
     return this.enqueue(input.worldId, async () => {
       if (!this.adapter.commitMigration || !this.adapter.verifyMigrationReadback) throw new Error("persistence adapter does not support protected legacy migration");
-      const existing = await this.adapter.readLatestCheckpoint(input.worldId);
-      if (existing) { this.states.set(input.worldId, Object.freeze({ checkpoint: existing, records: existing.records, journalSequence: existing.journalSequence })); return existing; }
       const fingerprint = validateFingerprint(input.fingerprint ?? defaultFingerprint(input.save));
       const shards = shardWorldSaveV1(input.worldId, input.save);
       const records = shards.shards.map((entry) => Object.freeze({ address: entry.address, revision: 1, byteLength: entry.payload.byteLength, payloadHash: entry.payloadHash }));
       const checkpoint = checkpointWorldSaveShardsV1({ checkpointId: checkpointId(0, shards.setHash), parentCheckpointId: null, worldId: input.worldId, journalSequence: 0,
-        generatorHash: fingerprint.generatorHash, contentHash: fingerprint.contentHash, createdAt: this.now(), records });
+        generatorHash: fingerprint.generatorHash, contentHash: fingerprint.contentHash, createdAt: migrationCheckpointCreatedAt(input.save), records });
       const bundle = createLegacyMigrationBundleV1({ sourceKey: input.sourceKey, sourceFormat: input.sourceFormat, worldId: input.worldId,
         sourcePayload: input.sourcePayload, normalizedPayload: encodeCanonicalWorldSaveValueV1(input.save) });
       const recordPayloads = new Map(shards.shards.map((entry) => [persistenceRecordKeyV1(entry.address), entry.payload]));
       await this.adapter.commitMigration({ bundle, sourcePayload: input.sourcePayload, checkpoint, recordPayloads });
       const verified = await this.adapter.verifyMigrationReadback({ bundle, checkpoint });
-      if (!verified.ready) throw new Error(`legacy migration failed readback: ${[...verified.missingRecords, ...verified.corruptRecords].join(", ") || "backup/checkpoint mismatch"}`);
+      const exactReadback = verified.ready && verified.checkpointHash === checkpoint.checkpointHash && verified.backupPreserved
+        && verified.missingRecords.length === 0 && verified.corruptRecords.length === 0;
+      if (!exactReadback) {
+        const failures = [...verified.missingRecords, ...verified.corruptRecords];
+        if (verified.checkpointHash !== checkpoint.checkpointHash) failures.push("checkpoint hash mismatch");
+        if (!verified.backupPreserved) failures.push("legacy source backup mismatch");
+        throw new Error(`legacy migration failed readback: ${failures.join(", ") || "adapter did not confirm exact durable state"}`);
+      }
       this.states.set(input.worldId, Object.freeze({ checkpoint, records: checkpoint.records, journalSequence: 0 }));
       return checkpoint;
     });
