@@ -35,6 +35,33 @@ and drop) also reject rather than being accepted and ignored. All three state
 flags currently reject as well: the browser cannot grant itself creative,
 flight, or mounted eligibility by setting an input bit.
 
+Schema 6 defines an isolated `StepV2` codec beside that frozen input ABI. Its
+request payload starts with the complete schema-2 StepV1 bytes, then appends a
+bounded, strictly ordered context-command lane. Cast commands bind an exact
+spell ID plus loadout and learned-spell revisions. Reload commands bind the
+injective container key (`kind`, `id`, optional `ownerId`), selected slot, and
+container revision. Mounted abilities bind the packed generational entity ID,
+entity revision, seat index, and ability slot. All command sequences and target
+ticks are JavaScript-safe, command hashes are domain-separated, and full-width
+packed entity IDs remain raw `u64` values rather than lossy JavaScript numbers.
+
+The schema-6 response starts with the complete schema-3 StepResult bytes,
+including its replay hash, then appends one canonical semantic receipt for
+every crossed due context command. Receipts have a closed outcome/reason
+matrix; bind the command hash, post-step identity, and replay hash; and may
+carry an exact resolved entity revision, full world revision for a resolved
+block, and typed session/effect identities with revisions. Variant-specific
+resolution fields prevent irrelevant revisions from acquiring accidental
+meaning. The existing `commandsProcessed`/`commandsAccepted` fields remain
+overall integrated scheduler counters; they are intentionally not derived
+from semantic outcomes in this wire-only slice.
+
+The generic V1 request/response decoders reject schema-6 StepV2. Dedicated
+StepV2 codecs make the ABI testable before runtime installation, while the
+browser pump exposes only an optional dispatcher and requires an explicit
+restored next-command sequence. Therefore codec availability does not claim a
+Wasm implementation, restored continuity, authority cutover, or capability.
+
 Limits shared with TypeScript include an 8 MiB envelope, 1 MiB per domain
 operation, 6 MiB combined extraction, 128 input frames, 64 capabilities, and
 JavaScript-safe integer revisions. Extraction hashes cover the exact five
@@ -91,10 +118,13 @@ authority.
 Having a valid BWRQ/BWRS codec is not an authority promotion. The browser
 service requires the content-addressed artifact plus the exact
 `fixed-step-input-v1` and `bounded-extraction-v1` capabilities before it can
-be production-authoritative. The Wasm facade intentionally advertises
-`fixed-step-input-v1-pending-live-cutover` and
-`bounded-extraction-v1-pending-live-domain-views` until those gates are proven;
-it never promotes incomplete authority. `bulk-platform-v1` is present because
+be production-authoritative. `bounded-extraction-v1` attests static support for
+fixed, bounded extraction and is paired with
+`bounded-extraction-blockers-v1`; the dynamic BWX0/BWR6 statuses and blockers
+decide whether each individual envelope is complete and promotable. The Wasm
+facade still advertises `fixed-step-input-v1-pending-live-cutover` until that
+authority gate is proven; it never promotes incomplete authority.
+`bulk-platform-v1` is present because
 the Rust R8 dispatcher now owns real request IDs, transfer tokens, backpressure,
 retry decisions, and durable BWPA validation. Its `BWDS` recovery-shell snapshot
 preserves dispatcher work only; full runtime restore remains fail-closed until

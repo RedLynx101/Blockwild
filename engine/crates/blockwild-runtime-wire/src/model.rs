@@ -11,6 +11,9 @@ pub const RUNTIME_SCHEMA_V4: u16 = 4;
 /// Schema 5 adds browser-owned viewport dimensions and a presentation-only
 /// view revision to Extract requests. No response operation uses schema 5.
 pub const RUNTIME_SCHEMA_V5: u16 = 5;
+/// Schema 6 is an isolated fixed-step extension carrying sequenced semantic
+/// context commands and their exact receipts. RuntimeInputFrameV1 is unchanged.
+pub const RUNTIME_SCHEMA_V6: u16 = 6;
 pub const DEFAULT_TERRAIN_CONTENT_HASH_V2: WireHash = WireHash([
     0xcc, 0x59, 0x90, 0x3b, 0xe7, 0x7d, 0xfe, 0x30, 0x10, 0x9d, 0x15, 0xbf, 0xaf, 0x0e, 0x30, 0x22,
 ]);
@@ -29,6 +32,9 @@ pub const MAX_EXTRACTION_BYTES: usize = 6 * 1024 * 1024;
 pub const MAX_OPERATIONS: usize = 256;
 pub const MAX_INPUT_FRAMES: usize = 128;
 pub const MAX_ACTION_RECEIPTS: usize = MAX_INPUT_FRAMES * 6;
+pub const MAX_CONTEXT_COMMANDS_V2: usize = MAX_INPUT_FRAMES;
+pub const MAX_CONTEXT_RECEIPTS_V2: usize = MAX_CONTEXT_COMMANDS_V2;
+pub const MAX_CONTEXT_SEAT_INDEX_V2: u8 = 7;
 pub const MAX_SAFE_U64: u64 = 9_007_199_254_740_991;
 pub const MAX_VIEWPORT_DIMENSION_V1: u32 = 16_384;
 
@@ -253,6 +259,271 @@ pub struct RuntimeInputActionReceiptV1 {
     pub authoritative_flags: u8,
     pub target_entity_id: u64,
     pub effect_hash: WireHash,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RuntimeContainerKindV2 {
+    Player = 0,
+    Equipment = 1,
+    Container = 2,
+    Machine = 3,
+    Waygrid = 4,
+    CardforgeCase = 5,
+}
+
+impl RuntimeContainerKindV2 {
+    pub fn from_code(code: u8) -> Result<Self, WireError> {
+        match code {
+            0 => Ok(Self::Player),
+            1 => Ok(Self::Equipment),
+            2 => Ok(Self::Container),
+            3 => Ok(Self::Machine),
+            4 => Ok(Self::Waygrid),
+            5 => Ok(Self::CardforgeCase),
+            _ => Err(WireError::new(
+                "context-container-kind",
+                "context container kind is unknown",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeContainerKeyV2 {
+    pub kind: RuntimeContainerKindV2,
+    pub id: String,
+    pub owner_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeContextCommandActionV2 {
+    Cast {
+        spell_id: String,
+        loadout_revision: u64,
+        learned_revision: u64,
+    },
+    Reload {
+        container: RuntimeContainerKeyV2,
+        selected_slot: u8,
+        container_revision: u64,
+    },
+    MountedAbility {
+        mount_entity_id: u64,
+        mount_entity_revision: u64,
+        seat_index: u8,
+        ability_slot: u8,
+    },
+}
+
+impl RuntimeContextCommandActionV2 {
+    #[must_use]
+    pub const fn kind(&self) -> RuntimeContextCommandKindV2 {
+        match self {
+            Self::Cast { .. } => RuntimeContextCommandKindV2::Cast,
+            Self::Reload { .. } => RuntimeContextCommandKindV2::Reload,
+            Self::MountedAbility { .. } => RuntimeContextCommandKindV2::MountedAbility,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RuntimeContextCommandKindV2 {
+    Cast = 0,
+    Reload = 1,
+    MountedAbility = 2,
+}
+
+impl RuntimeContextCommandKindV2 {
+    pub fn from_code(code: u8) -> Result<Self, WireError> {
+        match code {
+            0 => Ok(Self::Cast),
+            1 => Ok(Self::Reload),
+            2 => Ok(Self::MountedAbility),
+            _ => Err(WireError::new(
+                "context-command-kind",
+                "context command kind is unknown",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeContextCommandV2 {
+    pub sequence: u64,
+    pub target_tick: u64,
+    pub action: RuntimeContextCommandActionV2,
+    pub command_hash: WireHash,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RuntimeSemanticActionOutcomeV2 {
+    Applied = 0,
+    Rejected = 1,
+}
+
+impl RuntimeSemanticActionOutcomeV2 {
+    pub fn from_code(code: u8) -> Result<Self, WireError> {
+        match code {
+            0 => Ok(Self::Applied),
+            1 => Ok(Self::Rejected),
+            _ => Err(WireError::new("semantic-outcome", "semantic action outcome is unknown")),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum RuntimeSemanticActionReasonV2 {
+    Applied = 0,
+    NoTarget = 1,
+    Ineligible = 2,
+    StaleRevision = 3,
+    UnknownContent = 4,
+    EmptySlot = 5,
+    Blocked = 6,
+    ContextMismatch = 7,
+}
+
+impl RuntimeSemanticActionReasonV2 {
+    pub fn from_code(code: u8) -> Result<Self, WireError> {
+        match code {
+            0 => Ok(Self::Applied),
+            1 => Ok(Self::NoTarget),
+            2 => Ok(Self::Ineligible),
+            3 => Ok(Self::StaleRevision),
+            4 => Ok(Self::UnknownContent),
+            5 => Ok(Self::EmptySlot),
+            6 => Ok(Self::Blocked),
+            7 => Ok(Self::ContextMismatch),
+            _ => Err(WireError::new("semantic-reason", "semantic action reason is unknown")),
+        }
+    }
+
+    #[must_use]
+    pub const fn matches_outcome(self, outcome: RuntimeSemanticActionOutcomeV2) -> bool {
+        matches!(
+            (outcome, self),
+            (RuntimeSemanticActionOutcomeV2::Applied, Self::Applied)
+                | (
+                    RuntimeSemanticActionOutcomeV2::Rejected,
+                    Self::NoTarget
+                        | Self::Ineligible
+                        | Self::StaleRevision
+                        | Self::UnknownContent
+                        | Self::EmptySlot
+                        | Self::Blocked
+                        | Self::ContextMismatch
+                )
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeResolvedEntityV2 {
+    /// Packed generational EntityId. This may use the complete u64 range.
+    pub entity_id: u64,
+    pub entity_revision: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeWorldAuthorityRevisionV2 {
+    pub epoch: u64,
+    pub mutation: u64,
+    pub residency: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeResolvedBlockV2 {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub block_id: u16,
+    pub world_revision: RuntimeWorldAuthorityRevisionV2,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeTypedRevisionRefV2 {
+    pub type_id: String,
+    pub id: String,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeTypedEffectRefV2 {
+    pub type_id: String,
+    pub id: String,
+    pub revision: u64,
+    pub effect_hash: WireHash,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeSemanticActionResolutionV2 {
+    Cast {
+        loadout_revision: u64,
+        learned_revision: u64,
+    },
+    Reload {
+        container_revision: u64,
+    },
+    MountedAbility {
+        mount_entity_revision: u64,
+    },
+}
+
+impl RuntimeSemanticActionResolutionV2 {
+    #[must_use]
+    pub const fn kind(&self) -> RuntimeContextCommandKindV2 {
+        match self {
+            Self::Cast { .. } => RuntimeContextCommandKindV2::Cast,
+            Self::Reload { .. } => RuntimeContextCommandKindV2::Reload,
+            Self::MountedAbility { .. } => RuntimeContextCommandKindV2::MountedAbility,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSemanticActionReceiptV2 {
+    pub command_sequence: u64,
+    pub target_tick: u64,
+    pub applied_tick: u64,
+    pub command_hash: WireHash,
+    pub outcome: RuntimeSemanticActionOutcomeV2,
+    pub reason: RuntimeSemanticActionReasonV2,
+    pub resolved_entity: Option<RuntimeResolvedEntityV2>,
+    pub resolved_block: Option<RuntimeResolvedBlockV2>,
+    pub session: Option<RuntimeTypedRevisionRefV2>,
+    pub effect: Option<RuntimeTypedEffectRefV2>,
+    pub resolution: RuntimeSemanticActionResolutionV2,
+    pub receipt_hash: WireHash,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeStepRequestV2 {
+    pub request_id: u32,
+    pub client_epoch: u32,
+    pub expected: RuntimeIdentityV1,
+    pub monotonic_time_us: u64,
+    pub budget_us: u32,
+    pub inputs: Vec<RuntimeInputFrameV1>,
+    pub context_commands: Vec<RuntimeContextCommandV2>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeStepResponseV2 {
+    pub request_id: u32,
+    pub client_epoch: u32,
+    pub worker_epoch: u32,
+    pub identity: RuntimeIdentityV1,
+    pub fixed_steps: u16,
+    pub inputs_applied: u16,
+    pub commands_processed: u16,
+    pub commands_accepted: u16,
+    pub action_receipts: Vec<RuntimeInputActionReceiptV1>,
+    pub replay_hash: WireHash,
+    pub semantic_receipts: Vec<RuntimeSemanticActionReceiptV2>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

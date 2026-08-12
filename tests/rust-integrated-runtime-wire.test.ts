@@ -7,17 +7,25 @@ import {
   createRustIntegratedRuntimeDomainOperationV1,
   decodeRustIntegratedRuntimeRequestV1,
   decodeRustIntegratedRuntimeResponseV1,
+  decodeRustIntegratedRuntimeStepRequestV2,
+  decodeRustIntegratedRuntimeStepResultV2,
   encodeRustIntegratedRuntimeRequestV1,
   encodeRustIntegratedRuntimeResponseV1,
+  encodeRustIntegratedRuntimeStepRequestV2,
+  encodeRustIntegratedRuntimeStepResultV2,
   RustIntegratedRuntimeCodecError,
   rustIntegratedRuntimeExtractionChecksumV1,
   rustIntegratedRuntimeWireChecksumV1,
+  sealRustIntegratedRuntimeContextCommandV2,
+  sealRustIntegratedRuntimeSemanticActionReceiptV2,
 } from "../app/game/rust-integrated-runtime-codec.ts";
 import type {
   RustIntegratedRuntimeCommandBatchV1,
   RustIntegratedRuntimeIdentityV1,
   RustIntegratedRuntimeRequestV1,
   RustIntegratedRuntimeResponseV1,
+  RustIntegratedRuntimeStepRequestV2,
+  RustIntegratedRuntimeStepResultV2,
 } from "../app/game/rust-integrated-runtime-contract.ts";
 import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import {
@@ -63,6 +71,100 @@ function fixtureHex(name: string) {
   const fixture = FIXTURE.envelopes.find((entry) => entry.name === name);
   assert.ok(fixture, `missing integrated runtime fixture ${name}`);
   return fixture.hex;
+}
+
+function stepV2FixtureRequest(): RustIntegratedRuntimeStepRequestV2 {
+  const targetTick = 9;
+  return Object.freeze({
+    type: "runtime-step-v2",
+    requestId: 51,
+    clientEpoch: 7,
+    expected: fixtureIdentity(),
+    monotonicTimeUs: 450_000,
+    budgetUs: 8_000,
+    inputs: Object.freeze([Object.freeze({
+      sequence: 9, targetTick, moveX: -123, moveZ: 456, lookYaw: -789, lookPitch: 321,
+      buttons: 1 << 6, selectedSlot: 4, flags: 0,
+    })]),
+    contextCommands: Object.freeze([
+      sealRustIntegratedRuntimeContextCommandV2({
+        sequence: 41, targetTick,
+        action: Object.freeze({ kind: "cast", spellId: "spell:verdant-🌿", loadoutRevision: 12, learnedRevision: 13 }),
+      }),
+      sealRustIntegratedRuntimeContextCommandV2({
+        sequence: 42, targetTick,
+        action: Object.freeze({
+          kind: "reload",
+          container: Object.freeze({ kind: "equipment", id: "actor:fixture:equipment", ownerId: "actor:fixture" }),
+          selectedSlot: 4,
+          containerRevision: 14,
+        }),
+      }),
+      sealRustIntegratedRuntimeContextCommandV2({
+        sequence: 43, targetTick,
+        action: Object.freeze({
+          kind: "mounted-ability", mountEntityId: BigInt("0xfedcba9876543210"),
+          mountEntityRevision: 15, seatIndex: 1, abilitySlot: 2,
+        }),
+      }),
+    ]),
+  });
+}
+
+function stepV2FixtureResult(request = stepV2FixtureRequest()): RustIntegratedRuntimeStepResultV2 {
+  const postIdentity = Object.freeze({
+    ...request.expected,
+    revision: Object.freeze({ ...request.expected.revision, simulation: request.expected.revision.simulation + 1 }),
+    tick: 9,
+    stateHash: "4".repeat(32),
+  });
+  const replayHash = "5".repeat(32);
+  const semanticReceipts = Object.freeze([
+    sealRustIntegratedRuntimeSemanticActionReceiptV2({
+      commandSequence: 41, targetTick: 9, appliedTick: 9,
+      commandHash: request.contextCommands[0].commandHash,
+      outcome: "applied", reason: "applied",
+      resolvedEntity: null,
+      resolvedBlock: null,
+      session: Object.freeze({ typeId: "blockwild.magic.cast-session.v1", id: "cast:41", revision: 3 }),
+      effect: Object.freeze({ typeId: "blockwild.magic.effect.v1", id: "effect:verdant", revision: 4, effectHash: "a".repeat(32) }),
+      resolution: Object.freeze({ kind: "cast", loadoutRevision: 12, learnedRevision: 13 }),
+    }, postIdentity, replayHash),
+    sealRustIntegratedRuntimeSemanticActionReceiptV2({
+      commandSequence: 42, targetTick: 9, appliedTick: 9,
+      commandHash: request.contextCommands[1].commandHash,
+      outcome: "rejected", reason: "empty-slot",
+      resolvedEntity: null,
+      resolvedBlock: Object.freeze({
+        x: -2, y: 64, z: 7, blockId: 301,
+        worldRevision: Object.freeze({ epoch: 1, mutation: 22, residency: 5 }),
+      }),
+      session: null,
+      effect: null,
+      resolution: Object.freeze({ kind: "reload", containerRevision: 14 }),
+    }, postIdentity, replayHash),
+    sealRustIntegratedRuntimeSemanticActionReceiptV2({
+      commandSequence: 43, targetTick: 9, appliedTick: 9,
+      commandHash: request.contextCommands[2].commandHash,
+      outcome: "applied", reason: "applied",
+      resolvedEntity: Object.freeze({ entityId: BigInt("0xfedcba9876543210"), entityRevision: 15 }),
+      resolvedBlock: null,
+      session: Object.freeze({ typeId: "blockwild.mount.seat-session.v1", id: "seat:1", revision: 6 }),
+      effect: Object.freeze({ typeId: "blockwild.mount.ability-effect.v1", id: "ability:2", revision: 7, effectHash: "b".repeat(32) }),
+      resolution: Object.freeze({ kind: "mounted-ability", mountEntityRevision: 15 }),
+    }, postIdentity, replayHash),
+  ]);
+  return Object.freeze({
+    type: "runtime-step-result-v2", requestId: request.requestId, clientEpoch: request.clientEpoch,
+    workerEpoch: 3, identity: postIdentity, fixedSteps: 1, inputsApplied: 1,
+    commandsProcessed: 0, commandsAccepted: 0,
+    actionReceipts: Object.freeze([Object.freeze({
+      sequence: 1, inputSequence: 9, tick: 9, kind: "secondary-use", outcome: "applied",
+      selectedSlot: 4, authoritativeFlags: 0, targetEntityId: BigInt(0), effectHash: "c".repeat(32),
+    })]),
+    replayHash,
+    semanticReceipts,
+  });
 }
 
 function extraction(
@@ -365,6 +467,98 @@ test("action receipt codec rejects unknown kinds and trailing bytes", () => {
   assert.throws(
     () => decodeRustIntegratedRuntimeResponseV1(trailing),
     (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "trailing-bytes",
+  );
+});
+
+test("schema-6 StepV2 is canonical, bounded, corruption-safe, and keeps legacy prefixes exact", () => {
+  const request = stepV2FixtureRequest();
+  const requestBytes = encodeRustIntegratedRuntimeStepRequestV2(request);
+  assert.equal(new DataView(requestBytes.buffer).getUint16(6, true), 6);
+  assert.deepEqual(decodeRustIntegratedRuntimeStepRequestV2(requestBytes), request);
+  assert.equal(toHex(requestBytes), fixtureHex("step-v2-context-commands"));
+  assert.throws(
+    () => decodeRustIntegratedRuntimeRequestV1(requestBytes),
+    (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "runtime-schema",
+  );
+
+  const legacyRequest = encodeRustIntegratedRuntimeRequestV1({
+    type: "runtime-step-v1", requestId: request.requestId, clientEpoch: request.clientEpoch,
+    expected: request.expected, monotonicTimeUs: request.monotonicTimeUs,
+    budgetUs: request.budgetUs, inputs: request.inputs,
+  });
+  assert.deepEqual(
+    requestBytes.subarray(44, 44 + legacyRequest.byteLength - 44),
+    legacyRequest.subarray(44),
+    "schema-2 StepV1 payload must remain the exact StepV2 prefix",
+  );
+
+  const response = stepV2FixtureResult(request);
+  const responseBytes = encodeRustIntegratedRuntimeStepResultV2(response);
+  assert.equal(new DataView(responseBytes.buffer).getUint16(6, true), 6);
+  assert.deepEqual(decodeRustIntegratedRuntimeStepResultV2(responseBytes), response);
+  assert.equal(toHex(responseBytes), fixtureHex("step-result-v2-semantic-receipts"));
+  assert.throws(
+    () => decodeRustIntegratedRuntimeResponseV1(responseBytes),
+    (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "runtime-schema",
+  );
+
+  const legacyResponse = encodeRustIntegratedRuntimeResponseV1({
+    type: "runtime-step-result-v1", requestId: response.requestId, clientEpoch: response.clientEpoch,
+    workerEpoch: response.workerEpoch, identity: response.identity, fixedSteps: response.fixedSteps,
+    inputsApplied: response.inputsApplied, commandsProcessed: response.commandsProcessed,
+    commandsAccepted: response.commandsAccepted, actionReceipts: response.actionReceipts, replayHash: response.replayHash,
+  });
+  assert.deepEqual(
+    responseBytes.subarray(44, 44 + legacyResponse.byteLength - 44),
+    legacyResponse.subarray(44),
+    "schema-3 StepResult payload must remain the exact StepResultV2 prefix",
+  );
+
+  const damagedRequest = requestBytes.slice();
+  const commandHash = fromHex(request.contextCommands[0].commandHash);
+  const commandHashOffset = damagedRequest.findIndex((_, index) => (
+    index >= 44 && commandHash.every((byte, relative) => damagedRequest[index + relative] === byte)
+  ));
+  assert.ok(commandHashOffset >= 44);
+  damagedRequest[commandHashOffset] ^= 0xff;
+  damagedRequest.set(fromHex(rustIntegratedRuntimeWireChecksumV1(damagedRequest.subarray(44))), 28);
+  assert.throws(
+    () => decodeRustIntegratedRuntimeStepRequestV2(damagedRequest),
+    (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "context-command-hash",
+  );
+
+  const damagedResponse = responseBytes.slice();
+  damagedResponse[damagedResponse.byteLength - 1] ^= 0xff;
+  damagedResponse.set(fromHex(rustIntegratedRuntimeWireChecksumV1(damagedResponse.subarray(44))), 28);
+  assert.throws(
+    () => decodeRustIntegratedRuntimeStepResultV2(damagedResponse),
+    (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "semantic-receipt-hash",
+  );
+
+  assert.throws(
+    () => encodeRustIntegratedRuntimeStepRequestV2({
+      ...request, contextCommands: Object.freeze([...request.contextCommands].reverse()),
+    }),
+    (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "context-command-order",
+  );
+  assert.throws(
+    () => sealRustIntegratedRuntimeSemanticActionReceiptV2({
+      ...response.semanticReceipts[0], outcome: "applied", reason: "blocked",
+    }, response.identity, response.replayHash),
+    (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "semantic-reason-matrix",
+  );
+  assert.throws(
+    () => encodeRustIntegratedRuntimeStepResultV2({
+      ...response, replayHash: "6".repeat(32),
+    }),
+    (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "semantic-receipt-hash",
+    "receipt hashes bind the enclosing replay hash and post-step identity",
+  );
+  assert.throws(
+    () => sealRustIntegratedRuntimeContextCommandV2({
+      sequence: Number.MAX_SAFE_INTEGER + 1, targetTick: 9, action: request.contextCommands[0].action,
+    }),
+    (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "invalid-integer",
   );
 });
 

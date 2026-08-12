@@ -12,8 +12,15 @@ import {
   type RustIntegratedRuntimeInputActionKindV1,
   type RustIntegratedRuntimeInputActionReceiptV1,
   type RustIntegratedRuntimeInputFrameV1,
+  type RustIntegratedRuntimeContextCommandActionV2,
+  type RustIntegratedRuntimeContextCommandV2,
+  type RustIntegratedRuntimeStepResultV2,
   type RustIntegratedRuntimeResponseV1,
 } from "./rust-integrated-runtime-contract.ts";
+import {
+  rustIntegratedRuntimeSemanticActionReceiptHashV2,
+  sealRustIntegratedRuntimeContextCommandV2,
+} from "./rust-integrated-runtime-codec.ts";
 import type {
   RustIntegratedPlayerBootstrapStatusReceiptV1,
   RustIntegratedPlayerRuntimeContinuityV1,
@@ -33,6 +40,7 @@ import {
 export const RUST_LIVE_INPUT_STEP_BUDGET_US_R5 = 8_000;
 export const RUST_LIVE_INPUT_AXIS_DIVISOR_R5 = 32_767;
 export const RUST_LIVE_INPUT_MAX_LATCHED_TRANSITIONS_R5 = 128;
+export const RUST_LIVE_CONTEXT_COMMAND_QUEUE_MAX_V2 = 128;
 
 const U64_SAFE_MAX = Number.MAX_SAFE_INTEGER;
 const TWO_PI = Math.PI * 2;
@@ -62,6 +70,8 @@ type RustIntegratedRuntimeStepResultR5 = Extract<
   { type: "runtime-step-result-v1" }
 >;
 
+type RustLiveRuntimeStepResultR5 = RustIntegratedRuntimeStepResultR5 | RustIntegratedRuntimeStepResultV2;
+
 export type RustLiveInputHeldIntentR5 = Readonly<{
   jump: boolean;
   crouch: boolean;
@@ -89,6 +99,8 @@ export type RustLiveInputIntentR5 = Readonly<{
   actions: RustLiveInputActionIntentR5;
 }>;
 
+export type RustLiveContextCommandIntentV2 = RustIntegratedRuntimeContextCommandActionV2;
+
 export interface RustLiveInputPumpServiceR5 {
   identity(): RustIntegratedRuntimeIdentityV1;
   step(
@@ -96,6 +108,13 @@ export interface RustLiveInputPumpServiceR5 {
     budgetUs: number,
     inputs: readonly RustIntegratedRuntimeInputFrameV1[],
   ): Promise<RustIntegratedRuntimeStepResultR5>;
+  /** Optional until the native schema-6 dispatcher/capability is installed. */
+  stepV2?(
+    monotonicTimeUs: number,
+    budgetUs: number,
+    inputs: readonly RustIntegratedRuntimeInputFrameV1[],
+    contextCommands: readonly RustIntegratedRuntimeContextCommandV2[],
+  ): Promise<RustIntegratedRuntimeStepResultV2>;
   extract(
     afterRevision: number,
     maxBytes?: number,
@@ -113,6 +132,8 @@ export type RustLiveInputPumpOptionsR5 = Readonly<{
   afterExtractionRevision?: number;
   externalEntityId?: string;
   nowUs?: () => number;
+  /** Explicit restore/status seam; absence disables semantic command queueing. */
+  nextContextCommandSequence?: number | null;
 }>;
 
 export type RustLiveInputPumpAdvanceOptionsR5 = Readonly<{
@@ -124,7 +145,7 @@ export type RustLiveInputPumpExtractionCauseR5 = "initial" | "authority" | "view
 
 export type RustLiveInputPumpAdvanceResultR5 = Readonly<{
   discarded: boolean;
-  step: RustIntegratedRuntimeStepResultR5 | null;
+  step: RustLiveRuntimeStepResultR5 | null;
   extraction: RustIntegratedRuntimeExtractionV1 | null;
   cause?: RustLiveInputPumpExtractionCauseR5 | null;
   camera?: RustLiveCameraViewR10 | null;
@@ -160,6 +181,8 @@ export type RustLiveInputPumpDiagnosticsR5 = Readonly<{
   pendingInputSequence: number | null;
   nextInputSequence: number;
   nextActionSequence: number;
+  nextContextCommandSequence: number | null;
+  queuedContextCommands: number;
   lastMonotonicTimeUs: number;
   lastExtractionRevision: number;
   lastAuthorityTick: number;
@@ -196,6 +219,8 @@ type PendingInputR5 = Readonly<{
     bit: number;
     kind: RustIntegratedRuntimeInputActionKindV1;
   }>[];
+  contextCommands: readonly RustIntegratedRuntimeContextCommandV2[];
+  contextIntentCount: number;
 }>;
 
 type StagedAppliedInputR5 = Readonly<{
@@ -346,6 +371,18 @@ function initialIntent(
   });
 }
 
+function checkedContextCommandIntentV2(value: RustLiveContextCommandIntentV2): RustLiveContextCommandIntentV2 {
+  const sealed = sealRustIntegratedRuntimeContextCommandV2({ sequence: 1, targetTick: 0, action: value });
+  switch (sealed.action.kind) {
+    case "cast": return Object.freeze({ ...sealed.action });
+    case "reload": return Object.freeze({
+      ...sealed.action,
+      container: Object.freeze({ ...sealed.action.container }),
+    });
+    case "mounted-ability": return Object.freeze({ ...sealed.action });
+  }
+}
+
 function validateContinuity(
   status: RustLiveInputPumpOptionsR5["status"],
   identity: RustIntegratedRuntimeIdentityV1,
@@ -444,6 +481,8 @@ export class RustLiveInputPumpR5 {
   private authoritativeFlags: number;
   private nextInputSequence: number;
   private nextActionSequence: number;
+  private nextContextCommandSequence: number | null;
+  private readonly contextCommandIntents: RustLiveContextCommandIntentV2[] = [];
   private lastMonotonicTimeUs: number;
   private lastIdentity: RustIntegratedRuntimeIdentityV1;
   private lastExtractionRevision: number;
@@ -477,6 +516,10 @@ export class RustLiveInputPumpR5 {
     this.lastIdentity = identity;
     this.nextInputSequence = continuity.nextInputSequence;
     this.nextActionSequence = continuity.nextActionSequence;
+    this.nextContextCommandSequence = options.nextContextCommandSequence === undefined
+      || options.nextContextCommandSequence === null
+      ? null
+      : integer(options.nextContextCommandSequence, 1, U64_SAFE_MAX, "next context command sequence");
     this.lastMonotonicTimeUs = continuity.lastMonotonicTimeUs;
     this.lastAppliedButtons = continuity.lastAppliedButtons;
     this.physicalActionButtons = continuity.lastAppliedButtons & ACTION_BUTTON_MASK;
@@ -509,6 +552,26 @@ export class RustLiveInputPumpR5 {
       this.physicalActionButtons = nextActions;
       this.latest = next;
       this.samples += 1;
+    } catch (error) {
+      this.failClosed(error);
+      throw error;
+    }
+  }
+
+  queueContextCommand(worldGeneration: number, intent: RustLiveContextCommandIntentV2) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    if (this.nextContextCommandSequence === null) {
+      fail("context-command-continuity", "Rust status does not attest the next context command sequence");
+    }
+    if (!this.service.stepV2) {
+      fail("context-command-service", "Rust runtime does not expose the schema-6 StepV2 dispatcher");
+    }
+    if (this.contextCommandIntents.length >= RUST_LIVE_CONTEXT_COMMAND_QUEUE_MAX_V2) {
+      fail("context-command-capacity", "live context command queue exceeds 128 commands");
+    }
+    try {
+      this.contextCommandIntents.push(checkedContextCommandIntentV2(intent));
     } catch (error) {
       this.failClosed(error);
       throw error;
@@ -575,6 +638,7 @@ export class RustLiveInputPumpR5 {
       await this.tail;
       this.pendingInput = null;
       for (const queue of this.actionTransitions.values()) queue.length = 0;
+      this.contextCommandIntents.length = 0;
       this.stateValue = "stopped";
     })();
     return this.stopPromise;
@@ -593,6 +657,8 @@ export class RustLiveInputPumpR5 {
       pendingInputSequence: this.pendingInput?.frame.sequence ?? null,
       nextInputSequence: this.nextInputSequence,
       nextActionSequence: this.nextActionSequence,
+      nextContextCommandSequence: this.nextContextCommandSequence,
+      queuedContextCommands: this.contextCommandIntents.length,
       lastMonotonicTimeUs: this.lastMonotonicTimeUs,
       lastExtractionRevision: this.lastExtractionRevision,
       lastAuthorityTick: this.lastIdentity.tick,
@@ -629,11 +695,24 @@ export class RustLiveInputPumpR5 {
     const created = this.pendingInput === null;
     const pending = this.pendingInput ?? this.createPendingInput(before);
     const inputs = created ? Object.freeze([pending.frame]) : Object.freeze([]);
+    const contextCommands = created ? pending.contextCommands : Object.freeze([]);
     this.inFlight = true;
     this.stepCalls += 1;
-    let step: RustIntegratedRuntimeStepResultR5;
+    let step: RustLiveRuntimeStepResultR5;
     try {
-      step = await this.service.step(monotonicTimeUs, RUST_LIVE_INPUT_STEP_BUDGET_US_R5, inputs);
+      if (pending.contextCommands.length > 0) {
+        const stepV2 = this.service.stepV2;
+        if (!stepV2) fail("context-command-service", "Rust runtime lost its schema-6 StepV2 dispatcher");
+        step = await stepV2.call(
+          this.service,
+          monotonicTimeUs,
+          RUST_LIVE_INPUT_STEP_BUDGET_US_R5,
+          inputs,
+          contextCommands,
+        );
+      } else {
+        step = await this.service.step(monotonicTimeUs, RUST_LIVE_INPUT_STEP_BUDGET_US_R5, inputs);
+      }
     } catch (error) {
       if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
       throw error;
@@ -643,10 +722,16 @@ export class RustLiveInputPumpR5 {
     if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
 
     const staged = this.validateStep(before, pending, step);
+    const contextApplied = this.validateContextReceipts(pending, step);
     this.lastMonotonicTimeUs = monotonicTimeUs;
     this.lastIdentity = frozenIdentity(step.identity);
-    this.pendingInput = step.inputsApplied === 0 ? Object.freeze({ ...pending, submitted: true }) : null;
+    this.pendingInput = step.inputsApplied === 0 ? Object.freeze({
+      ...pending,
+      submitted: true,
+      ...(contextApplied ? { contextCommands: Object.freeze([]), contextIntentCount: 0 } : {}),
+    }) : null;
     if (staged) this.commitAppliedInput(staged);
+    if (contextApplied) this.commitContextCommands(pending);
 
     const authorityChanged = step.fixedSteps > 0 || step.inputsApplied === 1;
     const viewChanged = view !== null && !sameView(this.lastView, view);
@@ -785,20 +870,37 @@ export class RustLiveInputPumpR5 {
       selectedSlot: this.latest.selectedSlot,
       flags: this.authoritativeFlags,
     });
+    const contextIntentCount = this.contextCommandIntents.length;
+    const contextCommands: RustIntegratedRuntimeContextCommandV2[] = [];
+    if (contextIntentCount > 0) {
+      const firstSequence = this.nextContextCommandSequence;
+      if (firstSequence === null) fail("context-command-continuity", "context command sequence continuity is unavailable");
+      for (let index = 0; index < contextIntentCount; index += 1) {
+        contextCommands.push(sealRustIntegratedRuntimeContextCommandV2({
+          sequence: integer(firstSequence + index, 1, U64_SAFE_MAX, "context command sequence"),
+          targetTick: frame.targetTick,
+          action: this.contextCommandIntents[index],
+        }));
+      }
+    }
     return Object.freeze({
       frame,
       submitted: false,
       consumedTransitions: Object.freeze(consumedTransitions),
       expectedActions: Object.freeze(expectedActions),
+      contextCommands: Object.freeze(contextCommands),
+      contextIntentCount,
     });
   }
 
   private validateStep(
     before: RustIntegratedRuntimeIdentityV1,
     pending: PendingInputR5,
-    step: RustIntegratedRuntimeStepResultR5,
+    step: RustLiveRuntimeStepResultR5,
   ): StagedAppliedInputR5 | null {
-    if (step.type !== "runtime-step-result-v1") fail("step-response", "Rust step returned the wrong response type");
+    if (step.type !== "runtime-step-result-v1" && step.type !== "runtime-step-result-v2") {
+      fail("step-response", "Rust step returned the wrong response type");
+    }
     integer(step.fixedSteps, 0, 8, "Rust fixed-step count");
     integer(step.inputsApplied, 0, 1, "Rust applied-input count");
     if (!identityDoesNotRegress(before, step.identity)
@@ -835,6 +937,52 @@ export class RustLiveInputPumpR5 {
       actionSequence = integer(actionSequence + 1, 1, U64_SAFE_MAX, "next action sequence");
     }
     return Object.freeze({ pending, authoritativeFlags: flags, nextActionSequence: actionSequence });
+  }
+
+  private validateContextReceipts(pending: PendingInputR5, step: RustLiveRuntimeStepResultR5) {
+    const receipts = step.type === "runtime-step-result-v2" ? step.semanticReceipts : Object.freeze([]);
+    const due = pending.contextCommands.filter((command) => command.targetTick <= step.identity.tick);
+    if (receipts.length !== due.length) {
+      fail("context-command-receipts", "Rust omitted, duplicated, or added a semantic command receipt");
+    }
+    if (due.length === 0) return false;
+    if (step.type !== "runtime-step-result-v2") {
+      fail("context-command-response", "Rust crossed a context command target without a schema-6 response");
+    }
+    for (let index = 0; index < due.length; index += 1) {
+      const command = due[index];
+      const receipt = receipts[index];
+      if (receipt.commandSequence !== command.sequence
+        || receipt.targetTick !== command.targetTick
+        || receipt.commandHash !== command.commandHash
+        || receipt.resolution.kind !== command.action.kind
+        || receipt.appliedTick < command.targetTick
+        || receipt.appliedTick > step.identity.tick) {
+        fail("context-command-receipts", "Rust semantic receipt does not bind the exact due command");
+      }
+      let expectedHash: string;
+      try {
+        expectedHash = rustIntegratedRuntimeSemanticActionReceiptHashV2(receipt, step.identity, step.replayHash);
+      } catch (error) {
+        fail("context-command-receipts", `Rust semantic receipt is malformed: ${errorText(error)}`);
+      }
+      if (expectedHash !== receipt.receiptHash) {
+        fail("context-command-receipts", "Rust semantic receipt hash does not bind the post-step replay state");
+      }
+    }
+    return true;
+  }
+
+  private commitContextCommands(pending: PendingInputR5) {
+    if (pending.contextIntentCount !== pending.contextCommands.length || pending.contextIntentCount < 1) {
+      fail("context-command-commit", "semantic command commit count is inconsistent");
+    }
+    if (this.contextCommandIntents.length < pending.contextIntentCount) {
+      fail("context-command-commit", "semantic command queue changed while commands were pending");
+    }
+    const last = pending.contextCommands[pending.contextCommands.length - 1];
+    this.contextCommandIntents.splice(0, pending.contextIntentCount);
+    this.nextContextCommandSequence = integer(last.sequence + 1, 1, U64_SAFE_MAX, "next context command sequence");
   }
 
   private commitAppliedInput(staged: StagedAppliedInputR5) {
@@ -975,6 +1123,9 @@ export class RustLiveInputPumpR5 {
     this.stateValue = "failed";
     this.lifecycle += 1;
     this.lastError = errorText(error);
+    this.pendingInput = null;
+    this.contextCommandIntents.length = 0;
+    for (const queue of this.actionTransitions.values()) queue.length = 0;
   }
 }
 

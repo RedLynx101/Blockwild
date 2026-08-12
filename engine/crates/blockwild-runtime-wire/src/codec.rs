@@ -2,19 +2,27 @@ use std::collections::BTreeSet;
 
 use crate::checksum::wire_checksum_v1;
 use crate::model::{
-    DEFAULT_GENERATION_OPTIONS_JSON_V1, DEFAULT_TERRAIN_CONTENT_HASH_V2, MAX_ACTION_RECEIPTS, MAX_DOMAIN_PAYLOAD_BYTES,
-    MAX_EXTRACTION_BYTES, MAX_GENERATION_OPTIONS_JSON_BYTES, MAX_INPUT_FRAMES, MAX_OPERATIONS, MAX_SAFE_U64,
-    MAX_VIEWPORT_DIMENSION_V1, MAX_WIRE_BYTES, RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_SCHEMA_V2, RUNTIME_SCHEMA_V3,
-    RUNTIME_SCHEMA_V4, RUNTIME_SCHEMA_V5, RUNTIME_WIRE_V1, RuntimeCommandBatchV1, RuntimeCommandReceiptV1,
-    RuntimeConfigV1, RuntimeDomainOperationV1, RuntimeDomainV1, RuntimeExtractionV1, RuntimeIdentityV1,
-    RuntimeInputActionKindV1, RuntimeInputActionOutcomeV1, RuntimeInputActionReceiptV1, RuntimeInputFrameV1,
-    RuntimeRequestV1, RuntimeResponseV1, RuntimeRevisionV1, WireError, WireHash,
+    DEFAULT_GENERATION_OPTIONS_JSON_V1, DEFAULT_TERRAIN_CONTENT_HASH_V2, MAX_ACTION_RECEIPTS, MAX_CONTEXT_COMMANDS_V2,
+    MAX_CONTEXT_RECEIPTS_V2, MAX_CONTEXT_SEAT_INDEX_V2, MAX_DOMAIN_PAYLOAD_BYTES, MAX_EXTRACTION_BYTES,
+    MAX_GENERATION_OPTIONS_JSON_BYTES, MAX_INPUT_FRAMES, MAX_OPERATIONS, MAX_SAFE_U64, MAX_VIEWPORT_DIMENSION_V1,
+    MAX_WIRE_BYTES, RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_SCHEMA_V2, RUNTIME_SCHEMA_V3, RUNTIME_SCHEMA_V4,
+    RUNTIME_SCHEMA_V5, RUNTIME_SCHEMA_V6, RUNTIME_WIRE_V1, RuntimeCommandBatchV1, RuntimeCommandReceiptV1,
+    RuntimeConfigV1, RuntimeContainerKeyV2, RuntimeContainerKindV2, RuntimeContextCommandActionV2,
+    RuntimeContextCommandKindV2, RuntimeContextCommandV2, RuntimeDomainOperationV1, RuntimeDomainV1,
+    RuntimeExtractionV1, RuntimeIdentityV1, RuntimeInputActionKindV1, RuntimeInputActionOutcomeV1,
+    RuntimeInputActionReceiptV1, RuntimeInputFrameV1, RuntimeRequestV1, RuntimeResolvedBlockV2,
+    RuntimeResolvedEntityV2, RuntimeResponseV1, RuntimeRevisionV1, RuntimeSemanticActionOutcomeV2,
+    RuntimeSemanticActionReasonV2, RuntimeSemanticActionReceiptV2, RuntimeSemanticActionResolutionV2,
+    RuntimeStepRequestV2, RuntimeStepResponseV2, RuntimeTypedEffectRefV2, RuntimeTypedRevisionRefV2,
+    RuntimeWorldAuthorityRevisionV2, WireError, WireHash,
 };
 
 const REQUEST_MAGIC: [u8; 4] = *b"BWRQ";
 const RESPONSE_MAGIC: [u8; 4] = *b"BWRS";
 const HEADER_BYTES: usize = 44;
 const MAX_CAPABILITIES: usize = 64;
+const CONTEXT_COMMAND_HASH_DOMAIN_V2: &str = "blockwild.runtime.context-command.v2";
+const SEMANTIC_RECEIPT_HASH_DOMAIN_V2: &str = "blockwild.runtime.semantic-receipt.v2";
 struct Writer {
     bytes: Vec<u8>,
 }
@@ -47,6 +55,10 @@ impl Writer {
     }
 
     fn i16(&mut self, value: i16) {
+        self.raw(&value.to_le_bytes());
+    }
+
+    fn i32(&mut self, value: i32) {
         self.raw(&value.to_le_bytes());
     }
 
@@ -163,6 +175,14 @@ impl<'a> Reader<'a> {
         Ok(u32::from_le_bytes(bytes))
     }
 
+    fn i32(&mut self) -> Result<i32, WireError> {
+        let bytes: [u8; 4] = self
+            .take(4)?
+            .try_into()
+            .map_err(|_| WireError::new("truncated", "i32 is truncated"))?;
+        Ok(i32::from_le_bytes(bytes))
+    }
+
     fn raw_u64(&mut self) -> Result<u64, WireError> {
         let bytes: [u8; 8] = self
             .take(8)?
@@ -254,7 +274,7 @@ fn encode_envelope(
     output.extend_from_slice(&RUNTIME_WIRE_V1.to_le_bytes());
     if !matches!(
         schema,
-        RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3 | RUNTIME_SCHEMA_V4 | RUNTIME_SCHEMA_V5
+        RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3 | RUNTIME_SCHEMA_V4 | RUNTIME_SCHEMA_V5 | RUNTIME_SCHEMA_V6
     ) {
         return Err(WireError::new(
             "runtime-schema",
@@ -294,7 +314,7 @@ fn decode_envelope(value: &[u8], magic: [u8; 4]) -> Result<(EnvelopeHeader, &[u8
     let schema = reader.u16()?;
     if !matches!(
         schema,
-        RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3 | RUNTIME_SCHEMA_V4 | RUNTIME_SCHEMA_V5
+        RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3 | RUNTIME_SCHEMA_V4 | RUNTIME_SCHEMA_V5 | RUNTIME_SCHEMA_V6
     ) {
         return Err(WireError::new(
             "runtime-schema",
@@ -699,6 +719,440 @@ fn read_action_receipt(reader: &mut Reader<'_>) -> Result<RuntimeInputActionRece
     Ok(value)
 }
 
+fn domain_hash_v2(domain: &str, body: &[u8]) -> Result<WireHash, WireError> {
+    let mut writer = Writer::new();
+    writer.string(domain, "hash.domain", 96)?;
+    writer.raw(body);
+    Ok(WireHash(wire_checksum_v1(&writer.finish(MAX_WIRE_BYTES)?)))
+}
+
+fn write_optional_label(writer: &mut Writer, value: Option<&str>, name: &str, maximum: usize) -> Result<(), WireError> {
+    writer.u8(u8::from(value.is_some()));
+    if let Some(value) = value {
+        writer.string(value, name, maximum)?;
+    }
+    Ok(())
+}
+
+fn read_optional_label(reader: &mut Reader<'_>, name: &str, maximum: usize) -> Result<Option<String>, WireError> {
+    match reader.u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(reader.string(name, maximum)?)),
+        _ => Err(WireError::new(
+            "context-option",
+            "context optional label flag is invalid",
+        )),
+    }
+}
+
+fn write_container_key_v2(writer: &mut Writer, value: &RuntimeContainerKeyV2) -> Result<(), WireError> {
+    writer.u8(value.kind as u8);
+    writer.string(&value.id, "context.container.id", 160)?;
+    write_optional_label(writer, value.owner_id.as_deref(), "context.container.ownerId", 160)
+}
+
+fn read_container_key_v2(reader: &mut Reader<'_>) -> Result<RuntimeContainerKeyV2, WireError> {
+    Ok(RuntimeContainerKeyV2 {
+        kind: RuntimeContainerKindV2::from_code(reader.u8()?)?,
+        id: reader.string("context.container.id", 160)?,
+        owner_id: read_optional_label(reader, "context.container.ownerId", 160)?,
+    })
+}
+
+fn write_context_command_body_v2(writer: &mut Writer, value: &RuntimeContextCommandV2) -> Result<(), WireError> {
+    if value.sequence == 0 {
+        return Err(WireError::new(
+            "context-command",
+            "context command sequence must be non-zero",
+        ));
+    }
+    writer.u64(value.sequence, "context.sequence")?;
+    writer.u64(value.target_tick, "context.targetTick")?;
+    writer.u8(value.action.kind() as u8);
+    match &value.action {
+        RuntimeContextCommandActionV2::Cast {
+            spell_id,
+            loadout_revision,
+            learned_revision,
+        } => {
+            writer.string(spell_id, "context.spellId", 160)?;
+            writer.u64(*loadout_revision, "context.loadoutRevision")?;
+            writer.u64(*learned_revision, "context.learnedRevision")?;
+        }
+        RuntimeContextCommandActionV2::Reload {
+            container,
+            selected_slot,
+            container_revision,
+        } => {
+            if *selected_slot > 8 {
+                return Err(WireError::new("context-slot", "reload selected slot must be in 0..8"));
+            }
+            write_container_key_v2(writer, container)?;
+            writer.u8(*selected_slot);
+            writer.u64(*container_revision, "context.containerRevision")?;
+        }
+        RuntimeContextCommandActionV2::MountedAbility {
+            mount_entity_id,
+            mount_entity_revision,
+            seat_index,
+            ability_slot,
+        } => {
+            if *mount_entity_id == 0 {
+                return Err(WireError::new(
+                    "context-mount",
+                    "mounted ability requires a non-zero entity id",
+                ));
+            }
+            if *seat_index > MAX_CONTEXT_SEAT_INDEX_V2 || *ability_slot > 2 {
+                return Err(WireError::new(
+                    "context-mount",
+                    "mounted ability seat or ability slot is outside its bound",
+                ));
+            }
+            writer.raw_u64(*mount_entity_id);
+            writer.u64(*mount_entity_revision, "context.mountEntityRevision")?;
+            writer.u8(*seat_index);
+            writer.u8(*ability_slot);
+        }
+    }
+    Ok(())
+}
+
+fn read_context_command_body_v2(reader: &mut Reader<'_>) -> Result<RuntimeContextCommandV2, WireError> {
+    let sequence = reader.u64()?;
+    if sequence == 0 {
+        return Err(WireError::new(
+            "context-command",
+            "context command sequence must be non-zero",
+        ));
+    }
+    let target_tick = reader.u64()?;
+    let action = match RuntimeContextCommandKindV2::from_code(reader.u8()?)? {
+        RuntimeContextCommandKindV2::Cast => RuntimeContextCommandActionV2::Cast {
+            spell_id: reader.string("context.spellId", 160)?,
+            loadout_revision: reader.u64()?,
+            learned_revision: reader.u64()?,
+        },
+        RuntimeContextCommandKindV2::Reload => {
+            let container = read_container_key_v2(reader)?;
+            let selected_slot = reader.u8()?;
+            if selected_slot > 8 {
+                return Err(WireError::new("context-slot", "reload selected slot must be in 0..8"));
+            }
+            RuntimeContextCommandActionV2::Reload {
+                container,
+                selected_slot,
+                container_revision: reader.u64()?,
+            }
+        }
+        RuntimeContextCommandKindV2::MountedAbility => {
+            let mount_entity_id = reader.raw_u64()?;
+            let mount_entity_revision = reader.u64()?;
+            let seat_index = reader.u8()?;
+            let ability_slot = reader.u8()?;
+            if mount_entity_id == 0 || seat_index > MAX_CONTEXT_SEAT_INDEX_V2 || ability_slot > 2 {
+                return Err(WireError::new(
+                    "context-mount",
+                    "mounted ability identity or slot is invalid",
+                ));
+            }
+            RuntimeContextCommandActionV2::MountedAbility {
+                mount_entity_id,
+                mount_entity_revision,
+                seat_index,
+                ability_slot,
+            }
+        }
+    };
+    Ok(RuntimeContextCommandV2 {
+        sequence,
+        target_tick,
+        action,
+        command_hash: WireHash::default(),
+    })
+}
+
+pub fn context_command_hash_v2(value: &RuntimeContextCommandV2) -> Result<WireHash, WireError> {
+    let mut writer = Writer::new();
+    write_context_command_body_v2(&mut writer, value)?;
+    domain_hash_v2(CONTEXT_COMMAND_HASH_DOMAIN_V2, &writer.finish(MAX_WIRE_BYTES)?)
+}
+
+pub fn seal_context_command_v2(mut value: RuntimeContextCommandV2) -> Result<RuntimeContextCommandV2, WireError> {
+    value.command_hash = context_command_hash_v2(&value)?;
+    Ok(value)
+}
+
+fn write_context_command_v2(writer: &mut Writer, value: &RuntimeContextCommandV2) -> Result<(), WireError> {
+    let expected = context_command_hash_v2(value)?;
+    if value.command_hash != expected {
+        return Err(WireError::new(
+            "context-command-hash",
+            "context command hash does not match its canonical bytes",
+        ));
+    }
+    write_context_command_body_v2(writer, value)?;
+    writer.hash(value.command_hash);
+    Ok(())
+}
+
+fn read_context_command_v2(reader: &mut Reader<'_>) -> Result<RuntimeContextCommandV2, WireError> {
+    let mut value = read_context_command_body_v2(reader)?;
+    value.command_hash = reader.hash()?;
+    if context_command_hash_v2(&value)? != value.command_hash {
+        return Err(WireError::new(
+            "context-command-hash",
+            "decoded context command hash is invalid",
+        ));
+    }
+    Ok(value)
+}
+
+fn write_typed_revision_ref_v2(
+    writer: &mut Writer,
+    value: &RuntimeTypedRevisionRefV2,
+    label: &str,
+) -> Result<(), WireError> {
+    writer.string(&value.type_id, &format!("{label}.typeId"), 160)?;
+    writer.string(&value.id, &format!("{label}.id"), 160)?;
+    writer.u64(value.revision, &format!("{label}.revision"))
+}
+
+fn read_typed_revision_ref_v2(reader: &mut Reader<'_>, label: &str) -> Result<RuntimeTypedRevisionRefV2, WireError> {
+    Ok(RuntimeTypedRevisionRefV2 {
+        type_id: reader.string(&format!("{label}.typeId"), 160)?,
+        id: reader.string(&format!("{label}.id"), 160)?,
+        revision: reader.u64()?,
+    })
+}
+
+fn write_semantic_receipt_body_v2(
+    writer: &mut Writer,
+    value: &RuntimeSemanticActionReceiptV2,
+) -> Result<(), WireError> {
+    if value.command_sequence == 0 || value.applied_tick < value.target_tick {
+        return Err(WireError::new("semantic-receipt", "semantic receipt cursor is invalid"));
+    }
+    if !value.reason.matches_outcome(value.outcome) {
+        return Err(WireError::new(
+            "semantic-reason-matrix",
+            "semantic outcome and reason disagree",
+        ));
+    }
+    writer.u64(value.command_sequence, "semantic.commandSequence")?;
+    writer.u64(value.target_tick, "semantic.targetTick")?;
+    writer.u64(value.applied_tick, "semantic.appliedTick")?;
+    writer.u8(value.resolution.kind() as u8);
+    writer.u8(value.outcome as u8);
+    writer.u8(value.reason as u8);
+    writer.u8(0);
+    writer.hash(value.command_hash);
+    writer.u8(u8::from(value.resolved_entity.is_some()));
+    if let Some(entity) = value.resolved_entity {
+        if entity.entity_id == 0 {
+            return Err(WireError::new("semantic-entity", "resolved entity id must be non-zero"));
+        }
+        writer.raw_u64(entity.entity_id);
+        writer.u64(entity.entity_revision, "semantic.entityRevision")?;
+    }
+    writer.u8(u8::from(value.resolved_block.is_some()));
+    if let Some(block) = value.resolved_block {
+        writer.i32(block.x);
+        writer.i32(block.y);
+        writer.i32(block.z);
+        writer.u16(block.block_id);
+        writer.u64(block.world_revision.epoch, "semantic.worldRevision.epoch")?;
+        writer.u64(block.world_revision.mutation, "semantic.worldRevision.mutation")?;
+        writer.u64(block.world_revision.residency, "semantic.worldRevision.residency")?;
+    }
+    writer.u8(u8::from(value.session.is_some()));
+    if let Some(session) = &value.session {
+        write_typed_revision_ref_v2(writer, session, "semantic.session")?;
+    }
+    writer.u8(u8::from(value.effect.is_some()));
+    if let Some(effect) = &value.effect {
+        write_typed_revision_ref_v2(
+            writer,
+            &RuntimeTypedRevisionRefV2 {
+                type_id: effect.type_id.clone(),
+                id: effect.id.clone(),
+                revision: effect.revision,
+            },
+            "semantic.effect",
+        )?;
+        writer.hash(effect.effect_hash);
+    }
+    match value.resolution {
+        RuntimeSemanticActionResolutionV2::Cast {
+            loadout_revision,
+            learned_revision,
+        } => {
+            writer.u64(loadout_revision, "semantic.loadoutRevision")?;
+            writer.u64(learned_revision, "semantic.learnedRevision")?;
+        }
+        RuntimeSemanticActionResolutionV2::Reload { container_revision } => {
+            writer.u64(container_revision, "semantic.containerRevision")?;
+        }
+        RuntimeSemanticActionResolutionV2::MountedAbility { mount_entity_revision } => {
+            writer.u64(mount_entity_revision, "semantic.mountEntityRevision")?;
+        }
+    }
+    Ok(())
+}
+
+fn read_semantic_receipt_body_v2(reader: &mut Reader<'_>) -> Result<RuntimeSemanticActionReceiptV2, WireError> {
+    let command_sequence = reader.u64()?;
+    let target_tick = reader.u64()?;
+    let applied_tick = reader.u64()?;
+    let kind = RuntimeContextCommandKindV2::from_code(reader.u8()?)?;
+    let outcome = RuntimeSemanticActionOutcomeV2::from_code(reader.u8()?)?;
+    let reason = RuntimeSemanticActionReasonV2::from_code(reader.u8()?)?;
+    if reader.u8()? != 0 {
+        return Err(WireError::new(
+            "reserved",
+            "semantic receipt reserved byte must be zero",
+        ));
+    }
+    if command_sequence == 0 || applied_tick < target_tick {
+        return Err(WireError::new("semantic-receipt", "semantic receipt cursor is invalid"));
+    }
+    if !reason.matches_outcome(outcome) {
+        return Err(WireError::new(
+            "semantic-reason-matrix",
+            "semantic outcome and reason disagree",
+        ));
+    }
+    let command_hash = reader.hash()?;
+    let resolved_entity = match reader.u8()? {
+        0 => None,
+        1 => {
+            let entity_id = reader.raw_u64()?;
+            if entity_id == 0 {
+                return Err(WireError::new("semantic-entity", "resolved entity id must be non-zero"));
+            }
+            Some(RuntimeResolvedEntityV2 {
+                entity_id,
+                entity_revision: reader.u64()?,
+            })
+        }
+        _ => return Err(WireError::new("context-option", "resolved entity option is invalid")),
+    };
+    let resolved_block = match reader.u8()? {
+        0 => None,
+        1 => Some(RuntimeResolvedBlockV2 {
+            x: reader.i32()?,
+            y: reader.i32()?,
+            z: reader.i32()?,
+            block_id: reader.u16()?,
+            world_revision: RuntimeWorldAuthorityRevisionV2 {
+                epoch: reader.u64()?,
+                mutation: reader.u64()?,
+                residency: reader.u64()?,
+            },
+        }),
+        _ => return Err(WireError::new("context-option", "resolved block option is invalid")),
+    };
+    let session = match reader.u8()? {
+        0 => None,
+        1 => Some(read_typed_revision_ref_v2(reader, "semantic.session")?),
+        _ => return Err(WireError::new("context-option", "session option is invalid")),
+    };
+    let effect = match reader.u8()? {
+        0 => None,
+        1 => {
+            let reference = read_typed_revision_ref_v2(reader, "semantic.effect")?;
+            Some(RuntimeTypedEffectRefV2 {
+                type_id: reference.type_id,
+                id: reference.id,
+                revision: reference.revision,
+                effect_hash: reader.hash()?,
+            })
+        }
+        _ => return Err(WireError::new("context-option", "effect option is invalid")),
+    };
+    let resolution = match kind {
+        RuntimeContextCommandKindV2::Cast => RuntimeSemanticActionResolutionV2::Cast {
+            loadout_revision: reader.u64()?,
+            learned_revision: reader.u64()?,
+        },
+        RuntimeContextCommandKindV2::Reload => RuntimeSemanticActionResolutionV2::Reload {
+            container_revision: reader.u64()?,
+        },
+        RuntimeContextCommandKindV2::MountedAbility => RuntimeSemanticActionResolutionV2::MountedAbility {
+            mount_entity_revision: reader.u64()?,
+        },
+    };
+    Ok(RuntimeSemanticActionReceiptV2 {
+        command_sequence,
+        target_tick,
+        applied_tick,
+        command_hash,
+        outcome,
+        reason,
+        resolved_entity,
+        resolved_block,
+        session,
+        effect,
+        resolution,
+        receipt_hash: WireHash::default(),
+    })
+}
+
+pub fn semantic_action_receipt_hash_v2(
+    value: &RuntimeSemanticActionReceiptV2,
+    post_identity: &RuntimeIdentityV1,
+    replay_hash: WireHash,
+) -> Result<WireHash, WireError> {
+    let mut writer = Writer::new();
+    write_identity(&mut writer, post_identity)?;
+    writer.hash(replay_hash);
+    write_semantic_receipt_body_v2(&mut writer, value)?;
+    domain_hash_v2(SEMANTIC_RECEIPT_HASH_DOMAIN_V2, &writer.finish(MAX_WIRE_BYTES)?)
+}
+
+pub fn seal_semantic_action_receipt_v2(
+    mut value: RuntimeSemanticActionReceiptV2,
+    post_identity: &RuntimeIdentityV1,
+    replay_hash: WireHash,
+) -> Result<RuntimeSemanticActionReceiptV2, WireError> {
+    value.receipt_hash = semantic_action_receipt_hash_v2(&value, post_identity, replay_hash)?;
+    Ok(value)
+}
+
+fn write_semantic_receipt_v2(
+    writer: &mut Writer,
+    value: &RuntimeSemanticActionReceiptV2,
+    post_identity: &RuntimeIdentityV1,
+    replay_hash: WireHash,
+) -> Result<(), WireError> {
+    let expected = semantic_action_receipt_hash_v2(value, post_identity, replay_hash)?;
+    if value.receipt_hash != expected {
+        return Err(WireError::new(
+            "semantic-receipt-hash",
+            "semantic receipt hash is invalid",
+        ));
+    }
+    write_semantic_receipt_body_v2(writer, value)?;
+    writer.hash(value.receipt_hash);
+    Ok(())
+}
+
+fn read_semantic_receipt_v2(
+    reader: &mut Reader<'_>,
+    post_identity: &RuntimeIdentityV1,
+    replay_hash: WireHash,
+) -> Result<RuntimeSemanticActionReceiptV2, WireError> {
+    let mut value = read_semantic_receipt_body_v2(reader)?;
+    value.receipt_hash = reader.hash()?;
+    if semantic_action_receipt_hash_v2(&value, post_identity, replay_hash)? != value.receipt_hash {
+        return Err(WireError::new(
+            "semantic-receipt-hash",
+            "decoded semantic receipt hash is invalid",
+        ));
+    }
+    Ok(value)
+}
+
 fn write_receipt(writer: &mut Writer, value: &RuntimeCommandReceiptV1) -> Result<(), WireError> {
     match value {
         RuntimeCommandReceiptV1::Accepted {
@@ -1009,6 +1463,270 @@ fn read_capabilities(reader: &mut Reader<'_>, label: &str) -> Result<Vec<String>
         values.push(value);
     }
     Ok(values)
+}
+
+fn validate_context_command_order_v2(values: &[RuntimeContextCommandV2]) -> Result<(), WireError> {
+    if values.len() > MAX_CONTEXT_COMMANDS_V2 {
+        return Err(WireError::new(
+            "context-command-capacity",
+            "step context command batch exceeds 128 commands",
+        ));
+    }
+    for pair in values.windows(2) {
+        if pair[0].target_tick > pair[1].target_tick || pair[0].sequence >= pair[1].sequence {
+            return Err(WireError::new(
+                "context-command-order",
+                "context commands require nondecreasing target ticks and strictly increasing sequences",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_semantic_receipt_order_v2(values: &[RuntimeSemanticActionReceiptV2]) -> Result<(), WireError> {
+    if values.len() > MAX_CONTEXT_RECEIPTS_V2 {
+        return Err(WireError::new(
+            "semantic-receipt-capacity",
+            "step semantic receipt batch exceeds 128 receipts",
+        ));
+    }
+    for pair in values.windows(2) {
+        if pair[0].target_tick > pair[1].target_tick || pair[0].command_sequence >= pair[1].command_sequence {
+            return Err(WireError::new(
+                "semantic-receipt-order",
+                "semantic receipts require nondecreasing target ticks and strictly increasing command sequences",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Encodes the isolated schema-6 StepV2 request. The complete schema-2 StepV1
+/// payload is an exact prefix; only the bounded context-command lane follows.
+pub fn encode_step_request_v2(request: &RuntimeStepRequestV2) -> Result<Vec<u8>, WireError> {
+    if request.budget_us == 0 || request.budget_us > 1_000_000 {
+        return Err(WireError::new("invalid-integer", "step budget must be in 1..1000000"));
+    }
+    if request.inputs.len() > MAX_INPUT_FRAMES {
+        return Err(WireError::new("input-capacity", "step input batch exceeds 128 frames"));
+    }
+    validate_context_command_order_v2(&request.context_commands)?;
+    let mut writer = Writer::new();
+    write_identity(&mut writer, &request.expected)?;
+    writer.u64(request.monotonic_time_us, "step.monotonicTimeUs")?;
+    writer.u32(request.budget_us);
+    writer.u16(
+        u16::try_from(request.inputs.len())
+            .map_err(|_| WireError::new("input-capacity", "input frame count exceeds u16"))?,
+    );
+    for input in &request.inputs {
+        write_input(&mut writer, *input)?;
+    }
+    writer.u16(
+        u16::try_from(request.context_commands.len())
+            .map_err(|_| WireError::new("context-command-capacity", "context command count exceeds u16"))?,
+    );
+    for command in &request.context_commands {
+        write_context_command_v2(&mut writer, command)?;
+    }
+    encode_envelope(
+        REQUEST_MAGIC,
+        RUNTIME_SCHEMA_V6,
+        EnvelopeHeader {
+            schema: RUNTIME_SCHEMA_V6,
+            operation: 3,
+            status: 0,
+            request_id: request.request_id,
+            client_epoch: request.client_epoch,
+            worker_epoch: 0,
+        },
+        writer.finish(MAX_WIRE_BYTES)?,
+    )
+}
+
+/// Decodes only schema-6 StepV2. Generic V1 request decoding continues to
+/// reject schema 6, keeping unsupported runtime dispatch fail-closed.
+pub fn decode_step_request_v2(value: &[u8]) -> Result<RuntimeStepRequestV2, WireError> {
+    let (header, payload) = decode_envelope(value, REQUEST_MAGIC)?;
+    if header.schema != RUNTIME_SCHEMA_V6 || header.operation != 3 || header.status != 0 || header.worker_epoch != 0 {
+        return Err(WireError::new(
+            "step-v2-header",
+            "schema-6 StepV2 request header is invalid",
+        ));
+    }
+    let mut reader = Reader::new(payload);
+    let expected = read_identity(&mut reader)?;
+    let monotonic_time_us = reader.u64()?;
+    let budget_us = reader.u32()?;
+    if budget_us == 0 || budget_us > 1_000_000 {
+        return Err(WireError::new("invalid-integer", "step budget must be in 1..1000000"));
+    }
+    let input_count = usize::from(reader.u16()?);
+    if input_count > MAX_INPUT_FRAMES {
+        return Err(WireError::new("input-capacity", "step input batch exceeds 128 frames"));
+    }
+    let mut inputs = Vec::with_capacity(input_count);
+    for _ in 0..input_count {
+        inputs.push(read_input(&mut reader)?);
+    }
+    let command_count = usize::from(reader.u16()?);
+    if command_count > MAX_CONTEXT_COMMANDS_V2 {
+        return Err(WireError::new(
+            "context-command-capacity",
+            "step context command batch exceeds 128 commands",
+        ));
+    }
+    let mut context_commands = Vec::with_capacity(command_count);
+    for _ in 0..command_count {
+        context_commands.push(read_context_command_v2(&mut reader)?);
+    }
+    reader.finish()?;
+    validate_context_command_order_v2(&context_commands)?;
+    Ok(RuntimeStepRequestV2 {
+        request_id: header.request_id,
+        client_epoch: header.client_epoch,
+        expected,
+        monotonic_time_us,
+        budget_us,
+        inputs,
+        context_commands,
+    })
+}
+
+/// Encodes schema-6 StepV2. The schema-3 StepResult payload, including replay
+/// hash, remains an exact prefix before semantic receipts are appended.
+pub fn encode_step_response_v2(response: &RuntimeStepResponseV2) -> Result<Vec<u8>, WireError> {
+    if response.worker_epoch == 0 {
+        return Err(WireError::new(
+            "worker-epoch",
+            "runtime response is missing a worker epoch",
+        ));
+    }
+    if response.action_receipts.len() > MAX_ACTION_RECEIPTS {
+        return Err(WireError::new(
+            "input-action-capacity",
+            "step action receipts exceed their bound",
+        ));
+    }
+    validate_semantic_receipt_order_v2(&response.semantic_receipts)?;
+    let mut writer = Writer::new();
+    write_identity(&mut writer, &response.identity)?;
+    writer.u16(response.fixed_steps);
+    writer.u16(response.inputs_applied);
+    writer.u16(response.commands_processed);
+    writer.u16(response.commands_accepted);
+    writer.u16(
+        u16::try_from(response.action_receipts.len())
+            .map_err(|_| WireError::new("input-action-capacity", "action receipt count exceeds u16"))?,
+    );
+    let mut previous_action_sequence = 0_u64;
+    for receipt in &response.action_receipts {
+        if receipt.sequence <= previous_action_sequence {
+            return Err(WireError::new(
+                "input-action-order",
+                "step action receipt sequences must be strictly increasing",
+            ));
+        }
+        previous_action_sequence = receipt.sequence;
+        write_action_receipt(&mut writer, *receipt)?;
+    }
+    writer.hash(response.replay_hash);
+    writer.u16(
+        u16::try_from(response.semantic_receipts.len())
+            .map_err(|_| WireError::new("semantic-receipt-capacity", "semantic receipt count exceeds u16"))?,
+    );
+    for receipt in &response.semantic_receipts {
+        if receipt.applied_tick > response.identity.tick {
+            return Err(WireError::new(
+                "semantic-receipt",
+                "semantic receipt applied tick exceeds the post-step identity",
+            ));
+        }
+        write_semantic_receipt_v2(&mut writer, receipt, &response.identity, response.replay_hash)?;
+    }
+    encode_envelope(
+        RESPONSE_MAGIC,
+        RUNTIME_SCHEMA_V6,
+        EnvelopeHeader {
+            schema: RUNTIME_SCHEMA_V6,
+            operation: 3,
+            status: 0,
+            request_id: response.request_id,
+            client_epoch: response.client_epoch,
+            worker_epoch: response.worker_epoch,
+        },
+        writer.finish(MAX_WIRE_BYTES)?,
+    )
+}
+
+pub fn decode_step_response_v2(value: &[u8]) -> Result<RuntimeStepResponseV2, WireError> {
+    let (header, payload) = decode_envelope(value, RESPONSE_MAGIC)?;
+    if header.schema != RUNTIME_SCHEMA_V6 || header.operation != 3 || header.status != 0 || header.worker_epoch == 0 {
+        return Err(WireError::new(
+            "step-v2-header",
+            "schema-6 StepV2 response header is invalid",
+        ));
+    }
+    let mut reader = Reader::new(payload);
+    let identity = read_identity(&mut reader)?;
+    let fixed_steps = reader.u16()?;
+    let inputs_applied = reader.u16()?;
+    let commands_processed = reader.u16()?;
+    let commands_accepted = reader.u16()?;
+    let action_count = usize::from(reader.u16()?);
+    if action_count > MAX_ACTION_RECEIPTS {
+        return Err(WireError::new(
+            "input-action-capacity",
+            "step action receipts exceed their bound",
+        ));
+    }
+    let mut action_receipts = Vec::with_capacity(action_count);
+    let mut previous_action_sequence = 0_u64;
+    for _ in 0..action_count {
+        let receipt = read_action_receipt(&mut reader)?;
+        if receipt.sequence <= previous_action_sequence {
+            return Err(WireError::new(
+                "input-action-order",
+                "step action receipt sequences must be strictly increasing",
+            ));
+        }
+        previous_action_sequence = receipt.sequence;
+        action_receipts.push(receipt);
+    }
+    let replay_hash = reader.hash()?;
+    let semantic_count = usize::from(reader.u16()?);
+    if semantic_count > MAX_CONTEXT_RECEIPTS_V2 {
+        return Err(WireError::new(
+            "semantic-receipt-capacity",
+            "step semantic receipt batch exceeds 128 receipts",
+        ));
+    }
+    let mut semantic_receipts = Vec::with_capacity(semantic_count);
+    for _ in 0..semantic_count {
+        let receipt = read_semantic_receipt_v2(&mut reader, &identity, replay_hash)?;
+        if receipt.applied_tick > identity.tick {
+            return Err(WireError::new(
+                "semantic-receipt",
+                "semantic receipt applied tick exceeds the post-step identity",
+            ));
+        }
+        semantic_receipts.push(receipt);
+    }
+    reader.finish()?;
+    validate_semantic_receipt_order_v2(&semantic_receipts)?;
+    Ok(RuntimeStepResponseV2 {
+        request_id: header.request_id,
+        client_epoch: header.client_epoch,
+        worker_epoch: header.worker_epoch,
+        identity,
+        fixed_steps,
+        inputs_applied,
+        commands_processed,
+        commands_accepted,
+        action_receipts,
+        replay_hash,
+        semantic_receipts,
+    })
 }
 
 /// Encodes one complete coarse request; no domain object crosses the worker
@@ -2062,6 +2780,42 @@ mod tests {
             fixture_global_string("rustCanonicalHex"),
             fixture_global_string("buggyU8RotateHex"),
             "rotating an eight-bit value must not masquerade as Rust u64 semantics"
+        );
+    }
+
+    #[test]
+    fn schema_six_step_v2_matches_typescript_golden_bytes_and_fails_closed() {
+        let request = from_hex(&fixture_string("step-v2-context-commands", "hex"));
+        let decoded_request = decode_step_request_v2(&request).expect("decode TypeScript StepV2 request fixture");
+        assert_eq!(encode_step_request_v2(&decoded_request).unwrap(), request);
+        assert_eq!(decode_request_v1(&request).unwrap_err().code, "runtime-schema");
+        assert_eq!(decoded_request.context_commands.len(), 3);
+        assert!(matches!(
+            decoded_request.context_commands[2].action,
+            RuntimeContextCommandActionV2::MountedAbility {
+                mount_entity_id: 0xfedc_ba98_7654_3210,
+                ..
+            }
+        ));
+
+        let response = from_hex(&fixture_string("step-result-v2-semantic-receipts", "hex"));
+        let decoded_response = decode_step_response_v2(&response).expect("decode TypeScript StepV2 response fixture");
+        assert_eq!(encode_step_response_v2(&decoded_response).unwrap(), response);
+        assert_eq!(decode_response_v1(&response).unwrap_err().code, "runtime-schema");
+        assert_eq!(decoded_response.semantic_receipts.len(), 3);
+        assert!(matches!(
+            decoded_response.semantic_receipts[1].resolved_block,
+            Some(RuntimeResolvedBlockV2 { x: -2, y: 64, z: 7, .. })
+        ));
+
+        let mut corrupted = request;
+        let last = corrupted.len() - 1;
+        corrupted[last] ^= 0xff;
+        let checksum = wire_checksum_v1(&corrupted[HEADER_BYTES..]);
+        corrupted[28..HEADER_BYTES].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_step_request_v2(&corrupted).unwrap_err().code,
+            "context-command-hash"
         );
     }
 }

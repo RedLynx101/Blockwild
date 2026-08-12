@@ -1,6 +1,8 @@
 import {
   RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES,
   RUST_INTEGRATED_RUNTIME_MAX_ACTION_RECEIPTS,
+  RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_COMMANDS_V2,
+  RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_RECEIPTS_V2,
   RUST_INTEGRATED_RUNTIME_MAX_EXTRACTION_BYTES,
   RUST_INTEGRATED_RUNTIME_MAX_INPUT_FRAMES,
   RUST_INTEGRATED_RUNTIME_MAX_OPERATIONS,
@@ -9,6 +11,7 @@ import {
   RUST_INTEGRATED_RUNTIME_SCHEMA_V3,
   RUST_INTEGRATED_RUNTIME_SCHEMA_V4,
   RUST_INTEGRATED_RUNTIME_SCHEMA_V5,
+  RUST_INTEGRATED_RUNTIME_SCHEMA_V6,
   RUST_INTEGRATED_RUNTIME_DEFAULT_GENERATION_OPTIONS_JSON_V1,
   RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONTENT_HASH_V2,
   RUST_INTEGRATED_RUNTIME_MAX_GENERATION_OPTIONS_JSON_BYTES,
@@ -25,6 +28,15 @@ import {
   type RustIntegratedRuntimeIdentityV1,
   type RustIntegratedRuntimeInputFrameV1,
   type RustIntegratedRuntimeInputActionReceiptV1,
+  type RustIntegratedRuntimeContextCommandActionV2,
+  type RustIntegratedRuntimeContextCommandV2,
+  type RustIntegratedRuntimeContextContainerKeyV2,
+  type RustIntegratedRuntimeResolvedBlockV2,
+  type RustIntegratedRuntimeSemanticActionReceiptV2,
+  type RustIntegratedRuntimeSemanticActionResolutionV2,
+  type RustIntegratedRuntimeStepRequestV2,
+  type RustIntegratedRuntimeStepResultV2,
+  type RustIntegratedRuntimeTypedRevisionRefV2,
   type RustIntegratedRuntimeRequestV1,
   type RustIntegratedRuntimeResponseV1,
   type RustIntegratedRuntimeRevisionV1,
@@ -35,8 +47,11 @@ const RESPONSE_MAGIC = Uint8Array.from([0x42, 0x57, 0x52, 0x53]); // BWRS
 const HEADER_BYTES = 44;
 const HASH_BYTES = 16;
 const HASH_PATTERN = /^[0-9a-f]{32}$/u;
+const ZERO_HASH = "00000000000000000000000000000000";
 const MAX_LABEL_BYTES = 512;
 const MAX_CAPABILITIES = 64;
+const CONTEXT_COMMAND_HASH_DOMAIN_V2 = "blockwild.runtime.context-command.v2";
+const SEMANTIC_RECEIPT_HASH_DOMAIN_V2 = "blockwild.runtime.semantic-receipt.v2";
 const U64_MAX_SAFE = Number.MAX_SAFE_INTEGER;
 const U64_MAX = BigInt("0xffffffffffffffff");
 const U64_MASK = BigInt("0xffffffffffffffff");
@@ -194,6 +209,12 @@ class Writer {
     this.append(bytes);
   }
   i16(value: number) { this.u16(integer(value, -0x8000, 0x7fff, "i16") & 0xffff); }
+  i32(value: number) {
+    const normalized = integer(value, -0x8000_0000, 0x7fff_ffff, "i32");
+    const bytes = new Uint8Array(4);
+    new DataView(bytes.buffer).setInt32(0, normalized, true);
+    this.append(bytes);
+  }
   u32(value: number) {
     const normalized = integer(value, 0, 0xffff_ffff, "u32");
     const bytes = new Uint8Array(4);
@@ -250,6 +271,7 @@ class Reader {
   u8() { return this.take(1)[0]; }
   u16() { const bytes = this.take(2); return bytes[0] | bytes[1] << 8; }
   i16() { const value = this.u16(); return value & 0x8000 ? value - 0x1_0000 : value; }
+  i32() { const bytes = this.take(4); return new DataView(bytes.buffer, bytes.byteOffset, 4).getInt32(0, true); }
   u32() { const bytes = this.take(4); return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true); }
   rawU64() {
     const bytes = this.take(8);
@@ -560,6 +582,319 @@ function readInputActionReceipt(reader: Reader): RustIntegratedRuntimeInputActio
   });
 }
 
+const contextCommandKinds = Object.freeze(["cast", "reload", "mounted-ability"] as const);
+const contextContainerKinds = Object.freeze([
+  "player", "equipment", "container", "machine", "waygrid", "cardforge-case",
+] as const);
+const semanticOutcomes = Object.freeze(["applied", "rejected"] as const);
+const semanticReasons = Object.freeze([
+  "applied", "no-target", "ineligible", "stale-revision", "unknown-content", "empty-slot", "blocked", "context-mismatch",
+] as const);
+
+function domainHashV2(domain: string, body: Uint8Array) {
+  const writer = new Writer();
+  writer.string(domain, "hash.domain", 96);
+  writer.raw(body);
+  return rustIntegratedRuntimeWireChecksumV1(writer.finish());
+}
+
+function writeOptionalLabel(writer: Writer, value: string | null, name: string, maximum: number) {
+  writer.u8(value === null ? 0 : 1);
+  if (value !== null) writer.string(value, name, maximum);
+}
+
+function readOptionalLabel(reader: Reader, name: string, maximum: number) {
+  const present = reader.u8();
+  if (present > 1) throw new RustIntegratedRuntimeCodecError("context-option", `${name} option flag is invalid`);
+  return present === 1 ? reader.string(name, maximum) : null;
+}
+
+function writeContextContainerKeyV2(writer: Writer, value: RustIntegratedRuntimeContextContainerKeyV2) {
+  const kind = contextContainerKinds.indexOf(value.kind);
+  if (kind < 0) throw new RustIntegratedRuntimeCodecError("context-container-kind", "context container kind is unknown");
+  writer.u8(kind);
+  writer.string(value.id, "context.container.id", 160);
+  writeOptionalLabel(writer, value.ownerId, "context.container.ownerId", 160);
+}
+
+function readContextContainerKeyV2(reader: Reader): RustIntegratedRuntimeContextContainerKeyV2 {
+  const kindTag = reader.u8();
+  const kind = contextContainerKinds[kindTag];
+  if (kind === undefined) throw new RustIntegratedRuntimeCodecError("context-container-kind", "context container kind is unknown");
+  return Object.freeze({
+    kind,
+    id: reader.string("context.container.id", 160),
+    ownerId: readOptionalLabel(reader, "context.container.ownerId", 160),
+  });
+}
+
+function writeContextActionV2(writer: Writer, action: RustIntegratedRuntimeContextCommandActionV2) {
+  const kind = contextCommandKinds.indexOf(action.kind);
+  if (kind < 0) throw new RustIntegratedRuntimeCodecError("context-command-kind", "context command kind is unknown");
+  writer.u8(kind);
+  switch (action.kind) {
+    case "cast":
+      writer.string(action.spellId, "context.spellId", 160);
+      writer.u64(integer(action.loadoutRevision, 0, U64_MAX_SAFE, "context.loadoutRevision"));
+      writer.u64(integer(action.learnedRevision, 0, U64_MAX_SAFE, "context.learnedRevision"));
+      break;
+    case "reload":
+      writeContextContainerKeyV2(writer, action.container);
+      writer.u8(integer(action.selectedSlot, 0, 8, "context.selectedSlot"));
+      writer.u64(integer(action.containerRevision, 0, U64_MAX_SAFE, "context.containerRevision"));
+      break;
+    case "mounted-ability":
+      if (action.mountEntityId === BigInt(0)) throw new RustIntegratedRuntimeCodecError("context-mount", "mounted ability entity id is zero");
+      writer.rawU64(action.mountEntityId);
+      writer.u64(integer(action.mountEntityRevision, 0, U64_MAX_SAFE, "context.mountEntityRevision"));
+      writer.u8(integer(action.seatIndex, 0, 7, "context.seatIndex"));
+      writer.u8(integer(action.abilitySlot, 0, 2, "context.abilitySlot"));
+      break;
+  }
+}
+
+function readContextActionV2(reader: Reader): RustIntegratedRuntimeContextCommandActionV2 {
+  const kind = contextCommandKinds[reader.u8()];
+  if (kind === undefined) throw new RustIntegratedRuntimeCodecError("context-command-kind", "context command kind is unknown");
+  switch (kind) {
+    case "cast": return Object.freeze({
+      kind,
+      spellId: reader.string("context.spellId", 160),
+      loadoutRevision: reader.u64(),
+      learnedRevision: reader.u64(),
+    });
+    case "reload": return Object.freeze({
+      kind,
+      container: readContextContainerKeyV2(reader),
+      selectedSlot: integer(reader.u8(), 0, 8, "context.selectedSlot"),
+      containerRevision: reader.u64(),
+    });
+    case "mounted-ability": {
+      const mountEntityId = reader.rawU64();
+      if (mountEntityId === BigInt(0)) throw new RustIntegratedRuntimeCodecError("context-mount", "mounted ability entity id is zero");
+      return Object.freeze({
+        kind,
+        mountEntityId,
+        mountEntityRevision: reader.u64(),
+        seatIndex: integer(reader.u8(), 0, 7, "context.seatIndex"),
+        abilitySlot: integer(reader.u8(), 0, 2, "context.abilitySlot") as 0 | 1 | 2,
+      });
+    }
+  }
+}
+
+function contextCommandBodyV2(value: RustIntegratedRuntimeContextCommandV2) {
+  const writer = new Writer();
+  writer.u64(integer(value.sequence, 1, U64_MAX_SAFE, "context.sequence"));
+  writer.u64(integer(value.targetTick, 0, U64_MAX_SAFE, "context.targetTick"));
+  writeContextActionV2(writer, value.action);
+  return writer.finish();
+}
+
+export function rustIntegratedRuntimeContextCommandHashV2(value: RustIntegratedRuntimeContextCommandV2) {
+  return domainHashV2(CONTEXT_COMMAND_HASH_DOMAIN_V2, contextCommandBodyV2(value));
+}
+
+export function sealRustIntegratedRuntimeContextCommandV2(
+  value: Readonly<Omit<RustIntegratedRuntimeContextCommandV2, "commandHash">>,
+): RustIntegratedRuntimeContextCommandV2 {
+  const normalized = Object.freeze({ ...value, action: Object.freeze({ ...value.action }), commandHash: ZERO_HASH });
+  return Object.freeze({ ...normalized, commandHash: rustIntegratedRuntimeContextCommandHashV2(normalized) });
+}
+
+function writeContextCommandV2(writer: Writer, value: RustIntegratedRuntimeContextCommandV2) {
+  const body = contextCommandBodyV2(value);
+  const expected = domainHashV2(CONTEXT_COMMAND_HASH_DOMAIN_V2, body);
+  if (value.commandHash !== expected) {
+    throw new RustIntegratedRuntimeCodecError("context-command-hash", "context command hash does not match its canonical bytes");
+  }
+  writer.raw(body);
+  writer.hash(value.commandHash, "context.commandHash");
+}
+
+function readContextCommandV2(reader: Reader): RustIntegratedRuntimeContextCommandV2 {
+  const sequence = reader.u64();
+  if (sequence < 1) throw new RustIntegratedRuntimeCodecError("context-command", "context command sequence must be non-zero");
+  const targetTick = reader.u64();
+  const action = readContextActionV2(reader);
+  const commandHash = reader.hash();
+  const value = Object.freeze({ sequence, targetTick, action, commandHash });
+  if (rustIntegratedRuntimeContextCommandHashV2(value) !== commandHash) {
+    throw new RustIntegratedRuntimeCodecError("context-command-hash", "decoded context command hash is invalid");
+  }
+  return value;
+}
+
+function writeTypedRevisionRefV2(writer: Writer, value: RustIntegratedRuntimeTypedRevisionRefV2, name: string) {
+  writer.string(value.typeId, `${name}.typeId`, 160);
+  writer.string(value.id, `${name}.id`, 160);
+  writer.u64(integer(value.revision, 0, U64_MAX_SAFE, `${name}.revision`));
+}
+
+function readTypedRevisionRefV2(reader: Reader, name: string): RustIntegratedRuntimeTypedRevisionRefV2 {
+  return Object.freeze({
+    typeId: reader.string(`${name}.typeId`, 160),
+    id: reader.string(`${name}.id`, 160),
+    revision: reader.u64(),
+  });
+}
+
+function semanticReasonMatchesOutcome(outcome: RustIntegratedRuntimeSemanticActionReceiptV2["outcome"], reason: RustIntegratedRuntimeSemanticActionReceiptV2["reason"]) {
+  return outcome === "applied" ? reason === "applied" : reason !== "applied";
+}
+
+function writeResolvedBlockV2(writer: Writer, value: RustIntegratedRuntimeResolvedBlockV2) {
+  writer.i32(value.x); writer.i32(value.y); writer.i32(value.z);
+  writer.u16(integer(value.blockId, 0, 0xffff, "semantic.blockId"));
+  writer.u64(integer(value.worldRevision.epoch, 0, U64_MAX_SAFE, "semantic.worldRevision.epoch"));
+  writer.u64(integer(value.worldRevision.mutation, 0, U64_MAX_SAFE, "semantic.worldRevision.mutation"));
+  writer.u64(integer(value.worldRevision.residency, 0, U64_MAX_SAFE, "semantic.worldRevision.residency"));
+}
+
+function readResolvedBlockV2(reader: Reader): RustIntegratedRuntimeResolvedBlockV2 {
+  return Object.freeze({
+    x: reader.i32(), y: reader.i32(), z: reader.i32(), blockId: reader.u16(),
+    worldRevision: Object.freeze({ epoch: reader.u64(), mutation: reader.u64(), residency: reader.u64() }),
+  });
+}
+
+function writeSemanticResolutionV2(writer: Writer, value: RustIntegratedRuntimeSemanticActionResolutionV2) {
+  switch (value.kind) {
+    case "cast":
+      writer.u64(integer(value.loadoutRevision, 0, U64_MAX_SAFE, "semantic.loadoutRevision"));
+      writer.u64(integer(value.learnedRevision, 0, U64_MAX_SAFE, "semantic.learnedRevision"));
+      break;
+    case "reload": writer.u64(integer(value.containerRevision, 0, U64_MAX_SAFE, "semantic.containerRevision")); break;
+    case "mounted-ability": writer.u64(integer(value.mountEntityRevision, 0, U64_MAX_SAFE, "semantic.mountEntityRevision")); break;
+  }
+}
+
+function readSemanticResolutionV2(reader: Reader, kind: typeof contextCommandKinds[number]): RustIntegratedRuntimeSemanticActionResolutionV2 {
+  switch (kind) {
+    case "cast": return Object.freeze({ kind, loadoutRevision: reader.u64(), learnedRevision: reader.u64() });
+    case "reload": return Object.freeze({ kind, containerRevision: reader.u64() });
+    case "mounted-ability": return Object.freeze({ kind, mountEntityRevision: reader.u64() });
+  }
+}
+
+function semanticReceiptBodyV2(value: RustIntegratedRuntimeSemanticActionReceiptV2) {
+  if (value.appliedTick < value.targetTick || !semanticReasonMatchesOutcome(value.outcome, value.reason)) {
+    throw new RustIntegratedRuntimeCodecError("semantic-reason-matrix", "semantic receipt cursor or outcome/reason matrix is invalid");
+  }
+  const kind = contextCommandKinds.indexOf(value.resolution.kind);
+  const outcome = semanticOutcomes.indexOf(value.outcome);
+  const reason = semanticReasons.indexOf(value.reason);
+  if (kind < 0 || outcome < 0 || reason < 0) {
+    throw new RustIntegratedRuntimeCodecError("semantic-receipt", "semantic receipt enum is unknown");
+  }
+  const writer = new Writer();
+  writer.u64(integer(value.commandSequence, 1, U64_MAX_SAFE, "semantic.commandSequence"));
+  writer.u64(integer(value.targetTick, 0, U64_MAX_SAFE, "semantic.targetTick"));
+  writer.u64(integer(value.appliedTick, 0, U64_MAX_SAFE, "semantic.appliedTick"));
+  writer.u8(kind); writer.u8(outcome); writer.u8(reason); writer.u8(0);
+  writer.hash(value.commandHash, "semantic.commandHash");
+  writer.u8(value.resolvedEntity === null ? 0 : 1);
+  if (value.resolvedEntity !== null) {
+    if (value.resolvedEntity.entityId === BigInt(0)) throw new RustIntegratedRuntimeCodecError("semantic-entity", "resolved entity id is zero");
+    writer.rawU64(value.resolvedEntity.entityId);
+    writer.u64(integer(value.resolvedEntity.entityRevision, 0, U64_MAX_SAFE, "semantic.entityRevision"));
+  }
+  writer.u8(value.resolvedBlock === null ? 0 : 1);
+  if (value.resolvedBlock !== null) writeResolvedBlockV2(writer, value.resolvedBlock);
+  writer.u8(value.session === null ? 0 : 1);
+  if (value.session !== null) writeTypedRevisionRefV2(writer, value.session, "semantic.session");
+  writer.u8(value.effect === null ? 0 : 1);
+  if (value.effect !== null) {
+    writeTypedRevisionRefV2(writer, value.effect, "semantic.effect");
+    writer.hash(value.effect.effectHash, "semantic.effectHash");
+  }
+  writeSemanticResolutionV2(writer, value.resolution);
+  return writer.finish();
+}
+
+export function rustIntegratedRuntimeSemanticActionReceiptHashV2(
+  value: RustIntegratedRuntimeSemanticActionReceiptV2,
+  postIdentity: RustIntegratedRuntimeIdentityV1,
+  replayHash: string,
+) {
+  const writer = new Writer();
+  writeIdentity(writer, postIdentity);
+  writer.hash(replayHash, "step.replayHash");
+  writer.raw(semanticReceiptBodyV2(value));
+  return domainHashV2(SEMANTIC_RECEIPT_HASH_DOMAIN_V2, writer.finish());
+}
+
+export function sealRustIntegratedRuntimeSemanticActionReceiptV2(
+  value: Readonly<Omit<RustIntegratedRuntimeSemanticActionReceiptV2, "receiptHash">>,
+  postIdentity: RustIntegratedRuntimeIdentityV1,
+  replayHash: string,
+): RustIntegratedRuntimeSemanticActionReceiptV2 {
+  const normalized = Object.freeze({ ...value, receiptHash: ZERO_HASH });
+  return Object.freeze({
+    ...normalized,
+    receiptHash: rustIntegratedRuntimeSemanticActionReceiptHashV2(normalized, postIdentity, replayHash),
+  });
+}
+
+function writeSemanticReceiptV2(
+  writer: Writer,
+  value: RustIntegratedRuntimeSemanticActionReceiptV2,
+  postIdentity: RustIntegratedRuntimeIdentityV1,
+  replayHash: string,
+) {
+  const body = semanticReceiptBodyV2(value);
+  if (rustIntegratedRuntimeSemanticActionReceiptHashV2(value, postIdentity, replayHash) !== value.receiptHash) {
+    throw new RustIntegratedRuntimeCodecError("semantic-receipt-hash", "semantic receipt hash is invalid");
+  }
+  writer.raw(body);
+  writer.hash(value.receiptHash, "semantic.receiptHash");
+}
+
+function readSemanticReceiptV2(
+  reader: Reader,
+  postIdentity: RustIntegratedRuntimeIdentityV1,
+  replayHash: string,
+): RustIntegratedRuntimeSemanticActionReceiptV2 {
+  const commandSequence = reader.u64();
+  const targetTick = reader.u64();
+  const appliedTick = reader.u64();
+  const kind = contextCommandKinds[reader.u8()];
+  const outcome = semanticOutcomes[reader.u8()];
+  const reason = semanticReasons[reader.u8()];
+  if (reader.u8() !== 0) throw new RustIntegratedRuntimeCodecError("reserved", "semantic receipt reserved byte must be zero");
+  if (kind === undefined || outcome === undefined || reason === undefined) {
+    throw new RustIntegratedRuntimeCodecError("semantic-receipt", "semantic receipt enum is unknown");
+  }
+  const commandHash = reader.hash();
+  const entityPresent = reader.u8();
+  if (entityPresent > 1) throw new RustIntegratedRuntimeCodecError("context-option", "resolved entity option is invalid");
+  const resolvedEntity = entityPresent === 1 ? Object.freeze({ entityId: reader.rawU64(), entityRevision: reader.u64() }) : null;
+  if (resolvedEntity?.entityId === BigInt(0)) throw new RustIntegratedRuntimeCodecError("semantic-entity", "resolved entity id is zero");
+  const blockPresent = reader.u8();
+  if (blockPresent > 1) throw new RustIntegratedRuntimeCodecError("context-option", "resolved block option is invalid");
+  const resolvedBlock = blockPresent === 1 ? readResolvedBlockV2(reader) : null;
+  const sessionPresent = reader.u8();
+  if (sessionPresent > 1) throw new RustIntegratedRuntimeCodecError("context-option", "session option is invalid");
+  const session = sessionPresent === 1 ? readTypedRevisionRefV2(reader, "semantic.session") : null;
+  const effectPresent = reader.u8();
+  if (effectPresent > 1) throw new RustIntegratedRuntimeCodecError("context-option", "effect option is invalid");
+  const effectReference = effectPresent === 1 ? readTypedRevisionRefV2(reader, "semantic.effect") : null;
+  const effect = effectReference === null ? null : Object.freeze({ ...effectReference, effectHash: reader.hash() });
+  const resolution = readSemanticResolutionV2(reader, kind);
+  const receiptHash = reader.hash();
+  const value = Object.freeze({
+    commandSequence, targetTick, appliedTick, commandHash, outcome, reason,
+    resolvedEntity, resolvedBlock, session, effect, resolution, receiptHash,
+  });
+  if (commandSequence < 1 || appliedTick < targetTick || !semanticReasonMatchesOutcome(outcome, reason)) {
+    throw new RustIntegratedRuntimeCodecError("semantic-reason-matrix", "semantic receipt cursor or outcome/reason matrix is invalid");
+  }
+  if (rustIntegratedRuntimeSemanticActionReceiptHashV2(value, postIdentity, replayHash) !== receiptHash) {
+    throw new RustIntegratedRuntimeCodecError("semantic-receipt-hash", "decoded semantic receipt hash is invalid");
+  }
+  return value;
+}
+
 function writeReceipt(writer: Writer, value: RustIntegratedRuntimeCommandReceiptV1) {
   writer.u8(value.status === "accepted" ? 0 : 1);
   writer.string(value.commandId, "receipt.commandId", 160);
@@ -675,7 +1010,9 @@ function encodeEnvelope(
   output.set(magic, 0);
   const view = new DataView(output.buffer);
   view.setUint16(4, RUST_INTEGRATED_RUNTIME_WIRE_V1, true);
-  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V4 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V5) {
+  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3
+    && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V4 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V5
+    && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V6) {
     throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is unsupported");
   }
   view.setUint16(6, schema, true);
@@ -702,7 +1039,11 @@ function decodeEnvelope(value: Uint8Array | ArrayBuffer, magic: Uint8Array): Hea
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (view.getUint16(4, true) !== RUST_INTEGRATED_RUNTIME_WIRE_V1) throw new RustIntegratedRuntimeCodecError("wire-version", "integrated runtime wire version is unsupported");
   const schema = view.getUint16(6, true);
-  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V4 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V5) throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is unsupported");
+  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3
+    && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V4 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V5
+    && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V6) {
+    throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is unsupported");
+  }
   if (view.getUint16(10, true) !== 0) throw new RustIntegratedRuntimeCodecError("reserved", "integrated runtime reserved header bits must be zero");
   const payloadLength = view.getUint32(24, true);
   if (payloadLength !== bytes.byteLength - HEADER_BYTES) throw new RustIntegratedRuntimeCodecError("length", "integrated runtime envelope length does not match its payload");
@@ -732,6 +1073,157 @@ function validateOperationSchema(operation: number, schema: number, response: bo
   if (!valid) {
     throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is not valid for this operation");
   }
+}
+
+function validateContextCommandOrderV2(values: readonly RustIntegratedRuntimeContextCommandV2[]) {
+  if (values.length > RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_COMMANDS_V2) {
+    throw new RustIntegratedRuntimeCodecError("context-command-capacity", "step context command batch exceeds 128 commands");
+  }
+  for (let index = 1; index < values.length; index += 1) {
+    const previous = values[index - 1];
+    const current = values[index];
+    if (previous.targetTick > current.targetTick || previous.sequence >= current.sequence) {
+      throw new RustIntegratedRuntimeCodecError("context-command-order", "context commands require nondecreasing target ticks and strictly increasing sequences");
+    }
+  }
+}
+
+function validateSemanticReceiptOrderV2(values: readonly RustIntegratedRuntimeSemanticActionReceiptV2[]) {
+  if (values.length > RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_RECEIPTS_V2) {
+    throw new RustIntegratedRuntimeCodecError("semantic-receipt-capacity", "step semantic receipt batch exceeds 128 receipts");
+  }
+  for (let index = 1; index < values.length; index += 1) {
+    const previous = values[index - 1];
+    const current = values[index];
+    if (previous.targetTick > current.targetTick || previous.commandSequence >= current.commandSequence) {
+      throw new RustIntegratedRuntimeCodecError("semantic-receipt-order", "semantic receipts require nondecreasing target ticks and strictly increasing command sequences");
+    }
+  }
+}
+
+/** Encode only the isolated schema-6 StepV2 request. */
+export function encodeRustIntegratedRuntimeStepRequestV2(request: RustIntegratedRuntimeStepRequestV2) {
+  if (request.type !== "runtime-step-v2") throw new RustIntegratedRuntimeCodecError("step-v2-type", "StepV2 request type is invalid");
+  if (request.inputs.length > RUST_INTEGRATED_RUNTIME_MAX_INPUT_FRAMES) {
+    throw new RustIntegratedRuntimeCodecError("input-capacity", "step input batch exceeds 128 frames");
+  }
+  validateContextCommandOrderV2(request.contextCommands);
+  const writer = new Writer();
+  writeIdentity(writer, request.expected);
+  writer.u64(integer(request.monotonicTimeUs, 0, U64_MAX_SAFE, "step.monotonicTimeUs"));
+  writer.u32(integer(request.budgetUs, 1, 1_000_000, "step.budgetUs"));
+  writer.u16(request.inputs.length);
+  for (const input of request.inputs) writeInput(writer, input);
+  writer.u16(request.contextCommands.length);
+  for (const command of request.contextCommands) writeContextCommandV2(writer, command);
+  return encodeEnvelope(
+    REQUEST_MAGIC, 3, 0, request.requestId, request.clientEpoch, 0, writer.finish(), RUST_INTEGRATED_RUNTIME_SCHEMA_V6,
+  );
+}
+
+export function decodeRustIntegratedRuntimeStepRequestV2(value: Uint8Array | ArrayBuffer): RustIntegratedRuntimeStepRequestV2 {
+  const header = decodeEnvelope(value, REQUEST_MAGIC);
+  if (header.schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V6 || header.operation !== 3
+    || header.status !== 0 || header.workerEpoch !== 0) {
+    throw new RustIntegratedRuntimeCodecError("step-v2-header", "schema-6 StepV2 request header is invalid");
+  }
+  const reader = new Reader(header.payload);
+  const expected = readIdentity(reader);
+  const monotonicTimeUs = reader.u64();
+  const budgetUs = integer(reader.u32(), 1, 1_000_000, "step.budgetUs");
+  const inputCount = reader.u16();
+  if (inputCount > RUST_INTEGRATED_RUNTIME_MAX_INPUT_FRAMES) {
+    throw new RustIntegratedRuntimeCodecError("input-capacity", "step input batch exceeds 128 frames");
+  }
+  const inputs = Object.freeze(Array.from({ length: inputCount }, () => readInput(reader)));
+  const commandCount = reader.u16();
+  if (commandCount > RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_COMMANDS_V2) {
+    throw new RustIntegratedRuntimeCodecError("context-command-capacity", "step context command batch exceeds 128 commands");
+  }
+  const contextCommands = Object.freeze(Array.from({ length: commandCount }, () => readContextCommandV2(reader)));
+  reader.finish();
+  validateContextCommandOrderV2(contextCommands);
+  return Object.freeze({
+    type: "runtime-step-v2", requestId: header.requestId, clientEpoch: header.clientEpoch,
+    expected, monotonicTimeUs, budgetUs, inputs, contextCommands,
+  });
+}
+
+/** Encode schema-6 StepV2 with the complete schema-3 payload as its prefix. */
+export function encodeRustIntegratedRuntimeStepResultV2(response: RustIntegratedRuntimeStepResultV2) {
+  if (response.type !== "runtime-step-result-v2") throw new RustIntegratedRuntimeCodecError("step-v2-type", "StepV2 response type is invalid");
+  if (response.workerEpoch < 1) throw new RustIntegratedRuntimeCodecError("worker-epoch", "StepV2 response is missing a worker epoch");
+  if (response.actionReceipts.length > RUST_INTEGRATED_RUNTIME_MAX_ACTION_RECEIPTS) {
+    throw new RustIntegratedRuntimeCodecError("input-action-capacity", "step action receipts exceed their bound");
+  }
+  validateSemanticReceiptOrderV2(response.semanticReceipts);
+  const writer = new Writer();
+  writeIdentity(writer, response.identity);
+  writer.u16(response.fixedSteps); writer.u16(response.inputsApplied);
+  writer.u16(response.commandsProcessed); writer.u16(response.commandsAccepted);
+  writer.u16(response.actionReceipts.length);
+  let previousActionSequence = 0;
+  for (const receipt of response.actionReceipts) {
+    if (receipt.sequence <= previousActionSequence) {
+      throw new RustIntegratedRuntimeCodecError("input-action-order", "step action receipt sequences must be strictly increasing");
+    }
+    previousActionSequence = receipt.sequence;
+    writeInputActionReceipt(writer, receipt);
+  }
+  writer.hash(response.replayHash, "step.replayHash");
+  writer.u16(response.semanticReceipts.length);
+  for (const receipt of response.semanticReceipts) {
+    if (receipt.appliedTick > response.identity.tick) {
+      throw new RustIntegratedRuntimeCodecError("semantic-receipt", "semantic receipt applied tick exceeds post-step identity");
+    }
+    writeSemanticReceiptV2(writer, receipt, response.identity, response.replayHash);
+  }
+  return encodeEnvelope(
+    RESPONSE_MAGIC, 3, 0, response.requestId, response.clientEpoch, response.workerEpoch,
+    writer.finish(), RUST_INTEGRATED_RUNTIME_SCHEMA_V6,
+  );
+}
+
+export function decodeRustIntegratedRuntimeStepResultV2(value: Uint8Array | ArrayBuffer): RustIntegratedRuntimeStepResultV2 {
+  const header = decodeEnvelope(value, RESPONSE_MAGIC);
+  if (header.schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V6 || header.operation !== 3
+    || header.status !== 0 || header.workerEpoch < 1) {
+    throw new RustIntegratedRuntimeCodecError("step-v2-header", "schema-6 StepV2 response header is invalid");
+  }
+  const reader = new Reader(header.payload);
+  const identity = readIdentity(reader);
+  const fixedSteps = reader.u16();
+  const inputsApplied = reader.u16();
+  const commandsProcessed = reader.u16();
+  const commandsAccepted = reader.u16();
+  const actionCount = reader.u16();
+  if (actionCount > RUST_INTEGRATED_RUNTIME_MAX_ACTION_RECEIPTS) {
+    throw new RustIntegratedRuntimeCodecError("input-action-capacity", "step action receipts exceed their bound");
+  }
+  const actionReceipts = Object.freeze(Array.from({ length: actionCount }, () => readInputActionReceipt(reader)));
+  for (let index = 1; index < actionReceipts.length; index += 1) {
+    if (actionReceipts[index - 1].sequence >= actionReceipts[index].sequence) {
+      throw new RustIntegratedRuntimeCodecError("input-action-order", "step action receipt sequences must be strictly increasing");
+    }
+  }
+  const replayHash = reader.hash();
+  const semanticCount = reader.u16();
+  if (semanticCount > RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_RECEIPTS_V2) {
+    throw new RustIntegratedRuntimeCodecError("semantic-receipt-capacity", "step semantic receipt batch exceeds 128 receipts");
+  }
+  const semanticReceipts = Object.freeze(Array.from(
+    { length: semanticCount }, () => readSemanticReceiptV2(reader, identity, replayHash),
+  ));
+  reader.finish();
+  validateSemanticReceiptOrderV2(semanticReceipts);
+  if (semanticReceipts.some((receipt) => receipt.appliedTick > identity.tick)) {
+    throw new RustIntegratedRuntimeCodecError("semantic-receipt", "semantic receipt applied tick exceeds post-step identity");
+  }
+  return Object.freeze({
+    type: "runtime-step-result-v2", requestId: header.requestId, clientEpoch: header.clientEpoch,
+    workerEpoch: header.workerEpoch, identity, fixedSteps, inputsApplied, commandsProcessed,
+    commandsAccepted, actionReceipts, replayHash, semanticReceipts,
+  });
 }
 
 export function encodeRustIntegratedRuntimeRequestV1(request: RustIntegratedRuntimeRequestV1) {

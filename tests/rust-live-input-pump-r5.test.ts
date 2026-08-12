@@ -8,7 +8,10 @@ import {
   type RustIntegratedRuntimeInputActionKindV1,
   type RustIntegratedRuntimeInputActionReceiptV1,
   type RustIntegratedRuntimeInputFrameV1,
+  type RustIntegratedRuntimeContextCommandV2,
+  type RustIntegratedRuntimeSemanticActionResolutionV2,
 } from "../app/game/rust-integrated-runtime-contract.ts";
+import { sealRustIntegratedRuntimeSemanticActionReceiptV2 } from "../app/game/rust-integrated-runtime-codec.ts";
 import type { RustIntegratedPlayerRuntimeContinuityV1 } from "../app/game/rust-integrated-runtime-player-status.ts";
 import {
   RUST_LIVE_INPUT_STEP_BUDGET_US_R5,
@@ -97,6 +100,10 @@ class FakeRuntime implements RustLiveInputPumpServiceR5 {
   extractionRevision: number;
   position = 0;
   readonly submitted: RustIntegratedRuntimeInputFrameV1[] = [];
+  readonly contextArguments: Array<readonly RustIntegratedRuntimeContextCommandV2[]> = [];
+  pendingContextCommands: readonly RustIntegratedRuntimeContextCommandV2[] = Object.freeze([]);
+  omitSemanticReceipt = false;
+  rejectSemanticReceipt = false;
   readonly calls: string[] = [];
   readonly stepArguments: Array<Readonly<{ monotonicTimeUs: number; budgetUs: number; inputs: readonly RustIntegratedRuntimeInputFrameV1[] }>> = [];
   concurrent = 0;
@@ -202,6 +209,58 @@ class FakeRuntime implements RustLiveInputPumpServiceR5 {
     }
   }
 
+  async stepV2(
+    monotonicTimeUs: number,
+    budgetUs: number,
+    inputs: readonly RustIntegratedRuntimeInputFrameV1[],
+    contextCommands: readonly RustIntegratedRuntimeContextCommandV2[],
+  ) {
+    this.calls.push("step-v2");
+    if (contextCommands.length > 0) {
+      assert.equal(this.pendingContextCommands.length, 0, "pump must submit each context command only once");
+      this.pendingContextCommands = Object.freeze([...contextCommands]);
+    }
+    this.contextArguments.push(Object.freeze([...contextCommands]));
+    const base = await this.step(monotonicTimeUs, budgetUs, inputs);
+    const due = this.pendingContextCommands.filter((command) => command.targetTick <= base.identity.tick);
+    const semanticReceipts = due.map((command) => {
+      let resolution: RustIntegratedRuntimeSemanticActionResolutionV2;
+      switch (command.action.kind) {
+        case "cast": resolution = Object.freeze({
+          kind: "cast", loadoutRevision: command.action.loadoutRevision, learnedRevision: command.action.learnedRevision,
+        }); break;
+        case "reload": resolution = Object.freeze({
+          kind: "reload", containerRevision: command.action.containerRevision,
+        }); break;
+        case "mounted-ability": resolution = Object.freeze({
+          kind: "mounted-ability", mountEntityRevision: command.action.mountEntityRevision,
+        }); break;
+      }
+      return sealRustIntegratedRuntimeSemanticActionReceiptV2({
+        commandSequence: command.sequence,
+        targetTick: command.targetTick,
+        appliedTick: command.targetTick,
+        commandHash: command.commandHash,
+        outcome: this.rejectSemanticReceipt ? "rejected" : "applied",
+        reason: this.rejectSemanticReceipt ? "ineligible" : "applied",
+        resolvedEntity: command.action.kind === "mounted-ability"
+          ? Object.freeze({ entityId: command.action.mountEntityId, entityRevision: command.action.mountEntityRevision })
+          : null,
+        resolvedBlock: null,
+        session: null,
+        effect: null,
+        resolution,
+      }, base.identity, base.replayHash);
+    });
+    if (due.length > 0) this.pendingContextCommands = Object.freeze([]);
+    if (this.omitSemanticReceipt && semanticReceipts.length > 0) semanticReceipts.pop();
+    return Object.freeze({
+      ...base,
+      type: "runtime-step-result-v2" as const,
+      semanticReceipts: Object.freeze(semanticReceipts),
+    });
+  }
+
   async extract(afterRevision: number): Promise<RustIntegratedRuntimeExtractionV1> {
     this.enter("extract");
     try {
@@ -228,12 +287,18 @@ class FakeRuntime implements RustLiveInputPumpServiceR5 {
   private leave() { this.concurrent -= 1; }
 }
 
-function pump(runtime: FakeRuntime, value = continuity(), nowUs: () => number = () => 1) {
+function pump(
+  runtime: FakeRuntime,
+  value = continuity(),
+  nowUs: () => number = () => 1,
+  nextContextCommandSequence?: number | null,
+) {
   return new RustLiveInputPumpR5({
     service: runtime,
     status: status(value, runtime.identity().tick),
     worldGeneration: GENERATION,
     nowUs,
+    ...(nextContextCommandSequence === undefined ? {} : { nextContextCommandSequence }),
   });
 }
 
@@ -428,4 +493,112 @@ test("authoritative action flags feed later frames and step/extract remain seria
   assert.equal(live.diagnostics().authoritativeFlags, initialFlags | RUST_RUNTIME_INPUT_FLAG_V1.flying);
   assert.equal(runtime.submitted[1].flags, initialFlags | RUST_RUNTIME_INPUT_FLAG_V1.flying);
   await live.stop();
+});
+
+test("context commands require explicit continuity and submit once until exact receipt", async () => {
+  const unavailableRuntime = new FakeRuntime();
+  const unavailable = pump(unavailableRuntime);
+  assert.throws(
+    () => unavailable.queueContextCommand(GENERATION, Object.freeze({
+      kind: "cast", spellId: "spell:test", loadoutRevision: 1, learnedRevision: 2,
+    })),
+    /does not attest the next context command sequence/u,
+  );
+  assert.equal(unavailable.state, "ready", "missing optional continuity rejects queueing without corrupting V1 input");
+  await unavailable.stop();
+
+  let now = 1;
+  const runtime = new FakeRuntime();
+  const live = pump(runtime, continuity(), () => now, 7);
+  live.queueContextCommand(GENERATION, Object.freeze({
+    kind: "cast", spellId: "spell:test", loadoutRevision: 1, learnedRevision: 2,
+  }));
+  assert.equal((await live.advance(GENERATION)).step?.inputsApplied, 0);
+  assert.equal(runtime.contextArguments[0].length, 1);
+  assert.equal(runtime.contextArguments[0][0].sequence, 7);
+  assert.equal(runtime.contextArguments[0][0].targetTick, 1);
+  now = 50_001;
+  const applied = await live.advance(GENERATION);
+  assert.equal(applied.step?.type, "runtime-step-result-v2");
+  assert.equal(applied.step?.type === "runtime-step-result-v2" ? applied.step.semanticReceipts.length : -1, 1);
+  assert.equal(runtime.contextArguments[1].length, 0, "native-pending context commands must never be resubmitted");
+  assert.equal(live.diagnostics().queuedContextCommands, 0);
+  assert.equal(live.diagnostics().nextContextCommandSequence, 8);
+  await live.stop();
+});
+
+test("rejected semantic receipts consume sequence and omissions fail closed", async () => {
+  let now = 1;
+  const rejectedRuntime = new FakeRuntime();
+  rejectedRuntime.rejectSemanticReceipt = true;
+  const rejected = pump(rejectedRuntime, continuity(), () => now, 11);
+  rejected.queueContextCommand(GENERATION, Object.freeze({
+    kind: "reload",
+    container: Object.freeze({ kind: "equipment", id: "actor:test:equipment", ownerId: "actor:test" }),
+    selectedSlot: 0,
+    containerRevision: 4,
+  }));
+  await rejected.advance(GENERATION);
+  now = 50_001;
+  const result = await rejected.advance(GENERATION);
+  assert.equal(result.step?.type === "runtime-step-result-v2" ? result.step.semanticReceipts[0].outcome : null, "rejected");
+  assert.equal(rejected.diagnostics().queuedContextCommands, 0);
+  assert.equal(rejected.diagnostics().nextContextCommandSequence, 12, "deterministic rejection consumes its sequence");
+  await rejected.stop();
+
+  now = 1;
+  const omittedRuntime = new FakeRuntime();
+  omittedRuntime.omitSemanticReceipt = true;
+  const omitted = pump(omittedRuntime, continuity(), () => now, 21);
+  omitted.queueContextCommand(GENERATION, Object.freeze({
+    kind: "mounted-ability", mountEntityId: BigInt(91), mountEntityRevision: 3, seatIndex: 0, abilitySlot: 1,
+  }));
+  await omitted.advance(GENERATION);
+  now = 50_001;
+  await assert.rejects(omitted.advance(GENERATION), /omitted, duplicated, or added/u);
+  await omitted.drain();
+  assert.equal(omitted.state, "failed");
+  assert.equal(omitted.diagnostics().queuedContextCommands, 0, "terminal failure clears semantic intent custody");
+});
+
+test("right click remains one V1 secondary-use action per press", async () => {
+  let now = 1;
+  const runtime = new FakeRuntime();
+  const live = pump(runtime, continuity(), () => now);
+  const base = intent();
+  live.sample(GENERATION, withAction(base, "secondaryUse", true));
+  await live.advance(GENERATION);
+  now = 50_001;
+  const first = await live.advance(GENERATION);
+  assert.equal(first.step?.actionReceipts.filter((entry) => entry.kind === "secondary-use").length, 1);
+  now = 100_001;
+  const held = await live.advance(GENERATION);
+  assert.equal(held.step?.actionReceipts.filter((entry) => entry.kind === "secondary-use").length, 0);
+  live.sample(GENERATION, withAction(base, "secondaryUse", false));
+  now = 150_001;
+  await live.advance(GENERATION);
+  live.sample(GENERATION, withAction(base, "secondaryUse", true));
+  now = 200_001;
+  const second = await live.advance(GENERATION);
+  assert.equal(second.step?.actionReceipts.filter((entry) => entry.kind === "secondary-use").length, 1);
+  await live.stop();
+});
+
+test("stop clears queued semantic intent before any native call", async () => {
+  const runtime = new FakeRuntime();
+  const live = pump(runtime, continuity(), () => 1, 31);
+  live.queueContextCommand(GENERATION, Object.freeze({
+    kind: "cast", spellId: "spell:stopped", loadoutRevision: 2, learnedRevision: 5,
+  }));
+  assert.equal(live.diagnostics().queuedContextCommands, 1);
+  await live.stop();
+  assert.equal(live.state, "stopped");
+  assert.equal(live.diagnostics().queuedContextCommands, 0);
+  assert.deepEqual(runtime.calls, []);
+  assert.throws(
+    () => live.queueContextCommand(GENERATION, Object.freeze({
+      kind: "cast", spellId: "spell:too-late", loadoutRevision: 2, learnedRevision: 5,
+    })),
+    /is stopped/u,
+  );
 });

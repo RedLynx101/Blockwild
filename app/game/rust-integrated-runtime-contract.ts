@@ -15,6 +15,8 @@ export const RUST_INTEGRATED_RUNTIME_SCHEMA_V3 = 3 as const;
 export const RUST_INTEGRATED_RUNTIME_SCHEMA_V4 = 4 as const;
 /** Schema 5 adds a presentation-only viewport to Extract requests only. */
 export const RUST_INTEGRATED_RUNTIME_SCHEMA_V5 = 5 as const;
+/** Schema 6 is an isolated StepV2 side lane; RuntimeInputFrameV1 is unchanged. */
+export const RUST_INTEGRATED_RUNTIME_SCHEMA_V6 = 6 as const;
 export const RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONTENT_HASH_V2 = "cc59903be77dfe30109d15bfaf0e3022" as const;
 export const RUST_INTEGRATED_RUNTIME_DEFAULT_GENERATION_OPTIONS_JSON_V1 = "{\"biomeScale\":1.35,\"caveFrequency\":1,\"enabledFactions\":[\"hobbits\",\"goblins\",\"atlantians\",\"sugarcourt\",\"wood-elves\",\"dwarves\"],\"largeTownFrequency\":\"balanced\",\"profile\":\"world-below-v15\",\"resourceAbundance\":1,\"roadCoverage\":\"regional\",\"settlementClustering\":\"regional\",\"settlementDensity\":1,\"settlementPattern\":\"heartlands-v2\",\"structures\":true}" as const;
 export const RUST_INTEGRATED_RUNTIME_MAX_GENERATION_OPTIONS_JSON_BYTES = 16 * 1024;
@@ -30,6 +32,8 @@ export const RUST_INTEGRATED_RUNTIME_MAX_EXTRACTION_BYTES = 6 * 1024 * 1024;
 export const RUST_INTEGRATED_RUNTIME_MAX_OPERATIONS = 256;
 export const RUST_INTEGRATED_RUNTIME_MAX_INPUT_FRAMES = 128;
 export const RUST_INTEGRATED_RUNTIME_MAX_ACTION_RECEIPTS = RUST_INTEGRATED_RUNTIME_MAX_INPUT_FRAMES * 6;
+export const RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_COMMANDS_V2 = RUST_INTEGRATED_RUNTIME_MAX_INPUT_FRAMES;
+export const RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_RECEIPTS_V2 = RUST_INTEGRATED_RUNTIME_MAX_CONTEXT_COMMANDS_V2;
 export const RUST_INTEGRATED_RUNTIME_MAX_VIEWPORT_DIMENSION_V1 = 16_384;
 export const RUST_INTEGRATED_RUNTIME_MAX_PENDING_REQUESTS = 128;
 export const RUST_INTEGRATED_RUNTIME_MAX_IDEMPOTENCY_RECEIPTS = 4_096;
@@ -144,6 +148,131 @@ export type RustIntegratedRuntimeInputActionReceiptV1 = Readonly<{
   /** Lossless packed generational identity. Zero means no resolved entity target. */
   targetEntityId: bigint;
   effectHash: string;
+}>;
+
+export type RustIntegratedRuntimeContextContainerKindV2 =
+  | "player" | "equipment" | "container" | "machine" | "waygrid" | "cardforge-case";
+
+export type RustIntegratedRuntimeContextContainerKeyV2 = Readonly<{
+  kind: RustIntegratedRuntimeContextContainerKindV2;
+  id: string;
+  ownerId: string | null;
+}>;
+
+export type RustIntegratedRuntimeContextCommandActionV2 =
+  | Readonly<{
+    kind: "cast";
+    spellId: string;
+    loadoutRevision: number;
+    learnedRevision: number;
+  }>
+  | Readonly<{
+    kind: "reload";
+    container: RustIntegratedRuntimeContextContainerKeyV2;
+    selectedSlot: number;
+    containerRevision: number;
+  }>
+  | Readonly<{
+    kind: "mounted-ability";
+    /** Lossless packed generational identity. */
+    mountEntityId: bigint;
+    mountEntityRevision: number;
+    seatIndex: number;
+    abilitySlot: 0 | 1 | 2;
+  }>;
+
+export type RustIntegratedRuntimeContextCommandV2 = Readonly<{
+  sequence: number;
+  targetTick: number;
+  action: RustIntegratedRuntimeContextCommandActionV2;
+  commandHash: string;
+}>;
+
+export type RustIntegratedRuntimeSemanticActionOutcomeV2 = "applied" | "rejected";
+export type RustIntegratedRuntimeSemanticActionReasonV2 =
+  | "applied" | "no-target" | "ineligible" | "stale-revision"
+  | "unknown-content" | "empty-slot" | "blocked" | "context-mismatch";
+
+export type RustIntegratedRuntimeResolvedEntityV2 = Readonly<{
+  entityId: bigint;
+  entityRevision: number;
+}>;
+
+export type RustIntegratedRuntimeWorldAuthorityRevisionV2 = Readonly<{
+  epoch: number;
+  mutation: number;
+  residency: number;
+}>;
+
+export type RustIntegratedRuntimeResolvedBlockV2 = Readonly<{
+  x: number;
+  y: number;
+  z: number;
+  blockId: number;
+  worldRevision: RustIntegratedRuntimeWorldAuthorityRevisionV2;
+}>;
+
+export type RustIntegratedRuntimeTypedRevisionRefV2 = Readonly<{
+  typeId: string;
+  id: string;
+  revision: number;
+}>;
+
+export type RustIntegratedRuntimeTypedEffectRefV2 = Readonly<{
+  typeId: string;
+  id: string;
+  revision: number;
+  effectHash: string;
+}>;
+
+export type RustIntegratedRuntimeSemanticActionResolutionV2 =
+  | Readonly<{ kind: "cast"; loadoutRevision: number; learnedRevision: number }>
+  | Readonly<{ kind: "reload"; containerRevision: number }>
+  | Readonly<{ kind: "mounted-ability"; mountEntityRevision: number }>;
+
+export type RustIntegratedRuntimeSemanticActionReceiptV2 = Readonly<{
+  commandSequence: number;
+  targetTick: number;
+  appliedTick: number;
+  commandHash: string;
+  outcome: RustIntegratedRuntimeSemanticActionOutcomeV2;
+  reason: RustIntegratedRuntimeSemanticActionReasonV2;
+  resolvedEntity: RustIntegratedRuntimeResolvedEntityV2 | null;
+  resolvedBlock: RustIntegratedRuntimeResolvedBlockV2 | null;
+  session: RustIntegratedRuntimeTypedRevisionRefV2 | null;
+  effect: RustIntegratedRuntimeTypedEffectRefV2 | null;
+  resolution: RustIntegratedRuntimeSemanticActionResolutionV2;
+  receiptHash: string;
+}>;
+
+/**
+ * Isolated schema-6 request. It is deliberately outside RuntimeRequestV1 so
+ * existing runtime dispatch cannot imply support before the native cutover.
+ */
+export type RustIntegratedRuntimeStepRequestV2 = Readonly<{
+  type: "runtime-step-v2";
+  requestId: number;
+  clientEpoch: number;
+  expected: RustIntegratedRuntimeIdentityV1;
+  monotonicTimeUs: number;
+  budgetUs: number;
+  inputs: readonly RustIntegratedRuntimeInputFrameV1[];
+  contextCommands: readonly RustIntegratedRuntimeContextCommandV2[];
+}>;
+
+export type RustIntegratedRuntimeStepResultV2 = Readonly<{
+  type: "runtime-step-result-v2";
+  requestId: number;
+  clientEpoch: number;
+  workerEpoch: number;
+  identity: RustIntegratedRuntimeIdentityV1;
+  fixedSteps: number;
+  inputsApplied: number;
+  commandsProcessed: number;
+  commandsAccepted: number;
+  actionReceipts: readonly RustIntegratedRuntimeInputActionReceiptV1[];
+  replayHash: string;
+  semanticReceipts: readonly RustIntegratedRuntimeSemanticActionReceiptV2[];
 }>;
 
 /**
