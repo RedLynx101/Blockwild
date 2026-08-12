@@ -14,6 +14,7 @@ import {
   encodeRustIntegratedRuntimeResponseV1,
 } from "../app/game/rust-integrated-runtime-codec.ts";
 import type { RustIntegratedRuntimeIdentityV1, RustIntegratedRuntimeResponseV1 } from "../app/game/rust-integrated-runtime-contract.ts";
+import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import { RustEngineLoader, type RustEngineWasmExports } from "../app/game/rust-engine-loader.ts";
 import { RUST_ENGINE_PROTOCOL_VERSION, RUST_ENGINE_SCHEMA_VERSION } from "../app/game/rust-engine-protocol.ts";
 
@@ -124,6 +125,7 @@ test("browser kernel attests the manifest-selected artifact instead of trusting 
       sessionId: "fixture",
       contentHash: ZERO_HASH,
       generatorHash: ZERO_HASH,
+      ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
       waterBlockId: 7,
       directionalBlockIds: [],
       waterloggedBlockIds: [],

@@ -723,6 +723,88 @@ impl<'a> JsonParser<'a> {
     }
 }
 
+/// Validate Blockwild canonical JSON V1 without normalizing or replacing the
+/// caller's bytes. The format is compact UTF-8 JSON with lexicographically
+/// ordered object keys, minimally escaped strings, and finite numbers in their
+/// shortest round-trippable representation.
+pub(crate) fn validate_canonical_json_bytes_v1(source: &[u8]) -> Result<(), String> {
+    let value = JsonParser::parse(source)?;
+    let mut canonical = Vec::with_capacity(source.len());
+    write_canonical_json_v1(&value, &mut canonical);
+    if canonical != source {
+        return Err("JSON bytes are valid but not Blockwild canonical JSON V1".to_owned());
+    }
+    Ok(())
+}
+
+fn write_canonical_json_v1(value: &CanonicalJson, output: &mut Vec<u8>) {
+    match value {
+        CanonicalJson::Null => output.extend_from_slice(b"null"),
+        CanonicalJson::Bool(true) => output.extend_from_slice(b"true"),
+        CanonicalJson::Bool(false) => output.extend_from_slice(b"false"),
+        CanonicalJson::Number(number) => {
+            let parsed = number
+                .parse::<f64>()
+                .expect("the content JSON parser already validated this finite number");
+            if parsed == 0.0 {
+                output.push(b'0');
+            } else {
+                output.extend_from_slice(parsed.to_string().as_bytes());
+            }
+        }
+        CanonicalJson::String(string) => write_canonical_json_string_v1(string, output),
+        CanonicalJson::Array(values) => {
+            output.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                write_canonical_json_v1(value, output);
+            }
+            output.push(b']');
+        }
+        CanonicalJson::Object(fields) => {
+            output.push(b'{');
+            for (index, (key, value)) in fields.iter().enumerate() {
+                if index != 0 {
+                    output.push(b',');
+                }
+                write_canonical_json_string_v1(key, output);
+                output.push(b':');
+                write_canonical_json_v1(value, output);
+            }
+            output.push(b'}');
+        }
+    }
+}
+
+fn write_canonical_json_string_v1(value: &str, output: &mut Vec<u8>) {
+    output.push(b'"');
+    for character in value.chars() {
+        match character {
+            '"' => output.extend_from_slice(br#"\""#),
+            '\\' => output.extend_from_slice(br"\\"),
+            '\u{0008}' => output.extend_from_slice(br"\b"),
+            '\u{000c}' => output.extend_from_slice(br"\f"),
+            '\n' => output.extend_from_slice(br"\n"),
+            '\r' => output.extend_from_slice(br"\r"),
+            '\t' => output.extend_from_slice(br"\t"),
+            '\u{0000}'..='\u{001f}' => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let code = character as u8;
+                output.extend_from_slice(br"\u00");
+                output.push(HEX[usize::from(code >> 4)]);
+                output.push(HEX[usize::from(code & 0x0f)]);
+            }
+            _ => {
+                let mut bytes = [0_u8; 4];
+                output.extend_from_slice(character.encode_utf8(&mut bytes).as_bytes());
+            }
+        }
+    }
+    output.push(b'"');
+}
+
 pub fn materialize_content_runtime(
     manifest: &ProductionContentManifest,
     store: &MetadataBlobStore,
@@ -3658,6 +3740,15 @@ mod tests {
             JsonParser::parse(br#""\ud83d\udc09""#),
             Ok(CanonicalJson::String("🐉".to_owned()))
         );
+    }
+
+    #[test]
+    fn canonical_json_validation_preserves_unicode_and_rejects_alternate_spellings() {
+        assert!(validate_canonical_json_bytes_v1("{\"name\":\"Mizu 水\",\"nested\":[1,true]}".as_bytes()).is_ok());
+        assert!(validate_canonical_json_bytes_v1(b"{\"nested\":[1,true],\"name\":\"Mizu\"}").is_err());
+        assert!(validate_canonical_json_bytes_v1(b"{ \"name\":\"Mizu\"}").is_err());
+        assert!(validate_canonical_json_bytes_v1(b"{\"number\":1.0}").is_err());
+        assert!(validate_canonical_json_bytes_v1(b"{\"number\":-0}").is_err());
     }
 
     #[test]

@@ -7,7 +7,7 @@ import {
   type RustWorldHydrationHookV1,
   type WorldSave,
 } from "../app/game/engine.ts";
-import type { RustIntegratedRuntimeIdentityV1 } from "../app/game/rust-integrated-runtime-contract.ts";
+import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1, type RustIntegratedRuntimeIdentityV1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import type { RustContentInstallReceiptV1, RustProductionContentBundle } from "../app/game/rust-integrated-runtime-content.ts";
 import type { RustMultiplayerAuthorityV1 } from "../app/game/rust-multiplayer-authority.ts";
 import type { RustNativeWorldPersistenceSessionV1 } from "../app/game/rust-native-world-persistence.ts";
@@ -17,7 +17,7 @@ import {
   type RustWorldRuntimeHostConfigV1,
 } from "../app/game/rust-world-runtime-host.ts";
 import type { RustWorldRuntimeManagedHostV1 } from "../app/game/rust-world-runtime-manager.ts";
-import type { WorldMetadata, WorldStorage } from "../app/game/world-storage.ts";
+import { deriveWorldGenerationIdentityV1, type WorldMetadata, type WorldStorage } from "../app/game/world-storage.ts";
 
 const ARTIFACT = "a".repeat(64);
 const CONTENT = "b".repeat(32);
@@ -110,6 +110,7 @@ test("local host creates one persistence graph around the already-started adapte
     sessionId: "runtime.fixture-one",
     catalogWorldId: "catalog-one",
     generatorHash: GENERATOR,
+    ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
     waterBlockId: 7,
     directionalBlockIds: [],
     waterloggedBlockIds: [],
@@ -146,7 +147,10 @@ test("local host creates one persistence graph around the already-started adapte
   ]);
 });
 
-type StorageFixtureOptions = Readonly<{ hydrateOk?: boolean }>;
+type StorageFixtureOptions = Readonly<{
+  hydrateOk?: boolean;
+  generationIdentity?: WorldMetadata["generationIdentity"];
+}>;
 
 class FakeStorage {
   readonly events: string[] = [];
@@ -169,6 +173,12 @@ class FakeStorage {
       lastPlayedAt: null,
       playTimeMs: 0,
       lastSavedGameVersion: "1.12.0",
+      generationIdentity: options.generationIdentity === undefined
+        ? deriveWorldGenerationIdentityV1({
+          generatorVersion: 18,
+          generatorProfile: "world-below-v15",
+        } as WorldSave, {})
+        : options.generationIdentity,
     };
   }
 
@@ -229,11 +239,13 @@ function managedHost(config: RustWorldRuntimeHostConfigV1, session: RustNativeWo
 
 class FakeManager {
   readonly events: string[];
+  readonly configs: RustWorldRuntimeHostConfigV1[] = [];
   shutdowns = 0;
   host: RustWorldRuntimeManagedHostV1 | null = null;
 
   constructor(events: string[]) { this.events = events; }
   async activate(config: RustWorldRuntimeHostConfigV1) {
+    this.configs.push(config);
     this.events.push(`activate:${config.catalogWorldId}`);
     this.host = managedHost(config, fakeSession(config.catalogWorldId ?? "guest", this.events));
     return this.host;
@@ -294,7 +306,10 @@ test("new world binds and initializes native durability before controls open", a
   const storage = new FakeStorage();
   const manager = new FakeManager(storage.events);
   const engine = engineHarness(storage, manager);
-  (engine as unknown as { createWorld(): { id: string } }).createWorld = () => ({ id: storage.metadata.id });
+  (engine as unknown as { createWorld(): Pick<WorldMetadata, "id" | "generationIdentity"> }).createWorld = () => ({
+    id: storage.metadata.id,
+    generationIdentity: storage.metadata.generationIdentity,
+  });
 
   const created = await engine.createWorldWithRustRuntime(storage.metadata.seed, "survival");
   assert.equal(created.id, storage.metadata.id);
@@ -306,6 +321,8 @@ test("new world binds and initializes native durability before controls open", a
   ]);
   assert.equal(engine.running, true);
   assert.equal(engine.getRustRuntimeDiagnostics().nativePersistenceWorldId, "catalog-one");
+  assert.equal(manager.configs[0]?.generationOptionsJson, storage.metadata.generationIdentity?.generationOptionsJson);
+  assert.equal(manager.configs[0]?.terrainContentHash, storage.metadata.generationIdentity?.terrainContentHash);
 });
 
 test("stored world recovers before the compatibility document is read or presented", async () => {
@@ -327,13 +344,33 @@ test("stored world recovers before the compatibility document is read or present
     "mirror-read:catalog-one",
     "mirror-present:catalog-one",
   ]);
+  assert.equal(manager.configs[0]?.generationOptionsJson, storage.metadata.generationIdentity?.generationOptionsJson);
+  assert.equal(manager.configs[0]?.generatorHash, storage.metadata.generationIdentity?.generatorHash);
+});
+
+test("stored world without an exact catalog terrain identity stays protected before activation or document read", async () => {
+  const storage = new FakeStorage("catalog-legacy", { generationIdentity: null });
+  const manager = new FakeManager(storage.events);
+  const engine = engineHarness(storage, manager);
+
+  await assert.rejects(
+    engine.loadStoredWorldWithRustRuntime(storage.metadata.id),
+    /lacks an exact native terrain identity/u,
+  );
+  assert.deepEqual(storage.events, ["catalog-read"]);
+  assert.equal(manager.configs.length, 0);
+  assert.equal(storage.documentReads, 0);
+  assert.equal(engine.running, false);
 });
 
 test("switching worlds drains the first native session before the second worker activation", async () => {
   const storage = new FakeStorage();
   const manager = new FakeManager(storage.events);
   const engine = engineHarness(storage, manager);
-  (engine as unknown as { createWorld(): { id: string } }).createWorld = () => ({ id: "catalog-one" });
+  (engine as unknown as { createWorld(): Pick<WorldMetadata, "id" | "generationIdentity"> }).createWorld = () => ({
+    id: "catalog-one",
+    generationIdentity: storage.metadata.generationIdentity,
+  });
   (engine as unknown as { loadWorld(save: WorldSave, options: unknown, id: string): void }).loadWorld = (_save, _options, id) => {
     engine.activeWorldId = id;
   };
@@ -365,7 +402,10 @@ test("bound native world deletion is blocked until a future awaited tombstone fl
   const storage = new FakeStorage();
   const manager = new FakeManager(storage.events);
   const engine = engineHarness(storage, manager);
-  (engine as unknown as { createWorld(): { id: string } }).createWorld = () => ({ id: "catalog-one" });
+  (engine as unknown as { createWorld(): Pick<WorldMetadata, "id" | "generationIdentity"> }).createWorld = () => ({
+    id: "catalog-one",
+    generationIdentity: storage.metadata.generationIdentity,
+  });
   await engine.createWorldWithRustRuntime("NATIVE-SEED", "survival");
 
   const blocked = await engine.deleteStoredWorldWithRustRuntime("catalog-one");

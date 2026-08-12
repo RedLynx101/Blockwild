@@ -483,10 +483,18 @@ fn dispatch(
                     state.inventory.remove_empty_drop_custody(command)?
                 }
                 InventoryCommand::CreatePlayerCustody(command) => state.inventory.create_player_custody(command)?,
+                InventoryCommand::ImportPlayerInventoryV1(command) => {
+                    state.inventory.import_player_inventory_v1(command)?
+                }
             };
             resource_deltas.extend(deltas);
             touched.insert(Domain::Inventory);
-            push_event(events, batch_id, command_index, &actor.actor_id, "inventory", None);
+            let event_kind = if matches!(command, InventoryCommand::ImportPlayerInventoryV1(_)) {
+                "player-inventory-imported-v1"
+            } else {
+                "inventory"
+            };
+            push_event(events, batch_id, command_index, &actor.actor_id, event_kind, None);
         }
         GameplayCommand::Machine(command) => {
             let deltas = state.machines.apply(command, state.tick)?;
@@ -658,6 +666,21 @@ fn authorize_command(
     grant: &ActorGrant,
     command: &GameplayCommand,
 ) -> Result<(), Rejection> {
+    if matches!(
+        command,
+        GameplayCommand::Inventory(InventoryCommand::ImportPlayerInventoryV1(_))
+    ) {
+        if actor.role == crate::ActorRole::System
+            && grant.role == crate::ActorRole::System
+            && grant.scopes.contains(&Scope::System)
+        {
+            return Ok(());
+        }
+        return Err(Rejection::new(
+            RejectionCode::Unauthorized,
+            "player inventory import requires the system actor",
+        ));
+    }
     if matches!(command, GameplayCommand::AdvanceSchedule(_)) {
         if actor.role == crate::ActorRole::System
             && grant.role == crate::ActorRole::System
@@ -695,6 +718,7 @@ fn authorize_command(
                 }
                 InventoryCommand::RemoveEmptyDropCustody(_) => false,
                 InventoryCommand::CreatePlayerCustody(command) => owns(&command.inventory) && owns(&command.equipment),
+                InventoryCommand::ImportPlayerInventoryV1(_) => false,
             };
             if !allowed {
                 return Err(Rejection::new(

@@ -19,6 +19,7 @@ import type {
   RustIntegratedRuntimeRequestV1,
   RustIntegratedRuntimeResponseV1,
 } from "../app/game/rust-integrated-runtime-contract.ts";
+import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import {
   installRustIntegratedRuntimeWorkerHandlerV1,
   RustIntegratedRuntimeWorkerError,
@@ -63,6 +64,7 @@ function config(): RustIntegratedRuntimeConfigV1 {
     sessionId: "fixture",
     contentHash: ZERO_HASH,
     generatorHash: ZERO_HASH,
+    ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
     waterBlockId: 7,
     directionalBlockIds: Object.freeze([]),
     waterloggedBlockIds: Object.freeze([]),

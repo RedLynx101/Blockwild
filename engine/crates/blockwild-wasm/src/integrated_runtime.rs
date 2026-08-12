@@ -15,14 +15,16 @@ use blockwild_engine::{
     ENTITY_COMPATIBILITY_EXPORT_TYPE_V1, ENTITY_COMPATIBILITY_IMPORT_TYPE_V1, ENTITY_COMPATIBILITY_RECORD_TYPE_V1,
     INTEGRATED_RUNTIME_LEGACY_MIGRATION_SCHEMA_V1, IntegratedRuntimeBatchV2, IntegratedRuntimeConfigV2,
     IntegratedRuntimeError, IntegratedRuntimeIdentityV2, IntegratedRuntimeLegacyMigrationV1,
-    IntegratedRuntimeReceiptV2, IntegratedRuntimeV2, RuntimeCommandCacheLookupV1, decode_content_install_page_v1,
+    IntegratedRuntimeReceiptV2, IntegratedRuntimeV2, RuntimeCommandCacheLookupV1, TERRAIN_RESIDENCY_BATCH_TYPE_V1,
+    TERRAIN_RESIDENCY_RECEIPT_TYPE_V1, WorldViewExtractionInputV1, decode_content_install_page_v1,
     decode_entity_authority_export_v1, decode_entity_authority_import_v2, decode_entity_command_batch_v1,
     decode_entity_compatibility_export_v1, decode_entity_compatibility_import_v1, decode_gameplay_actor_grant_v1,
     decode_gameplay_batch_v1, decode_network_agent_grant_v1, decode_network_command_release_v1,
     decode_network_delta_build_request_v1, decode_network_peer_grant_v1, decode_network_peer_release_v1,
     decode_network_reconnect_request_v1, decode_network_replication_record_v1, decode_runtime_persistence_dispatch_v1,
-    decode_runtime_player_binding_v1, encode_content_install_receipt_v1, encode_entity_authority_import_receipt_v1,
-    encode_entity_event_batch_v1, encode_gameplay_receipt_v1, encode_runtime_persistence_dispatch_receipt_v1,
+    decode_runtime_player_binding_v1, decode_terrain_residency_batch_v1, encode_content_install_receipt_v1,
+    encode_entity_authority_import_receipt_v1, encode_entity_event_batch_v1, encode_gameplay_receipt_v1,
+    encode_runtime_persistence_dispatch_receipt_v1, encode_terrain_residency_receipt_v1,
     integrated_runtime_checkpoint_hash_v1,
 };
 use blockwild_network::{InterestSelectionStatsV1, encode_network_checkpoint_v1, encode_network_delta_v1};
@@ -62,7 +64,7 @@ const DOMAIN_VIEW_MAX_FIELDS_V1: usize = 2_048;
 const DOMAIN_VIEW_MAX_BLOCKERS_V1: usize = 32;
 const DOMAIN_VIEW_COUNT_V1: u16 = 8;
 const AUDIO_EXTRACTION_SCHEMA_V2: u16 = 2;
-const CAPABILITIES: [&str; 13] = [
+const CAPABILITIES: [&str; 14] = [
     "awaited-receipts-v1",
     "bounded-entity-extraction-v1",
     "bounded-extraction-v1-pending-live-domain-views",
@@ -76,6 +78,7 @@ const CAPABILITIES: [&str; 13] = [
     "gameplay-command-v1",
     "integrated-runtime-v1",
     "network-authority-v1",
+    "terrain-residency-v1",
 ];
 
 #[derive(Default)]
@@ -1042,11 +1045,14 @@ pub fn blockwild_runtime_destroy_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8
 fn create_runtime(config: RuntimeConfigV1) -> Result<IntegratedRuntimeV2, (String, String)> {
     let content_hash = canonical_hash(config.content_hash);
     let generator_hash = canonical_hash(config.generator_hash);
+    let terrain_content_hash = canonical_hash(config.terrain_content_hash);
     let runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2 {
         world_seed: config.world_seed,
         universe_id: config.universe_id,
         location_id: config.location_id,
         session_id: config.session_id,
+        terrain_content_hash,
+        generation_options_json: config.generation_options_json,
         content_hash,
         generator_hash,
         block_catalog: BlockCatalogV1 {
@@ -1084,6 +1090,19 @@ fn dispatch_command(
             ));
         }
         let response = match (operation.domain, operation.type_id.as_str()) {
+            (RuntimeDomainV1::World, TERRAIN_RESIDENCY_BATCH_TYPE_V1) => {
+                let request = decode_terrain_residency_batch_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let receipt = candidate
+                    .ensure_terrain_residency(&request)
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::World,
+                    TERRAIN_RESIDENCY_RECEIPT_TYPE_V1,
+                    encode_terrain_residency_receipt_v1(&receipt)
+                        .map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
             (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V2) => {
                 let binding = decode_runtime_player_binding_v1(&operation.payload)
                     .map_err(|error| (error.code.into(), error.message))?;
@@ -1765,7 +1784,6 @@ enum DomainViewValueV1 {
 struct DomainViewRowV1 {
     kind: u16,
     key: String,
-    revision: u64,
     fields: BTreeMap<String, DomainViewValueV1>,
 }
 
@@ -1786,11 +1804,10 @@ struct DomainViewV1 {
     blockers: Vec<String>,
 }
 
-fn domain_row(kind: u16, key: impl Into<String>, revision: u64) -> DomainViewRowV1 {
+fn domain_row(kind: u16, key: impl Into<String>, _source_revision: u64) -> DomainViewRowV1 {
     DomainViewRowV1 {
         kind,
         key: key.into(),
-        revision,
         fields: BTreeMap::new(),
     }
 }
@@ -1836,6 +1853,14 @@ fn option_string_field(row: &mut DomainViewRowV1, key: impl Into<String>, value:
     }
 }
 
+fn option_u64_field(row: &mut DomainViewRowV1, key: impl Into<String>, value: Option<u64>) {
+    let key = key.into();
+    bool_field(row, format!("{key}.present"), value.is_some());
+    if let Some(value) = value {
+        u64_field(row, format!("{key}.value"), value);
+    }
+}
+
 fn encode_domain_value(output: &mut Vec<u8>, value: &DomainViewValueV1) {
     match value {
         DomainViewValueV1::Bool(value) => {
@@ -1869,6 +1894,28 @@ fn encode_domain_value(output: &mut Vec<u8>, value: &DomainViewValueV1) {
     }
 }
 
+/// A row revision is a renderer-independent semantic revision, not a borrowed
+/// authority counter. Hashing the exact typed field encoding makes it change
+/// when any serialized kind, key, field name, value tag, or value changes,
+/// while identical semantic rows remain stable across checkpoint restore.
+fn domain_row_revision(row: &DomainViewRowV1) -> u64 {
+    let mut hasher = CanonicalHasher::new("blockwild.r10.domain-row-revision.v1");
+    hasher.write_u16(row.kind);
+    hasher.write_str(&row.key);
+    hasher.write_u16(row.fields.len() as u16);
+    for (key, value) in &row.fields {
+        hasher.write_str(key);
+        let mut encoded_value = Vec::new();
+        encode_domain_value(&mut encoded_value, value);
+        hasher.write_bytes(&encoded_value);
+    }
+    u64::from_le_bytes(
+        hasher.finish().as_bytes()[..8]
+            .try_into()
+            .expect("canonical hash lane is eight bytes"),
+    )
+}
+
 fn encode_domain_row(row: &DomainViewRowV1) -> Option<Vec<u8>> {
     if row.fields.len() > DOMAIN_VIEW_MAX_FIELDS_V1 {
         return None;
@@ -1876,7 +1923,7 @@ fn encode_domain_row(row: &DomainViewRowV1) -> Option<Vec<u8>> {
     let mut output = Vec::with_capacity(64 + row.fields.len().saturating_mul(32));
     output.extend_from_slice(&row.kind.to_le_bytes());
     write_extraction_string(&mut output, &row.key);
-    output.extend_from_slice(&row.revision.to_le_bytes());
+    output.extend_from_slice(&domain_row_revision(row).to_le_bytes());
     output.extend_from_slice(&(row.fields.len() as u16).to_le_bytes());
     for (key, value) in &row.fields {
         write_extraction_string(&mut output, key);
@@ -1934,14 +1981,33 @@ fn encode_domain_view(mut view: DomainViewV1) -> Vec<u8> {
     output
 }
 
+fn container_view_key(kind: u16, owner_id: Option<&str>, id: &str) -> String {
+    // The display key is the lower-hex rendering of an injective typed binary
+    // tuple. Option presence and UTF-8 byte lengths are explicit, so embedded
+    // punctuation and `None` versus `Some("")` cannot alias another key.
+    let owner_length = owner_id.map_or(0, |value| value.len());
+    let mut encoded = Vec::with_capacity(12 + owner_length + id.len());
+    encoded.push(1);
+    encoded.extend_from_slice(&kind.to_le_bytes());
+    encoded.push(u8::from(owner_id.is_some()));
+    if let Some(owner_id) = owner_id {
+        encoded.extend_from_slice(&(owner_id.len() as u32).to_le_bytes());
+        encoded.extend_from_slice(owner_id.as_bytes());
+    }
+    encoded.extend_from_slice(&(id.len() as u32).to_le_bytes());
+    encoded.extend_from_slice(id.as_bytes());
+    let mut key = String::with_capacity("container-key-v1/".len() + encoded.len() * 2);
+    key.push_str("container-key-v1/");
+    for byte in encoded {
+        use std::fmt::Write as _;
+        write!(&mut key, "{byte:02x}").expect("writing a container key to String cannot fail");
+    }
+    key
+}
+
 macro_rules! container_view_key {
     ($container:expr) => {
-        format!(
-            "{}:{}:{}",
-            $container.kind as u16,
-            $container.owner_id.as_deref().unwrap_or(""),
-            $container.id
-        )
+        container_view_key($container.kind as u16, $container.owner_id.as_deref(), &$container.id)
     };
 }
 
@@ -1949,6 +2015,129 @@ macro_rules! printing_view_key {
     ($printing:expr) => {
         format!("{}:{}:{}", $printing.card_id, $printing.variant_id, $printing.finish_id)
     };
+}
+
+macro_rules! dropped_item_world_view_row {
+    ($dropped:expr) => {{
+        let dropped = $dropped;
+        let spatial = &dropped.spatial;
+        let stack = &dropped.stack;
+        let mut row = domain_row(6, format!("drop:{}", spatial.drop_id), spatial.revision);
+        string_field(&mut row, "dropId", &spatial.drop_id);
+        u64_field(&mut row, "entityId", spatial.entity_id.packed());
+        u64_field(&mut row, "entityRevision", dropped.entity_revision);
+        string_field(&mut row, "custodyContainer", container_view_key!(&spatial.container));
+        u64_field(&mut row, "custodySlot", u64::from(spatial.slot));
+        u64_field(&mut row, "boundContainerRevision", spatial.bound_container_revision);
+        for (key, value) in [
+            ("position.xMilli", spatial.position.x_milli),
+            ("position.yMilli", spatial.position.y_milli),
+            ("position.zMilli", spatial.position.z_milli),
+            ("velocity.xMilliPerSecond", spatial.velocity_milli_per_second.x_milli),
+            ("velocity.yMilliPerSecond", spatial.velocity_milli_per_second.y_milli),
+            ("velocity.zMilliPerSecond", spatial.velocity_milli_per_second.z_milli),
+        ] {
+            i64_field(&mut row, key, value);
+        }
+        u64_field(&mut row, "rotation.yawMicroturns", u64::from(spatial.rotation.yaw));
+        u64_field(&mut row, "rotation.pitchMicroturns", u64::from(spatial.rotation.pitch));
+        u64_field(&mut row, "rotation.rollMicroturns", u64::from(spatial.rotation.roll));
+        u64_field(&mut row, "createdTick", spatial.created_tick);
+        option_u64_field(&mut row, "expiresTick", spatial.expires_tick);
+        option_string_field(&mut row, "pickupLockActorId", spatial.pickup_lock_actor_id.as_deref());
+        u64_field(&mut row, "stack.itemCode", u64::from(stack.item_code));
+        u64_field(&mut row, "stack.count", u64::from(stack.count));
+        option_u64_field(&mut row, "stack.durability", stack.durability_millionths.map(u64::from));
+        hash_field(&mut row, "stack.metadataHash", stack.metadata_hash);
+        row
+    }};
+}
+
+macro_rules! machine_anchor_world_view_row {
+    ($machine:expr) => {{
+        let machine = $machine;
+        let anchor = &machine.anchor;
+        let mut row = domain_row(5, format!("anchor:{}", anchor.machine_id), anchor.revision);
+        string_field(&mut row, "machineId", &anchor.machine_id);
+        string_field(&mut row, "presentationId", &anchor.presentation_id);
+        for (key, value) in [
+            ("position.xMilli", anchor.position.x_milli),
+            ("position.yMilli", anchor.position.y_milli),
+            ("position.zMilli", anchor.position.z_milli),
+        ] {
+            i64_field(&mut row, key, value);
+        }
+        u64_field(&mut row, "rotation.yawMicroturns", u64::from(anchor.rotation.yaw));
+        u64_field(&mut row, "rotation.pitchMicroturns", u64::from(anchor.rotation.pitch));
+        u64_field(&mut row, "rotation.rollMicroturns", u64::from(anchor.rotation.roll));
+        for (axis, extent) in ["x", "y", "z"].into_iter().zip(anchor.half_extents_milli) {
+            u64_field(&mut row, format!("halfExtents.{axis}Milli"), u64::from(extent));
+        }
+        u64_field(&mut row, "gameplayRevision", machine.gameplay_revision);
+        bool_field(&mut row, "gameplayActive", machine.active);
+        bool_field(&mut row, "light.present", anchor.light.is_some());
+        if let Some(light) = &anchor.light {
+            u64_field(&mut row, "light.kind", light.kind as u64);
+            u64_field(&mut row, "light.color.redMillionths", u64::from(light.color.red));
+            u64_field(&mut row, "light.color.greenMillionths", u64::from(light.color.green));
+            u64_field(&mut row, "light.color.blueMillionths", u64::from(light.color.blue));
+            u64_field(
+                &mut row,
+                "light.luminousFluxMillilumens",
+                light.luminous_flux_millilumens,
+            );
+            u64_field(&mut row, "light.rangeMilli", u64::from(light.range_milli));
+            u64_field(
+                &mut row,
+                "light.innerConeMicroturns",
+                u64::from(light.inner_cone_microturns),
+            );
+            u64_field(
+                &mut row,
+                "light.outerConeMicroturns",
+                u64::from(light.outer_cone_microturns),
+            );
+            bool_field(&mut row, "light.castsShadows", light.casts_shadows);
+            bool_field(&mut row, "light.enabled", light.enabled);
+        }
+        row
+    }};
+}
+
+macro_rules! celestial_body_world_view_row {
+    ($body:expr, $revision:expr) => {{
+        let body = $body;
+        let mut row = domain_row(5, format!("celestial-body:{}", body.body_id), $revision);
+        string_field(&mut row, "bodyId", &body.body_id);
+        option_string_field(&mut row, "parentBodyId", body.parent_body_id.as_deref());
+        u64_field(&mut row, "kind", body.kind as u64);
+        string_field(&mut row, "presentationId", &body.presentation_id);
+        for (key, value) in [
+            ("direction.xMillionths", body.direction.x_millionths),
+            ("direction.yMillionths", body.direction.y_millionths),
+            ("direction.zMillionths", body.direction.z_millionths),
+        ] {
+            i64_field(&mut row, key, i64::from(value));
+        }
+        u64_field(
+            &mut row,
+            "angularRadiusMicrodegrees",
+            u64::from(body.angular_radius_microdegrees),
+        );
+        u64_field(
+            &mut row,
+            "illuminatedFractionMillionths",
+            u64::from(body.illuminated_fraction_millionths),
+        );
+        u64_field(&mut row, "phaseMicroturns", u64::from(body.phase_microturns));
+        u64_field(&mut row, "tint.redMillionths", u64::from(body.tint.red));
+        u64_field(&mut row, "tint.greenMillionths", u64::from(body.tint.green));
+        u64_field(&mut row, "tint.blueMillionths", u64::from(body.tint.blue));
+        u64_field(&mut row, "radianceMillionths", u64::from(body.radiance_millionths));
+        i64_field(&mut row, "renderOrder", i64::from(body.render_order));
+        bool_field(&mut row, "occludesStars", body.occludes_stars);
+        row
+    }};
 }
 
 fn runtime_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
@@ -1996,7 +2185,7 @@ fn runtime_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
     }
 }
 
-fn player_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
+fn player_domain_view(runtime: &IntegratedRuntimeV2, world_view: Option<&WorldViewExtractionInputV1>) -> DomainViewV1 {
     let mut rows = Vec::new();
     if let Some(player) = runtime.player() {
         let body = &player.body;
@@ -2045,19 +2234,66 @@ fn player_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
         }
         rows.push(row);
     }
+    if let Some(world_view) = world_view {
+        for player in &world_view.players {
+            let binding = &player.binding;
+            let mut row = domain_row(2, format!("binding:{}", binding.player_id.packed()), binding.revision);
+            u64_field(&mut row, "playerId", binding.player_id.packed());
+            string_field(&mut row, "actorId", &binding.actor_id);
+            u64_field(&mut row, "entityId", binding.entity_id.packed());
+            string_field(
+                &mut row,
+                "inventoryContainer",
+                container_view_key!(&binding.inventory_container),
+            );
+            string_field(
+                &mut row,
+                "equipmentContainer",
+                container_view_key!(&binding.equipment_container),
+            );
+            u64_field(&mut row, "selectedSlot", u64::from(binding.selected_slot));
+            option_u64_field(&mut row, "backSlot", binding.back_slot.map(u64::from));
+            u64_field(
+                &mut row,
+                "inventoryContainerRevision",
+                player.inventory_container_revision,
+            );
+            u64_field(
+                &mut row,
+                "equipmentContainerRevision",
+                player.equipment_container_revision,
+            );
+            u64_field(&mut row, "entityRevision", player.entity_revision);
+            bool_field(&mut row, "held.present", player.held_stack.is_some());
+            if let Some(stack) = &player.held_stack {
+                u64_field(&mut row, "held.itemCode", u64::from(stack.item_code));
+                u64_field(&mut row, "held.count", u64::from(stack.count));
+                option_u64_field(&mut row, "held.durability", stack.durability_millionths.map(u64::from));
+                hash_field(&mut row, "held.metadataHash", stack.metadata_hash);
+            }
+            rows.push(row);
+        }
+    }
+    let mut blockers = vec!["camera-projection-and-orientation-not-authoritative".into()];
+    if world_view.is_none() {
+        blockers.extend([
+            "player-inventory-container-binding-not-explicit".into(),
+            "world-view-extraction-invariant-rejected".into(),
+        ]);
+    }
     DomainViewV1 {
         domain: 2,
-        revision: runtime.revision().simulation,
+        revision: runtime_extraction_revision(runtime),
         status: DomainViewStatusV1::Partial,
         rows,
-        blockers: vec![
-            "camera-projection-and-orientation-not-authoritative".into(),
-            "player-inventory-container-binding-not-explicit".into(),
-        ],
+        blockers,
     }
 }
 
-fn inventory_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
+fn inventory_domain_view(
+    runtime: &IntegratedRuntimeV2,
+    world_view: Option<&WorldViewExtractionInputV1>,
+) -> DomainViewV1 {
     let state = &runtime.gameplay().state.inventory;
     let mut rows = Vec::new();
     for (code, item) in &state.items {
@@ -2137,12 +2373,29 @@ fn inventory_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
         bool_field(&mut row, "active", furnace.active);
         rows.push(row);
     }
+    if let Some(world_view) = world_view {
+        for dropped in &world_view.dropped_items {
+            rows.push(dropped_item_world_view_row!(dropped));
+        }
+    }
+    let blockers = if world_view.is_some() {
+        Vec::new()
+    } else {
+        vec![
+            "dropped-item-spatial-state-not-authoritative".into(),
+            "world-view-extraction-invariant-rejected".into(),
+        ]
+    };
     DomainViewV1 {
         domain: 3,
-        revision: runtime.gameplay().state.revision.inventory,
-        status: DomainViewStatusV1::Partial,
+        revision: runtime_extraction_revision(runtime),
+        status: if blockers.is_empty() {
+            DomainViewStatusV1::Complete
+        } else {
+            DomainViewStatusV1::Partial
+        },
         rows,
-        blockers: vec!["dropped-item-spatial-state-not-authoritative".into()],
+        blockers,
     }
 }
 
@@ -2161,7 +2414,7 @@ macro_rules! resource_fields {
     }};
 }
 
-fn machine_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
+fn machine_domain_view(runtime: &IntegratedRuntimeV2, world_view: Option<&WorldViewExtractionInputV1>) -> DomainViewV1 {
     let state = &runtime.gameplay().state.machines;
     let mut rows = Vec::new();
     for (machine_id, machine) in &state.machines {
@@ -2221,16 +2474,25 @@ fn machine_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
         }
         rows.push(row);
     }
+    if let Some(world_view) = world_view {
+        for machine in &world_view.machines {
+            rows.push(machine_anchor_world_view_row!(machine));
+        }
+    }
+    let mut blockers = vec!["world-prop-presentation-not-authoritative".into()];
+    if world_view.is_none() {
+        blockers.extend([
+            "machine-light-profiles-not-authoritative".into(),
+            "machine-spatial-anchors-not-authoritative".into(),
+            "world-view-extraction-invariant-rejected".into(),
+        ]);
+    }
     DomainViewV1 {
         domain: 4,
-        revision: runtime.gameplay().state.revision.machines,
+        revision: runtime_extraction_revision(runtime),
         status: DomainViewStatusV1::Partial,
         rows,
-        blockers: vec![
-            "machine-spatial-anchors-not-authoritative".into(),
-            "machine-light-profiles-not-authoritative".into(),
-            "world-prop-presentation-not-authoritative".into(),
-        ],
+        blockers,
     }
 }
 
@@ -2643,34 +2905,189 @@ fn cardforge_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
     }
 }
 
-fn environment_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
+fn environment_domain_view(
+    runtime: &IntegratedRuntimeV2,
+    world_view: Option<&WorldViewExtractionInputV1>,
+) -> DomainViewV1 {
     let identity = runtime.identity();
     let mut row = domain_row(1, "location", identity.revision.world);
     string_field(&mut row, "universeId", &identity.universe_id);
     string_field(&mut row, "locationId", &identity.location_id);
+    let Some(world_view) = world_view else {
+        return DomainViewV1 {
+            domain: 8,
+            revision: identity.revision.world,
+            status: DomainViewStatusV1::Absent,
+            rows: vec![row],
+            blockers: vec![
+                "atmosphere-and-gravity-profile-not-authoritative".into(),
+                "celestial-sky-state-not-authoritative".into(),
+                "weather-lighting-and-fog-not-authoritative".into(),
+                "world-view-extraction-invariant-rejected".into(),
+            ],
+        };
+    };
+    string_field(&mut row, "world.universeId", &world_view.identity.world.universe);
+    string_field(&mut row, "world.locationId", &world_view.identity.world.location);
+    hash_field(&mut row, "worldViewStateHash", world_view.identity.state_hash);
+    hash_field(&mut row, "gameplayStateHash", world_view.gameplay_state_hash);
+    hash_field(&mut row, "entityStateHash", world_view.entity_state_hash);
+    hash_field(&mut row, "extractionHash", world_view.extraction_hash);
+    for (key, value) in [
+        ("revision.epoch", u64::from(world_view.identity.revision.epoch)),
+        ("revision.sequence", world_view.identity.revision.sequence),
+        ("revision.clock", world_view.identity.revision.clock),
+        ("revision.machineAnchors", world_view.identity.revision.machine_anchors),
+        ("revision.droppedItems", world_view.identity.revision.dropped_items),
+        ("revision.playerBindings", world_view.identity.revision.player_bindings),
+        ("revision.environment", world_view.identity.revision.environment),
+        (
+            "revision.atmosphereGravity",
+            world_view.identity.revision.atmosphere_gravity,
+        ),
+        ("revision.celestial", world_view.identity.revision.celestial),
+    ] {
+        u64_field(&mut row, key, value);
+    }
+    let mut rows = vec![row];
+
+    let environment = &world_view.environment;
+    let mut lighting = domain_row(2, "environment-lighting", environment.revision);
+    u64_field(&mut lighting, "observedTick", environment.observed_tick);
+    u64_field(&mut lighting, "weather", environment.weather as u64);
+    u64_field(&mut lighting, "weatherSeed", environment.weather_seed);
+    u64_field(
+        &mut lighting,
+        "precipitationMillionths",
+        u64::from(environment.precipitation_millionths),
+    );
+    u64_field(
+        &mut lighting,
+        "cloudCoverMillionths",
+        u64::from(environment.cloud_cover_millionths),
+    );
+    u64_field(
+        &mut lighting,
+        "fogDensityMillionths",
+        u64::from(environment.fog_density_millionths),
+    );
+    for (key, value) in [
+        ("wind.xMilliPerSecond", environment.wind_milli_per_second.x_milli),
+        ("wind.yMilliPerSecond", environment.wind_milli_per_second.y_milli),
+        ("wind.zMilliPerSecond", environment.wind_milli_per_second.z_milli),
+    ] {
+        i64_field(&mut lighting, key, value);
+    }
+    for (key, value) in [
+        ("ambient.redMillionths", environment.ambient_color.red),
+        ("ambient.greenMillionths", environment.ambient_color.green),
+        ("ambient.blueMillionths", environment.ambient_color.blue),
+        ("ambientIrradianceMillionths", environment.ambient_irradiance_millionths),
+        ("sky.redMillionths", environment.sky_color.red),
+        ("sky.greenMillionths", environment.sky_color.green),
+        ("sky.blueMillionths", environment.sky_color.blue),
+        ("skyIrradianceMillionths", environment.sky_irradiance_millionths),
+        (
+            "lightningProbabilityMillionths",
+            environment.lightning_probability_millionths,
+        ),
+    ] {
+        u64_field(&mut lighting, key, u64::from(value));
+    }
+    rows.push(lighting);
+
+    let atmosphere = &world_view.atmosphere_gravity;
+    let mut atmosphere_row = domain_row(3, "atmosphere-gravity", atmosphere.revision);
+    u64_field(
+        &mut atmosphere_row,
+        "pressureMillipascals",
+        atmosphere.pressure_millipascals,
+    );
+    u64_field(
+        &mut atmosphere_row,
+        "temperatureMillikelvin",
+        u64::from(atmosphere.temperature_millikelvin),
+    );
+    for (key, value) in [
+        ("composition.oxygenMillionths", atmosphere.composition.oxygen),
+        ("composition.nitrogenMillionths", atmosphere.composition.nitrogen),
+        (
+            "composition.carbonDioxideMillionths",
+            atmosphere.composition.carbon_dioxide,
+        ),
+        ("composition.argonMillionths", atmosphere.composition.argon),
+        ("composition.otherMillionths", atmosphere.composition.other),
+        ("composition.toxicMillionths", atmosphere.composition.toxic),
+        ("opticalExtinctionMillionths", atmosphere.optical_extinction_millionths),
+    ] {
+        u64_field(&mut atmosphere_row, key, u64::from(value));
+    }
+    u64_field(
+        &mut atmosphere_row,
+        "gravity.accelerationMicrometresPerSecondSquared",
+        atmosphere.gravity.acceleration_micrometres_per_second_squared,
+    );
+    for (key, value) in [
+        (
+            "gravity.direction.xMillionths",
+            atmosphere.gravity.direction.x_millionths,
+        ),
+        (
+            "gravity.direction.yMillionths",
+            atmosphere.gravity.direction.y_millionths,
+        ),
+        (
+            "gravity.direction.zMillionths",
+            atmosphere.gravity.direction.z_millionths,
+        ),
+    ] {
+        i64_field(&mut atmosphere_row, key, i64::from(value));
+    }
+    bool_field(&mut atmosphere_row, "humanBreathable", atmosphere.is_human_breathable());
+    rows.push(atmosphere_row);
+
+    let celestial = &world_view.celestial;
+    let mut celestial_header = domain_row(4, "celestial-sky", celestial.revision);
+    u64_field(&mut celestial_header, "ephemerisTick", celestial.ephemeris_tick);
+    u64_field(&mut celestial_header, "starfieldSeed", celestial.starfield_seed);
+    u64_field(&mut celestial_header, "bodyCount", celestial.bodies.len() as u64);
+    rows.push(celestial_header);
+    for body in celestial.bodies.values() {
+        rows.push(celestial_body_world_view_row!(body, celestial.revision));
+    }
     DomainViewV1 {
         domain: 8,
-        revision: identity.revision.world,
-        status: DomainViewStatusV1::Absent,
-        rows: vec![row],
-        blockers: vec![
-            "atmosphere-and-gravity-profile-not-authoritative".into(),
-            "celestial-sky-state-not-authoritative".into(),
-            "weather-lighting-and-fog-not-authoritative".into(),
-        ],
+        revision: world_view.identity.revision.sequence,
+        status: DomainViewStatusV1::Complete,
+        rows,
+        blockers: Vec::new(),
     }
 }
 
 fn domain_views(runtime: &IntegratedRuntimeV2) -> Vec<DomainViewV1> {
+    domain_views_with_world_view_result(runtime, runtime.world_view_extraction())
+}
+
+fn domain_views_with_world_view_result(
+    runtime: &IntegratedRuntimeV2,
+    world_view: Result<WorldViewExtractionInputV1, IntegratedRuntimeError>,
+) -> Vec<DomainViewV1> {
+    domain_views_with_world_view(runtime, world_view.as_ref().ok())
+}
+
+fn domain_views_with_world_view(
+    runtime: &IntegratedRuntimeV2,
+    world_view: Option<&WorldViewExtractionInputV1>,
+) -> Vec<DomainViewV1> {
     vec![
         runtime_domain_view(runtime),
-        player_domain_view(runtime),
-        inventory_domain_view(runtime),
-        machine_domain_view(runtime),
+        player_domain_view(runtime, world_view),
+        inventory_domain_view(runtime, world_view),
+        machine_domain_view(runtime, world_view),
         combat_domain_view(runtime),
         progression_domain_view(runtime),
         cardforge_domain_view(runtime),
-        environment_domain_view(runtime),
+        environment_domain_view(runtime, world_view),
     ]
 }
 
@@ -2986,7 +3403,8 @@ fn encode_bulk_control(
 #[cfg(test)]
 mod tests {
     use blockwild_authority::{
-        BlockCatalogV1, WorldAddressV1, WorldAuthorityStoreR4V1, encode_compatibility_save_binary_v1,
+        BlockCatalogV1, WorldAddressV1, WorldAuthorityRevisionV1, WorldAuthorityStoreR4V1,
+        encode_compatibility_save_binary_v1,
     };
     use blockwild_engine::{
         EntityAuthorityExportWireV1, EntityAuthorityImportWireV2, EntityCompatibilityExportWireV1,
@@ -2997,12 +3415,14 @@ mod tests {
         encode_runtime_persistence_dispatch_v1, encode_runtime_player_binding_v1,
     };
     use blockwild_entity::{
-        ActionState, ENTITY_COMMAND_SCHEMA, EntityClass, EntityCommand, EntityCommandBatch, EntityCompatibilityRecord,
-        EntityComponents, EntityResidency, EquipmentSlotState, MountSeat, Vec3 as EntityVec3,
+        ActionState, DespawnReason, ENTITY_COMMAND_SCHEMA, EntityClass, EntityCommand, EntityCommandBatch,
+        EntityCompatibilityRecord, EntityComponents, EntityResidency, EquipmentSlotState, MountSeat,
+        Vec3 as EntityVec3,
     };
     use blockwild_runtime_wire::{
-        RuntimeBulkRequestV1, RuntimeBulkResponseV1, RuntimeBulkStateV1, RuntimeInputFrameV1, RuntimeRequestV1,
-        RuntimeRevisionV1, decode_bulk_response_v1, decode_response_v1, encode_bulk_request_v1, encode_request_v1,
+        DEFAULT_GENERATION_OPTIONS_JSON_V1, DEFAULT_TERRAIN_CONTENT_HASH_V2, RuntimeBulkRequestV1,
+        RuntimeBulkResponseV1, RuntimeBulkStateV1, RuntimeInputFrameV1, RuntimeRequestV1, RuntimeRevisionV1,
+        decode_bulk_response_v1, decode_response_v1, encode_bulk_request_v1, encode_request_v1,
         seal_runtime_command_batch_v1,
     };
 
@@ -3114,6 +3534,8 @@ mod tests {
                 universe_id: "1".into(),
                 location_id: "surface".into(),
                 session_id: "test".into(),
+                terrain_content_hash: DEFAULT_TERRAIN_CONTENT_HASH_V2,
+                generation_options_json: DEFAULT_GENERATION_OPTIONS_JSON_V1.into(),
                 content_hash: WireHash([1; 16]),
                 generator_hash: WireHash([2; 16]),
                 water_block_id: 7,
@@ -3144,6 +3566,7 @@ mod tests {
         assert!(has_capability("bounded-entity-extraction-v1"));
         assert!(has_capability("bulk-platform-v1"));
         assert!(has_capability("content-bundle-install-v1"));
+        assert!(has_capability("terrain-residency-v1"));
         assert!(!has_capability("content-authority-v1"));
         assert!(has_capability("entity-authority-snapshot-v2"));
         assert!(has_capability("entity-compatibility-bridge-v1"));
@@ -3178,6 +3601,73 @@ mod tests {
         ))
         .unwrap();
         assert!(matches!(missing, RuntimeResponseV1::Error { .. }));
+    }
+
+    #[test]
+    fn terrain_residency_command_generates_then_attests_an_idempotent_repeat() {
+        let RuntimeResponseV1::Ready {
+            runtime_handle,
+            identity,
+            capabilities,
+            ..
+        } = decode_response_v1(&blockwild_runtime_create_v2(
+            &encode_request_v1(&create_request(101)).unwrap(),
+        ))
+        .unwrap()
+        else {
+            panic!("expected ready runtime")
+        };
+        assert!(capabilities.iter().any(|value| value == "terrain-residency-v1"));
+
+        let request = blockwild_engine::IntegratedTerrainResidencyBatchV1 {
+            expected_world_revision: WorldAuthorityRevisionV1 {
+                epoch: identity.revision.epoch,
+                mutation: 0,
+                residency: 0,
+            },
+            generation_options_json: DEFAULT_GENERATION_OPTIONS_JSON_V1.into(),
+            chunks: vec![blockwild_engine::IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 }],
+        };
+        let payload = blockwild_engine::encode_terrain_residency_batch_v1(&request).unwrap();
+        let operation = RuntimeDomainOperationV1 {
+            domain: RuntimeDomainV1::World,
+            type_id: TERRAIN_RESIDENCY_BATCH_TYPE_V1.into(),
+            schema: 1,
+            payload_hash: WireHash(wire_checksum_v1(&payload)),
+            payload,
+        };
+        let (generated_identity, receipt) =
+            dispatch_single_operation(runtime_handle, 102, identity, "terrain-residency:generate", operation);
+        assert_eq!(receipt.type_id, TERRAIN_RESIDENCY_RECEIPT_TYPE_V1);
+        let generated = blockwild_engine::decode_terrain_residency_receipt_v1(&receipt.payload).unwrap();
+        assert_eq!(generated.generated_chunks, 1);
+        assert_eq!(generated.already_resident_chunks, 0);
+        assert_eq!(generated.world_revision.residency, generated_identity.revision.world);
+
+        let repeat_request = blockwild_engine::IntegratedTerrainResidencyBatchV1 {
+            expected_world_revision: generated.world_revision,
+            generation_options_json: DEFAULT_GENERATION_OPTIONS_JSON_V1.into(),
+            chunks: vec![blockwild_engine::IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 }],
+        };
+        let payload = blockwild_engine::encode_terrain_residency_batch_v1(&repeat_request).unwrap();
+        let operation = RuntimeDomainOperationV1 {
+            domain: RuntimeDomainV1::World,
+            type_id: TERRAIN_RESIDENCY_BATCH_TYPE_V1.into(),
+            schema: 1,
+            payload_hash: WireHash(wire_checksum_v1(&payload)),
+            payload,
+        };
+        let (repeat_identity, receipt) = dispatch_single_operation(
+            runtime_handle,
+            103,
+            generated_identity.clone(),
+            "terrain-residency:repeat",
+            operation,
+        );
+        let repeated = blockwild_engine::decode_terrain_residency_receipt_v1(&receipt.payload).unwrap();
+        assert_eq!(repeated.generated_chunks, 0);
+        assert_eq!(repeated.already_resident_chunks, 1);
+        assert_eq!(repeat_identity, generated_identity);
     }
 
     #[test]
@@ -4352,7 +4842,355 @@ mod tests {
     }
 
     #[test]
-    fn domain_bundle_names_every_missing_authority_and_stays_pending() {
+    fn domain_row_revision_attests_kind_key_field_names_tags_and_values() {
+        let mut row = domain_row(7, "record:\u{e000}", 99);
+        bool_field(&mut row, "bool", true);
+        bytes_field(&mut row, "bytes", &[0, 1, 0x80]);
+        f64_field(&mut row, "f64", 1.5);
+        hash_field(&mut row, "hash", CanonicalHash([7; 16]));
+        i64_field(&mut row, "i64", -2);
+        string_field(&mut row, "string", "\u{1f600}");
+        u64_field(&mut row, "u64", 17);
+        let revision = domain_row_revision(&row);
+
+        let mut changed = row.clone();
+        changed.kind += 1;
+        assert_ne!(domain_row_revision(&changed), revision);
+        let mut changed = row.clone();
+        changed.key.push('x');
+        assert_ne!(domain_row_revision(&changed), revision);
+        let mut changed = row.clone();
+        let value = changed.fields.remove("bool").unwrap();
+        changed.fields.insert("bool-renamed".into(), value);
+        assert_ne!(domain_row_revision(&changed), revision);
+
+        for (field, replacement) in [
+            ("bool", DomainViewValueV1::Bool(false)),
+            ("bytes", DomainViewValueV1::Bytes(vec![0, 1, 0x81])),
+            ("f64", DomainViewValueV1::F64(1.500_000_000_000_000_2)),
+            ("hash", DomainViewValueV1::Hash(CanonicalHash([8; 16]))),
+            ("i64", DomainViewValueV1::I64(-3)),
+            ("string", DomainViewValueV1::String("\u{1f601}".into())),
+            ("u64", DomainViewValueV1::U64(18)),
+        ] {
+            let mut changed = row.clone();
+            changed.fields.insert(field.into(), replacement);
+            assert_ne!(domain_row_revision(&changed), revision, "field {field}");
+        }
+        let mut changed_tag = row;
+        changed_tag.fields.insert("u64".into(), DomainViewValueV1::I64(17));
+        assert_ne!(domain_row_revision(&changed_tag), revision, "value tags are semantic");
+    }
+
+    #[test]
+    fn domain_row_revision_is_semantic_not_a_borrowed_source_counter() {
+        assert_eq!(
+            domain_row_revision(&domain_row(1, "semantic", 1)),
+            domain_row_revision(&domain_row(1, "semantic", 9))
+        );
+    }
+
+    #[test]
+    fn container_view_keys_are_typed_length_prefixed_and_injective() {
+        let keys = BTreeSet::from([
+            container_view_key(0, None, "owner:id"),
+            container_view_key(0, Some(""), "owner:id"),
+            container_view_key(0, Some("owner"), "id"),
+            container_view_key(0, Some("owner:id"), ""),
+            container_view_key(1, Some("owner"), "id"),
+            container_view_key(1, Some("\u{6c34}:\u{1f600}"), "id:\u{e000}"),
+        ]);
+        assert_eq!(keys.len(), 6);
+        assert!(keys.iter().all(|key| key.starts_with("container-key-v1/")));
+    }
+
+    #[test]
+    fn joined_drop_machine_light_and_celestial_record_builders_are_nonempty() {
+        struct Packed(u64);
+        impl Packed {
+            const fn packed(&self) -> u64 {
+                self.0
+            }
+        }
+        struct ContainerFixture {
+            kind: u16,
+            owner_id: Option<String>,
+            id: String,
+        }
+        struct VectorFixture {
+            x_milli: i64,
+            y_milli: i64,
+            z_milli: i64,
+        }
+        struct RotationFixture {
+            yaw: u32,
+            pitch: u32,
+            roll: u32,
+        }
+        struct StackFixture {
+            item_code: u32,
+            count: u32,
+            durability_millionths: Option<u32>,
+            metadata_hash: CanonicalHash,
+        }
+        struct SpatialFixture {
+            drop_id: String,
+            revision: u64,
+            entity_id: Packed,
+            container: ContainerFixture,
+            slot: u16,
+            bound_container_revision: u64,
+            position: VectorFixture,
+            velocity_milli_per_second: VectorFixture,
+            rotation: RotationFixture,
+            created_tick: u64,
+            expires_tick: Option<u64>,
+            pickup_lock_actor_id: Option<String>,
+        }
+        struct DropFixture {
+            spatial: SpatialFixture,
+            stack: StackFixture,
+            entity_revision: u64,
+        }
+        struct ColorFixture {
+            red: u32,
+            green: u32,
+            blue: u32,
+        }
+        struct LightFixture {
+            kind: u8,
+            color: ColorFixture,
+            luminous_flux_millilumens: u64,
+            range_milli: u32,
+            inner_cone_microturns: u32,
+            outer_cone_microturns: u32,
+            casts_shadows: bool,
+            enabled: bool,
+        }
+        struct AnchorFixture {
+            machine_id: String,
+            revision: u64,
+            presentation_id: String,
+            position: VectorFixture,
+            rotation: RotationFixture,
+            half_extents_milli: [u32; 3],
+            light: Option<LightFixture>,
+        }
+        struct MachineFixture {
+            anchor: AnchorFixture,
+            gameplay_revision: u64,
+            active: bool,
+        }
+        struct DirectionFixture {
+            x_millionths: i32,
+            y_millionths: i32,
+            z_millionths: i32,
+        }
+        struct BodyFixture {
+            body_id: String,
+            parent_body_id: Option<String>,
+            kind: u8,
+            presentation_id: String,
+            direction: DirectionFixture,
+            angular_radius_microdegrees: u32,
+            illuminated_fraction_millionths: u32,
+            phase_microturns: u32,
+            tint: ColorFixture,
+            radiance_millionths: u32,
+            render_order: i32,
+            occludes_stars: bool,
+        }
+
+        let drop = DropFixture {
+            spatial: SpatialFixture {
+                drop_id: "drop:\u{6c34}:\u{1f600}".into(),
+                revision: 3,
+                entity_id: Packed(0x1_0000_0007),
+                container: ContainerFixture {
+                    kind: 2,
+                    owner_id: Some("owner:drop".into()),
+                    id: "custody:drop".into(),
+                },
+                slot: 0,
+                bound_container_revision: 4,
+                position: VectorFixture {
+                    x_milli: 1_500,
+                    y_milli: 64_000,
+                    z_milli: -2_500,
+                },
+                velocity_milli_per_second: VectorFixture {
+                    x_milli: 200,
+                    y_milli: 300,
+                    z_milli: -400,
+                },
+                rotation: RotationFixture {
+                    yaw: 125_000,
+                    pitch: 25_000,
+                    roll: 0,
+                },
+                created_tick: 9,
+                expires_tick: Some(109),
+                pickup_lock_actor_id: Some("actor:drop".into()),
+            },
+            stack: StackFixture {
+                item_code: 42,
+                count: 3,
+                durability_millionths: Some(875_000),
+                metadata_hash: CanonicalHash([0x42; 16]),
+            },
+            entity_revision: 5,
+        };
+        let machine = MachineFixture {
+            anchor: AnchorFixture {
+                machine_id: "machine:lamp".into(),
+                revision: 6,
+                presentation_id: "machine.lamp.v1".into(),
+                position: VectorFixture {
+                    x_milli: 4_000,
+                    y_milli: 65_000,
+                    z_milli: 8_000,
+                },
+                rotation: RotationFixture {
+                    yaw: 250_000,
+                    pitch: 0,
+                    roll: 0,
+                },
+                half_extents_milli: [500, 1_000, 500],
+                light: Some(LightFixture {
+                    kind: 0,
+                    color: ColorFixture {
+                        red: 1_000_000,
+                        green: 700_000,
+                        blue: 300_000,
+                    },
+                    luminous_flux_millilumens: 900_000,
+                    range_milli: 12_000,
+                    inner_cone_microturns: 0,
+                    outer_cone_microturns: 0,
+                    casts_shadows: true,
+                    enabled: true,
+                }),
+            },
+            gameplay_revision: 7,
+            active: true,
+        };
+        let celestial = BodyFixture {
+            body_id: "star:\u{1f31f}".into(),
+            parent_body_id: None,
+            kind: 0,
+            presentation_id: "celestial.waystar".into(),
+            direction: DirectionFixture {
+                x_millionths: 0,
+                y_millionths: 1_000_000,
+                z_millionths: 0,
+            },
+            angular_radius_microdegrees: 250_000,
+            illuminated_fraction_millionths: 1_000_000,
+            phase_microturns: 0,
+            tint: ColorFixture {
+                red: 1_000_000,
+                green: 950_000,
+                blue: 850_000,
+            },
+            radiance_millionths: 5_000_000,
+            render_order: -1,
+            occludes_stars: true,
+        };
+
+        let rows = [
+            dropped_item_world_view_row!(&drop),
+            machine_anchor_world_view_row!(&machine),
+            celestial_body_world_view_row!(&celestial, 8),
+        ];
+        assert_eq!(rows.iter().map(|row| row.kind).collect::<Vec<_>>(), [6, 5, 5]);
+        assert!(
+            rows.iter()
+                .all(|row| !row.fields.is_empty() && domain_row_revision(row) != 0)
+        );
+        assert!(rows[0].fields.contains_key("stack.metadataHash"));
+        assert!(rows[1].fields.contains_key("light.luminousFluxMillilumens"));
+        assert!(rows[2].fields.contains_key("angularRadiusMicrodegrees"));
+        assert!(rows.iter().all(|row| encode_domain_row(row).is_some()));
+    }
+
+    #[test]
+    fn domain_view_wire_orders_bmp_non_bmp_text_as_rust_utf8_bytes() {
+        let bmp = "\u{e000}";
+        let non_bmp = "\u{1f600}";
+        assert!(bmp.as_bytes() < non_bmp.as_bytes());
+        let mut bmp_row = domain_row(1, bmp, 0);
+        string_field(&mut bmp_row, bmp, "bmp");
+        string_field(&mut bmp_row, non_bmp, "non-bmp");
+        let encoded = encode_domain_view(DomainViewV1 {
+            domain: 1,
+            revision: 1,
+            status: DomainViewStatusV1::Partial,
+            rows: vec![domain_row(1, non_bmp, 0), bmp_row],
+            blockers: vec![non_bmp.into(), bmp.into()],
+        });
+        let mut reader = ExtractionReader::new(&encoded);
+        assert_eq!(reader.u8(), 1);
+        assert_eq!(reader.u16(), DOMAIN_VIEW_SCHEMA_V1);
+        assert_eq!(reader.u8(), DomainViewStatusV1::Partial as u8);
+        reader.u64();
+        assert_eq!((reader.u32(), reader.u32(), reader.u32(), reader.u32()), (2, 2, 0, 2));
+        assert_eq!(reader.u16(), 2);
+        assert_eq!(reader.string(), bmp);
+        assert_eq!(reader.string(), non_bmp);
+        let payload_length = usize::try_from(reader.u32()).unwrap();
+        reader.take(16);
+        let payload = reader.take(payload_length);
+        reader.finish();
+        let mut payload_reader = ExtractionReader::new(payload);
+        assert_eq!(payload_reader.u16(), 1);
+        assert_eq!(payload_reader.string(), bmp);
+        payload_reader.u64();
+        assert_eq!(payload_reader.u16(), 2);
+        assert_eq!(payload_reader.string(), bmp);
+        payload_reader.take(1 + 4 + 3);
+        assert_eq!(payload_reader.string(), non_bmp);
+    }
+
+    fn runtime_with_bound_extraction_player() -> IntegratedRuntimeV2 {
+        let mut runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        let mut record = EntityCompatibilityRecord::new("player:extraction", "player:extraction", "player");
+        record.class = EntityClass::Player;
+        record.position = EntityVec3::new(8.0, 64.0, 8.0);
+        record.health = 20.0;
+        record.maximum_health = 20.0;
+        let mut spawn = IntegratedRuntimeBatchV2::empty("spawn-extraction-player", runtime.identity());
+        spawn.entities.push(EntityCommandBatch {
+            schema: ENTITY_COMMAND_SCHEMA,
+            sequence: 1,
+            expected_revision: 0,
+            tick: 0,
+            commands: vec![EntityCommand::Spawn {
+                record,
+                residency: EntityResidency::Hot,
+            }],
+        });
+        assert!(runtime.commit(spawn).accepted());
+        runtime
+            .bind_player(RuntimePlayerBindingWireV1 {
+                external_entity_id: "player:extraction".into(),
+                actor_id: "player:extraction".into(),
+                player_id: blockwild_types::PlayerId::new(7, 3),
+                creative_mode: false,
+                radius: 0.35,
+                standing_height: 1.8,
+                crouching_height: 1.35,
+                mass: 80.0,
+                walk_speed: 4.3,
+                sprint_speed: 6.2,
+                creative_flight_speed: 8.0,
+                maximum_oxygen_seconds: 15.0,
+            })
+            .unwrap();
+        runtime
+    }
+
+    #[test]
+    fn world_view_domains_close_only_serialized_authority_and_stay_pending() {
         let runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
         let views = domain_views(&runtime);
         assert_eq!(
@@ -4362,37 +5200,45 @@ mod tests {
         assert_eq!(views[0].status, DomainViewStatusV1::Complete);
         assert_eq!(
             views[1].blockers,
-            [
-                "camera-projection-and-orientation-not-authoritative",
-                "player-inventory-container-binding-not-explicit",
-            ]
+            ["camera-projection-and-orientation-not-authoritative"]
         );
-        assert!(
-            views[2]
-                .blockers
-                .iter()
-                .any(|value| value == "dropped-item-spatial-state-not-authoritative")
-        );
-        assert!(
-            views[3]
-                .blockers
-                .iter()
-                .any(|value| value == "machine-spatial-anchors-not-authoritative")
-        );
+        assert_eq!(views[2].status, DomainViewStatusV1::Complete);
+        assert!(views[2].blockers.is_empty());
+        assert_eq!(views[3].blockers, ["world-prop-presentation-not-authoritative"]);
         assert!(
             views[4]
                 .blockers
                 .iter()
                 .any(|value| value == "combat-projectile-and-summon-render-presentation-not-authoritative")
         );
-        assert_eq!(views[7].status, DomainViewStatusV1::Absent);
+        assert_eq!(views[7].status, DomainViewStatusV1::Complete);
+        assert!(views[7].blockers.is_empty());
         assert_eq!(
-            views[7].blockers,
-            [
-                "atmosphere-and-gravity-profile-not-authoritative",
-                "celestial-sky-state-not-authoritative",
-                "weather-lighting-and-fog-not-authoritative",
-            ]
+            views[7].rows.iter().map(|row| row.kind).collect::<Vec<_>>(),
+            [1, 2, 3, 4]
+        );
+
+        let unavailable = domain_views_with_world_view(&runtime, None);
+        assert_eq!(unavailable[1].status, DomainViewStatusV1::Partial);
+        assert!(
+            unavailable[1]
+                .blockers
+                .iter()
+                .any(|value| value == "player-inventory-container-binding-not-explicit")
+        );
+        assert_eq!(unavailable[2].status, DomainViewStatusV1::Partial);
+        assert!(
+            unavailable[2]
+                .blockers
+                .iter()
+                .any(|value| value == "dropped-item-spatial-state-not-authoritative")
+        );
+        assert_eq!(unavailable[7].status, DomainViewStatusV1::Absent);
+        assert!(
+            unavailable[7]
+                .blockers
+                .iter()
+                .any(|value| value == "world-view-extraction-invariant-rejected")
         );
         assert!(!extraction_promotion_ready(&runtime));
         let capabilities = capabilities(&runtime);
@@ -4413,5 +5259,198 @@ mod tests {
         assert!(bundle.len() < DOMAIN_VIEW_COUNT_V1 as usize * DOMAIN_VIEW_MAX_BYTES_V1);
         assert_eq!(&encode_audio_extraction(&runtime)[..4], b"BWAU");
         assert_eq!(&encode_diagnostics(&runtime)[..4], b"BWRX");
+    }
+
+    #[test]
+    fn player_and_environment_joins_are_checkpoint_stable_and_exact() {
+        let runtime = runtime_with_bound_extraction_player();
+        let extraction = runtime.world_view_extraction().unwrap();
+        assert_eq!(extraction.players.len(), 1);
+        let views = domain_views_with_world_view(&runtime, Some(&extraction));
+        let binding = views[1]
+            .rows
+            .iter()
+            .find(|row| row.kind == 2)
+            .expect("player binding row");
+        assert_eq!(
+            binding.key,
+            format!("binding:{}", blockwild_types::PlayerId::new(7, 3).packed())
+        );
+        assert!(matches!(
+            binding.fields.get("inventoryContainer"),
+            Some(DomainViewValueV1::String(value))
+                if value == &container_view_key(0, Some("player:extraction"), "player:extraction")
+        ));
+        assert!(matches!(
+            binding.fields.get("equipmentContainer"),
+            Some(DomainViewValueV1::String(value))
+                if value == &container_view_key(1, Some("player:extraction"), "player:extraction:equipment")
+        ));
+        assert!(matches!(
+            binding.fields.get("held.present"),
+            Some(DomainViewValueV1::Bool(false))
+        ));
+        assert!(matches!(
+            binding.fields.get("backSlot.value"),
+            Some(DomainViewValueV1::U64(7))
+        ));
+
+        let environment = &views[7];
+        assert_eq!(environment.status, DomainViewStatusV1::Complete);
+        assert!(environment.blockers.is_empty());
+        assert!(environment.rows.iter().any(|row| {
+            row.kind == 2
+                && matches!(row.fields.get("weather"), Some(DomainViewValueV1::U64(0)))
+                && row.fields.contains_key("fogDensityMillionths")
+        }));
+        assert!(environment.rows.iter().any(|row| {
+            row.kind == 3
+                && matches!(row.fields.get("humanBreathable"), Some(DomainViewValueV1::Bool(true)))
+                && row.fields.contains_key("gravity.direction.yMillionths")
+        }));
+        assert!(
+            environment
+                .rows
+                .iter()
+                .any(|row| { row.kind == 4 && matches!(row.fields.get("bodyCount"), Some(DomainViewValueV1::U64(0))) })
+        );
+
+        let before_identity = runtime.identity();
+        let before_bundle = encode_hud_extraction(&runtime);
+        let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+        let checkpoint_hash = integrated_runtime_checkpoint_hash_v1(&checkpoint);
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(&checkpoint, checkpoint_hash).unwrap();
+        assert_eq!(restored.identity(), before_identity);
+        assert_eq!(restored.world_view_extraction().unwrap(), extraction);
+        assert_eq!(encode_hud_extraction(&restored), before_bundle);
+    }
+
+    #[test]
+    fn bound_world_view_bwx0_matches_shared_typescript_fixture() {
+        let actual = encode_hud_extraction(&runtime_with_bound_extraction_player())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let expected = include_str!(
+            "../../../../tests/fixtures/rust-engine/r10-authoritative-extraction/bound-world-view-bwx0-v1.hex"
+        )
+        .trim();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn rejected_world_view_join_fails_every_joined_domain_closed() {
+        let mut runtime = runtime_with_bound_extraction_player();
+        let before = runtime.identity();
+        let mut orphaning = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        let mut batch = IntegratedRuntimeBatchV2::empty("spawn-orphaning-snapshot", orphaning.identity());
+        batch.entities.push(EntityCommandBatch {
+            schema: ENTITY_COMMAND_SCHEMA,
+            sequence: 1,
+            expected_revision: 0,
+            tick: 0,
+            commands: vec![EntityCommand::Spawn {
+                record: EntityCompatibilityRecord::new("temporary", "temporary", "temporary"),
+                residency: EntityResidency::Cold,
+            }],
+        });
+        let receipt = orphaning.commit(batch);
+        let IntegratedRuntimeReceiptV2::Accepted(receipt) = receipt else {
+            panic!("orphaning fixture spawn rejected")
+        };
+        let entity_id = receipt.entities[0].events[0].entity_id;
+        let mut batch = IntegratedRuntimeBatchV2::empty("despawn-orphaning-snapshot", orphaning.identity());
+        batch.entities.push(EntityCommandBatch {
+            schema: ENTITY_COMMAND_SCHEMA,
+            sequence: 2,
+            expected_revision: 1,
+            tick: 0,
+            commands: vec![EntityCommand::Despawn {
+                id: entity_id,
+                reason: DespawnReason::Admin,
+            }],
+        });
+        assert!(orphaning.commit(batch).accepted());
+        let orphaning_snapshot = orphaning.export_entity_authority_snapshot(2).unwrap();
+        let join_error = runtime
+            .import_entity_authority_snapshot(runtime.entities().revision(), &orphaning_snapshot)
+            .expect_err("the empty snapshot must not orphan a world-view player binding");
+        assert_eq!(join_error.code, "entity-snapshot-world-view");
+        assert_eq!(runtime.identity(), before, "the rejected join is atomic");
+        let views = domain_views_with_world_view_result(
+            &runtime,
+            Err(IntegratedRuntimeError::new("world-view-extraction", join_error.message)),
+        );
+        for index in [1_usize, 2, 3, 7] {
+            assert!(
+                views[index]
+                    .blockers
+                    .iter()
+                    .any(|blocker| blocker == "world-view-extraction-invariant-rejected"),
+                "domain {} did not fail closed",
+                views[index].domain
+            );
+            assert_ne!(views[index].status, DomainViewStatusV1::Complete);
+        }
+        assert!(views[1].rows.iter().all(|row| row.kind != 2));
+        assert!(views[2].rows.iter().all(|row| row.kind != 6));
+        assert!(views[3].rows.iter().all(|row| row.kind != 5));
+        assert!(views[7].rows.iter().all(|row| row.kind == 1));
+    }
+
+    #[test]
+    fn domain_view_wire_is_canonical_and_bounded() {
+        let rows = [domain_row(2, "z", 3), domain_row(1, "b", 2), domain_row(1, "a", 1)];
+        let encoded = encode_domain_view(DomainViewV1 {
+            domain: 8,
+            revision: 9,
+            status: DomainViewStatusV1::Complete,
+            rows: rows.into(),
+            blockers: Vec::new(),
+        });
+        let mut reader = ExtractionReader::new(&encoded);
+        assert_eq!(reader.u8(), 8);
+        assert_eq!(reader.u16(), DOMAIN_VIEW_SCHEMA_V1);
+        assert_eq!(reader.u8(), DomainViewStatusV1::Complete as u8);
+        assert_eq!(reader.u64(), 9);
+        assert_eq!((reader.u32(), reader.u32(), reader.u32(), reader.u32()), (3, 3, 0, 3));
+        assert_eq!(reader.u16(), 0);
+        let payload_length = usize::try_from(reader.u32()).unwrap();
+        reader.take(16);
+        let payload = reader.take(payload_length);
+        reader.finish();
+        let mut payload_reader = ExtractionReader::new(payload);
+        let mut actual = Vec::new();
+        for _ in 0..3 {
+            let kind = payload_reader.u16();
+            let key = payload_reader.string();
+            payload_reader.u64();
+            assert_eq!(payload_reader.u16(), 0);
+            actual.push((kind, key));
+        }
+        payload_reader.finish();
+        assert_eq!(actual, [(1, "a".into()), (1, "b".into()), (2, "z".into())]);
+
+        let bounded = encode_domain_view(DomainViewV1 {
+            domain: 3,
+            revision: 1,
+            status: DomainViewStatusV1::Complete,
+            rows: (0..=DOMAIN_VIEW_MAX_RECORDS_V1)
+                .map(|index| domain_row(1, format!("row:{index:05}"), index as u64))
+                .collect(),
+            blockers: Vec::new(),
+        });
+        let mut reader = ExtractionReader::new(&bounded);
+        assert_eq!(reader.u8(), 3);
+        assert_eq!(reader.u16(), DOMAIN_VIEW_SCHEMA_V1);
+        assert_eq!(reader.u8(), DomainViewStatusV1::Partial as u8);
+        assert_eq!(reader.u64(), 1);
+        assert_eq!(reader.u32(), (DOMAIN_VIEW_MAX_RECORDS_V1 + 1) as u32);
+        assert_eq!(reader.u32(), DOMAIN_VIEW_MAX_RECORDS_V1 as u32);
+        assert_eq!(reader.u32(), 1);
+        assert_eq!(reader.u32(), DOMAIN_VIEW_MAX_RECORDS_V1 as u32);
+        assert_eq!(reader.u16(), 1);
+        assert_eq!(reader.string(), "records-truncated-at-bounded-cursor");
+        assert!(usize::try_from(reader.u32()).unwrap() <= DOMAIN_VIEW_MAX_BYTES_V1);
     }
 }

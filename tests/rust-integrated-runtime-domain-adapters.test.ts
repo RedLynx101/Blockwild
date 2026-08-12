@@ -16,6 +16,7 @@ import type {
   RustIntegratedRuntimeIdentityV1,
   RustIntegratedRuntimeResponseV1,
 } from "../app/game/rust-integrated-runtime-contract.ts";
+import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import { RustIntegratedRuntimeServiceV1 } from "../app/game/rust-integrated-runtime-service.ts";
 
 const ZERO_HASH = "0".repeat(32);
@@ -73,6 +74,7 @@ test("network port keeps complete BWRN/BWNA packets opaque and idempotent", asyn
   await service.start({
     worldSeed: "fixture", universeId: "1", locationId: "surface", sessionId: "fixture",
     contentHash: ZERO_HASH, generatorHash: ZERO_HASH, waterBlockId: 7, directionalBlockIds: [], waterloggedBlockIds: [],
+    ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
   });
   const port = new RustIntegratedNetworkRuntimePortV1(service);
   const request = Uint8Array.from([0x42, 0x57, 0x52, 0x4e, 0x80, 0xff]);
@@ -117,6 +119,7 @@ test("network port awaits Rust command-lease release before resolving", async ()
   await service.start({
     worldSeed: "fixture", universeId: "1", locationId: "surface", sessionId: "fixture",
     contentHash: ZERO_HASH, generatorHash: ZERO_HASH, waterBlockId: 7, directionalBlockIds: [], waterloggedBlockIds: [],
+    ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
   });
   const port = new RustIntegratedNetworkRuntimePortV1(service);
   await port.releaseCommand("command:🌿");

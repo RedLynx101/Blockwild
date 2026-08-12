@@ -6,11 +6,11 @@ import type { RustWorldRuntimeHostConfigV1 } from "./rust-world-runtime-host";
 import type { RustWorldRuntimeManagedHostV1 } from "./rust-world-runtime-manager";
 import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow";
 
-export const RUST_MULTIPLAYER_RUNTIME_DESCRIPTOR_SCHEMA_V1 = 1 as const;
+export const RUST_MULTIPLAYER_RUNTIME_DESCRIPTOR_SCHEMA_V2 = 2 as const;
 
 const CANONICAL_HASH_PATTERN = /^[0-9a-f]{32}$/u;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_.-]{8,160}$/u;
-const DESCRIPTOR_KEYS = Object.freeze([
+const DESCRIPTOR_KEYS_V2 = Object.freeze([
   "schema",
   "worldSeed",
   "universeId",
@@ -18,11 +18,35 @@ const DESCRIPTOR_KEYS = Object.freeze([
   "runtimeSessionId",
   "generatorHash",
   "contentHash",
+  "terrainContentHash",
+  "generationOptionsJson",
   "descriptorHash",
 ] as const);
+const GENERATION_OPTION_KEYS = Object.freeze([
+  "biomeScale",
+  "caveFrequency",
+  "enabledFactions",
+  "largeTownFrequency",
+  "profile",
+  "resourceAbundance",
+  "roadCoverage",
+  "settlementClustering",
+  "settlementDensity",
+  "settlementPattern",
+  "structures",
+] as const);
+const GENERATION_FACTIONS = Object.freeze([
+  "hobbits",
+  "goblins",
+  "atlantians",
+  "sugarcourt",
+  "wood-elves",
+  "dwarves",
+] as const);
+const MAX_GENERATION_OPTIONS_UTF8_BYTES = 16 * 1024;
 
-export type RustMultiplayerRuntimeDescriptorV1 = Readonly<{
-  schema: typeof RUST_MULTIPLAYER_RUNTIME_DESCRIPTOR_SCHEMA_V1;
+export type RustMultiplayerRuntimeDescriptorV2 = Readonly<{
+  schema: typeof RUST_MULTIPLAYER_RUNTIME_DESCRIPTOR_SCHEMA_V2;
   worldSeed: string;
   universeId: string;
   locationId: string;
@@ -30,11 +54,15 @@ export type RustMultiplayerRuntimeDescriptorV1 = Readonly<{
   runtimeSessionId: string;
   generatorHash: string;
   contentHash: string;
+  /** Exact byte-affecting terrain registry fingerprint. */
+  terrainContentHash: string;
+  /** Canonical JSON containing every byte-affecting generation option. */
+  generationOptionsJson: string;
   descriptorHash: string;
 }>;
 
-export type RustMultiplayerRuntimeDescriptorSourceV1 = Readonly<Omit<
-  RustMultiplayerRuntimeDescriptorV1,
+export type RustMultiplayerRuntimeDescriptorSourceV2 = Readonly<Omit<
+  RustMultiplayerRuntimeDescriptorV2,
   "schema" | "descriptorHash"
 >>;
 
@@ -58,31 +86,33 @@ export type RustMultiplayerAuthorityInterestSourceV1 = (
  * caller must invoke shutdown on every terminal path, including validation or
  * signaling failure after the factory resolves.
  */
-export type RustMultiplayerRuntimeBindingV1 = Readonly<{
-  descriptor: RustMultiplayerRuntimeDescriptorV1;
+export type RustMultiplayerRuntimeBindingV2 = Readonly<{
+  descriptor: RustMultiplayerRuntimeDescriptorV2;
   authority: RustMultiplayerAuthorityV1;
   interest: RustMultiplayerAuthorityInterestV1;
   shutdown: () => Promise<unknown>;
 }>;
 
-export type RustMultiplayerGuestAuthorityFactoryInputV1 = Readonly<{
-  descriptor: RustMultiplayerRuntimeDescriptorV1;
+export type RustMultiplayerGuestAuthorityFactoryInputV2 = Readonly<{
+  descriptor: RustMultiplayerRuntimeDescriptorV2;
   signal: AbortSignal;
 }>;
 
-export type RustMultiplayerGuestAuthorityFactoryV1 = (
-  input: RustMultiplayerGuestAuthorityFactoryInputV1,
-) => Promise<RustMultiplayerRuntimeBindingV1>;
+export type RustMultiplayerGuestAuthorityFactoryV2 = (
+  input: RustMultiplayerGuestAuthorityFactoryInputV2,
+) => Promise<RustMultiplayerRuntimeBindingV2>;
 
 export type RustMultiplayerRuntimeManagerPortV1 = Readonly<{
   activate(config: RustWorldRuntimeHostConfigV1): Promise<RustWorldRuntimeManagedHostV1>;
   shutdown(): Promise<unknown>;
 }>;
 
-export type RustMultiplayerGuestRuntimeBootstrapOptionsV1 = Readonly<{
+export type RustMultiplayerGuestRuntimeBootstrapOptionsV2 = Readonly<{
   manager: RustMultiplayerRuntimeManagerPortV1;
   /** Local generator fingerprint. Offers naming another generator fail before startup. */
   generatorHash: string;
+  /** Local terrain corpus fingerprint. Offers naming another corpus fail before startup. */
+  terrainContentHash: string;
   waterBlockId: number;
   directionalBlockIds: readonly number[];
   waterloggedBlockIds: readonly number[];
@@ -133,51 +163,120 @@ function canonicalHash(value: unknown, label: string) {
   return value;
 }
 
-function descriptorHash(source: RustMultiplayerRuntimeDescriptorSourceV1) {
-  return new TypeScriptCanonicalHasher("blockwild-multiplayer-runtime-descriptor-v1")
-    .writeU16(RUST_MULTIPLAYER_RUNTIME_DESCRIPTOR_SCHEMA_V1)
+function canonicalGenerationOptionsJson(value: unknown) {
+  const generationOptionsJson = boundedUtf8(
+    value,
+    "generationOptionsJson",
+    MAX_GENERATION_OPTIONS_UTF8_BYTES,
+  );
+  if (/[\u0000-\u001f\u007f-\u009f]/u.test(generationOptionsJson)) {
+    throw new RustMultiplayerRuntimeBootstrapErrorV1(
+      "invalid-generation-options",
+      "generationOptionsJson contains control characters",
+    );
+  }
+  let parsed: unknown;
+  try { parsed = JSON.parse(generationOptionsJson); }
+  catch {
+    throw new RustMultiplayerRuntimeBootstrapErrorV1(
+      "invalid-generation-options",
+      "generationOptionsJson must be canonical JSON",
+    );
+  }
+  const options = record(parsed);
+  if (!options
+    || !exactKeys(options, GENERATION_OPTION_KEYS)
+    || JSON.stringify(Object.keys(options)) !== JSON.stringify(GENERATION_OPTION_KEYS)
+    || JSON.stringify(options) !== generationOptionsJson) {
+    throw new RustMultiplayerRuntimeBootstrapErrorV1(
+      "invalid-generation-options",
+      "generationOptionsJson must have the exact canonical terrain option shape and order",
+    );
+  }
+  const rounded = (candidate: unknown, minimum: number, maximum: number) => typeof candidate === "number"
+    && Number.isFinite(candidate)
+    && candidate >= minimum
+    && candidate <= maximum
+    && candidate === Math.round(candidate * 100) / 100;
+  const factions = options.enabledFactions;
+  if (!rounded(options.biomeScale, 0.25, 4)
+    || !rounded(options.caveFrequency, 0, 3)
+    || !rounded(options.resourceAbundance, 0.25, 4)
+    || !rounded(options.settlementDensity, 0, 3)
+    || (options.profile !== "legacy-v14" && options.profile !== "world-below-v15")
+    || (options.settlementPattern !== "legacy-scattered-v1" && options.settlementPattern !== "heartlands-v2")
+    || (options.settlementClustering !== "even" && options.settlementClustering !== "regional" && options.settlementClustering !== "strong")
+    || (options.roadCoverage !== "none" && options.roadCoverage !== "local" && options.roadCoverage !== "regional" && options.roadCoverage !== "dense")
+    || (options.largeTownFrequency !== "rare" && options.largeTownFrequency !== "balanced" && options.largeTownFrequency !== "frequent")
+    || typeof options.structures !== "boolean"
+    || !Array.isArray(factions)
+    || factions.some((faction, index) => {
+      if (typeof faction !== "string") return true;
+      const position = GENERATION_FACTIONS.indexOf(faction as typeof GENERATION_FACTIONS[number]);
+      const prior = index === 0
+        ? -1
+        : GENERATION_FACTIONS.indexOf(factions[index - 1] as typeof GENERATION_FACTIONS[number]);
+      return position <= prior;
+    })) {
+    throw new RustMultiplayerRuntimeBootstrapErrorV1(
+      "invalid-generation-options",
+      "generationOptionsJson contains unsupported or non-normalized terrain options",
+    );
+  }
+  return generationOptionsJson;
+}
+
+function descriptorHashV2(source: RustMultiplayerRuntimeDescriptorSourceV2) {
+  return new TypeScriptCanonicalHasher("blockwild-multiplayer-runtime-descriptor-v2")
+    .writeU16(RUST_MULTIPLAYER_RUNTIME_DESCRIPTOR_SCHEMA_V2)
     .writeString(source.worldSeed)
     .writeString(source.universeId)
     .writeString(source.locationId)
     .writeString(source.runtimeSessionId)
     .writeString(source.generatorHash)
     .writeString(source.contentHash)
+    .writeString(source.terrainContentHash)
+    .writeString(source.generationOptionsJson)
     .finishHex();
 }
 
-export function createRustMultiplayerRuntimeDescriptorV1(
-  source: RustMultiplayerRuntimeDescriptorSourceV1,
-): RustMultiplayerRuntimeDescriptorV1 {
-  const normalized: RustMultiplayerRuntimeDescriptorSourceV1 = Object.freeze({
+export function createRustMultiplayerRuntimeDescriptorV2(
+  source: RustMultiplayerRuntimeDescriptorSourceV2,
+): RustMultiplayerRuntimeDescriptorV2 {
+  const normalized: RustMultiplayerRuntimeDescriptorSourceV2 = Object.freeze({
     worldSeed: boundedUtf8(source.worldSeed, "worldSeed", 2_048),
     universeId: boundedUtf8(source.universeId, "universeId", 64),
     locationId: boundedUtf8(source.locationId, "locationId", 128),
     runtimeSessionId: runtimeSessionId(source.runtimeSessionId),
     generatorHash: canonicalHash(source.generatorHash, "generatorHash"),
     contentHash: canonicalHash(source.contentHash, "contentHash"),
+    terrainContentHash: canonicalHash(source.terrainContentHash, "terrainContentHash"),
+    generationOptionsJson: canonicalGenerationOptionsJson(source.generationOptionsJson),
   });
   return Object.freeze({
-    schema: RUST_MULTIPLAYER_RUNTIME_DESCRIPTOR_SCHEMA_V1,
+    schema: RUST_MULTIPLAYER_RUNTIME_DESCRIPTOR_SCHEMA_V2,
     ...normalized,
-    descriptorHash: descriptorHash(normalized),
+    descriptorHash: descriptorHashV2(normalized),
   });
 }
 
-export function parseRustMultiplayerRuntimeDescriptorV1(
+export function parseRustMultiplayerRuntimeDescriptorV2(
   value: unknown,
-): RustMultiplayerRuntimeDescriptorV1 {
+): RustMultiplayerRuntimeDescriptorV2 {
   const source = record(value);
-  if (!source || !exactKeys(source, DESCRIPTOR_KEYS)
-    || source.schema !== RUST_MULTIPLAYER_RUNTIME_DESCRIPTOR_SCHEMA_V1) {
+  if (!source || !exactKeys(source, DESCRIPTOR_KEYS_V2)
+    || source.schema !== RUST_MULTIPLAYER_RUNTIME_DESCRIPTOR_SCHEMA_V2) {
     throw new RustMultiplayerRuntimeBootstrapErrorV1("invalid-descriptor", "Rust multiplayer runtime descriptor has a non-canonical shape");
   }
-  const normalized = createRustMultiplayerRuntimeDescriptorV1({
+  const normalized = createRustMultiplayerRuntimeDescriptorV2({
     worldSeed: source.worldSeed as string,
     universeId: source.universeId as string,
     locationId: source.locationId as string,
     runtimeSessionId: source.runtimeSessionId as string,
     generatorHash: source.generatorHash as string,
     contentHash: source.contentHash as string,
+    terrainContentHash: source.terrainContentHash as string,
+    generationOptionsJson: source.generationOptionsJson as string,
   });
   if (source.descriptorHash !== normalized.descriptorHash) {
     throw new RustMultiplayerRuntimeBootstrapErrorV1("descriptor-hash", "Rust multiplayer runtime descriptor hash does not match its canonical fields");
@@ -185,23 +284,23 @@ export function parseRustMultiplayerRuntimeDescriptorV1(
   return normalized;
 }
 
-export function validateRustMultiplayerRuntimeDescriptorV1(
+export function validateRustMultiplayerRuntimeDescriptorV2(
   value: unknown,
-): value is RustMultiplayerRuntimeDescriptorV1 {
-  try { parseRustMultiplayerRuntimeDescriptorV1(value); return true; }
+): value is RustMultiplayerRuntimeDescriptorV2 {
+  try { parseRustMultiplayerRuntimeDescriptorV2(value); return true; }
   catch { return false; }
 }
 
-export function rustMultiplayerRuntimeDescriptorEqualsV1(
-  left: RustMultiplayerRuntimeDescriptorV1,
-  right: RustMultiplayerRuntimeDescriptorV1,
+export function rustMultiplayerRuntimeDescriptorEqualsV2(
+  left: RustMultiplayerRuntimeDescriptorV2,
+  right: RustMultiplayerRuntimeDescriptorV2,
 ) {
-  return DESCRIPTOR_KEYS.every((key) => left[key] === right[key]);
+  return DESCRIPTOR_KEYS_V2.every((key) => left[key] === right[key]);
 }
 
 function requireAuthorityAddress(
   authority: RustMultiplayerAuthorityV1,
-  descriptor: RustMultiplayerRuntimeDescriptorV1,
+  descriptor: RustMultiplayerRuntimeDescriptorV2,
 ) {
   let identity: ReturnType<RustMultiplayerAuthorityV1["currentIdentity"]>;
   try { identity = authority.currentIdentity(); }
@@ -217,12 +316,12 @@ function requireAuthorityAddress(
   }
 }
 
-export function canonicalizeRustMultiplayerRuntimeBindingV1(
-  value: RustMultiplayerRuntimeBindingV1,
-  expected?: RustMultiplayerRuntimeDescriptorV1,
-): RustMultiplayerRuntimeBindingV1 {
-  const descriptor = parseRustMultiplayerRuntimeDescriptorV1(value?.descriptor);
-  if (expected && !rustMultiplayerRuntimeDescriptorEqualsV1(descriptor, expected)) {
+export function canonicalizeRustMultiplayerRuntimeBindingV2(
+  value: RustMultiplayerRuntimeBindingV2,
+  expected?: RustMultiplayerRuntimeDescriptorV2,
+): RustMultiplayerRuntimeBindingV2 {
+  const descriptor = parseRustMultiplayerRuntimeDescriptorV2(value?.descriptor);
+  if (expected && !rustMultiplayerRuntimeDescriptorEqualsV2(descriptor, expected)) {
     throw new RustMultiplayerRuntimeBootstrapErrorV1("runtime-mismatch", "Started Rust runtime does not match the host's advertised descriptor");
   }
   if (!value.authority || value.authority.backend !== "rust-wasm-worker"
@@ -243,9 +342,9 @@ function requireReadyIdentity(
 }
 
 /** Builds the signal descriptor only from a fully attested managed host. */
-export function describeReadyRustMultiplayerRuntimeV1(
+export function describeReadyRustMultiplayerRuntimeV2(
   host: RustWorldRuntimeManagedHostV1,
-): RustMultiplayerRuntimeDescriptorV1 {
+): RustMultiplayerRuntimeDescriptorV2 {
   const diagnostics = host.diagnostics();
   if (diagnostics.state !== "ready" || !diagnostics.adapter?.authoritative || !diagnostics.adapter.contentReady) {
     throw new RustMultiplayerRuntimeBootstrapErrorV1("runtime-not-ready", "Rust world runtime is not authoritative and content-ready");
@@ -253,17 +352,21 @@ export function describeReadyRustMultiplayerRuntimeV1(
   requireReadyIdentity(diagnostics.identity, host.config);
   const contentHash = canonicalHash(diagnostics.contentHash, "contentHash");
   const generatorHash = canonicalHash(diagnostics.generatorHash, "generatorHash");
+  const terrainContentHash = canonicalHash(host.config.terrainContentHash, "terrainContentHash");
+  const generationOptionsJson = canonicalGenerationOptionsJson(host.config.generationOptionsJson);
   if (generatorHash !== host.config.generatorHash
     || diagnostics.adapter.contentManifestHash !== contentHash) {
     throw new RustMultiplayerRuntimeBootstrapErrorV1("fingerprint-mismatch", "Rust runtime attestation does not match its configured fingerprints");
   }
-  const descriptor = createRustMultiplayerRuntimeDescriptorV1({
+  const descriptor = createRustMultiplayerRuntimeDescriptorV2({
     worldSeed: host.config.worldSeed,
     universeId: host.config.universeId,
     locationId: host.config.locationId,
     runtimeSessionId: host.config.sessionId,
     generatorHash,
     contentHash,
+    terrainContentHash,
+    generationOptionsJson,
   });
   requireAuthorityAddress(host.multiplayerAuthority(), descriptor);
   return descriptor;
@@ -271,7 +374,7 @@ export function describeReadyRustMultiplayerRuntimeV1(
 
 function requireInterestAddress(
   interest: NetworkInterestSetV1,
-  descriptor: RustMultiplayerRuntimeDescriptorV1,
+  descriptor: RustMultiplayerRuntimeDescriptorV2,
 ) {
   for (const chunk of interest.chunks) {
     if (chunk.universeId !== descriptor.universeId || chunk.locationId !== descriptor.locationId) {
@@ -282,11 +385,11 @@ function requireInterestAddress(
 }
 
 /** Converts an already-ready managed host into a checked multiplayer binding. */
-export function bindReadyRustMultiplayerRuntimeV1(
+export function bindReadyRustMultiplayerRuntimeV2(
   host: RustWorldRuntimeManagedHostV1,
   interestSource: RustMultiplayerAuthorityInterestSourceV1,
-): RustMultiplayerRuntimeBindingV1 {
-  const descriptor = describeReadyRustMultiplayerRuntimeV1(host);
+): RustMultiplayerRuntimeBindingV2 {
+  const descriptor = describeReadyRustMultiplayerRuntimeV2(host);
   const authority = host.multiplayerAuthority();
   const interest: RustMultiplayerAuthorityInterestV1 = (input) => {
     if (input.sessionId !== descriptor.runtimeSessionId) {
@@ -294,7 +397,7 @@ export function bindReadyRustMultiplayerRuntimeV1(
     }
     return requireInterestAddress(host.authorityInterest(interestSource(input)), descriptor);
   };
-  return canonicalizeRustMultiplayerRuntimeBindingV1({
+  return canonicalizeRustMultiplayerRuntimeBindingV2({
     descriptor,
     authority,
     interest,
@@ -317,10 +420,11 @@ function normalizedBlockIds(values: readonly number[], label: string) {
  * The local content attestation and generator fingerprint must exactly match
  * the host offer before the returned authority can negotiate a handshake.
  */
-export function createRustMultiplayerGuestAuthorityFactoryV1(
-  options: RustMultiplayerGuestRuntimeBootstrapOptionsV1,
-): RustMultiplayerGuestAuthorityFactoryV1 {
+export function createRustMultiplayerGuestAuthorityFactoryV2(
+  options: RustMultiplayerGuestRuntimeBootstrapOptionsV2,
+): RustMultiplayerGuestAuthorityFactoryV2 {
   const generatorHash = canonicalHash(options.generatorHash, "generatorHash");
+  const terrainContentHash = canonicalHash(options.terrainContentHash, "terrainContentHash");
   if (!Number.isInteger(options.waterBlockId) || options.waterBlockId < 0 || options.waterBlockId > 0xffff) {
     throw new RustMultiplayerRuntimeBootstrapErrorV1("invalid-runtime-config", "waterBlockId is invalid");
   }
@@ -330,11 +434,14 @@ export function createRustMultiplayerGuestAuthorityFactoryV1(
   let active = false;
 
   return async ({ descriptor: offered, signal }) => {
-    const descriptor = parseRustMultiplayerRuntimeDescriptorV1(offered);
+    const descriptor = parseRustMultiplayerRuntimeDescriptorV2(offered);
     if (signal.aborted) throw new RustMultiplayerRuntimeBootstrapErrorV1("cancelled", "Rust guest runtime startup was cancelled");
     if (starting || active) throw new RustMultiplayerRuntimeBootstrapErrorV1("concurrent-start", "Rust guest runtime bootstrap already owns a runtime");
     if (descriptor.generatorHash !== generatorHash) {
       throw new RustMultiplayerRuntimeBootstrapErrorV1("generator-mismatch", "Host and guest generator fingerprints differ");
+    }
+    if (descriptor.terrainContentHash !== terrainContentHash) {
+      throw new RustMultiplayerRuntimeBootstrapErrorV1("terrain-content-mismatch", "Host and guest terrain corpus fingerprints differ");
     }
 
     starting = true;
@@ -346,19 +453,21 @@ export function createRustMultiplayerGuestAuthorityFactoryV1(
         locationId: descriptor.locationId,
         sessionId: descriptor.runtimeSessionId,
         generatorHash,
+        terrainContentHash,
+        generationOptionsJson: descriptor.generationOptionsJson,
         waterBlockId: options.waterBlockId,
         directionalBlockIds,
         waterloggedBlockIds,
       }));
       activated = true;
       if (signal.aborted) throw new RustMultiplayerRuntimeBootstrapErrorV1("cancelled", "Rust guest runtime startup was cancelled");
-      const ready = bindReadyRustMultiplayerRuntimeV1(host, options.interest);
-      if (!rustMultiplayerRuntimeDescriptorEqualsV1(ready.descriptor, descriptor)) {
+      const ready = bindReadyRustMultiplayerRuntimeV2(host, options.interest);
+      if (!rustMultiplayerRuntimeDescriptorEqualsV2(ready.descriptor, descriptor)) {
         throw new RustMultiplayerRuntimeBootstrapErrorV1("runtime-mismatch", "Guest Rust runtime attestation differs from the host offer");
       }
       active = true;
       let shutdown = false;
-      return canonicalizeRustMultiplayerRuntimeBindingV1({
+      return canonicalizeRustMultiplayerRuntimeBindingV2({
         descriptor: ready.descriptor,
         authority: ready.authority,
         interest: ready.interest,

@@ -1,0 +1,12 @@
+{
+  "generator": "blockwild-gameplay GameplayAuthority::encode_snapshot schema 2",
+  "schema": 2,
+  "bytes": 336,
+  "universe": "browser-fixture-é",
+  "location": "surface-世界-🌌",
+  "opaqueExtensionHex": "0080ff0709c3a9",
+  "stateHash": "16ae6049563f44f0c83a571e907d2503",
+  "replayHash": "e0d4bfb094faaa0e10517128aa5ce8fd",
+  "payloadHash": "fbbe18257f7dd5bd10287c462fc05768",
+  "snapshotHash": "624f976bdcef823410287c462fc05768"
+}

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { RustContentInstallReceiptV1, RustProductionContentBundle } from "../app/game/rust-integrated-runtime-content";
-import type { RustIntegratedRuntimeConfigV1, RustIntegratedRuntimeIdentityV1 } from "../app/game/rust-integrated-runtime-contract";
+import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1, type RustIntegratedRuntimeConfigV1, type RustIntegratedRuntimeIdentityV1 } from "../app/game/rust-integrated-runtime-contract";
 import type { RustMultiplayerAuthorityV1 } from "../app/game/rust-multiplayer-authority";
 import {
   RustWorldRuntimeHostV1,
@@ -104,7 +104,7 @@ test("one world host installs content before exposing its multiplayer authority"
   const adapter = new FakeAdapter();
   const host = new RustWorldRuntimeHostV1({
     worldSeed: "seed", universeId: "world:test", locationId: "surface", sessionId: "session",
-    generatorHash: GENERATOR, waterBlockId: 7, directionalBlockIds: [9, 2], waterloggedBlockIds: [18],
+    generatorHash: GENERATOR, ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1, waterBlockId: 7, directionalBlockIds: [9, 2], waterloggedBlockIds: [18],
   }, {
     artifactHash: ARTIFACT,
     contentFactory: bundle,
@@ -127,7 +127,7 @@ test("failed content attestation shuts down the sole worker and exposes no autho
   adapter.contentReady = false;
   const host = new RustWorldRuntimeHostV1({
     worldSeed: "seed", universeId: "world:test", locationId: "surface", sessionId: "session",
-    generatorHash: GENERATOR, waterBlockId: 7, directionalBlockIds: [], waterloggedBlockIds: [],
+    generatorHash: GENERATOR, ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1, waterBlockId: 7, directionalBlockIds: [], waterloggedBlockIds: [],
   }, { artifactHash: ARTIFACT, contentFactory: bundle, adapterFactory: () => adapter, authorityFactory: () => fakeAuthority(adapter.calls) });
   await assert.rejects(() => host.start(), /non-authoritative/u);
   assert.equal(host.diagnostics().state, "failed");
@@ -139,7 +139,7 @@ test("worker shutdown is attempted even when authority draining fails", async ()
   const adapter = new FakeAdapter();
   const host = new RustWorldRuntimeHostV1({
     worldSeed: "seed", universeId: "world:test", locationId: "surface", sessionId: "session",
-    generatorHash: GENERATOR, waterBlockId: 7, directionalBlockIds: [], waterloggedBlockIds: [],
+    generatorHash: GENERATOR, ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1, waterBlockId: 7, directionalBlockIds: [], waterloggedBlockIds: [],
   }, {
     artifactHash: ARTIFACT,
     contentFactory: bundle,

@@ -6,6 +6,7 @@ import type {
   RustIntegratedRuntimeRequestV1,
   RustIntegratedRuntimeResponseV1,
 } from "../app/game/rust-integrated-runtime-contract.ts";
+import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import {
   encodeRustIntegratedRuntimeResponseV1,
 } from "../app/game/rust-integrated-runtime-codec.ts";
@@ -43,6 +44,7 @@ function config(): RustIntegratedRuntimeConfigV1 {
     sessionId: "test",
     contentHash: ZERO_HASH,
     generatorHash: ZERO_HASH,
+    ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
     waterBlockId: 7,
     directionalBlockIds: Object.freeze([]),
     waterloggedBlockIds: Object.freeze([]),

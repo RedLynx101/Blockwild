@@ -21,6 +21,7 @@ export const RUST_DOMAIN_BUNDLE_MAX_BYTES_R10 = 8 * 1_048_576;
 export const RUST_AUDIO_MAX_EVENTS_R10 = 256;
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
+const encoder = new TextEncoder();
 const U64_MAX = BigInt("0xffffffffffffffff");
 
 export type RustDomainIdR10 = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
@@ -113,12 +114,31 @@ function frozenBytes(value: Uint8Array) {
   return Uint8Array.from(value);
 }
 
+/** Match Rust `str`/`String` ordering: lexicographic over canonical UTF-8. */
+export function compareCanonicalUtf8R10(left: string, right: string) {
+  if (left === right) return 0;
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const shared = Math.min(leftBytes.byteLength, rightBytes.byteLength);
+  for (let index = 0; index < shared; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] < rightBytes[index] ? -1 : 1;
+  }
+  return leftBytes.byteLength < rightBytes.byteLength ? -1 : 1;
+}
+
 class Reader {
   private offset = 0;
 
   constructor(private readonly source: Uint8Array) {}
 
   get remaining() { return this.source.byteLength - this.offset; }
+  get position() { return this.offset; }
+
+  span(start: number, end: number) {
+    invariant(Number.isSafeInteger(start) && Number.isSafeInteger(end) && start >= 0 && start <= end && end <= this.source.byteLength,
+      "R10 extraction span is outside its source");
+    return this.source.subarray(start, end);
+  }
 
   take(length: number) {
     invariant(Number.isSafeInteger(length) && length >= 0 && length <= this.remaining, "R10 extraction is truncated");
@@ -164,19 +184,29 @@ function decodeDomainRows(payload: Uint8Array, selected: number) {
     const kind = reader.u16();
     const key = reader.string();
     invariant(key.length > 0, "R10 domain row key is empty");
-    if (previous) invariant(kind > previous[0] || kind === previous[0] && key > previous[1], "R10 domain rows are not canonical and unique");
+    if (previous) invariant(kind > previous[0] || kind === previous[0] && compareCanonicalUtf8R10(key, previous[1]) > 0,
+      "R10 domain rows are not canonical and unique");
     previous = [kind, key];
     const revision = reader.u64();
     const fieldCount = reader.u16();
     invariant(fieldCount <= RUST_DOMAIN_VIEW_MAX_FIELDS_R10, "R10 domain row field cap exceeded");
+    const revisionHasher = new TypeScriptCanonicalHasher("blockwild.r10.domain-row-revision.v1")
+      .writeU16(kind).writeString(key).writeU16(fieldCount);
     const fields: Array<readonly [string, RustDomainValueR10]> = [];
     let previousField: string | null = null;
     for (let fieldIndex = 0; fieldIndex < fieldCount; fieldIndex += 1) {
       const field = reader.string();
-      invariant(field.length > 0 && (previousField === null || field > previousField), "R10 row fields are not canonical and unique");
+      invariant(field.length > 0 && (previousField === null || compareCanonicalUtf8R10(field, previousField) > 0),
+        "R10 row fields are not canonical and unique");
       previousField = field;
-      fields.push(Object.freeze([field, readDomainValue(reader)] as const));
+      const valueStart = reader.position;
+      const value = readDomainValue(reader);
+      revisionHasher.writeString(field).writeBytes(reader.span(valueStart, reader.position));
+      fields.push(Object.freeze([field, value] as const));
     }
+    const revisionBytes = revisionHasher.finish();
+    const expectedRevision = new DataView(revisionBytes.buffer, revisionBytes.byteOffset, 8).getBigUint64(0, true);
+    invariant(revision === expectedRevision, "R10 domain row revision does not attest its complete payload");
     rows.push(Object.freeze({ kind, key, revision, fields: Object.freeze(fields) }));
   }
   reader.finish();
@@ -216,7 +246,8 @@ export function decodeRustDomainBundleR10(value: Uint8Array | ArrayBuffer): Rust
     const blockers: string[] = [];
     for (let blockerIndex = 0; blockerIndex < blockerCount; blockerIndex += 1) {
       const blocker = reader.string(512);
-      invariant(blocker.length > 0 && (blockers.length === 0 || blocker > blockers.at(-1)!), "R10 blockers are not canonical and unique");
+      invariant(blocker.length > 0 && (blockers.length === 0 || compareCanonicalUtf8R10(blocker, blockers.at(-1)!) > 0),
+        "R10 blockers are not canonical and unique");
       blockers.push(blocker);
       promotionBlockers.push(`domain-${domain}:${blocker}`);
     }
@@ -251,7 +282,10 @@ export function decodeRustDomainBundleR10(value: Uint8Array | ArrayBuffer): Rust
     contentManifestHash,
     contentReady,
     views: Object.freeze(views),
-    promotion: Object.freeze({ ready: promotionBlockers.length === 0, blockers: Object.freeze(promotionBlockers.sort()) }),
+    promotion: Object.freeze({
+      ready: promotionBlockers.length === 0,
+      blockers: Object.freeze(promotionBlockers.sort(compareCanonicalUtf8R10)),
+    }),
   });
 }
 

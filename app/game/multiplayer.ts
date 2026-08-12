@@ -40,14 +40,14 @@ import type {
   RustMultiplayerAuthorityV1,
 } from "./rust-multiplayer-authority";
 import {
-  canonicalizeRustMultiplayerRuntimeBindingV1,
-  parseRustMultiplayerRuntimeDescriptorV1,
-  rustMultiplayerRuntimeDescriptorEqualsV1,
-  validateRustMultiplayerRuntimeDescriptorV1,
+  canonicalizeRustMultiplayerRuntimeBindingV2,
+  parseRustMultiplayerRuntimeDescriptorV2,
+  rustMultiplayerRuntimeDescriptorEqualsV2,
+  validateRustMultiplayerRuntimeDescriptorV2,
   type RustMultiplayerAuthorityInterestV1,
-  type RustMultiplayerGuestAuthorityFactoryV1,
-  type RustMultiplayerRuntimeBindingV1,
-  type RustMultiplayerRuntimeDescriptorV1,
+  type RustMultiplayerGuestAuthorityFactoryV2,
+  type RustMultiplayerRuntimeBindingV2,
+  type RustMultiplayerRuntimeDescriptorV2,
 } from "./rust-multiplayer-runtime-bootstrap";
 import type { RustIntegratedNetworkDeltaBuildRequestV1 } from "./rust-integrated-runtime-network-lifecycle";
 import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow";
@@ -753,9 +753,9 @@ export type MultiplayerOptions = {
   rustAuthority?: RustMultiplayerAuthorityV1;
   authorityInterest?: RustMultiplayerAuthorityInterestV1;
   /** Required beside a ready authority so offers attest the exact active runtime. */
-  rustRuntimeDescriptor?: RustMultiplayerRuntimeDescriptorV1;
+  rustRuntimeDescriptor?: RustMultiplayerRuntimeDescriptorV2;
   /** Guest-only path: starts and attests the offered runtime before negotiation. */
-  guestAuthorityFactory?: RustMultiplayerGuestAuthorityFactoryV1;
+  guestAuthorityFactory?: RustMultiplayerGuestAuthorityFactoryV2;
   authorityTimeoutMs?: number;
   authorityGrantLifetimeMs?: number;
   onEvent?: MultiplayerListener;
@@ -772,7 +772,7 @@ type OfferSignal = {
   identity: PeerIdentity;
   description: RTCSessionDescriptionInit;
   authority?: AuthoritySignalV1;
-  runtime?: RustMultiplayerRuntimeDescriptorV1;
+  runtime?: RustMultiplayerRuntimeDescriptorV2;
 };
 
 type AnswerSignal = {
@@ -784,7 +784,7 @@ type AnswerSignal = {
   identity: PeerIdentity;
   description: RTCSessionDescriptionInit;
   authority?: AuthoritySignalV1;
-  runtime?: RustMultiplayerRuntimeDescriptorV1;
+  runtime?: RustMultiplayerRuntimeDescriptorV2;
 };
 
 export type ManualSignal = OfferSignal | AnswerSignal;
@@ -1776,7 +1776,7 @@ export function validateManualSignal(value: unknown): value is ManualSignal {
     || (value.authority !== undefined && (!isRecord(value.authority) || value.authority.schema !== 1
       || typeof value.authority.packet !== "string" || value.authority.packet.length < 1 || value.authority.packet.length > 32 * 1024
       || !/^[A-Za-z0-9_-]+$/u.test(value.authority.packet)))
-    || (value.runtime !== undefined && !validateRustMultiplayerRuntimeDescriptorV1(value.runtime))
+    || (value.runtime !== undefined && !validateRustMultiplayerRuntimeDescriptorV2(value.runtime))
     || ((value.authority === undefined) !== (value.runtime === undefined))
     || (value.runtime !== undefined && value.runtime.runtimeSessionId !== value.sessionId)) return false;
   return validateDescription(value.description, value.kind);
@@ -1904,8 +1904,8 @@ export class MultiplayerSession {
   private readonly artificialLatencyMs: { min: number; max: number } | null;
   private rustAuthority: RustMultiplayerAuthorityV1 | null;
   private authorityInterest: RustMultiplayerAuthorityInterestV1 | null;
-  private rustRuntimeDescriptor: RustMultiplayerRuntimeDescriptorV1 | null;
-  private readonly guestAuthorityFactory: RustMultiplayerGuestAuthorityFactoryV1 | null;
+  private rustRuntimeDescriptor: RustMultiplayerRuntimeDescriptorV2 | null;
+  private readonly guestAuthorityFactory: RustMultiplayerGuestAuthorityFactoryV2 | null;
   private readonly preboundSessionId: string | null;
   private readonly authorityTimeoutMs: number;
   private readonly authorityGrantLifetimeMs: number;
@@ -1966,9 +1966,9 @@ export class MultiplayerSession {
         throw new MultiplayerProtocolError("Rust multiplayer requires either one ready authority binding or one guest authority factory");
       }
       if (hasReadyAuthority) {
-        let binding: RustMultiplayerRuntimeBindingV1;
+        let binding: RustMultiplayerRuntimeBindingV2;
         try {
-          binding = canonicalizeRustMultiplayerRuntimeBindingV1({
+          binding = canonicalizeRustMultiplayerRuntimeBindingV2({
             descriptor: options.rustRuntimeDescriptor!,
             authority: options.rustAuthority!,
             interest: options.authorityInterest!,
@@ -2041,12 +2041,12 @@ export class MultiplayerSession {
     return createNetworkInterestSetV1(this.authorityInterest({ sessionId: this.sessionId, local: this.identity, peer, role }));
   }
 
-  private checkedRuntimeBinding(expected?: RustMultiplayerRuntimeDescriptorV1) {
+  private checkedRuntimeBinding(expected?: RustMultiplayerRuntimeDescriptorV2) {
     if (!this.rustAuthority || !this.authorityInterest || !this.rustRuntimeDescriptor) {
       throw new MultiplayerProtocolError("Rust multiplayer runtime is not ready");
     }
     try {
-      return canonicalizeRustMultiplayerRuntimeBindingV1({
+      return canonicalizeRustMultiplayerRuntimeBindingV2({
         descriptor: this.rustRuntimeDescriptor,
         authority: this.rustAuthority,
         interest: this.authorityInterest,
@@ -2057,7 +2057,7 @@ export class MultiplayerSession {
     }
   }
 
-  private async shutdownUnadoptedGuestRuntime(binding: RustMultiplayerRuntimeBindingV1) {
+  private async shutdownUnadoptedGuestRuntime(binding: RustMultiplayerRuntimeBindingV2) {
     if (!binding || typeof binding.shutdown !== "function") return;
     const operation = Promise.resolve().then(() => binding.shutdown());
     this.trackAuthority(operation);
@@ -2065,7 +2065,7 @@ export class MultiplayerSession {
   }
 
   private async acquireGuestRuntime(
-    descriptor: RustMultiplayerRuntimeDescriptorV1,
+    descriptor: RustMultiplayerRuntimeDescriptorV2,
     controller: AbortController,
     generation: number,
   ) {
@@ -2077,8 +2077,8 @@ export class MultiplayerSession {
       await this.shutdownUnadoptedGuestRuntime(created);
       throw new MultiplayerOperationCancelledError("Guest runtime startup was cancelled because the session changed");
     }
-    let binding: RustMultiplayerRuntimeBindingV1;
-    try { binding = canonicalizeRustMultiplayerRuntimeBindingV1(created, descriptor); }
+    let binding: RustMultiplayerRuntimeBindingV2;
+    try { binding = canonicalizeRustMultiplayerRuntimeBindingV2(created, descriptor); }
     catch (error) {
       await this.shutdownUnadoptedGuestRuntime(created);
       throw new MultiplayerProtocolError(error instanceof Error ? error.message : "Guest Rust runtime binding is invalid");
@@ -2437,12 +2437,12 @@ export class MultiplayerSession {
     const signal = decodeInviteCode(inviteCode);
     if (signal.kind !== "offer") throw new MultiplayerProtocolError("Expected a host offer code");
     if (signal.identity.id === this.identity.id) throw new MultiplayerProtocolError("Cannot join your own multiplayer invite");
-    let runtime: RustMultiplayerRuntimeDescriptorV1 | null = null;
+    let runtime: RustMultiplayerRuntimeDescriptorV2 | null = null;
     if (this.authorityMode === "rust-authoritative") {
       if (!signal.authority || !signal.runtime) {
         throw new MultiplayerProtocolError("Host invite is missing its required Rust authority handshake or runtime descriptor");
       }
-      try { runtime = parseRustMultiplayerRuntimeDescriptorV1(signal.runtime); }
+      try { runtime = parseRustMultiplayerRuntimeDescriptorV2(signal.runtime); }
       catch (error) { throw new MultiplayerProtocolError(error instanceof Error ? error.message : "Host runtime descriptor is invalid"); }
       if (runtime.runtimeSessionId !== signal.sessionId) throw new MultiplayerProtocolError("Host runtime and WebRTC session IDs differ");
       if (this.preboundSessionId && this.preboundSessionId !== signal.sessionId) {
@@ -2545,11 +2545,11 @@ export class MultiplayerSession {
       if (!signal.authority || !signal.runtime) {
         throw new MultiplayerProtocolError("Guest answer is missing its Rust authority handshake or runtime descriptor");
       }
-      let runtime: RustMultiplayerRuntimeDescriptorV1;
-      try { runtime = parseRustMultiplayerRuntimeDescriptorV1(signal.runtime); }
+      let runtime: RustMultiplayerRuntimeDescriptorV2;
+      try { runtime = parseRustMultiplayerRuntimeDescriptorV2(signal.runtime); }
       catch (error) { throw new MultiplayerProtocolError(error instanceof Error ? error.message : "Guest runtime descriptor is invalid"); }
       const expected = this.checkedRuntimeBinding().descriptor;
-      if (!rustMultiplayerRuntimeDescriptorEqualsV1(runtime, expected)) {
+      if (!rustMultiplayerRuntimeDescriptorEqualsV2(runtime, expected)) {
         throw new MultiplayerProtocolError("Guest answer attests a different Rust runtime");
       }
     } else if (signal.authority || signal.runtime) {

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  compareCanonicalUtf8R10,
   decodeRustAudioExtractionR10,
   decodeRustDomainBundleR10,
   decodeRustRuntimeDiagnosticsR10,
@@ -15,6 +16,10 @@ import type { RustIntegratedRuntimeExtractionV1 } from "../app/game/rust-integra
 
 const encoder = new TextEncoder();
 const GOLDEN = readFileSync(new URL("./fixtures/rust-engine/r10-authoritative-extraction/domain-row-v1.hex", import.meta.url), "utf8").trim();
+const BOUND_WORLD_VIEW_BWX0 = readFileSync(
+  new URL("./fixtures/rust-engine/r10-authoritative-extraction/bound-world-view-bwx0-v1.hex", import.meta.url),
+  "utf8",
+).trim();
 
 class Writer {
   readonly bytes: number[] = [];
@@ -28,28 +33,45 @@ class Writer {
   finish() { return Uint8Array.from(this.bytes); }
 }
 
-function domainPayload() {
-  const writer = new Writer();
-  writer.u16(7).string("golden").u64(9).u16(7)
-    .string("bool").u8(0).u8(1)
-    .string("bytes").u8(6).u32(3).raw([0, 1, 0x80])
-    .string("f64").u8(3).f64(1.5)
-    .string("hash").u8(5).raw(Uint8Array.from({ length: 16 }, (_, index) => index))
-    .string("i64").u8(2).u64(BigInt.asUintN(64, BigInt(-2)))
-    .string("string").u8(4).string("é")
-    .string("u64").u8(1).u64(BigInt("0x0102030405060708"));
+type EncodedDomainField = readonly [name: string, value: Uint8Array];
+
+function domainRow(kind: number, key: string, fields: readonly EncodedDomainField[], sourceRevision = BigInt(0)) {
+  void sourceRevision;
+  const revisionHasher = new TypeScriptCanonicalHasher("blockwild.r10.domain-row-revision.v1")
+    .writeU16(kind).writeString(key).writeU16(fields.length);
+  for (const [name, value] of fields) revisionHasher.writeString(name).writeBytes(value);
+  const revisionBytes = revisionHasher.finish();
+  const revision = new DataView(revisionBytes.buffer, revisionBytes.byteOffset, 8).getBigUint64(0, true);
+  const writer = new Writer().u16(kind).string(key).u64(revision).u16(fields.length);
+  for (const [name, value] of fields) writer.string(name).raw(value);
   return writer.finish();
 }
 
-function domainBundle(payload = domainPayload()) {
+function domainPayload(lastU64 = BigInt("0x0102030405060708")) {
+  return domainRow(7, "golden", [
+    ["bool", new Writer().u8(0).u8(1).finish()],
+    ["bytes", new Writer().u8(6).u32(3).raw([0, 1, 0x80]).finish()],
+    ["f64", new Writer().u8(3).f64(1.5).finish()],
+    ["hash", new Writer().u8(5).raw(Uint8Array.from({ length: 16 }, (_, index) => index)).finish()],
+    ["i64", new Writer().u8(2).u64(BigInt.asUintN(64, BigInt(-2))).finish()],
+    ["string", new Writer().u8(4).string("é").finish()],
+    ["u64", new Writer().u8(1).u64(lastU64).finish()],
+  ]);
+}
+
+function domainBundle(
+  payload = domainPayload(),
+  domainOneRows = 1,
+  domainEightBlockers: readonly string[] = ["celestial-sky-state-not-authoritative"],
+) {
   const writer = new Writer();
   writer.raw(encoder.encode("BWX0")).u16(1).u64(17).u64(11)
     .raw(Uint8Array.from({ length: 16 }, () => 0x11))
     .raw(Uint8Array.from({ length: 16 }, () => 0x22)).u8(1).u16(8);
   for (let domain = 1; domain <= 8; domain += 1) {
-    const blockers = domain === 8 ? ["celestial-sky-state-not-authoritative"] : [];
+    const blockers = domain === 8 ? domainEightBlockers : [];
     const body = domain === 1 ? payload : new Uint8Array();
-    const total = domain === 1 ? 1 : 0;
+    const total = domain === 1 ? domainOneRows : 0;
     const status = domain === 8 ? 2 : 0;
     const hash = new TypeScriptCanonicalHasher("blockwild.r10.domain-view-payload.v1").writeBytes(body).finish();
     writer.u8(domain).u16(1).u8(status).u64(domain).u32(total).u32(total).u32(0).u32(total).u16(blockers.length);
@@ -69,6 +91,66 @@ test("R10 domain row has exact native/TypeScript byte parity", () => {
   assert.equal(decoded.views[7].status, "absent");
   assert.deepEqual(decoded.promotion.blockers, ["domain-8:celestial-sky-state-not-authoritative"]);
   assert.equal(decoded.promotion.ready, false);
+});
+
+test("Rust-produced bound-player BWX0 decodes end to end in TypeScript", () => {
+  const decoded = decodeRustDomainBundleR10(Uint8Array.from(Buffer.from(BOUND_WORLD_VIEW_BWX0, "hex")));
+  assert.equal(decoded.views.length, 8);
+  const binding = decoded.views[1].rows.find((row) => row.kind === 2);
+  assert.ok(binding);
+  const fields = new Map(binding.fields);
+  assert.equal(fields.get("playerId"), BigInt("12884901895"));
+  assert.match(String(fields.get("inventoryContainer")), /^container-key-v1\/[0-9a-f]+$/u);
+  assert.match(String(fields.get("equipmentContainer")), /^container-key-v1\/[0-9a-f]+$/u);
+  assert.notEqual(fields.get("inventoryContainer"), fields.get("equipmentContainer"));
+  assert.equal(decoded.views[2].status, "complete");
+  assert.equal(decoded.views[7].status, "complete");
+  assert.equal(decoded.views[7].rows.find((row) => row.kind === 4)?.fields.find(([name]) => name === "bodyCount")?.[1], BigInt(0));
+  assert.equal(decoded.promotion.ready, false, "remaining presentation blockers stay explicit");
+});
+
+test("R10 canonical text order is Rust UTF-8 byte order for BMP and non-BMP values", () => {
+  const bmp = "\u{e000}";
+  const nonBmp = "\u{1f600}";
+  assert.equal(bmp > nonBmp, true, "the golden must distinguish JavaScript UTF-16 order");
+  assert.equal(compareCanonicalUtf8R10(bmp, nonBmp), -1);
+
+  const orderedFields: readonly EncodedDomainField[] = [
+    [bmp, new Writer().u8(4).string("bmp").finish()],
+    [nonBmp, new Writer().u8(4).string("non-bmp").finish()],
+  ];
+  const orderedRows = new Writer()
+    .raw(domainRow(1, bmp, orderedFields))
+    .raw(domainRow(1, nonBmp, [])).finish();
+  const decoded = decodeRustDomainBundleR10(domainBundle(orderedRows, 2, [bmp, nonBmp]));
+  assert.deepEqual(decoded.views[0].rows.map((row) => row.key), [bmp, nonBmp]);
+  assert.deepEqual(decoded.views[0].rows[0].fields.map(([name]) => name), [bmp, nonBmp]);
+  assert.deepEqual(decoded.views[7].blockers, [bmp, nonBmp]);
+
+  const utf16OrderedRows = new Writer()
+    .raw(domainRow(1, nonBmp, []))
+    .raw(domainRow(1, bmp, [])).finish();
+  assert.throws(
+    () => decodeRustDomainBundleR10(domainBundle(utf16OrderedRows, 2, [bmp, nonBmp])),
+    /rows are not canonical/u,
+  );
+  assert.throws(
+    () => decodeRustDomainBundleR10(domainBundle(orderedRows, 2, [nonBmp, bmp])),
+    /blockers are not canonical/u,
+  );
+});
+
+test("R10 row revision attests every encoded field byte", () => {
+  const forged = domainPayload();
+  forged[forged.length - 1] ^= 1;
+  assert.throws(
+    () => decodeRustDomainBundleR10(domainBundle(forged)),
+    /revision does not attest its complete payload/u,
+  );
+});
+
+test("R10 row revision remains stable when an unused source counter changes", () => {
+  assert.deepEqual(domainRow(1, "semantic", [], BigInt(1)), domainRow(1, "semantic", [], BigInt(9)));
 });
 
 test("R10 domain decoder rejects corruption, order, counts, and forged hashes", () => {
@@ -158,8 +240,7 @@ test("R10 scene composer installs domain metadata atomically and rejects diverge
   const revision = composer.authoritativeMetadata().revision;
   assert.equal(composer.submitRuntimeExtraction(first, context), true);
   assert.equal(composer.authoritativeMetadata().revision, revision, "exact replay is idempotent");
-  const changedPayload = domainPayload();
-  changedPayload[changedPayload.length - 1] ^= 1;
+  const changedPayload = domainPayload(BigInt("0x0102030405060709"));
   assert.throws(() => composer.submitRuntimeExtraction(extraction(domainBundle(changedPayload)), context), /stale authoritative/);
   assert.equal(composer.authoritativeMetadata().revision, revision, "divergent replay cannot partially install metadata");
 });

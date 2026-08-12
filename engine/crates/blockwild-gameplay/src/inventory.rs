@@ -4,6 +4,12 @@ use blockwild_types::{CanonicalHash, CanonicalHasher};
 
 use crate::{MAX_ITEM_STACK, Rejection, RejectionCode, ResourceDelta, validate_id, write_option_str, write_option_u64};
 
+pub const PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1: usize = 9;
+pub const MAX_ITEM_INSTANCE_METADATA_BYTES_V1: usize = 64 * 1024;
+pub const MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1: usize = 64 * 1024;
+pub const MAX_PLAYER_INVENTORY_IMPORT_METADATA_BYTES_V1: usize = 256 * 1024;
+pub const INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG: u16 = 6;
+
 pub type ItemCode = u32;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -293,6 +299,86 @@ pub struct CreatePlayerCustodyCommand {
     pub back_slot: Option<u16>,
 }
 
+/// An immutable, content-addressed item-instance descriptor. Unlike the
+/// production content blob store this table does not use reference counts:
+/// inventory custody remains represented by [`ItemStack`], while these bytes
+/// are a durable lookup record for non-zero stack metadata hashes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemInstanceMetadataV1 {
+    pub hash: CanonicalHash,
+    pub type_id: String,
+    pub schema_id: String,
+    pub schema_version: u16,
+    pub content_version: u32,
+    pub canonical_json_bytes: Vec<u8>,
+    pub unknown_extension_bytes: Vec<u8>,
+}
+
+impl ItemInstanceMetadataV1 {
+    #[must_use]
+    pub fn calculate_hash(&self) -> CanonicalHash {
+        let mut hasher = CanonicalHasher::new("blockwild.gameplay.item-instance-metadata.v1");
+        hasher.write_u16(1);
+        hasher.write_str(&self.type_id);
+        hasher.write_str(&self.schema_id);
+        hasher.write_u16(self.schema_version);
+        hasher.write_u32(self.content_version);
+        hasher.write_bytes(&self.canonical_json_bytes);
+        hasher.write_bytes(&self.unknown_extension_bytes);
+        hasher.finish()
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), Rejection> {
+        validate_id("item metadata type", &self.type_id)?;
+        validate_id("item metadata schema", &self.schema_id)?;
+        if self.schema_version == 0 {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "item metadata schema version must be non-zero",
+            ));
+        }
+        if self.canonical_json_bytes.len() > MAX_ITEM_INSTANCE_METADATA_BYTES_V1
+            || self.unknown_extension_bytes.len() > MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1
+        {
+            return Err(Rejection::new(
+                RejectionCode::Capacity,
+                "item metadata descriptor exceeds its byte bound",
+            ));
+        }
+        crate::content_runtime::validate_canonical_json_bytes_v1(&self.canonical_json_bytes).map_err(|_| {
+            Rejection::new(
+                RejectionCode::InvalidCommand,
+                "item metadata bytes are not canonical JSON V1",
+            )
+        })?;
+        if self.hash == CanonicalHash::default() || self.hash != self.calculate_hash() {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "item metadata hash does not match its immutable descriptor",
+            ));
+        }
+        Ok(())
+    }
+
+    fn hash_into(&self, hasher: &mut CanonicalHasher) {
+        hasher.write_bytes(self.hash.as_bytes());
+        hasher.write_str(&self.type_id);
+        hasher.write_str(&self.schema_id);
+        hasher.write_u16(self.schema_version);
+        hasher.write_u32(self.content_version);
+        hasher.write_bytes(&self.canonical_json_bytes);
+        hasher.write_bytes(&self.unknown_extension_bytes);
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportPlayerInventoryV1 {
+    pub inventory: ContainerKey,
+    pub expected_revision: u64,
+    pub slots: Vec<Option<ItemStack>>,
+    pub metadata: Vec<ItemInstanceMetadataV1>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InventoryCommand {
     Transfer(TransferCommand),
@@ -301,6 +387,7 @@ pub enum InventoryCommand {
     CreateDropCustody(CreateDropCustodyCommand),
     RemoveEmptyDropCustody(RemoveEmptyDropCustodyCommand),
     CreatePlayerCustody(CreatePlayerCustodyCommand),
+    ImportPlayerInventoryV1(ImportPlayerInventoryV1),
 }
 
 impl InventoryCommand {
@@ -373,6 +460,25 @@ impl InventoryCommand {
                 hasher.write_u16(command.equipment_slots);
                 write_option_u64(hasher, command.back_slot.map(u64::from));
             }
+            Self::ImportPlayerInventoryV1(command) => {
+                hasher.write_u16(INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG);
+                command.inventory.hash_into(hasher);
+                hasher.write_u64(command.expected_revision);
+                hasher.write_u64(command.slots.len() as u64);
+                for slot in &command.slots {
+                    match slot {
+                        Some(stack) => {
+                            hasher.write_u16(1);
+                            stack.hash_into(hasher);
+                        }
+                        None => hasher.write_u16(0),
+                    }
+                }
+                hasher.write_u64(command.metadata.len() as u64);
+                for metadata in &command.metadata {
+                    metadata.hash_into(hasher);
+                }
+            }
         }
     }
 }
@@ -383,6 +489,7 @@ pub struct InventoryState {
     pub containers: BTreeMap<ContainerKey, Container>,
     pub recipes: BTreeMap<String, Recipe>,
     pub furnaces: BTreeMap<String, FurnaceState>,
+    pub item_instance_metadata: BTreeMap<CanonicalHash, ItemInstanceMetadataV1>,
 }
 
 impl InventoryState {
@@ -534,6 +641,143 @@ impl InventoryState {
         self.insert_container(inventory)?;
         self.insert_container(equipment)?;
         Ok(Vec::new())
+    }
+
+    /// Import the exact legacy nine-slot player inventory once. The authority
+    /// already applies commands to a cloned [`GameplayState`], and this method
+    /// stages again so it is also atomic when used in focused unit tests.
+    pub fn import_player_inventory_v1(
+        &mut self,
+        command: &ImportPlayerInventoryV1,
+    ) -> Result<Vec<ResourceDelta>, Rejection> {
+        command.inventory.validate()?;
+        if command.inventory.kind != ContainerKind::Player || command.inventory.owner_id.is_none() {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "player inventory import requires an owned player container",
+            ));
+        }
+        if command.expected_revision != 0 || command.slots.len() != PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1 {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "player inventory import requires revision zero and exactly nine slots",
+            ));
+        }
+        if command.metadata.len() > PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1 {
+            return Err(Rejection::new(
+                RejectionCode::Capacity,
+                "player inventory import metadata exceeds the slot bound",
+            ));
+        }
+        let metadata_bytes = command.metadata.iter().try_fold(0_usize, |total, metadata| {
+            total
+                .checked_add(metadata.canonical_json_bytes.len())
+                .and_then(|value| value.checked_add(metadata.unknown_extension_bytes.len()))
+        });
+        if metadata_bytes.is_none_or(|bytes| bytes > MAX_PLAYER_INVENTORY_IMPORT_METADATA_BYTES_V1) {
+            return Err(Rejection::new(
+                RejectionCode::Capacity,
+                "player inventory import metadata exceeds the total byte bound",
+            ));
+        }
+
+        let target = self
+            .containers
+            .get(&command.inventory)
+            .ok_or_else(|| Rejection::new(RejectionCode::InvalidTarget, "player inventory does not exist"))?;
+        if target.revision != command.expected_revision {
+            return Err(Rejection::new(
+                RejectionCode::StaleRevision,
+                "player inventory revision is not pristine",
+            ));
+        }
+        if target.slots.len() != PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1
+            || target.equipment_tags.len() != PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1
+            || target.equipment_tags.iter().any(Option::is_some)
+        {
+            return Err(Rejection::new(
+                RejectionCode::InvalidTarget,
+                "player inventory target is not an ordinary nine-slot custody",
+            ));
+        }
+        if target.slots.iter().any(Option::is_some) {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "nonempty player inventory cannot be imported",
+            ));
+        }
+
+        let mut supplied_metadata = BTreeMap::new();
+        for metadata in &command.metadata {
+            metadata.validate()?;
+            if supplied_metadata.insert(metadata.hash, metadata).is_some() {
+                return Err(Rejection::new(
+                    RejectionCode::Conflict,
+                    "player inventory import repeats a metadata descriptor",
+                ));
+            }
+            if let Some(existing) = self.item_instance_metadata.get(&metadata.hash)
+                && existing != metadata
+            {
+                return Err(Rejection::new(
+                    RejectionCode::Conflict,
+                    "item metadata hash conflicts with the immutable store",
+                ));
+            }
+        }
+        if command
+            .metadata
+            .windows(2)
+            .any(|records| records[0].hash > records[1].hash)
+        {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "player inventory import metadata is not in canonical hash order",
+            ));
+        }
+
+        let mut referenced_metadata = BTreeSet::new();
+        let mut deltas = Vec::new();
+        for stack in command.slots.iter().flatten() {
+            let definition = self.items.get(&stack.item_code).ok_or_else(|| {
+                Rejection::new(RejectionCode::InvalidCommand, "import stack references an unknown item")
+            })?;
+            stack.validate(definition.max_stack)?;
+            if stack.metadata_hash != CanonicalHash::default() {
+                referenced_metadata.insert(stack.metadata_hash);
+                if !supplied_metadata.contains_key(&stack.metadata_hash) {
+                    return Err(Rejection::new(
+                        RejectionCode::InvalidCommand,
+                        "import stack metadata descriptor is missing",
+                    ));
+                }
+            }
+            deltas.push(ResourceDelta {
+                item_code: stack.item_code,
+                metadata_hash: stack.metadata_hash,
+                amount: i64::from(stack.count),
+                reason: "player-inventory-import-v1".into(),
+            });
+        }
+        if supplied_metadata.keys().any(|hash| !referenced_metadata.contains(hash)) {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "player inventory import contains unreferenced metadata",
+            ));
+        }
+
+        let mut staged = self.clone();
+        for metadata in command.metadata.iter().cloned() {
+            staged.item_instance_metadata.entry(metadata.hash).or_insert(metadata);
+        }
+        let target = staged
+            .containers
+            .get_mut(&command.inventory)
+            .expect("import target was validated");
+        target.slots.clone_from(&command.slots);
+        target.revision = 1;
+        *self = staged;
+        Ok(deltas)
     }
 
     pub fn register_recipe(&mut self, recipe: Recipe) -> Result<(), Rejection> {
@@ -1006,6 +1250,15 @@ impl InventoryState {
             hasher.write_u64(furnace.fuel_ticks);
             hasher.write_u64(furnace.last_tick);
             hasher.write_u16(u16::from(furnace.active));
+        }
+        // Empty stores deliberately contribute no bytes so decoded V1
+        // snapshots retain their historical state hashes.
+        if !self.item_instance_metadata.is_empty() {
+            hasher.write_str("blockwild.gameplay.item-instance-metadata-store.v1");
+            hasher.write_u64(self.item_instance_metadata.len() as u64);
+            for metadata in self.item_instance_metadata.values() {
+                metadata.hash_into(hasher);
+            }
         }
     }
 }

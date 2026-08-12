@@ -11,6 +11,16 @@ export const RUST_INTEGRATED_RUNTIME_WIRE_V1 = 1 as const;
 export const RUST_INTEGRATED_RUNTIME_SCHEMA_V2 = 2 as const;
 /** Schema 3 adds bounded rising-edge action receipts to fixed-step responses. */
 export const RUST_INTEGRATED_RUNTIME_SCHEMA_V3 = 3 as const;
+/** Schema 4 adds immutable terrain identity to Create requests only. */
+export const RUST_INTEGRATED_RUNTIME_SCHEMA_V4 = 4 as const;
+export const RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONTENT_HASH_V2 = "cc59903be77dfe30109d15bfaf0e3022" as const;
+export const RUST_INTEGRATED_RUNTIME_DEFAULT_GENERATION_OPTIONS_JSON_V1 = "{\"biomeScale\":1.35,\"caveFrequency\":1,\"enabledFactions\":[\"hobbits\",\"goblins\",\"atlantians\",\"sugarcourt\",\"wood-elves\",\"dwarves\"],\"largeTownFrequency\":\"balanced\",\"profile\":\"world-below-v15\",\"resourceAbundance\":1,\"roadCoverage\":\"regional\",\"settlementClustering\":\"regional\",\"settlementDensity\":1,\"settlementPattern\":\"heartlands-v2\",\"structures\":true}" as const;
+export const RUST_INTEGRATED_RUNTIME_MAX_GENERATION_OPTIONS_JSON_BYTES = 16 * 1024;
+/** Explicit legacy/default identity for fixtures and schema-v2/v3 decoding. */
+export const RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 = Object.freeze({
+  terrainContentHash: RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONTENT_HASH_V2,
+  generationOptionsJson: RUST_INTEGRATED_RUNTIME_DEFAULT_GENERATION_OPTIONS_JSON_V1,
+});
 export const RUST_INTEGRATED_RUNTIME_FIXED_STEP_US = 50_000;
 export const RUST_INTEGRATED_RUNTIME_MAX_REQUEST_BYTES = 8 * 1024 * 1024;
 export const RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES = 1024 * 1024;
@@ -80,6 +90,8 @@ export type RustIntegratedRuntimeConfigV1 = Readonly<{
   sessionId: string;
   contentHash: string;
   generatorHash: string;
+  terrainContentHash: string;
+  generationOptionsJson: string;
   waterBlockId: number;
   directionalBlockIds: readonly number[];
   waterloggedBlockIds: readonly number[];

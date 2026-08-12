@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use blockwild_authority::{
     BlockCatalogV1, CellPositionV1, ChunkAuxiliaryDataV1, LiquidMetadataV1, ReadOriginV1, ReadSizeV1, SectionInstallV1,
-    WORLD_SECTION_CELL_COUNT_V1, WorldAddressV1 as AuthorityWorldAddressV1, WorldAuthorityStoreR4V1, WorldCellReadV1,
-    WorldCellV1, WorldChunkAddressV1 as AuthorityChunkAddressV1, WorldLiquidKindV1, WorldMutationBatchR4V1,
-    WorldMutationReceiptR4V1, WorldReadPageV1, WorldSectionAddressV1, decode_compatibility_save_binary_v1,
-    decode_world_authority_snapshot_r4_v1, encode_world_authority_snapshot_r4_v1,
+    WORLD_SECTION_CELL_COUNT_V1, WorldAddressV1 as AuthorityWorldAddressV1, WorldAuthorityRevisionV1,
+    WorldAuthorityStoreR4V1, WorldCellReadV1, WorldCellV1, WorldChunkAddressV1 as AuthorityChunkAddressV1,
+    WorldLiquidKindV1, WorldMutationBatchR4V1, WorldMutationReceiptR4V1, WorldReadPageV1, WorldSectionAddressV1,
+    decode_compatibility_save_binary_v1, decode_world_authority_snapshot_r4_v1, encode_world_authority_snapshot_r4_v1,
 };
 use blockwild_entity::{
     ActionState, ENTITY_COMMAND_SCHEMA, EcologyJobQueue, EntityAuthority, EntityClass, EntityCommand,
@@ -34,8 +34,9 @@ use blockwild_gameplay::{
     stage_player_drop_v1,
 };
 use blockwild_generation::{
-    Block as GeneratedBlock, ChunkPayloadV2, GenerateChunkRequestV2, GenerationDiagnostics, GenerationOutcome,
-    GenerationService,
+    Block as GeneratedBlock, ChunkPayloadV2, GENERATOR_VERSION, GenerateChunkRequestV2, GenerationDiagnostics,
+    GenerationOutcome, GenerationService, PROTOCOL_VERSION as GENERATION_PROTOCOL_VERSION_V2,
+    REQUEST_SCHEMA_VERSION as GENERATION_REQUEST_SCHEMA_VERSION_V2,
 };
 use blockwild_network::{
     AgentCapabilityGrantV1, InterestDeltaBuildSourceV1, InterestIndexV1, InterestSelectionStatsV1,
@@ -107,6 +108,7 @@ pub const INTEGRATED_RUNTIME_CONTENT_MAX_ENTRIES_V1: usize = blockwild_gameplay:
 pub const INTEGRATED_RUNTIME_MAX_ENTITY_SCHEDULE_JOBS_V1: usize = 256;
 pub const INTEGRATED_RUNTIME_MAX_ECOLOGY_SCHEDULE_JOBS_V1: usize = 64;
 pub const INTEGRATED_RUNTIME_MAX_PATH_SCHEDULE_JOBS_V1: usize = 64;
+pub const INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1: usize = 25;
 pub const INTEGRATED_RUNTIME_ECOLOGY_CADENCE_TICKS_V1: u64 = 20;
 pub const INTEGRATED_RUNTIME_NATIVE_DOMAIN_COUNT_V1: u16 = 6;
 const NATIVE_WORLD_RECORD_ID_V1: &str = "rust-world-r4-v1";
@@ -119,6 +121,19 @@ const NATIVE_RECORD_SCHEMA_V1: u16 = 1;
 const NATIVE_RUNTIME_MAGIC_V1: &[u8; 4] = b"BWRC";
 const NATIVE_RUNTIME_CORE_SCHEMA_V2: u16 = 2;
 const NATIVE_RUNTIME_CORE_SCHEMA_V3: u16 = 3;
+const NATIVE_RUNTIME_CORE_SCHEMA_V4: u16 = 4;
+const NATIVE_RUNTIME_CORE_SCHEMA_V5: u16 = 5;
+const DURABLE_SESSION_NEUTRAL_ID_V1: &str = "blockwild-durable-session-neutral-v1";
+const DEFAULT_TERRAIN_CONTENT_HASH_V2: CanonicalHash = CanonicalHash([
+    0xcc, 0x59, 0x90, 0x3b, 0xe7, 0x7d, 0xfe, 0x30, 0x10, 0x9d, 0x15, 0xbf, 0xaf, 0x0e, 0x30, 0x22,
+]);
+pub(crate) const DEFAULT_GENERATION_OPTIONS_JSON_V1: &str = concat!(
+    "{\"biomeScale\":1.35,\"caveFrequency\":1,\"enabledFactions\":[\"hobbits\",\"goblins\",",
+    "\"atlantians\",\"sugarcourt\",\"wood-elves\",\"dwarves\"],\"largeTownFrequency\":\"balanced\",",
+    "\"profile\":\"world-below-v15\",\"resourceAbundance\":1,",
+    "\"roadCoverage\":\"regional\",\"settlementClustering\":\"regional\",\"settlementDensity\":1,",
+    "\"settlementPattern\":\"heartlands-v2\",\"structures\":true}",
+);
 const NATIVE_CONTENT_MAGIC_V1: &[u8; 4] = b"BWCT";
 const NATIVE_CHECKPOINT_MAGIC_V1: &[u8; 4] = b"BWCK";
 const NATIVE_CHECKPOINT_SCHEMA_V1: u16 = 1;
@@ -180,6 +195,11 @@ pub struct IntegratedRuntimeConfigV2 {
     pub universe_id: String,
     pub location_id: String,
     pub session_id: String,
+    /// Terrain parity identity is intentionally distinct from the complete
+    /// production content manifest used by gameplay/content installation.
+    pub terrain_content_hash: CanonicalHash,
+    /// Stable-key canonical JSON sealed at runtime creation and checkpointed.
+    pub generation_options_json: String,
     pub content_hash: CanonicalHash,
     pub generator_hash: CanonicalHash,
     pub block_catalog: BlockCatalogV1,
@@ -192,6 +212,8 @@ impl Default for IntegratedRuntimeConfigV2 {
             universe_id: "1".into(),
             location_id: "blockwild".into(),
             session_id: "local-host".into(),
+            terrain_content_hash: DEFAULT_TERRAIN_CONTENT_HASH_V2,
+            generation_options_json: DEFAULT_GENERATION_OPTIONS_JSON_V1.into(),
             content_hash: CanonicalHash::default(),
             generator_hash: CanonicalHash::default(),
             block_catalog: BlockCatalogV1::default(),
@@ -207,6 +229,7 @@ impl IntegratedRuntimeConfigV2 {
                 "world seed exceeds 512 UTF-16 code units",
             ));
         }
+        validate_canonical_generation_options_json_v1(&self.generation_options_json)?;
         AuthorityWorldAddressV1::new(&self.universe_id, &self.location_id)
             .map_err(|error| IntegratedRuntimeError::domain("world", error))?;
         NetworkBrowserAuthorityRuntimeV1::new(self.session_id.clone())
@@ -419,6 +442,54 @@ pub struct GeneratedChunkInstallSummaryV2 {
     pub state_hash: CanonicalHash,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct IntegratedTerrainChunkCoordinateV1 {
+    pub chunk_x: i32,
+    pub chunk_z: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegratedTerrainResidencyBatchV1 {
+    pub expected_world_revision: WorldAuthorityRevisionV1,
+    pub generation_options_json: String,
+    /// Exact explicit chunk set in `(chunk_x, chunk_z)` canonical order.
+    pub chunks: Vec<IntegratedTerrainChunkCoordinateV1>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntegratedTerrainResidencyStatusV1 {
+    AlreadyResident = 0,
+    Generated = 1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegratedTerrainResidencyChunkReceiptV1 {
+    pub coordinate: IntegratedTerrainChunkCoordinateV1,
+    pub status: IntegratedTerrainResidencyStatusV1,
+    pub resident_sections: u16,
+    pub edit_count: u32,
+    pub generation_revision: u32,
+    pub request_hash: CanonicalHash,
+    pub source_hash: CanonicalHash,
+    pub edit_hash: CanonicalHash,
+    pub namespace_hash: CanonicalHash,
+    pub cache_hit: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegratedTerrainResidencyReceiptV1 {
+    pub previous_world_revision: WorldAuthorityRevisionV1,
+    pub world_revision: WorldAuthorityRevisionV1,
+    pub requested_chunks: u32,
+    pub generated_chunks: u32,
+    pub already_resident_chunks: u32,
+    pub requested_resident_chunks: u32,
+    pub resident_sections: u32,
+    pub chunks: Vec<IntegratedTerrainResidencyChunkReceiptV1>,
+    pub state_hash: CanonicalHash,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegratedRuntimeSaveProgressV1 {
     pub stage_id: String,
@@ -585,6 +656,7 @@ pub enum RuntimeCommandCacheLookupV1 {
 
 #[derive(Clone, Debug)]
 struct IntegratedRuntimeCoreSnapshotV1 {
+    schema: u16,
     config: IntegratedRuntimeConfigV2,
     expected_revision: IntegratedRuntimeRevisionV2,
     tick: u64,
@@ -607,6 +679,9 @@ struct IntegratedRuntimeCoreSnapshotV1 {
     command_receipt_order: VecDeque<(String, String)>,
     command_receipt_bytes: usize,
     compatibility_journal: JournalState,
+    durable_network_drained_proof: Option<CanonicalHash>,
+    durable_state_proof: Option<CanonicalHash>,
+    durable_replay_proof: Option<CanonicalHash>,
     unknown_extension_bytes: Vec<u8>,
 }
 
@@ -665,6 +740,11 @@ pub struct IntegratedRuntimeV2 {
     hydrated_exports: BTreeMap<String, IntegratedRuntimeHydratedExportV1>,
     next_hydration_transfer_token: u64,
     network: NetworkBrowserAuthorityRuntimeV1,
+    /// True only while no network/grant/receiver mutation has occurred since
+    /// construction or a native hydrate reset. It is deliberately
+    /// conservative: once network authority has been exercised the runtime
+    /// must start a fresh session before emitting a session-rebindable save.
+    durable_network_state_pristine: bool,
     replication: InterestIndexV1,
     replication_record_hashes: BTreeMap<String, CanonicalHash>,
     tick: u64,
@@ -763,6 +843,7 @@ impl IntegratedRuntimeV2 {
             hydrated_exports: BTreeMap::new(),
             next_hydration_transfer_token: HYDRATION_TRANSFER_TOKEN_BASE_V1,
             network,
+            durable_network_state_pristine: true,
             replication: InterestIndexV1::default(),
             replication_record_hashes: BTreeMap::new(),
             tick: 0,
@@ -1015,7 +1096,9 @@ impl IntegratedRuntimeV2 {
     /// content installation is deliberately not checkpointable.
     #[must_use]
     pub fn native_save_ready(&self) -> bool {
-        self.native_save_prerequisites_ready() && self.build_native_state_records().is_ok()
+        self.native_save_prerequisites_ready()
+            && self.durable_network_save_boundary_proof().is_ok()
+            && self.build_native_state_records().is_ok()
     }
 
     /// Exports one bounded, self-verifying in-memory checkpoint for Worker
@@ -1489,6 +1572,22 @@ impl IntegratedRuntimeV2 {
         !self.stopped && self.content_stage.is_none()
     }
 
+    fn durable_network_save_boundary_proof(&self) -> Result<CanonicalHash, IntegratedRuntimeError> {
+        let empty_network = NetworkBrowserAuthorityRuntimeV1::new(self.config.session_id.clone())
+            .map_err(|error| IntegratedRuntimeError::domain("native-save-network", error))?;
+        if !self.durable_network_state_pristine
+            || self.network.authority_fingerprint() != empty_network.authority_fingerprint()
+            || self.replication.record_count() != 0
+            || !self.replication_record_hashes.is_empty()
+        {
+            return Err(IntegratedRuntimeError::new(
+                "native-save-network-active",
+                "durable native saves require a provably unused, empty network/grant/replication session",
+            ));
+        }
+        Ok(durable_network_drained_proof_v1())
+    }
+
     fn build_native_bundle_unchecked(&self) -> Result<IntegratedRuntimeNativeBundleV1, IntegratedRuntimeError> {
         let mut bodies = BTreeMap::new();
         bodies.insert(
@@ -1553,6 +1652,7 @@ impl IntegratedRuntimeV2 {
     }
 
     fn build_native_state_records(&self) -> Result<Vec<NormalizedStateRecordV1>, IntegratedRuntimeError> {
+        self.durable_network_save_boundary_proof()?;
         let bundle = self.build_native_bundle()?;
         let mut records = Vec::with_capacity(bundle.envelopes.len() + 16);
         let mut owned_addresses = BTreeSet::new();
@@ -1686,6 +1786,7 @@ impl IntegratedRuntimeV2 {
         candidate.replication_record_hashes.clear();
         candidate.network = NetworkBrowserAuthorityRuntimeV1::new(candidate.config.session_id.clone())
             .map_err(|error| IntegratedRuntimeError::domain("recovery-network", error))?;
+        candidate.durable_network_state_pristine = true;
         candidate.rebuild_entity_schedules()?;
         validate_world_view_runtime_links_v1(
             &candidate.world_view.state,
@@ -2208,9 +2309,83 @@ impl IntegratedRuntimeV2 {
             .ok_or_else(|| IntegratedRuntimeError::new("recovery-native-missing", "native record set is empty"))?;
         let bundle = IntegratedRuntimeNativeBundleV1 { bundle_hash, envelopes };
         let core = decode_and_validate_native_bundle_v1(&bundle)?;
+        let proof_count = usize::from(core.durable_network_drained_proof.is_some())
+            + usize::from(core.durable_state_proof.is_some())
+            + usize::from(core.durable_replay_proof.is_some());
+        let (rebound_core, durable_proofs) = if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V5 {
+            if proof_count != 3 {
+                return Err(IntegratedRuntimeError::new(
+                    "recovery-proof-incomplete",
+                    "schema-v5 durable recovery requires network, state, and replay proofs together",
+                ));
+            }
+            let expected_network_proof = core.durable_network_drained_proof.expect("complete proof set");
+            if expected_network_proof != durable_network_drained_proof_v1() {
+                return Err(IntegratedRuntimeError::new(
+                    "recovery-network-proof",
+                    "durable recovery network-drain proof is invalid",
+                ));
+            }
+            let expected_state_proof = core.durable_state_proof.expect("complete proof set");
+            let expected_replay_proof = core.durable_replay_proof.expect("complete proof set");
+            let mut rebound_config = core.config.clone();
+            rebound_config.session_id.clone_from(&self.config.session_id);
+            if rebound_config != self.config {
+                return Err(IntegratedRuntimeError::new(
+                    "recovery-config",
+                    "native runtime record does not match the target immutable world configuration",
+                ));
+            }
+            let mut rebound = core;
+            rebound.config = rebound_config;
+            if durable_runtime_core_state_proof_v1(&rebound)? != expected_state_proof
+                || durable_runtime_replay_proof_v1(&rebound) != expected_replay_proof
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "recovery-session-proof",
+                    "session rebind changed durable state or replay identity",
+                ));
+            }
+            (
+                rebound,
+                Some((expected_network_proof, expected_state_proof, expected_replay_proof)),
+            )
+        } else {
+            if proof_count != 0 || core.config != self.config {
+                return Err(IntegratedRuntimeError::new(
+                    "recovery-config",
+                    "legacy native recovery requires an exact target configuration including session",
+                ));
+            }
+            (core, None)
+        };
 
         let mut candidate = self.clone();
-        candidate.install_native_bundle(&bundle, Some(core))?;
+        candidate.install_native_bundle(&bundle, Some(rebound_core.clone()))?;
+        if let Some((expected_network_proof, expected_state_proof, expected_replay_proof)) = durable_proofs {
+            let mut installed_core = runtime_core_snapshot_from_runtime_v1(&candidate);
+            // Persistence transport/head revision is recovered from the verified
+            // BWPR checkpoint below. The native record owns every other revision.
+            installed_core.expected_revision.persistence = rebound_core.expected_revision.persistence;
+            if durable_runtime_core_state_proof_v1(&installed_core)? != expected_state_proof
+                || durable_runtime_replay_proof_v1(&installed_core) != expected_replay_proof
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "recovery-state-drift",
+                    "installed durable authorities do not reproduce the saved state and replay proofs",
+                ));
+            }
+            if !candidate.durable_network_state_pristine
+                || candidate.replication.record_count() != 0
+                || !candidate.replication_record_hashes.is_empty()
+                || candidate.durable_network_save_boundary_proof()? != expected_network_proof
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "recovery-network-active",
+                    "recovered runtime did not reset network/grant/replication authority",
+                ));
+            }
+        }
         candidate.persistence_authority =
             PersistenceAuthorityV1::recover(complete.checkpoint.clone(), complete.payloads.clone())
                 .map_err(|error| IntegratedRuntimeError::domain("recovery-authority", error))?;
@@ -2610,6 +2785,8 @@ impl IntegratedRuntimeV2 {
         hasher.write_str(&self.config.location_id);
         hasher.write_bytes(self.config.content_hash.as_bytes());
         hasher.write_bytes(self.config.generator_hash.as_bytes());
+        hasher.write_bytes(self.config.terrain_content_hash.as_bytes());
+        hasher.write_str(&self.config.generation_options_json);
         match (&self.content_stage, &self.content_attestation) {
             (Some(stage), None) => {
                 hasher.write_u16(1);
@@ -4476,6 +4653,7 @@ impl IntegratedRuntimeV2 {
             .network
             .process(packet)
             .map_err(|error| IntegratedRuntimeError::domain("network", error))?;
+        self.durable_network_state_pristine = false;
         self.network_revision = self.network_revision.saturating_add(1);
         self.invalidate_state_hash();
         Ok(response)
@@ -4503,6 +4681,7 @@ impl IntegratedRuntimeV2 {
         self.network
             .upsert_peer_grant(grant)
             .map_err(|error| IntegratedRuntimeError::domain("network-grant", error))?;
+        self.durable_network_state_pristine = false;
         self.network_revision = self.network_revision.saturating_add(1);
         self.invalidate_state_hash();
         Ok(())
@@ -4516,6 +4695,7 @@ impl IntegratedRuntimeV2 {
         self.network
             .upsert_agent_grant(grant)
             .map_err(|error| IntegratedRuntimeError::domain("agent-grant", error))?;
+        self.durable_network_state_pristine = false;
         self.network_revision = self.network_revision.saturating_add(1);
         self.invalidate_state_hash();
         Ok(())
@@ -4532,6 +4712,7 @@ impl IntegratedRuntimeV2 {
             .upsert(value)
             .map_err(|error| IntegratedRuntimeError::domain("network-replication", error))?;
         self.replication_record_hashes.insert(key, hash);
+        self.durable_network_state_pristine = false;
         self.network_revision = self.network_revision.saturating_add(1);
         self.invalidate_state_hash();
         Ok(())
@@ -4542,6 +4723,7 @@ impl IntegratedRuntimeV2 {
         let removed = self.replication.remove(value);
         if removed {
             self.replication_record_hashes.remove(&key);
+            self.durable_network_state_pristine = false;
             self.network_revision = self.network_revision.saturating_add(1);
             self.invalidate_state_hash();
         }
@@ -4572,6 +4754,7 @@ impl IntegratedRuntimeV2 {
     pub fn release_network_peer(&mut self, peer_id: &str) -> Result<(), IntegratedRuntimeError> {
         self.ensure_running()?;
         self.network.release_peer(peer_id);
+        self.durable_network_state_pristine = false;
         self.network_revision = self.network_revision.saturating_add(1);
         self.invalidate_state_hash();
         Ok(())
@@ -4580,6 +4763,7 @@ impl IntegratedRuntimeV2 {
     pub fn release_network_command(&mut self, command_id: &str) -> Result<(), IntegratedRuntimeError> {
         self.ensure_running()?;
         self.network.release_command(command_id);
+        self.durable_network_state_pristine = false;
         self.network_revision = self.network_revision.saturating_add(1);
         self.invalidate_state_hash();
         Ok(())
@@ -4600,6 +4784,152 @@ impl IntegratedRuntimeV2 {
         request: &GenerateChunkRequestV2,
     ) -> Result<GeneratedChunkInstallSummaryV2, IntegratedRuntimeError> {
         self.ensure_running()?;
+        let (chunk, cache_hit) = self.generate_chunk(request)?;
+        self.install_generated_chunk(request, chunk, cache_hit)
+    }
+
+    /// Ensures a bounded explicit chunk set is resident through one atomic
+    /// Rust-owned control operation. All generation results are validated
+    /// before the cloned authority candidate receives its first install.
+    pub fn ensure_terrain_residency(
+        &mut self,
+        request: &IntegratedTerrainResidencyBatchV1,
+    ) -> Result<IntegratedTerrainResidencyReceiptV1, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        validate_terrain_residency_batch_v1(request)?;
+        let previous_world_revision = self.world.revision();
+        if request.expected_world_revision != previous_world_revision {
+            return Err(IntegratedRuntimeError::new(
+                "terrain-residency-stale",
+                "terrain residency batch expected an obsolete world authority revision",
+            ));
+        }
+        if request.generation_options_json != self.config.generation_options_json {
+            return Err(IntegratedRuntimeError::new(
+                "terrain-generation-options",
+                "terrain residency batch does not match the immutable runtime generation options",
+            ));
+        }
+
+        let edit_save = self.world.export_compatibility_save();
+        let edits_by_chunk = edit_save
+            .edits
+            .into_iter()
+            .map(|chunk| ((chunk.chunk_x, chunk.chunk_z), chunk.entries))
+            .collect::<BTreeMap<_, _>>();
+        let generation_epoch = terrain_generation_epoch_v1(&self.config);
+        let mut prepared_requests = Vec::with_capacity(request.chunks.len());
+        for coordinate in &request.chunks {
+            // Namespace construction reads a one-chunk edit halo. Rejecting
+            // coordinate overflow before any generation keeps every invalid
+            // batch free of cache and diagnostics side effects as well.
+            validate_terrain_halo_coordinate_v1(*coordinate)?;
+            let edits = edits_by_chunk
+                .get(&(coordinate.chunk_x, coordinate.chunk_z))
+                .cloned()
+                .unwrap_or_default();
+            let edit_hash = terrain_edit_hash_v1(*coordinate, &edits);
+            let namespace = terrain_namespace_v1(
+                &self.config.world_seed,
+                &self.config.generation_options_json,
+                *coordinate,
+                &edits_by_chunk,
+            )?;
+            let namespace_hash = terrain_namespace_hash_v1(&namespace);
+            let generation_revision = terrain_generation_revision_v1(edit_hash, namespace_hash);
+            let task_id = terrain_generation_task_id_v1(&self.config, *coordinate, edit_hash, namespace_hash);
+            let mut generation_request = GenerateChunkRequestV2 {
+                protocol_version: GENERATION_PROTOCOL_VERSION_V2,
+                schema_version: GENERATION_REQUEST_SCHEMA_VERSION_V2,
+                epoch: generation_epoch,
+                task_id,
+                revision: generation_revision,
+                namespace,
+                content_hash: self.config.terrain_content_hash.to_hex(),
+                generator_hash: self.config.generator_hash.to_hex(),
+                seed_text: self.config.world_seed.clone(),
+                generation_options_json: self.config.generation_options_json.clone(),
+                key: format!("{},{}", coordinate.chunk_x, coordinate.chunk_z),
+                cx: coordinate.chunk_x,
+                cz: coordinate.chunk_z,
+                edits,
+                request_hash: String::new(),
+            };
+            generation_request.request_hash = generation_request.canonical_hash().to_hex();
+            self.validate_generation_request(&generation_request)?;
+            prepared_requests.push((*coordinate, generation_request, edit_hash, namespace_hash));
+        }
+
+        let mut prepared = Vec::with_capacity(prepared_requests.len());
+        for (coordinate, generation_request, edit_hash, namespace_hash) in prepared_requests {
+            let (chunk, cache_hit) = self.generate_chunk(&generation_request)?;
+            let already_resident = terrain_chunk_is_exactly_resident_v1(&self.world, &chunk);
+            prepared.push((
+                coordinate,
+                generation_request,
+                chunk,
+                cache_hit,
+                already_resident,
+                edit_hash,
+                namespace_hash,
+            ));
+        }
+
+        let mut candidate = self.clone();
+        let mut chunks = Vec::with_capacity(prepared.len());
+        let mut generated_chunks = 0_u32;
+        let mut already_resident_chunks = 0_u32;
+        for (coordinate, generation_request, chunk, cache_hit, already_resident, edit_hash, namespace_hash) in prepared
+        {
+            let source_hash = parse_canonical_hash(&chunk.chunk_hash)?;
+            let request_hash = parse_canonical_hash(&generation_request.request_hash)?;
+            let status = if already_resident {
+                already_resident_chunks = already_resident_chunks.saturating_add(1);
+                IntegratedTerrainResidencyStatusV1::AlreadyResident
+            } else {
+                candidate.install_generated_chunk(&generation_request, chunk, cache_hit)?;
+                generated_chunks = generated_chunks.saturating_add(1);
+                IntegratedTerrainResidencyStatusV1::Generated
+            };
+            chunks.push(IntegratedTerrainResidencyChunkReceiptV1 {
+                coordinate,
+                status,
+                resident_sections: 12,
+                edit_count: generation_request.edits.len() as u32,
+                generation_revision: generation_request.revision,
+                request_hash,
+                source_hash,
+                edit_hash,
+                namespace_hash,
+                cache_hit,
+            });
+        }
+        let world_revision = candidate.world.revision();
+        let resident_sections = u32::try_from(candidate.world.resident_section_count()).map_err(|_| {
+            IntegratedRuntimeError::new(
+                "terrain-residency-count",
+                "resident section count exceeds the diagnostics wire range",
+            )
+        })?;
+        let state_hash = candidate.state_hash();
+        *self = candidate;
+        Ok(IntegratedTerrainResidencyReceiptV1 {
+            previous_world_revision,
+            world_revision,
+            requested_chunks: chunks.len() as u32,
+            generated_chunks,
+            already_resident_chunks,
+            requested_resident_chunks: chunks.len() as u32,
+            resident_sections,
+            chunks,
+            state_hash,
+        })
+    }
+
+    fn generate_chunk(
+        &self,
+        request: &GenerateChunkRequestV2,
+    ) -> Result<(ChunkPayloadV2, bool), IntegratedRuntimeError> {
         self.validate_generation_request(request)?;
         let cancellation = blockwild_generation::CancellationToken::default();
         let outcome = self
@@ -4612,7 +4942,10 @@ impl IntegratedRuntimeV2 {
                 "generation result became stale before authority installation",
             ));
         };
-        self.install_generated_chunk(request, *chunk, cache_hit)
+        chunk
+            .validate(request)
+            .map_err(|error| IntegratedRuntimeError::domain("generation-result", error))?;
+        Ok((*chunk, cache_hit))
     }
 
     fn validate_generation_request(&self, request: &GenerateChunkRequestV2) -> Result<(), IntegratedRuntimeError> {
@@ -4620,12 +4953,13 @@ impl IntegratedRuntimeV2 {
             .validate()
             .map_err(|error| IntegratedRuntimeError::domain("generation", error))?;
         if request.seed_text != self.config.world_seed
-            || request.content_hash != self.config.content_hash.to_hex()
+            || request.content_hash != self.config.terrain_content_hash.to_hex()
             || request.generator_hash != self.config.generator_hash.to_hex()
+            || request.generation_options_json != self.config.generation_options_json
         {
             return Err(IntegratedRuntimeError::new(
                 "generation-identity",
-                "generation request does not match the integrated runtime seed and content identities",
+                "generation request does not match the integrated runtime terrain identity",
             ));
         }
         Ok(())
@@ -4935,6 +5269,305 @@ fn write_content_domain_digests(hasher: &mut CanonicalHasher, domains: &BTreeMap
         hasher.write_u32(digest.count);
         hasher.write_bytes(digest.hash.as_bytes());
     }
+}
+
+fn validate_terrain_residency_batch_v1(
+    request: &IntegratedTerrainResidencyBatchV1,
+) -> Result<(), IntegratedRuntimeError> {
+    request
+        .expected_world_revision
+        .validate()
+        .map_err(|error| IntegratedRuntimeError::domain("terrain-residency-revision", error))?;
+    validate_canonical_generation_options_json_v1(&request.generation_options_json)?;
+    if request.chunks.is_empty() || request.chunks.len() > INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1 {
+        return Err(IntegratedRuntimeError::new(
+            "terrain-residency-count",
+            "terrain residency batch is empty or exceeds its chunk bound",
+        ));
+    }
+    for pair in request.chunks.windows(2) {
+        if pair[0] >= pair[1] {
+            return Err(IntegratedRuntimeError::new(
+                "terrain-residency-order",
+                "terrain residency chunks must be sorted and unique by chunk_x then chunk_z",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_canonical_generation_options_json_v1(value: &str) -> Result<(), IntegratedRuntimeError> {
+    if value.is_empty() || value.len() > 16 * 1024 || value.chars().any(char::is_control) {
+        return Err(invalid_generation_options_v1());
+    }
+    let mut remaining = value;
+    consume_generation_literal_v1(&mut remaining, "{\"biomeScale\":")?;
+    consume_generation_number_v1(&mut remaining, 0.25, 4.0, ",\"caveFrequency\":")?;
+    consume_generation_number_v1(&mut remaining, 0.0, 3.0, ",\"enabledFactions\":[")?;
+    let faction_end = remaining.find(']').ok_or_else(invalid_generation_options_v1)?;
+    let factions = &remaining[..faction_end];
+    let allowed_factions = [
+        "hobbits",
+        "goblins",
+        "atlantians",
+        "sugarcourt",
+        "wood-elves",
+        "dwarves",
+    ];
+    let mut previous_rank = None;
+    if !factions.is_empty() {
+        for faction in factions.split(',') {
+            if faction.len() < 3 || !faction.starts_with('"') || !faction.ends_with('"') {
+                return Err(invalid_generation_options_v1());
+            }
+            let faction = &faction[1..faction.len() - 1];
+            let rank = allowed_factions
+                .iter()
+                .position(|allowed| *allowed == faction)
+                .ok_or_else(invalid_generation_options_v1)?;
+            if previous_rank.is_some_and(|previous| rank <= previous) {
+                return Err(invalid_generation_options_v1());
+            }
+            previous_rank = Some(rank);
+        }
+    }
+    remaining = &remaining[faction_end + 1..];
+    consume_generation_literal_v1(&mut remaining, ",\"largeTownFrequency\":\"")?;
+    consume_generation_enum_v1(&mut remaining, &["rare", "balanced", "frequent"], "\",\"profile\":\"")?;
+    consume_generation_enum_v1(
+        &mut remaining,
+        &["legacy-v14", "world-below-v15"],
+        "\",\"resourceAbundance\":",
+    )?;
+    consume_generation_number_v1(&mut remaining, 0.25, 4.0, ",\"roadCoverage\":\"")?;
+    consume_generation_enum_v1(
+        &mut remaining,
+        &["none", "local", "regional", "dense"],
+        "\",\"settlementClustering\":\"",
+    )?;
+    consume_generation_enum_v1(
+        &mut remaining,
+        &["even", "regional", "strong"],
+        "\",\"settlementDensity\":",
+    )?;
+    consume_generation_number_v1(&mut remaining, 0.0, 3.0, ",\"settlementPattern\":\"")?;
+    consume_generation_enum_v1(
+        &mut remaining,
+        &["legacy-scattered-v1", "heartlands-v2"],
+        "\",\"structures\":",
+    )?;
+    if remaining != "true}" && remaining != "false}" {
+        return Err(invalid_generation_options_v1());
+    }
+    Ok(())
+}
+
+fn invalid_generation_options_v1() -> IntegratedRuntimeError {
+    IntegratedRuntimeError::new(
+        "invalid-generation-options",
+        "generation options must contain only normalized chunk-affecting fields in canonical JSON order",
+    )
+}
+
+fn consume_generation_literal_v1(remaining: &mut &str, literal: &str) -> Result<(), IntegratedRuntimeError> {
+    *remaining = remaining
+        .strip_prefix(literal)
+        .ok_or_else(invalid_generation_options_v1)?;
+    Ok(())
+}
+
+fn consume_generation_enum_v1(
+    remaining: &mut &str,
+    allowed: &[&str],
+    delimiter: &str,
+) -> Result<(), IntegratedRuntimeError> {
+    let end = remaining.find(delimiter).ok_or_else(invalid_generation_options_v1)?;
+    if !allowed.contains(&&remaining[..end]) {
+        return Err(invalid_generation_options_v1());
+    }
+    *remaining = &remaining[end + delimiter.len()..];
+    Ok(())
+}
+
+fn consume_generation_number_v1(
+    remaining: &mut &str,
+    minimum: f64,
+    maximum: f64,
+    delimiter: &str,
+) -> Result<(), IntegratedRuntimeError> {
+    let end = remaining.find(delimiter).ok_or_else(invalid_generation_options_v1)?;
+    let token = &remaining[..end];
+    let value = token.parse::<f64>().map_err(|_| invalid_generation_options_v1())?;
+    let normalized = (value.clamp(minimum, maximum) * 100.0).round() / 100.0;
+    let canonical = if normalized == 0.0 {
+        "0".into()
+    } else {
+        normalized.to_string()
+    };
+    if !value.is_finite() || value != normalized || token != canonical {
+        return Err(invalid_generation_options_v1());
+    }
+    *remaining = &remaining[end + delimiter.len()..];
+    Ok(())
+}
+
+fn validate_terrain_halo_coordinate_v1(
+    coordinate: IntegratedTerrainChunkCoordinateV1,
+) -> Result<(), IntegratedRuntimeError> {
+    for delta in [-1_i32, 0, 1] {
+        coordinate.chunk_x.checked_add(delta).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "terrain-residency-coordinate",
+                "terrain residency edit halo overflows chunk_x",
+            )
+        })?;
+        coordinate.chunk_z.checked_add(delta).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "terrain-residency-coordinate",
+                "terrain residency edit halo overflows chunk_z",
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn terrain_edit_hash_v1(coordinate: IntegratedTerrainChunkCoordinateV1, edits: &[(u32, u16)]) -> CanonicalHash {
+    let mut hasher = CanonicalHasher::new("blockwild.integrated.terrain-edits.r4.v1");
+    hasher.write_i32(coordinate.chunk_x);
+    hasher.write_i32(coordinate.chunk_z);
+    hasher.write_u32(edits.len() as u32);
+    for (index, block_id) in edits {
+        hasher.write_u32(*index);
+        hasher.write_u16(*block_id);
+    }
+    hasher.finish()
+}
+
+fn terrain_namespace_hash_v1(namespace: &str) -> CanonicalHash {
+    let mut hasher = CanonicalHasher::new("blockwild.integrated.terrain-namespace.r4.v1");
+    hasher.write_str(namespace);
+    hasher.finish()
+}
+
+fn terrain_generation_epoch_v1(config: &IntegratedRuntimeConfigV2) -> u32 {
+    let mut hasher = CanonicalHasher::new("blockwild.integrated.terrain-epoch.r4.v1");
+    hasher.write_str(&config.universe_id);
+    hasher.write_str(&config.location_id);
+    hasher.write_str(&config.world_seed);
+    hasher.write_bytes(config.terrain_content_hash.as_bytes());
+    hasher.write_bytes(config.generator_hash.as_bytes());
+    hasher.write_str(&config.generation_options_json);
+    nonzero_hash_u32_v1(hasher.finish())
+}
+
+fn terrain_generation_revision_v1(edit_hash: CanonicalHash, namespace_hash: CanonicalHash) -> u32 {
+    let mut hasher = CanonicalHasher::new("blockwild.integrated.terrain-revision.r4.v1");
+    hasher.write_bytes(edit_hash.as_bytes());
+    hasher.write_bytes(namespace_hash.as_bytes());
+    nonzero_hash_u32_v1(hasher.finish())
+}
+
+fn terrain_generation_task_id_v1(
+    config: &IntegratedRuntimeConfigV2,
+    coordinate: IntegratedTerrainChunkCoordinateV1,
+    edit_hash: CanonicalHash,
+    namespace_hash: CanonicalHash,
+) -> u32 {
+    let mut hasher = CanonicalHasher::new("blockwild.integrated.terrain-task.r4.v1");
+    hasher.write_str(&config.universe_id);
+    hasher.write_str(&config.location_id);
+    hasher.write_i32(coordinate.chunk_x);
+    hasher.write_i32(coordinate.chunk_z);
+    hasher.write_bytes(edit_hash.as_bytes());
+    hasher.write_bytes(namespace_hash.as_bytes());
+    nonzero_hash_u32_v1(hasher.finish())
+}
+
+fn nonzero_hash_u32_v1(hash: CanonicalHash) -> u32 {
+    let value = u32::from_le_bytes(hash.as_bytes()[..4].try_into().expect("fixed hash prefix"));
+    value.max(1)
+}
+
+fn terrain_namespace_v1(
+    seed: &str,
+    generation_options_json: &str,
+    coordinate: IntegratedTerrainChunkCoordinateV1,
+    edits_by_chunk: &BTreeMap<(i32, i32), Vec<(u32, u16)>>,
+) -> Result<String, IntegratedRuntimeError> {
+    let mut halo = Vec::with_capacity(9);
+    for delta_z in [-1_i32, 0, 1] {
+        for delta_x in [-1_i32, 0, 1] {
+            let chunk_x = coordinate.chunk_x.checked_add(delta_x).ok_or_else(|| {
+                IntegratedRuntimeError::new("terrain-residency-coordinate", "terrain edit halo overflows chunk_x")
+            })?;
+            let chunk_z = coordinate.chunk_z.checked_add(delta_z).ok_or_else(|| {
+                IntegratedRuntimeError::new("terrain-residency-coordinate", "terrain edit halo overflows chunk_z")
+            })?;
+            halo.push(terrain_edit_signature_v1(
+                edits_by_chunk
+                    .get(&(chunk_x, chunk_z))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+            ));
+        }
+    }
+    Ok(format!(
+        "terrain-v5|g{GENERATOR_VERSION}|{seed}|{generation_options_json}|{},{}|{}",
+        coordinate.chunk_x,
+        coordinate.chunk_z,
+        halo.join(".")
+    ))
+}
+
+fn terrain_edit_signature_v1(edits: &[(u32, u16)]) -> String {
+    if edits.is_empty() {
+        return "0".into();
+    }
+    let mut hash = blockwild_types::FNV1A_32_OFFSET;
+    for (index, block_id) in edits {
+        hash = (hash ^ *index).wrapping_mul(blockwild_types::FNV1A_32_PRIME);
+        hash = (hash ^ u32::from(*block_id)).wrapping_mul(blockwild_types::FNV1A_32_PRIME);
+    }
+    base36_u32_v1(hash)
+}
+
+fn base36_u32_v1(mut value: u32) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    if value == 0 {
+        return "0".into();
+    }
+    let mut reversed = [0_u8; 7];
+    let mut length = 0_usize;
+    while value != 0 {
+        reversed[length] = DIGITS[(value % 36) as usize];
+        length += 1;
+        value /= 36;
+    }
+    reversed[..length].reverse();
+    String::from_utf8(reversed[..length].to_vec()).expect("base36 digits are UTF-8")
+}
+
+fn terrain_chunk_is_exactly_resident_v1(world: &WorldAuthorityStoreR4V1, chunk: &ChunkPayloadV2) -> bool {
+    let address = AuthorityChunkAddressV1 {
+        world: world.active_address().clone(),
+        chunk_x: chunk.cx,
+        chunk_z: chunk.cz,
+    };
+    let Some(auxiliary) = world.chunk_auxiliary(&address) else {
+        return false;
+    };
+    if auxiliary.source_revision != u64::from(chunk.revision) || auxiliary.source_hash != chunk.chunk_hash {
+        return false;
+    }
+    (0_i16..12_i16).all(|section_y| {
+        let section = WorldSectionAddressV1 {
+            world: world.active_address().clone(),
+            chunk_x: chunk.cx,
+            chunk_z: chunk.cz,
+            section_y,
+        };
+        world.section_source_identity(&section) == Some((u64::from(chunk.revision), chunk.chunk_hash.as_str()))
+    })
 }
 
 fn page_to_simulation_window(page: &WorldReadPageV1) -> Result<WorldReadWindowV1, IntegratedRuntimeError> {
@@ -5745,6 +6378,8 @@ fn write_runtime_config_v1(
     writer.string(&config.session_id)?;
     writer.hash(config.content_hash);
     writer.hash(config.generator_hash);
+    writer.hash(config.terrain_content_hash);
+    writer.string(&config.generation_options_json)?;
     writer.u16(config.block_catalog.water_block_id);
     writer.u32(config.block_catalog.directional_blocks.len() as u32);
     for value in &config.block_catalog.directional_blocks {
@@ -5759,6 +6394,7 @@ fn write_runtime_config_v1(
 
 fn read_runtime_config_v1(
     reader: &mut NativeReaderV1<'_>,
+    schema: u16,
 ) -> Result<IntegratedRuntimeConfigV2, IntegratedRuntimeError> {
     let world_seed = reader.string()?;
     let universe_id = reader.string()?;
@@ -5766,6 +6402,16 @@ fn read_runtime_config_v1(
     let session_id = reader.string()?;
     let content_hash = reader.hash()?;
     let generator_hash = reader.hash()?;
+    let terrain_content_hash = if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V4 {
+        reader.hash()?
+    } else {
+        DEFAULT_TERRAIN_CONTENT_HASH_V2
+    };
+    let generation_options_json = if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V4 {
+        reader.string()?
+    } else {
+        DEFAULT_GENERATION_OPTIONS_JSON_V1.into()
+    };
     let water_block_id = reader.u16()?;
     let directional_count = reader.count(u16::MAX as usize + 1, "directional blocks")?;
     let mut directional_blocks = BTreeSet::new();
@@ -5792,6 +6438,8 @@ fn read_runtime_config_v1(
         universe_id,
         location_id,
         session_id,
+        terrain_content_hash,
+        generation_options_json,
         content_hash,
         generator_hash,
         block_catalog: BlockCatalogV1 {
@@ -6085,11 +6733,46 @@ fn read_compatibility_journal_v1(
         .map_err(|error| IntegratedRuntimeError::domain("native-journal", error))
 }
 
-fn encode_runtime_core_snapshot_v1(runtime: &IntegratedRuntimeV2) -> Result<Vec<u8>, IntegratedRuntimeError> {
-    if runtime.native_runtime_extension_bytes.len() > NATIVE_EXTENSION_MAX_BYTES_V1
-        || runtime.effect_events.len() > INTEGRATED_RUNTIME_MAX_EFFECT_EVENTS
-        || runtime.queued_inputs.len() > MAX_INPUT_FRAMES
-        || runtime.replay.len() > INTEGRATED_RUNTIME_MAX_REPLAY_ENTRIES
+fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> IntegratedRuntimeCoreSnapshotV1 {
+    IntegratedRuntimeCoreSnapshotV1 {
+        schema: NATIVE_RUNTIME_CORE_SCHEMA_V5,
+        config: runtime.config.clone(),
+        expected_revision: runtime.revision(),
+        tick: runtime.tick,
+        last_monotonic_time_us: runtime.last_monotonic_time_us,
+        accumulator_us: runtime.accumulator_us,
+        rng_state: runtime.rng_state,
+        network_revision: runtime.network_revision,
+        simulation_revision: runtime.simulation_revision,
+        gameplay_authority_revision: runtime.gameplay_authority_revision,
+        entity_command_sequence: runtime.entity_command_sequence,
+        player: runtime.player.clone(),
+        effect_events: runtime.effect_events.clone(),
+        next_effect_sequence: runtime.next_effect_sequence,
+        queued_inputs: runtime.queued_inputs.clone(),
+        last_input_sequence: runtime.last_input_sequence,
+        last_applied_input: runtime.last_applied_input,
+        next_action_sequence: runtime.next_action_sequence,
+        replay: runtime.replay.clone(),
+        command_receipts: runtime.command_receipts.clone(),
+        command_receipt_order: runtime.command_receipt_order.clone(),
+        command_receipt_bytes: runtime.command_receipt_bytes,
+        compatibility_journal: runtime.persistence.clone(),
+        durable_network_drained_proof: None,
+        durable_state_proof: None,
+        durable_replay_proof: None,
+        unknown_extension_bytes: runtime.native_runtime_extension_bytes.clone(),
+    }
+}
+
+fn encode_runtime_core_snapshot_body_v1(
+    core: &IntegratedRuntimeCoreSnapshotV1,
+    schema: u16,
+) -> Result<Vec<u8>, IntegratedRuntimeError> {
+    if core.unknown_extension_bytes.len() > NATIVE_EXTENSION_MAX_BYTES_V1
+        || core.effect_events.len() > INTEGRATED_RUNTIME_MAX_EFFECT_EVENTS
+        || core.queued_inputs.len() > MAX_INPUT_FRAMES
+        || core.replay.len() > INTEGRATED_RUNTIME_MAX_REPLAY_ENTRIES
     {
         return Err(IntegratedRuntimeError::new(
             "native-runtime-capacity",
@@ -6097,60 +6780,60 @@ fn encode_runtime_core_snapshot_v1(runtime: &IntegratedRuntimeV2) -> Result<Vec<
         ));
     }
     validate_runtime_command_receipt_cache_v1(
-        &runtime.command_receipts,
-        &runtime.command_receipt_order,
-        runtime.command_receipt_bytes,
+        &core.command_receipts,
+        &core.command_receipt_order,
+        core.command_receipt_bytes,
     )?;
     let mut writer = NativeWriterV1::default();
     writer.raw(NATIVE_RUNTIME_MAGIC_V1);
-    writer.u16(NATIVE_RUNTIME_CORE_SCHEMA_V3);
-    write_runtime_config_v1(&mut writer, &runtime.config)?;
-    write_runtime_revision_v1(&mut writer, runtime.revision());
-    writer.u64(runtime.tick);
-    writer.u64(runtime.last_monotonic_time_us);
-    writer.u64(runtime.accumulator_us);
-    writer.u32(runtime.rng_state);
-    writer.u64(runtime.network_revision);
-    writer.u64(runtime.simulation_revision);
-    writer.u64(runtime.gameplay_authority_revision);
-    writer.u64(runtime.entity_command_sequence);
-    writer.bool(runtime.player.is_some());
-    if let Some(player) = &runtime.player {
+    writer.u16(schema);
+    write_runtime_config_v1(&mut writer, &core.config)?;
+    write_runtime_revision_v1(&mut writer, core.expected_revision);
+    writer.u64(core.tick);
+    writer.u64(core.last_monotonic_time_us);
+    writer.u64(core.accumulator_us);
+    writer.u32(core.rng_state);
+    writer.u64(core.network_revision);
+    writer.u64(core.simulation_revision);
+    writer.u64(core.gameplay_authority_revision);
+    writer.u64(core.entity_command_sequence);
+    writer.bool(core.player.is_some());
+    if let Some(player) = &core.player {
         write_runtime_player_v1(&mut writer, player)?;
     }
-    writer.u32(runtime.effect_events.len() as u32);
-    for event in &runtime.effect_events {
+    writer.u32(core.effect_events.len() as u32);
+    for event in &core.effect_events {
         writer.u64(event.sequence);
         writer.u64(event.tick);
         writer.string(&event.entity_external_id)?;
         writer.u8(event.kind as u8);
         writer.f64(event.amount);
     }
-    writer.u64(runtime.next_effect_sequence);
-    writer.u32(runtime.queued_inputs.len() as u32);
-    for input in &runtime.queued_inputs {
+    writer.u64(core.next_effect_sequence);
+    writer.u32(core.queued_inputs.len() as u32);
+    for input in &core.queued_inputs {
         write_runtime_input_v1(&mut writer, *input);
     }
-    writer.bool(runtime.last_input_sequence.is_some());
-    if let Some(sequence) = runtime.last_input_sequence {
+    writer.bool(core.last_input_sequence.is_some());
+    if let Some(sequence) = core.last_input_sequence {
         writer.u64(sequence);
     }
-    writer.bool(runtime.last_applied_input.is_some());
-    if let Some(input) = runtime.last_applied_input {
+    writer.bool(core.last_applied_input.is_some());
+    if let Some(input) = core.last_applied_input {
         write_runtime_input_v1(&mut writer, input);
     }
-    writer.u64(runtime.next_action_sequence);
-    writer.u32(runtime.replay.len() as u32);
-    for entry in &runtime.replay {
+    writer.u64(core.next_action_sequence);
+    writer.u32(core.replay.len() as u32);
+    for entry in &core.replay {
         writer.u64(entry.sequence);
         writer.string(&entry.batch_id)?;
         writer.hash(entry.before_hash);
         writer.hash(entry.after_hash);
         writer.hash(entry.receipt_hash);
     }
-    writer.u32(runtime.command_receipt_order.len() as u32);
-    for key in &runtime.command_receipt_order {
-        let entry = runtime
+    writer.u32(core.command_receipt_order.len() as u32);
+    for key in &core.command_receipt_order {
+        let entry = core
             .command_receipts
             .get(key)
             .expect("validated command receipt order contains every cache key");
@@ -6159,9 +6842,59 @@ fn encode_runtime_core_snapshot_v1(runtime: &IntegratedRuntimeV2) -> Result<Vec<
         writer.raw(&entry.command_hash.0);
         writer.bytes(&entry.encoded_receipt)?;
     }
-    write_compatibility_journal_v1(&mut writer, &runtime.persistence)?;
-    writer.bytes(&runtime.native_runtime_extension_bytes)?;
+    write_compatibility_journal_v1(&mut writer, &core.compatibility_journal)?;
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V5 {
+        writer.bool(core.durable_network_drained_proof.is_some());
+        if let Some(proof) = core.durable_network_drained_proof {
+            writer.hash(proof);
+        }
+        writer.hash(core.durable_state_proof.ok_or_else(|| {
+            IntegratedRuntimeError::new("native-runtime-proof", "runtime core durable state proof is missing")
+        })?);
+        writer.hash(core.durable_replay_proof.ok_or_else(|| {
+            IntegratedRuntimeError::new("native-runtime-proof", "runtime core durable replay proof is missing")
+        })?);
+    }
+    writer.bytes(&core.unknown_extension_bytes)?;
     Ok(writer.finish())
+}
+
+fn durable_network_drained_proof_v1() -> CanonicalHash {
+    CanonicalHasher::new("blockwild-durable-network-drained-v1").finish()
+}
+
+fn durable_runtime_core_state_proof_v1(
+    core: &IntegratedRuntimeCoreSnapshotV1,
+) -> Result<CanonicalHash, IntegratedRuntimeError> {
+    let mut normalized = core.clone();
+    normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V4;
+    normalized.config.session_id = DURABLE_SESSION_NEUTRAL_ID_V1.into();
+    normalized.durable_network_drained_proof = None;
+    normalized.durable_state_proof = None;
+    normalized.durable_replay_proof = None;
+    let bytes = encode_runtime_core_snapshot_body_v1(&normalized, NATIVE_RUNTIME_CORE_SCHEMA_V4)?;
+    let mut hasher = CanonicalHasher::new("blockwild-durable-runtime-core-state-v1");
+    hasher.write_bytes(&bytes);
+    Ok(hasher.finish())
+}
+
+fn durable_runtime_replay_proof_v1(core: &IntegratedRuntimeCoreSnapshotV1) -> CanonicalHash {
+    let mut digest = IntegratedReplayDigestV2::default();
+    for entry in &core.replay {
+        digest.add(hash_runtime_replay_entry(entry));
+    }
+    let mut hasher = CanonicalHasher::new("blockwild-integrated-replay-v2");
+    hasher.write_u64(core.replay.len() as u64);
+    digest.write_hash(&mut hasher);
+    hasher.finish()
+}
+
+fn encode_runtime_core_snapshot_v1(runtime: &IntegratedRuntimeV2) -> Result<Vec<u8>, IntegratedRuntimeError> {
+    let mut core = runtime_core_snapshot_from_runtime_v1(runtime);
+    core.durable_network_drained_proof = runtime.durable_network_save_boundary_proof().ok();
+    core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&core)?);
+    core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&core));
+    encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V5)
 }
 
 fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCoreSnapshotV1, IntegratedRuntimeError> {
@@ -6171,13 +6904,15 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
     if schema != NATIVE_RECORD_SCHEMA_V1
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V2
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V3
+        && schema != NATIVE_RUNTIME_CORE_SCHEMA_V4
+        && schema != NATIVE_RUNTIME_CORE_SCHEMA_V5
     {
         return Err(IntegratedRuntimeError::new(
             "native-runtime-schema",
             "runtime core snapshot schema is unsupported",
         ));
     }
-    let config = read_runtime_config_v1(&mut reader)?;
+    let config = read_runtime_config_v1(&mut reader, schema)?;
     let expected_revision = read_runtime_revision_v1(&mut reader)?;
     let tick = reader.u64()?;
     let last_monotonic_time_us = reader.u64()?;
@@ -6361,9 +7096,17 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
     }
     validate_runtime_command_receipt_cache_v1(&command_receipts, &command_receipt_order, command_receipt_bytes)?;
     let compatibility_journal = read_compatibility_journal_v1(&mut reader, &config)?;
+    let (durable_network_drained_proof, durable_state_proof, durable_replay_proof) =
+        if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V5 {
+            let network_proof = if reader.bool()? { Some(reader.hash()?) } else { None };
+            (network_proof, Some(reader.hash()?), Some(reader.hash()?))
+        } else {
+            (None, None, None)
+        };
     let unknown_extension_bytes = reader.bytes(NATIVE_EXTENSION_MAX_BYTES_V1)?;
     reader.finish()?;
-    Ok(IntegratedRuntimeCoreSnapshotV1 {
+    let core = IntegratedRuntimeCoreSnapshotV1 {
+        schema,
         config,
         expected_revision,
         tick,
@@ -6386,8 +7129,35 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         command_receipt_order,
         command_receipt_bytes,
         compatibility_journal,
+        durable_network_drained_proof,
+        durable_state_proof,
+        durable_replay_proof,
         unknown_extension_bytes,
-    })
+    };
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V5 {
+        if core
+            .durable_network_drained_proof
+            .is_some_and(|proof| proof != durable_network_drained_proof_v1())
+        {
+            return Err(IntegratedRuntimeError::new(
+                "native-runtime-network-proof",
+                "runtime core durable network-drain proof is invalid",
+            ));
+        }
+        if core.durable_state_proof != Some(durable_runtime_core_state_proof_v1(&core)?) {
+            return Err(IntegratedRuntimeError::new(
+                "native-runtime-state-proof",
+                "runtime core session-neutral durable state proof does not match",
+            ));
+        }
+        if core.durable_replay_proof != Some(durable_runtime_replay_proof_v1(&core)) {
+            return Err(IntegratedRuntimeError::new(
+                "native-runtime-replay-proof",
+                "runtime core durable replay proof does not match",
+            ));
+        }
+    }
+    Ok(core)
 }
 
 fn content_domain_tag_v1(domain: ContentDomain) -> u8 {
@@ -6691,11 +7461,16 @@ mod tests {
         ENTITY_COMMAND_SCHEMA, EntityCommand, EntityCompatibilityRecord, EntityResidency, MountSeat, MountState,
     };
     use blockwild_gameplay::{ItemDefinition, ItemStack};
+    use blockwild_network::{NetworkCapabilityV1, NetworkPeerKindV1, NetworkPeerRoleV1};
 
     use super::*;
 
     fn runtime_with_section() -> IntegratedRuntimeV2 {
-        let mut runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        runtime_with_section_config(IntegratedRuntimeConfigV2::default())
+    }
+
+    fn runtime_with_section_config(config: IntegratedRuntimeConfigV2) -> IntegratedRuntimeV2 {
+        let mut runtime = IntegratedRuntimeV2::new(config).unwrap();
         let address = runtime.world().active_address().clone();
         for section_y in [4_i16, 7_i16, 8_i16] {
             let mut cells = vec![WorldCellV1::default(); WORLD_SECTION_CELL_COUNT_V1];
@@ -6728,7 +7503,11 @@ mod tests {
     }
 
     fn runtime_with_bound_player() -> IntegratedRuntimeV2 {
-        let mut runtime = runtime_with_section();
+        runtime_with_bound_player_config(IntegratedRuntimeConfigV2::default())
+    }
+
+    fn runtime_with_bound_player_config(config: IntegratedRuntimeConfigV2) -> IntegratedRuntimeV2 {
+        let mut runtime = runtime_with_section_config(config);
         let mut record = EntityCompatibilityRecord::new("player:one", "player:one", "player");
         record.class = EntityClass::Player;
         record.position = EntityVec3::new(8.0, 63.5, 8.0);
@@ -6871,6 +7650,140 @@ mod tests {
                 .collect(),
             missing_record_keys: Vec::new(),
         }
+    }
+
+    fn force_unattested_native_recovery(runtime: &mut IntegratedRuntimeV2) -> PagedRecoveryCompleteV1 {
+        let bundle = runtime.build_native_bundle().expect("control-style native bundle");
+        let records = IntegratedRuntimeNativeRecordKindV1::ALL
+            .into_iter()
+            .map(|kind| {
+                let (record_kind, record_id) = kind.address();
+                Ok(NormalizedStateRecordV1 {
+                    address: RecordAddress::new(
+                        &runtime.config.universe_id,
+                        &runtime.config.location_id,
+                        record_kind,
+                        record_id,
+                    )
+                    .map_err(|error| IntegratedRuntimeError::domain("fixture-address", error))?,
+                    payload: encode_native_record_envelope_v1(
+                        bundle.envelopes.get(&kind).expect("complete fixture bundle"),
+                    )?,
+                })
+            })
+            .collect::<Result<Vec<_>, IntegratedRuntimeError>>()
+            .unwrap();
+        let save = CanonicalWorldSaveSetV1::build(
+            runtime.persistence_authority.world_id(),
+            &runtime.config.universe_id,
+            &runtime.config.location_id,
+            runtime.config.generator_hash,
+            runtime.config.content_hash,
+            std::iter::empty::<Vec<u8>>(),
+            records,
+        )
+        .unwrap();
+        runtime.persistence_authority.stage_complete_save_set(&save).unwrap();
+        runtime.prepare_next_authority_commit().unwrap();
+        accept_all_authority_commits(runtime);
+        recovered_authority_save(runtime)
+    }
+
+    fn rewrite_recovery_runtime_core(
+        recovered: &mut PagedRecoveryCompleteV1,
+        mut rewrite: impl FnMut(&mut IntegratedRuntimeCoreSnapshotV1),
+    ) {
+        let runtime_address = recovered
+            .payloads
+            .keys()
+            .find(|address| address.kind == RecordKind::Player && address.record_id == NATIVE_RUNTIME_RECORD_ID_V1)
+            .cloned()
+            .expect("runtime native record");
+        let mut envelopes = BTreeMap::new();
+        for (address, payload) in &recovered.payloads {
+            if payload.starts_with(NATIVE_RECORD_MAGIC_V1) {
+                let envelope = decode_native_record_envelope_v1(payload).unwrap();
+                let (kind, record_id) = envelope.kind.address();
+                assert_eq!((address.kind, address.record_id.as_str()), (kind, record_id));
+                envelopes.insert(envelope.kind, envelope);
+            }
+        }
+        let runtime_envelope = envelopes
+            .get_mut(&IntegratedRuntimeNativeRecordKindV1::Runtime)
+            .expect("runtime envelope");
+        let mut core = decode_runtime_core_snapshot_v1(&runtime_envelope.body).unwrap();
+        rewrite(&mut core);
+        runtime_envelope.body = encode_runtime_core_snapshot_body_v1(&core, core.schema).unwrap();
+        let bodies = envelopes
+            .iter()
+            .map(|(kind, envelope)| (*kind, envelope.body.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let first = envelopes.values().next().unwrap();
+        let bundle_hash = native_bundle_hash_v1(
+            &first.universe_id,
+            &first.location_id,
+            first.generator_hash,
+            first.content_hash,
+            &bodies,
+        );
+        for envelope in envelopes.values_mut() {
+            envelope.bundle_hash = bundle_hash;
+        }
+        for envelope in envelopes.values() {
+            let (_, record_id) = envelope.kind.address();
+            let address = recovered
+                .payloads
+                .keys()
+                .find(|address| address.record_id == record_id)
+                .cloned()
+                .unwrap();
+            recovered
+                .payloads
+                .insert(address, encode_native_record_envelope_v1(envelope).unwrap());
+        }
+        assert!(recovered.payloads.contains_key(&runtime_address));
+        let descriptors = recovered
+            .checkpoint
+            .records
+            .iter()
+            .map(|descriptor| {
+                let payload = recovered.payloads.get(&descriptor.address).unwrap();
+                RecordDescriptor {
+                    address: descriptor.address.clone(),
+                    revision: descriptor.revision,
+                    byte_length: payload.len() as u32,
+                    payload_hash: native_persistence_payload_hash_v1(payload),
+                }
+            })
+            .collect();
+        recovered.checkpoint = Checkpoint::new(
+            recovered.checkpoint.checkpoint_id.clone(),
+            recovered.checkpoint.parent_checkpoint_id.clone(),
+            recovered.checkpoint.world_id.clone(),
+            recovered.checkpoint.journal_sequence,
+            recovered.checkpoint.generator_hash,
+            recovered.checkpoint.content_hash,
+            recovered.checkpoint.created_at,
+            descriptors,
+        )
+        .unwrap();
+    }
+
+    fn activate_fixture_network_grant(runtime: &mut IntegratedRuntimeV2) {
+        runtime
+            .upsert_network_peer_grant(NetworkPeerGrantV1 {
+                session_id: runtime.config.session_id.clone(),
+                peer_id: "peer:durable-fixture".into(),
+                connection_id: "connection:durable-fixture".into(),
+                actor_id: "actor:durable-fixture".into(),
+                peer_kind: NetworkPeerKindV1::Human,
+                role: NetworkPeerRoleV1::Guest,
+                capabilities: vec![NetworkCapabilityV1::Observe],
+                expires_at: 10_000,
+                next_sequence: 0,
+                interest: NetworkInterestSetV1::new(0, Vec::new(), Vec::new()).unwrap(),
+            })
+            .unwrap();
     }
 
     fn loaded_block_id(runtime: &IntegratedRuntimeV2, position: CellPositionV1) -> u16 {
@@ -7669,6 +8582,233 @@ mod tests {
     }
 
     #[test]
+    fn durable_native_hydration_rebinds_only_session_and_preserves_authority_proofs() {
+        let source_config = IntegratedRuntimeConfigV2 {
+            world_seed: "durable-session-rebind-world".into(),
+            session_id: "durable-session-a".into(),
+            ..IntegratedRuntimeConfigV2::default()
+        };
+        let mut source = runtime_with_bound_player_config(source_config.clone());
+        source.native_world_extension_bytes = vec![0x80, 1, 0xff];
+        source.native_runtime_extension_bytes = vec![0xff, 2, 0x80];
+        source.native_gameplay_extension_bytes = vec![3, 0x80, 0xff];
+        source.native_world_view_extension_bytes = vec![0, 4, 0xff];
+        let edit_position = CellPositionV1 { x: 2, y: 1, z: 2 };
+        let mut edit = IntegratedRuntimeBatchV2::empty("durable-rebind-edit", source.identity());
+        edit.world.push(WorldMutationBatchR4V1 {
+            schema_version: blockwild_authority::WORLD_AUTHORITY_SCHEMA_V1,
+            batch_id: "durable-rebind-edit".into(),
+            authority_id: "fixture".into(),
+            address: source.world().active_address().clone(),
+            expected_revision: source.world().revision(),
+            commands: vec![blockwild_authority::WorldMutationCommandR4V1::SetBlock {
+                position: edit_position,
+                block_id: 1,
+                facing: None,
+            }],
+        });
+        assert!(source.commit(edit).accepted());
+        source.finalize_native_save("session-a-save", 101).unwrap();
+        accept_all_authority_commits(&mut source);
+        let recovered = recovered_authority_save(&source);
+
+        let expected_world = source.world().canonical_state_hash();
+        let expected_entities = source.entities().canonical_hash();
+        let expected_gameplay = source.gameplay().state.state_hash();
+        let expected_world_view = source.world_view().state.state_hash();
+        let expected_journal = source.persistence().state_hash();
+        let expected_authority = source.persistence_authority().state_hash();
+        let expected_player = source.player().cloned();
+        let expected_replay = source.replay_hash();
+
+        let mut target_config = source_config;
+        target_config.session_id = "durable-session-b".into();
+        let mut target = IntegratedRuntimeV2::new(target_config).unwrap();
+        target.recovered_save_sets.insert("session-rebind".into(), recovered);
+        target.hydrate_recovery("session-rebind").unwrap();
+
+        assert_eq!(target.config.session_id, "durable-session-b");
+        assert_eq!(target.world().canonical_state_hash(), expected_world);
+        assert_eq!(target.entities().canonical_hash(), expected_entities);
+        assert_eq!(target.gameplay().state.state_hash(), expected_gameplay);
+        assert_eq!(target.world_view().state.state_hash(), expected_world_view);
+        assert_eq!(target.persistence().state_hash(), expected_journal);
+        assert_eq!(target.persistence_authority().state_hash(), expected_authority);
+        assert_eq!(target.player(), expected_player.as_ref());
+        assert_eq!(target.replay_hash(), expected_replay);
+        assert_eq!(target.native_world_extension_bytes, vec![0x80, 1, 0xff]);
+        assert_eq!(target.native_runtime_extension_bytes, vec![0xff, 2, 0x80]);
+        assert_eq!(target.native_gameplay_extension_bytes, vec![3, 0x80, 0xff]);
+        assert_eq!(target.native_world_view_extension_bytes, vec![0, 4, 0xff]);
+        assert!(target.durable_network_state_pristine);
+        assert_eq!(target.replication.record_count(), 0);
+        assert!(target.replication_record_hashes.is_empty());
+        assert_eq!(
+            target.network.authority_fingerprint(),
+            NetworkBrowserAuthorityRuntimeV1::new("durable-session-b".into())
+                .unwrap()
+                .authority_fingerprint(),
+        );
+
+        let expected_control_identity = source.identity();
+        let control = source.export_runtime_checkpoint().unwrap();
+        let control_restored =
+            IntegratedRuntimeV2::restore_runtime_checkpoint(&control, integrated_runtime_checkpoint_hash_v1(&control))
+                .unwrap();
+        assert_eq!(control_restored.config.session_id, "durable-session-a");
+        assert_eq!(control_restored.identity(), expected_control_identity);
+    }
+
+    #[test]
+    fn durable_session_rebind_rejects_every_immutable_config_mismatch_atomically() {
+        let source_config = IntegratedRuntimeConfigV2 {
+            world_seed: "durable-mismatch-source".into(),
+            session_id: "durable-mismatch-a".into(),
+            content_hash: CanonicalHash([0x11; 16]),
+            generator_hash: CanonicalHash([0x22; 16]),
+            ..IntegratedRuntimeConfigV2::default()
+        };
+        let mut source = runtime_with_section_config(source_config.clone());
+        source.finalize_native_save("mismatch-source", 102).unwrap();
+        accept_all_authority_commits(&mut source);
+        let recovered = recovered_authority_save(&source);
+
+        let mut base = source_config;
+        base.session_id = "durable-mismatch-b".into();
+        let mut cases = Vec::new();
+        let mut seed = base.clone();
+        seed.world_seed = "different-seed".into();
+        cases.push(("seed", seed, "recovery-config"));
+        let mut terrain = base.clone();
+        terrain.terrain_content_hash = CanonicalHash([0x33; 16]);
+        cases.push(("terrain", terrain, "recovery-config"));
+        let mut options = base.clone();
+        options.generation_options_json = options
+            .generation_options_json
+            .replace("\"biomeScale\":1.35", "\"biomeScale\":1.25");
+        cases.push(("options", options, "recovery-config"));
+        let mut catalog = base.clone();
+        catalog.block_catalog.water_block_id = catalog.block_catalog.water_block_id.saturating_add(1);
+        cases.push(("catalog", catalog, "recovery-config"));
+        let mut content = base.clone();
+        content.content_hash = CanonicalHash([0x44; 16]);
+        cases.push(("content", content, "recovery-fingerprint"));
+        let mut generator = base.clone();
+        generator.generator_hash = CanonicalHash([0x55; 16]);
+        cases.push(("generator", generator, "recovery-fingerprint"));
+        let mut address = base;
+        address.location_id = "different-location".into();
+        cases.push(("address", address, "recovery-fingerprint"));
+
+        for (label, config, expected_code) in cases {
+            let mut target = IntegratedRuntimeV2::new(config).unwrap();
+            target.recovered_save_sets.insert(label.into(), recovered.clone());
+            let before = target.identity();
+            assert_eq!(
+                target.hydrate_recovery(label).unwrap_err().code,
+                expected_code,
+                "{label}"
+            );
+            assert_eq!(target.identity(), before, "{label}");
+            assert!(target.recovered_save_sets.contains_key(label), "{label}");
+        }
+    }
+
+    #[test]
+    fn legacy_durable_core_requires_exact_session_and_v5_proofs_are_all_or_nothing() {
+        let source_config = IntegratedRuntimeConfigV2 {
+            world_seed: "legacy-durable-session".into(),
+            session_id: "legacy-durable-session-a".into(),
+            ..IntegratedRuntimeConfigV2::default()
+        };
+        let mut source = runtime_with_section_config(source_config.clone());
+        source.finalize_native_save("legacy-session", 104).unwrap();
+        accept_all_authority_commits(&mut source);
+        let mut legacy = recovered_authority_save(&source);
+        rewrite_recovery_runtime_core(&mut legacy, |core| {
+            core.schema = NATIVE_RUNTIME_CORE_SCHEMA_V4;
+            core.durable_network_drained_proof = None;
+            core.durable_state_proof = None;
+            core.durable_replay_proof = None;
+        });
+
+        let mut same_session = IntegratedRuntimeV2::new(source_config.clone()).unwrap();
+        same_session
+            .recovered_save_sets
+            .insert("legacy-same".into(), legacy.clone());
+        same_session.hydrate_recovery("legacy-same").unwrap();
+        assert_eq!(
+            same_session.world().canonical_state_hash(),
+            source.world().canonical_state_hash()
+        );
+
+        let mut other_config = source_config;
+        other_config.session_id = "legacy-durable-session-b".into();
+        let mut different_session = IntegratedRuntimeV2::new(other_config).unwrap();
+        different_session
+            .recovered_save_sets
+            .insert("legacy-different".into(), legacy);
+        let before = different_session.identity();
+        assert_eq!(
+            different_session.hydrate_recovery("legacy-different").unwrap_err().code,
+            "recovery-config"
+        );
+        assert_eq!(different_session.identity(), before);
+
+        let mut partial = recovered_authority_save(&source);
+        rewrite_recovery_runtime_core(&mut partial, |core| {
+            core.durable_network_drained_proof = None;
+        });
+        let mut partial_target = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2 {
+            world_seed: "legacy-durable-session".into(),
+            session_id: "legacy-durable-session-c".into(),
+            ..IntegratedRuntimeConfigV2::default()
+        })
+        .unwrap();
+        partial_target.recovered_save_sets.insert("partial-v5".into(), partial);
+        let before = partial_target.identity();
+        assert_eq!(
+            partial_target.hydrate_recovery("partial-v5").unwrap_err().code,
+            "recovery-proof-incomplete"
+        );
+        assert_eq!(partial_target.identity(), before);
+        assert!(partial_target.recovered_save_sets.contains_key("partial-v5"));
+    }
+
+    #[test]
+    fn active_network_authority_cannot_emit_or_rebind_a_durable_native_save() {
+        let source_config = IntegratedRuntimeConfigV2 {
+            world_seed: "network-active-durable-source".into(),
+            session_id: "network-active-session-a".into(),
+            ..IntegratedRuntimeConfigV2::default()
+        };
+        let mut source = runtime_with_section_config(source_config.clone());
+        activate_fixture_network_grant(&mut source);
+        let before_save = source.identity();
+        assert_eq!(
+            source.finalize_native_save("network-active", 103).unwrap_err().code,
+            "native-save-network-active"
+        );
+        assert_eq!(source.identity(), before_save);
+
+        // A control-style bundle deliberately has no durable drain proof when
+        // network authority has been exercised. Even if wrapped in a valid
+        // persistence checkpoint, durable hydration must reject it atomically.
+        let unproven = force_unattested_native_recovery(&mut source);
+        let mut target_config = source_config;
+        target_config.session_id = "network-active-session-b".into();
+        let mut target = IntegratedRuntimeV2::new(target_config).unwrap();
+        target.recovered_save_sets.insert("unproven-network".into(), unproven);
+        let before_hydrate = target.identity();
+        assert_eq!(
+            target.hydrate_recovery("unproven-network").unwrap_err().code,
+            "recovery-proof-incomplete"
+        );
+        assert_eq!(target.identity(), before_hydrate);
+        assert!(target.recovered_save_sets.contains_key("unproven-network"));
+    }
+
+    #[test]
     fn recovery_hydration_is_atomic_and_compatibility_bytes_are_export_only() {
         let mut source = runtime_with_section();
         let position = CellPositionV1 { x: 1, y: 1, z: 1 };
@@ -8147,10 +9287,17 @@ mod tests {
 
     #[test]
     fn generated_chunk_installs_all_authority_and_auxiliary_streams_atomically() {
-        let request = blockwild_generation::fixture_request("integrated-generation", 0, 0, 1);
+        let mut request = blockwild_generation::fixture_request("integrated-generation", 0, 0, 1);
+        request.generation_options_json = DEFAULT_GENERATION_OPTIONS_JSON_V1.into();
+        request.namespace = format!(
+            "terrain-v5|g{GENERATOR_VERSION}|{}|{}|0,0|0.0.0.0.0.0.0.0.0",
+            request.seed_text, request.generation_options_json
+        );
+        request.request_hash = request.canonical_hash().to_hex();
         let mut config = IntegratedRuntimeConfigV2 {
             world_seed: request.seed_text.clone(),
-            content_hash: parse_canonical_hash(&request.content_hash).unwrap(),
+            terrain_content_hash: parse_canonical_hash(&request.content_hash).unwrap(),
+            generation_options_json: request.generation_options_json.clone(),
             generator_hash: parse_canonical_hash(&request.generator_hash).unwrap(),
             ..IntegratedRuntimeConfigV2::default()
         };
@@ -8172,6 +9319,231 @@ mod tests {
         assert_eq!(auxiliary.heightmap.len(), 256);
         assert_eq!(auxiliary.light.len(), 49_152);
         assert_eq!(runtime.generation_diagnostics().completed, 1);
+    }
+
+    #[test]
+    fn terrain_residency_batch_is_atomic_deterministic_and_idempotent() {
+        let fixture = blockwild_generation::fixture_request("integrated-residency", 0, 0, 1);
+        let mut config = IntegratedRuntimeConfigV2 {
+            world_seed: fixture.seed_text,
+            terrain_content_hash: parse_canonical_hash(&fixture.content_hash).unwrap(),
+            generator_hash: parse_canonical_hash(&fixture.generator_hash).unwrap(),
+            ..IntegratedRuntimeConfigV2::default()
+        };
+        config.block_catalog.water_block_id = GeneratedBlock::WATER;
+        let mut runtime = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        let batch = IntegratedTerrainResidencyBatchV1 {
+            expected_world_revision: runtime.world().revision(),
+            generation_options_json: config.generation_options_json.clone(),
+            chunks: vec![
+                IntegratedTerrainChunkCoordinateV1 {
+                    chunk_x: -1,
+                    chunk_z: 0,
+                },
+                IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 },
+            ],
+        };
+        let first = runtime.ensure_terrain_residency(&batch).unwrap();
+        assert_eq!(first.generated_chunks, 2);
+        assert_eq!(first.already_resident_chunks, 0);
+        assert_eq!(first.resident_sections, 24);
+        assert_eq!(runtime.world().resident_section_count(), 24);
+        let state_after_first = runtime.state_hash();
+        let revision_after_first = runtime.world().revision();
+
+        let repeat = IntegratedTerrainResidencyBatchV1 {
+            expected_world_revision: revision_after_first,
+            ..batch.clone()
+        };
+        let second = runtime.ensure_terrain_residency(&repeat).unwrap();
+        assert_eq!(second.generated_chunks, 0);
+        assert_eq!(second.already_resident_chunks, 2);
+        assert_eq!(second.world_revision, revision_after_first);
+        assert_eq!(runtime.state_hash(), state_after_first);
+
+        let mut independent = IntegratedRuntimeV2::new(config).unwrap();
+        let independently_generated = independent.ensure_terrain_residency(&batch).unwrap();
+        assert_eq!(independently_generated.chunks, first.chunks);
+        assert_eq!(
+            independent.world().canonical_state_hash(),
+            runtime.world().canonical_state_hash()
+        );
+
+        let pristine_neighbor_namespace = second.chunks[0].namespace_hash;
+        let edited_position = CellPositionV1 { x: 1, y: 100, z: 1 };
+        let world_mutation = WorldMutationBatchR4V1 {
+            schema_version: blockwild_authority::WORLD_AUTHORITY_SCHEMA_V1,
+            batch_id: "terrain-residency-local-edit".into(),
+            authority_id: "player:terrain-test".into(),
+            address: runtime.world().active_address().clone(),
+            expected_revision: runtime.world().revision(),
+            commands: vec![blockwild_authority::WorldMutationCommandR4V1::SetBlock {
+                position: edited_position,
+                block_id: 254,
+                facing: None,
+            }],
+        };
+        let mut root = IntegratedRuntimeBatchV2::empty("terrain-residency-local-edit", runtime.identity());
+        root.world.push(world_mutation);
+        assert!(runtime.commit(root).accepted());
+
+        let edit_receipt = runtime
+            .ensure_terrain_residency(&IntegratedTerrainResidencyBatchV1 {
+                expected_world_revision: runtime.world().revision(),
+                ..batch
+            })
+            .unwrap();
+        assert_eq!(
+            edit_receipt.generated_chunks, 2,
+            "the edited chunk and its halo neighbor regenerate"
+        );
+        assert_eq!(edit_receipt.chunks[0].edit_count, 0);
+        assert_eq!(edit_receipt.chunks[1].edit_count, 1);
+        assert_ne!(edit_receipt.chunks[0].namespace_hash, pristine_neighbor_namespace);
+        let WorldCellReadV1::Loaded { cell, .. } = runtime.world().read_cell(edited_position) else {
+            panic!("regenerated edited cell must remain resident")
+        };
+        assert_eq!(
+            cell.block_id, 254,
+            "the exact authority edit journal wins over generated bytes"
+        );
+    }
+
+    #[test]
+    fn terrain_residency_rejection_rolls_back_every_chunk() {
+        let fixture = blockwild_generation::fixture_request("integrated-residency-rollback", 0, 0, 1);
+        let mut config = IntegratedRuntimeConfigV2 {
+            world_seed: fixture.seed_text,
+            terrain_content_hash: parse_canonical_hash(&fixture.content_hash).unwrap(),
+            generator_hash: parse_canonical_hash(&fixture.generator_hash).unwrap(),
+            ..IntegratedRuntimeConfigV2::default()
+        };
+        config.block_catalog.water_block_id = GeneratedBlock::WATER;
+        let mut runtime = IntegratedRuntimeV2::new(config).unwrap();
+        let before_hash = runtime.state_hash();
+        let before_revision = runtime.world().revision();
+        let before_generation_diagnostics = runtime.generation_diagnostics();
+        let invalid = IntegratedTerrainResidencyBatchV1 {
+            expected_world_revision: before_revision,
+            generation_options_json: runtime.config().generation_options_json.clone(),
+            chunks: vec![
+                IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 },
+                IntegratedTerrainChunkCoordinateV1 {
+                    chunk_x: i32::MAX,
+                    chunk_z: 0,
+                },
+            ],
+        };
+        assert_eq!(
+            runtime.ensure_terrain_residency(&invalid).unwrap_err().code,
+            "terrain-residency-coordinate"
+        );
+        assert_eq!(runtime.world().resident_section_count(), 0);
+        assert_eq!(runtime.world().revision(), before_revision);
+        assert_eq!(runtime.state_hash(), before_hash);
+        assert_eq!(runtime.generation_diagnostics(), before_generation_diagnostics);
+
+        let different_options = IntegratedTerrainResidencyBatchV1 {
+            expected_world_revision: before_revision,
+            generation_options_json: runtime
+                .config()
+                .generation_options_json
+                .replace("\"structures\":true", "\"structures\":false"),
+            chunks: vec![IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 }],
+        };
+        assert_eq!(
+            runtime.ensure_terrain_residency(&different_options).unwrap_err().code,
+            "terrain-generation-options"
+        );
+        assert_eq!(runtime.state_hash(), before_hash);
+        assert_eq!(runtime.generation_diagnostics(), before_generation_diagnostics);
+
+        let stale = IntegratedTerrainResidencyBatchV1 {
+            expected_world_revision: WorldAuthorityRevisionV1 {
+                residency: before_revision.residency.saturating_add(1),
+                ..before_revision
+            },
+            generation_options_json: runtime.config().generation_options_json.clone(),
+            chunks: vec![IntegratedTerrainChunkCoordinateV1 { chunk_x: 0, chunk_z: 0 }],
+        };
+        assert_eq!(
+            runtime.ensure_terrain_residency(&stale).unwrap_err().code,
+            "terrain-residency-stale"
+        );
+        assert_eq!(runtime.state_hash(), before_hash);
+        assert_eq!(runtime.generation_diagnostics(), before_generation_diagnostics);
+    }
+
+    #[test]
+    fn terrain_options_exclude_spawn_origin_and_require_exact_normalized_fields() {
+        assert!(validate_canonical_generation_options_json_v1(DEFAULT_GENERATION_OPTIONS_JSON_V1).is_ok());
+        assert!(!DEFAULT_GENERATION_OPTIONS_JSON_V1.contains("origin"));
+        for invalid in [
+            "{}",
+            "{\"origin\":{\"mode\":\"wilderness\"}}",
+            &DEFAULT_GENERATION_OPTIONS_JSON_V1.replace("\"structures\":true", "\"structures\":true,\"origin\":{}"),
+            &DEFAULT_GENERATION_OPTIONS_JSON_V1.replace("\"caveFrequency\":1", "\"caveFrequency\":1.001"),
+            &DEFAULT_GENERATION_OPTIONS_JSON_V1.replace("\"hobbits\",\"goblins\"", "\"goblins\",\"hobbits\""),
+        ] {
+            assert_eq!(
+                validate_canonical_generation_options_json_v1(invalid).unwrap_err().code,
+                "invalid-generation-options"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_runtime_core_configs_restore_default_terrain_identity() {
+        let mut legacy = IntegratedRuntimeConfigV2 {
+            world_seed: "legacy-core-config".into(),
+            universe_id: "legacy-universe".into(),
+            location_id: "legacy-location".into(),
+            session_id: "legacy-session".into(),
+            content_hash: CanonicalHash([1; 16]),
+            generator_hash: CanonicalHash([2; 16]),
+            terrain_content_hash: CanonicalHash([3; 16]),
+            generation_options_json: DEFAULT_GENERATION_OPTIONS_JSON_V1.into(),
+            block_catalog: BlockCatalogV1::default(),
+        };
+        legacy.block_catalog.water_block_id = 7;
+        legacy.block_catalog.directional_blocks.extend([8, 9]);
+        legacy.block_catalog.waterlogged_blocks.insert(10);
+
+        // Schemas 1..=3 ended the immutable config after generatorHash and
+        // therefore have no terrain identity bytes to consume here.
+        let mut writer = NativeWriterV1::default();
+        writer.string(&legacy.world_seed).unwrap();
+        writer.string(&legacy.universe_id).unwrap();
+        writer.string(&legacy.location_id).unwrap();
+        writer.string(&legacy.session_id).unwrap();
+        writer.hash(legacy.content_hash);
+        writer.hash(legacy.generator_hash);
+        writer.u16(legacy.block_catalog.water_block_id);
+        writer.u32(legacy.block_catalog.directional_blocks.len() as u32);
+        for block_id in &legacy.block_catalog.directional_blocks {
+            writer.u16(*block_id);
+        }
+        writer.u32(legacy.block_catalog.waterlogged_blocks.len() as u32);
+        for block_id in &legacy.block_catalog.waterlogged_blocks {
+            writer.u16(*block_id);
+        }
+        let bytes = writer.finish();
+
+        for schema in [
+            NATIVE_RECORD_SCHEMA_V1,
+            NATIVE_RUNTIME_CORE_SCHEMA_V2,
+            NATIVE_RUNTIME_CORE_SCHEMA_V3,
+        ] {
+            let mut reader = NativeReaderV1::new(&bytes);
+            let restored = read_runtime_config_v1(&mut reader, schema).unwrap();
+            reader.finish().unwrap();
+            assert_eq!(restored.world_seed, legacy.world_seed);
+            assert_eq!(restored.content_hash, legacy.content_hash);
+            assert_eq!(restored.generator_hash, legacy.generator_hash);
+            assert_eq!(restored.terrain_content_hash, DEFAULT_TERRAIN_CONTENT_HASH_V2);
+            assert_eq!(restored.generation_options_json, DEFAULT_GENERATION_OPTIONS_JSON_V1);
+            assert_eq!(restored.block_catalog, legacy.block_catalog);
+        }
     }
 
     #[test]

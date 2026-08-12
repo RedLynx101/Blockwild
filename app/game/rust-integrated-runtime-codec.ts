@@ -7,6 +7,10 @@ import {
   RUST_INTEGRATED_RUNTIME_MAX_REQUEST_BYTES,
   RUST_INTEGRATED_RUNTIME_SCHEMA_V2,
   RUST_INTEGRATED_RUNTIME_SCHEMA_V3,
+  RUST_INTEGRATED_RUNTIME_SCHEMA_V4,
+  RUST_INTEGRATED_RUNTIME_DEFAULT_GENERATION_OPTIONS_JSON_V1,
+  RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONTENT_HASH_V2,
+  RUST_INTEGRATED_RUNTIME_MAX_GENERATION_OPTIONS_JSON_BYTES,
   RUST_INTEGRATED_RUNTIME_WIRE_V1,
   RUST_RUNTIME_INPUT_BUTTON_MASK_V1,
   RUST_RUNTIME_INPUT_FLAG_MASK_V1,
@@ -318,6 +322,12 @@ function writeConfig(writer: Writer, value: RustIntegratedRuntimeConfigV1) {
   writer.string(value.sessionId, "config.sessionId", 160);
   writer.hash(value.contentHash, "config.contentHash");
   writer.hash(value.generatorHash, "config.generatorHash");
+  writer.hash(value.terrainContentHash, "config.terrainContentHash");
+  writer.string(
+    value.generationOptionsJson,
+    "config.generationOptionsJson",
+    RUST_INTEGRATED_RUNTIME_MAX_GENERATION_OPTIONS_JSON_BYTES,
+  );
   writer.u16(value.waterBlockId);
   for (const values of [
     sortedUniqueBlockIds(value.directionalBlockIds, "config.directionalBlockIds"),
@@ -328,13 +338,19 @@ function writeConfig(writer: Writer, value: RustIntegratedRuntimeConfigV1) {
   }
 }
 
-function readConfig(reader: Reader): RustIntegratedRuntimeConfigV1 {
+function readConfig(reader: Reader, schema: number): RustIntegratedRuntimeConfigV1 {
   const worldSeed = reader.string("config.worldSeed", 2_048);
   const universeId = reader.string("config.universeId", 64);
   const locationId = reader.string("config.locationId", 128);
   const sessionId = reader.string("config.sessionId", 160);
   const contentHash = reader.hash();
   const generatorHash = reader.hash();
+  const terrainContentHash = schema >= RUST_INTEGRATED_RUNTIME_SCHEMA_V4
+    ? reader.hash()
+    : RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONTENT_HASH_V2;
+  const generationOptionsJson = schema >= RUST_INTEGRATED_RUNTIME_SCHEMA_V4
+    ? reader.string("config.generationOptionsJson", RUST_INTEGRATED_RUNTIME_MAX_GENERATION_OPTIONS_JSON_BYTES)
+    : RUST_INTEGRATED_RUNTIME_DEFAULT_GENERATION_OPTIONS_JSON_V1;
   const waterBlockId = reader.u16();
   const sets = Array.from({ length: 2 }, () => Object.freeze(Array.from({ length: reader.u16() }, () => reader.u16())));
   for (const values of sets) {
@@ -343,7 +359,7 @@ function readConfig(reader: Reader): RustIntegratedRuntimeConfigV1 {
     }
   }
   return Object.freeze({
-    worldSeed, universeId, locationId, sessionId, contentHash, generatorHash, waterBlockId,
+    worldSeed, universeId, locationId, sessionId, contentHash, generatorHash, terrainContentHash, generationOptionsJson, waterBlockId,
     directionalBlockIds: sets[0], waterloggedBlockIds: sets[1],
   });
 }
@@ -657,7 +673,7 @@ function encodeEnvelope(
   output.set(magic, 0);
   const view = new DataView(output.buffer);
   view.setUint16(4, RUST_INTEGRATED_RUNTIME_WIRE_V1, true);
-  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3) {
+  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V4) {
     throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is unsupported");
   }
   view.setUint16(6, schema, true);
@@ -684,7 +700,7 @@ function decodeEnvelope(value: Uint8Array | ArrayBuffer, magic: Uint8Array): Hea
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (view.getUint16(4, true) !== RUST_INTEGRATED_RUNTIME_WIRE_V1) throw new RustIntegratedRuntimeCodecError("wire-version", "integrated runtime wire version is unsupported");
   const schema = view.getUint16(6, true);
-  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3) throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is unsupported");
+  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V4) throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is unsupported");
   if (view.getUint16(10, true) !== 0) throw new RustIntegratedRuntimeCodecError("reserved", "integrated runtime reserved header bits must be zero");
   const payloadLength = view.getUint32(24, true);
   if (payloadLength !== bytes.byteLength - HEADER_BYTES) throw new RustIntegratedRuntimeCodecError("length", "integrated runtime envelope length does not match its payload");
@@ -695,6 +711,23 @@ function decodeEnvelope(value: Uint8Array | ArrayBuffer, magic: Uint8Array): Hea
     schema, operation: view.getUint8(8), status: view.getUint8(9), requestId: view.getUint32(12, true),
     clientEpoch: view.getUint32(16, true), workerEpoch: view.getUint32(20, true), payload,
   });
+}
+
+function validateOperationSchema(operation: number, schema: number, response: boolean) {
+  const valid = response
+    ? operation === 3
+      ? schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V2 || schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V3
+      : [1, 2, 4, 5, 6, 7, 255].includes(operation)
+        ? schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V2
+        : true
+    : operation === 1
+      ? schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V2 || schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V4
+      : [2, 3, 4, 5, 6, 7, 8].includes(operation)
+        ? schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V2
+        : true;
+  if (!valid) {
+    throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is not valid for this operation");
+  }
 }
 
 export function encodeRustIntegratedRuntimeRequestV1(request: RustIntegratedRuntimeRequestV1) {
@@ -726,17 +759,27 @@ export function encodeRustIntegratedRuntimeRequestV1(request: RustIntegratedRunt
       if (request.expected) writeIdentity(writer, request.expected);
       break;
   }
-  return encodeEnvelope(REQUEST_MAGIC, requestOperations[request.type], 0, request.requestId, request.clientEpoch, 0, writer.finish());
+  return encodeEnvelope(
+    REQUEST_MAGIC,
+    requestOperations[request.type],
+    0,
+    request.requestId,
+    request.clientEpoch,
+    0,
+    writer.finish(),
+    request.type === "runtime-create-v1" ? RUST_INTEGRATED_RUNTIME_SCHEMA_V4 : RUST_INTEGRATED_RUNTIME_SCHEMA_V2,
+  );
 }
 
 export function decodeRustIntegratedRuntimeRequestV1(value: Uint8Array | ArrayBuffer): RustIntegratedRuntimeRequestV1 {
   const header = decodeEnvelope(value, REQUEST_MAGIC);
   if (header.status !== 0 || header.workerEpoch !== 0) throw new RustIntegratedRuntimeCodecError("request-header", "runtime requests must have zero status and worker epoch");
+  validateOperationSchema(header.operation, header.schema, false);
   const base = { requestId: header.requestId, clientEpoch: header.clientEpoch } as const;
   const reader = new Reader(header.payload);
   let request: RustIntegratedRuntimeRequestV1;
   switch (header.operation) {
-    case 1: request = Object.freeze({ ...base, type: "runtime-create-v1", config: readConfig(reader) }); break;
+    case 1: request = Object.freeze({ ...base, type: "runtime-create-v1", config: readConfig(reader, header.schema) }); break;
     case 2: request = Object.freeze({ ...base, type: "runtime-command-v1", batch: readCommand(reader) }); break;
     case 8: request = Object.freeze({ ...base, type: "runtime-recover-command-v1", batch: readCommand(reader) }); break;
     case 3: {
@@ -830,6 +873,7 @@ export function encodeRustIntegratedRuntimeResponseV1(response: RustIntegratedRu
 export function decodeRustIntegratedRuntimeResponseV1(value: Uint8Array | ArrayBuffer): RustIntegratedRuntimeResponseV1 {
   const header = decodeEnvelope(value, RESPONSE_MAGIC);
   if (header.workerEpoch < 1) throw new RustIntegratedRuntimeCodecError("worker-epoch", "runtime response is missing a worker epoch");
+  validateOperationSchema(header.operation, header.schema, true);
   const base = { requestId: header.requestId, clientEpoch: header.clientEpoch, workerEpoch: header.workerEpoch } as const;
   const reader = new Reader(header.payload);
   let response: RustIntegratedRuntimeResponseV1;

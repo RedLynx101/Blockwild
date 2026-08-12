@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use blockwild_authority::WorldAuthorityRevisionV1;
 use blockwild_entity::{
     DespawnReason, DormantEntitySummary, EntityAuthority, EntityClass, EntityCommand, EntityCommandBatch,
     EntityCompatibilityRecord, EntityComponents, EntityEventBatch, EntityEventKind, EntityResidency, ProtectionState,
@@ -17,10 +18,13 @@ use blockwild_gameplay::{
     CardforgeCommand, CombatCommand, ContainerKey, ContainerKind, ContentArtifact, ContentDomain, ContentDomainDigest,
     CraftCommand, CreateDropCustodyCommand, CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3,
     FurnaceAdvanceCommand, GAMEPLAY_COMMAND_ADVANCE_SCHEDULE_TAG_V1, GameplayActor, GameplayBatch, GameplayCommand,
-    GameplayEvent, GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1, Ingredient, InventoryCommand,
-    MachineCommand, MachineOperation, OpaquePayload, PacifyMethod, PrintingKey, ProgressionAction, ProgressionCommand,
-    Rejection, RejectionCode, RemoveEmptyDropCustodyCommand, ResourceDelta, ResourceEndpoint, ResourceKey,
-    ResourceKind, Scope, SlotRef, StatDelta, TransferCommand, WorldKey,
+    GameplayEvent, GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1,
+    INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG, ImportPlayerInventoryV1, Ingredient, InventoryCommand,
+    ItemInstanceMetadataV1, ItemStack, MAX_ITEM_INSTANCE_METADATA_BYTES_V1,
+    MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1, MachineCommand, MachineOperation, OpaquePayload,
+    PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1, PacifyMethod, PrintingKey, ProgressionAction, ProgressionCommand, Rejection,
+    RejectionCode, RemoveEmptyDropCustodyCommand, ResourceDelta, ResourceEndpoint, ResourceKey, ResourceKind, Scope,
+    SlotRef, StatDelta, TransferCommand, WorldKey,
 };
 use blockwild_network::{
     AgentCapabilityGrantV1, AgentCapabilityV1, AgentLifecycleStatusV1, InterestDeltaBuildSourceV1,
@@ -30,6 +34,12 @@ use blockwild_network::{
 };
 use blockwild_runtime_wire::{MAX_DOMAIN_PAYLOAD_BYTES, WireError, wire_checksum_v1};
 use blockwild_types::{CanonicalHash, EntityId, LocationId, PlayerId};
+
+use crate::{
+    INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1, IntegratedTerrainChunkCoordinateV1,
+    IntegratedTerrainResidencyBatchV1, IntegratedTerrainResidencyChunkReceiptV1, IntegratedTerrainResidencyReceiptV1,
+    IntegratedTerrainResidencyStatusV1, validate_canonical_generation_options_json_v1,
+};
 
 const DOMAIN_PROTOCOL_V1: u16 = 1;
 const DOMAIN_SCHEMA_V1: u16 = 1;
@@ -61,6 +71,8 @@ const ENTITY_AUTHORITY_IMPORT_MAGIC: [u8; 4] = *b"BWI6";
 const ENTITY_AUTHORITY_IMPORT_RECEIPT_MAGIC: [u8; 4] = *b"BWU6";
 const ENTITY_COMPATIBILITY_EXPORT_MAGIC: [u8; 4] = *b"BWQ5";
 const ENTITY_COMPATIBILITY_IMPORT_MAGIC: [u8; 4] = *b"BWI5";
+const TERRAIN_RESIDENCY_BATCH_MAGIC: [u8; 4] = *b"BWT4";
+const TERRAIN_RESIDENCY_RECEIPT_MAGIC: [u8; 4] = *b"BWU4";
 
 pub const CONTENT_INSTALL_PAGE_TYPE_V1: &str = "blockwild.gameplay.content-install-page.v1";
 pub const CONTENT_INSTALL_RECEIPT_TYPE_V1: &str = "blockwild.gameplay.content-install-receipt.v1";
@@ -73,6 +85,8 @@ pub const ENTITY_AUTHORITY_IMPORT_RECEIPT_TYPE_V1: &str = "blockwild.entities.au
 pub const ENTITY_COMPATIBILITY_EXPORT_TYPE_V1: &str = "blockwild.entities.compatibility-export.r6.v1";
 pub const ENTITY_COMPATIBILITY_RECORD_TYPE_V1: &str = "blockwild.entities.compatibility-record.r6.v1";
 pub const ENTITY_COMPATIBILITY_IMPORT_TYPE_V1: &str = "blockwild.entities.compatibility-import.r6.v1";
+pub const TERRAIN_RESIDENCY_BATCH_TYPE_V1: &str = "blockwild.world.terrain-residency.ensure.r4.v1";
+pub const TERRAIN_RESIDENCY_RECEIPT_TYPE_V1: &str = "blockwild.world.terrain-residency-receipt.r4.v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EntityAuthorityExportWireV1 {
@@ -315,6 +329,209 @@ pub fn decode_runtime_player_binding_v1(bytes: &[u8]) -> Result<RuntimePlayerBin
     reader.finish()?;
     value.validate()?;
     Ok(value)
+}
+
+pub fn encode_terrain_residency_batch_v1(value: &IntegratedTerrainResidencyBatchV1) -> Result<Vec<u8>, WireError> {
+    validate_terrain_residency_wire_batch_v1(value)?;
+    let mut writer = Writer::default();
+    write_world_revision(&mut writer, value.expected_world_revision);
+    writer.string(&value.generation_options_json)?;
+    writer.count(
+        value.chunks.len(),
+        INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1,
+        "terrain residency chunks",
+    )?;
+    for chunk in &value.chunks {
+        writer.i32(chunk.chunk_x);
+        writer.i32(chunk.chunk_z);
+    }
+    wrap(TERRAIN_RESIDENCY_BATCH_MAGIC, writer.finish())
+}
+
+pub fn decode_terrain_residency_batch_v1(bytes: &[u8]) -> Result<IntegratedTerrainResidencyBatchV1, WireError> {
+    let mut reader = Reader::new(unwrap(TERRAIN_RESIDENCY_BATCH_MAGIC, bytes)?);
+    let expected_world_revision = read_world_revision(&mut reader)?;
+    let generation_options_json = reader.string()?;
+    let count = reader.count(
+        INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1,
+        "terrain residency chunks",
+    )?;
+    let mut chunks = Vec::with_capacity(count);
+    for _ in 0..count {
+        chunks.push(IntegratedTerrainChunkCoordinateV1 {
+            chunk_x: reader.i32()?,
+            chunk_z: reader.i32()?,
+        });
+    }
+    reader.finish()?;
+    let value = IntegratedTerrainResidencyBatchV1 {
+        expected_world_revision,
+        generation_options_json,
+        chunks,
+    };
+    validate_terrain_residency_wire_batch_v1(&value)?;
+    Ok(value)
+}
+
+pub fn encode_terrain_residency_receipt_v1(value: &IntegratedTerrainResidencyReceiptV1) -> Result<Vec<u8>, WireError> {
+    validate_terrain_residency_wire_receipt_v1(value)?;
+    let mut writer = Writer::default();
+    write_world_revision(&mut writer, value.previous_world_revision);
+    write_world_revision(&mut writer, value.world_revision);
+    writer.u32(value.requested_chunks);
+    writer.u32(value.generated_chunks);
+    writer.u32(value.already_resident_chunks);
+    writer.u32(value.requested_resident_chunks);
+    writer.u32(value.resident_sections);
+    writer.count(
+        value.chunks.len(),
+        INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1,
+        "terrain residency receipt chunks",
+    )?;
+    for chunk in &value.chunks {
+        writer.i32(chunk.coordinate.chunk_x);
+        writer.i32(chunk.coordinate.chunk_z);
+        writer.u8(chunk.status as u8);
+        writer.u16(chunk.resident_sections);
+        writer.u32(chunk.edit_count);
+        writer.u32(chunk.generation_revision);
+        writer.hash(chunk.request_hash);
+        writer.hash(chunk.source_hash);
+        writer.hash(chunk.edit_hash);
+        writer.hash(chunk.namespace_hash);
+        writer.flag(chunk.cache_hit);
+    }
+    writer.hash(value.state_hash);
+    wrap(TERRAIN_RESIDENCY_RECEIPT_MAGIC, writer.finish())
+}
+
+pub fn decode_terrain_residency_receipt_v1(bytes: &[u8]) -> Result<IntegratedTerrainResidencyReceiptV1, WireError> {
+    let mut reader = Reader::new(unwrap(TERRAIN_RESIDENCY_RECEIPT_MAGIC, bytes)?);
+    let previous_world_revision = read_world_revision(&mut reader)?;
+    let world_revision = read_world_revision(&mut reader)?;
+    let requested_chunks = reader.u32()?;
+    let generated_chunks = reader.u32()?;
+    let already_resident_chunks = reader.u32()?;
+    let requested_resident_chunks = reader.u32()?;
+    let resident_sections = reader.u32()?;
+    let count = reader.count(
+        INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1,
+        "terrain residency receipt chunks",
+    )?;
+    let mut chunks = Vec::with_capacity(count);
+    for _ in 0..count {
+        chunks.push(IntegratedTerrainResidencyChunkReceiptV1 {
+            coordinate: IntegratedTerrainChunkCoordinateV1 {
+                chunk_x: reader.i32()?,
+                chunk_z: reader.i32()?,
+            },
+            status: match reader.u8()? {
+                0 => IntegratedTerrainResidencyStatusV1::AlreadyResident,
+                1 => IntegratedTerrainResidencyStatusV1::Generated,
+                _ => return Err(WireError::new("terrain-residency-status", "unknown residency status")),
+            },
+            resident_sections: reader.u16()?,
+            edit_count: reader.u32()?,
+            generation_revision: reader.u32()?,
+            request_hash: reader.hash()?,
+            source_hash: reader.hash()?,
+            edit_hash: reader.hash()?,
+            namespace_hash: reader.hash()?,
+            cache_hit: reader.flag()?,
+        });
+    }
+    let state_hash = reader.hash()?;
+    reader.finish()?;
+    let value = IntegratedTerrainResidencyReceiptV1 {
+        previous_world_revision,
+        world_revision,
+        requested_chunks,
+        generated_chunks,
+        already_resident_chunks,
+        requested_resident_chunks,
+        resident_sections,
+        chunks,
+        state_hash,
+    };
+    validate_terrain_residency_wire_receipt_v1(&value)?;
+    Ok(value)
+}
+
+fn write_world_revision(writer: &mut Writer, value: WorldAuthorityRevisionV1) {
+    writer.u64(value.epoch);
+    writer.u64(value.mutation);
+    writer.u64(value.residency);
+}
+
+fn read_world_revision(reader: &mut Reader<'_>) -> Result<WorldAuthorityRevisionV1, WireError> {
+    let value = WorldAuthorityRevisionV1 {
+        epoch: reader.u64()?,
+        mutation: reader.u64()?,
+        residency: reader.u64()?,
+    };
+    value
+        .validate()
+        .map_err(|error| WireError::new("terrain-residency-revision", error.to_string()))?;
+    Ok(value)
+}
+
+fn validate_terrain_residency_wire_batch_v1(value: &IntegratedTerrainResidencyBatchV1) -> Result<(), WireError> {
+    value
+        .expected_world_revision
+        .validate()
+        .map_err(|error| WireError::new("terrain-residency-revision", error.to_string()))?;
+    validate_canonical_generation_options_json_v1(&value.generation_options_json)
+        .map_err(|error| WireError::new("invalid-generation-options", error.message))?;
+    if value.chunks.is_empty()
+        || value.chunks.len() > INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1
+        || value.chunks.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(WireError::new(
+            "terrain-residency-batch",
+            "terrain residency batch is malformed, unsorted, duplicated, or outside bounds",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_terrain_residency_wire_receipt_v1(value: &IntegratedTerrainResidencyReceiptV1) -> Result<(), WireError> {
+    value
+        .previous_world_revision
+        .validate()
+        .map_err(|error| WireError::new("terrain-residency-revision", error.to_string()))?;
+    value
+        .world_revision
+        .validate()
+        .map_err(|error| WireError::new("terrain-residency-revision", error.to_string()))?;
+    let count = value.chunks.len() as u32;
+    let generated = value
+        .chunks
+        .iter()
+        .filter(|chunk| chunk.status == IntegratedTerrainResidencyStatusV1::Generated)
+        .count() as u32;
+    let already_resident = count.saturating_sub(generated);
+    if value.chunks.is_empty()
+        || value.chunks.len() > INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1
+        || value.requested_chunks != count
+        || value.requested_resident_chunks != count
+        || value.generated_chunks.saturating_add(value.already_resident_chunks) != count
+        || value.generated_chunks != generated
+        || value.already_resident_chunks != already_resident
+        || value
+            .chunks
+            .windows(2)
+            .any(|pair| pair[0].coordinate >= pair[1].coordinate)
+        || value
+            .chunks
+            .iter()
+            .any(|chunk| chunk.resident_sections != 12 || chunk.generation_revision == 0)
+    {
+        return Err(WireError::new(
+            "terrain-residency-receipt",
+            "terrain residency receipt counters or chunk diagnostics are inconsistent",
+        ));
+    }
+    Ok(())
 }
 
 pub fn encode_runtime_persistence_dispatch_v1(value: &RuntimePersistenceDispatchWireV1) -> Result<Vec<u8>, WireError> {
@@ -1309,6 +1526,47 @@ fn write_inventory_command(writer: &mut Writer, value: &InventoryCommand) -> Res
                 writer.u16(back_slot);
             }
         }
+        InventoryCommand::ImportPlayerInventoryV1(value) => {
+            writer.u8(INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG as u8);
+            write_container_key(writer, &value.inventory)?;
+            writer.u64(value.expected_revision);
+            writer.count(
+                value.slots.len(),
+                PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+                "player inventory import slot count",
+            )?;
+            for slot in &value.slots {
+                writer.flag(slot.is_some());
+                if let Some(stack) = slot {
+                    writer.u32(stack.item_code);
+                    writer.u32(stack.count);
+                    writer.option_u32(stack.durability_millionths);
+                    writer.hash(stack.metadata_hash);
+                }
+            }
+            writer.count(
+                value.metadata.len(),
+                PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+                "player inventory import metadata count",
+            )?;
+            for metadata in &value.metadata {
+                writer.hash(metadata.hash);
+                writer.string(&metadata.type_id)?;
+                writer.string(&metadata.schema_id)?;
+                writer.u16(metadata.schema_version);
+                writer.u32(metadata.content_version);
+                writer.bytes(
+                    &metadata.canonical_json_bytes,
+                    MAX_ITEM_INSTANCE_METADATA_BYTES_V1,
+                    "item instance metadata JSON",
+                )?;
+                writer.bytes(
+                    &metadata.unknown_extension_bytes,
+                    MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1,
+                    "item instance metadata extension",
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -1376,6 +1634,53 @@ fn read_inventory_command(reader: &mut Reader<'_>) -> Result<InventoryCommand, W
             },
             request_hash: reader.hash()?,
         })),
+        tag if u16::from(tag) == INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG => {
+            let inventory = read_container_key(reader)?;
+            let expected_revision = reader.u64()?;
+            let slot_count = reader.count(
+                PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+                "player inventory import slot count",
+            )?;
+            let mut slots = Vec::with_capacity(slot_count);
+            for _ in 0..slot_count {
+                slots.push(if reader.flag()? {
+                    Some(ItemStack {
+                        item_code: reader.u32()?,
+                        count: reader.u32()?,
+                        durability_millionths: reader.option_u32()?,
+                        metadata_hash: reader.hash()?,
+                    })
+                } else {
+                    None
+                });
+            }
+            let metadata_count = reader.count(
+                PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+                "player inventory import metadata count",
+            )?;
+            let mut metadata = Vec::with_capacity(metadata_count);
+            for _ in 0..metadata_count {
+                metadata.push(ItemInstanceMetadataV1 {
+                    hash: reader.hash()?,
+                    type_id: reader.string()?,
+                    schema_id: reader.string()?,
+                    schema_version: reader.u16()?,
+                    content_version: reader.u32()?,
+                    canonical_json_bytes: reader
+                        .bytes(MAX_ITEM_INSTANCE_METADATA_BYTES_V1, "item instance metadata JSON")?,
+                    unknown_extension_bytes: reader.bytes(
+                        MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1,
+                        "item instance metadata extension",
+                    )?,
+                });
+            }
+            Ok(InventoryCommand::ImportPlayerInventoryV1(ImportPlayerInventoryV1 {
+                inventory,
+                expected_revision,
+                slots,
+                metadata,
+            }))
+        }
         _ => Err(WireError::new("inventory-command", "unknown inventory command tag")),
     }
 }
@@ -3757,6 +4062,57 @@ mod tests {
     }
 
     #[test]
+    fn player_inventory_import_wire_round_trips_and_enforces_bounds() {
+        let mut metadata = ItemInstanceMetadataV1 {
+            hash: CanonicalHash::default(),
+            type_id: "legacy-item-instance".into(),
+            schema_id: "legacy-item-instance-v1".into(),
+            schema_version: 1,
+            content_version: 3,
+            canonical_json_bytes: br#"{"name":"Explorer's Compass"}"#.to_vec(),
+            unknown_extension_bytes: vec![0, 0x80, 0xff],
+        };
+        metadata.hash = metadata.calculate_hash();
+        let mut slots = vec![None; PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1];
+        slots[0] = Some(ItemStack {
+            item_code: 17,
+            count: 2,
+            durability_millionths: Some(750_000),
+            metadata_hash: metadata.hash,
+        });
+        let command = InventoryCommand::ImportPlayerInventoryV1(ImportPlayerInventoryV1 {
+            inventory: ContainerKey::player("player:inventory-wire"),
+            expected_revision: 0,
+            slots,
+            metadata: vec![metadata],
+        });
+        let state = blockwild_gameplay::GameplayState::new(WorldKey::new("universe", "surface"), 1);
+        let batch = GameplayBatch::new(
+            "inventory-import:1",
+            "inventory-import:1",
+            GameplayActor {
+                actor_id: "inventory-migrator".into(),
+                player_id: None,
+                entity_id: None,
+                role: ActorRole::System,
+            },
+            state.identity(),
+            vec![GameplayCommand::Inventory(command)],
+        );
+        let encoded = encode_gameplay_batch_v1(&batch).unwrap();
+        assert_eq!(decode_gameplay_batch_v1(&encoded).unwrap(), batch);
+
+        let mut over_bound = batch;
+        let GameplayCommand::Inventory(InventoryCommand::ImportPlayerInventoryV1(command)) =
+            &mut over_bound.commands[0]
+        else {
+            unreachable!("fixture contains the import command")
+        };
+        command.slots.push(None);
+        assert_eq!(encode_gameplay_batch_v1(&over_bound).unwrap_err().code, "domain-count");
+    }
+
+    #[test]
     fn entity_wire_round_trips_high_bytes_and_rejects_corruption() {
         let mut record = EntityCompatibilityRecord::new("mob:é߿", "specimen:1", "frostquill");
         record.location_id = LocationId::new(1, 1);
@@ -4075,6 +4431,97 @@ mod tests {
 
         assert!(binding.player_id.packed() > 9_007_199_254_740_991);
         assert_eq!(decode_runtime_player_binding_v1(&encoded).unwrap(), binding);
+    }
+
+    #[test]
+    fn terrain_residency_wire_is_golden_bounded_and_fail_closed() {
+        let batch = IntegratedTerrainResidencyBatchV1 {
+            expected_world_revision: WorldAuthorityRevisionV1 {
+                epoch: 7,
+                mutation: 11,
+                residency: 13,
+            },
+            generation_options_json: crate::runtime::DEFAULT_GENERATION_OPTIONS_JSON_V1.into(),
+            chunks: vec![
+                IntegratedTerrainChunkCoordinateV1 {
+                    chunk_x: -2,
+                    chunk_z: 3,
+                },
+                IntegratedTerrainChunkCoordinateV1 {
+                    chunk_x: 4,
+                    chunk_z: -5,
+                },
+            ],
+        };
+        let encoded = encode_terrain_residency_batch_v1(&batch).unwrap();
+        assert_eq!(decode_terrain_residency_batch_v1(&encoded).unwrap(), batch);
+        assert_eq!(
+            encoded.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "425754340100010088010000de1f6d729fdb3858b8c5c4571516987007000000000000000b000000000000000d00000000000000580100007b2262696f6d655363616c65223a312e33352c22636176654672657175656e6379223a312c22656e61626c656446616374696f6e73223a5b22686f6262697473222c22676f626c696e73222c2261746c616e7469616e73222c227375676172636f757274222c22776f6f642d656c766573222c2264776172766573225d2c226c61726765546f776e4672657175656e6379223a2262616c616e636564222c2270726f66696c65223a22776f726c642d62656c6f772d763135222c227265736f757263654162756e64616e6365223a312c22726f6164436f766572616765223a22726567696f6e616c222c22736574746c656d656e74436c7573746572696e67223a22726567696f6e616c222c22736574746c656d656e7444656e73697479223a312c22736574746c656d656e745061747465726e223a2268656172746c616e64732d7632222c2273747275637475726573223a747275657d02000000feffffff0300000004000000fbffffff"
+        );
+        let mut corrupt = encoded;
+        *corrupt.last_mut().unwrap() ^= 0x80;
+        assert_eq!(
+            decode_terrain_residency_batch_v1(&corrupt).unwrap_err().code,
+            "domain-checksum"
+        );
+
+        let receipt = IntegratedTerrainResidencyReceiptV1 {
+            previous_world_revision: batch.expected_world_revision,
+            world_revision: WorldAuthorityRevisionV1 {
+                epoch: 7,
+                mutation: 11,
+                residency: 37,
+            },
+            requested_chunks: 2,
+            generated_chunks: 1,
+            already_resident_chunks: 1,
+            requested_resident_chunks: 2,
+            resident_sections: 24,
+            chunks: vec![
+                IntegratedTerrainResidencyChunkReceiptV1 {
+                    coordinate: batch.chunks[0],
+                    status: IntegratedTerrainResidencyStatusV1::Generated,
+                    resident_sections: 12,
+                    edit_count: 1,
+                    generation_revision: 17,
+                    request_hash: CanonicalHash([1; 16]),
+                    source_hash: CanonicalHash([2; 16]),
+                    edit_hash: CanonicalHash([3; 16]),
+                    namespace_hash: CanonicalHash([4; 16]),
+                    cache_hit: false,
+                },
+                IntegratedTerrainResidencyChunkReceiptV1 {
+                    coordinate: batch.chunks[1],
+                    status: IntegratedTerrainResidencyStatusV1::AlreadyResident,
+                    resident_sections: 12,
+                    edit_count: 0,
+                    generation_revision: 19,
+                    request_hash: CanonicalHash([5; 16]),
+                    source_hash: CanonicalHash([6; 16]),
+                    edit_hash: CanonicalHash([7; 16]),
+                    namespace_hash: CanonicalHash([8; 16]),
+                    cache_hit: true,
+                },
+            ],
+            state_hash: CanonicalHash([9; 16]),
+        };
+        let receipt_bytes = encode_terrain_residency_receipt_v1(&receipt).unwrap();
+        assert_eq!(decode_terrain_residency_receipt_v1(&receipt_bytes).unwrap(), receipt);
+        assert_eq!(
+            receipt_bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            "42575534010001000001000060614df5f7d98929d8039275ae9f18b307000000000000000b000000000000000d0000000000000007000000000000000b000000000000002500000000000000020000000100000001000000020000001800000002000000feffffff03000000010c000100000011000000010101010101010101010101010101010202020202020202020202020202020203030303030303030303030303030303040404040404040404040404040404040004000000fbffffff000c000000000013000000050505050505050505050505050505050606060606060606060606060606060607070707070707070707070707070707080808080808080808080808080808080109090909090909090909090909090909"
+        );
+        let mut inconsistent = receipt;
+        inconsistent.generated_chunks = 2;
+        inconsistent.already_resident_chunks = 0;
+        assert_eq!(
+            encode_terrain_residency_receipt_v1(&inconsistent).unwrap_err().code,
+            "terrain-residency-receipt"
+        );
     }
 
     #[test]

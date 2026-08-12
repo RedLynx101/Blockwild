@@ -10,11 +10,11 @@ import {
   type PeerIdentity,
 } from "../app/game/multiplayer.ts";
 import {
-  bindReadyRustMultiplayerRuntimeV1,
-  createRustMultiplayerGuestAuthorityFactoryV1,
-  createRustMultiplayerRuntimeDescriptorV1,
-  validateRustMultiplayerRuntimeDescriptorV1,
-  type RustMultiplayerRuntimeBindingV1,
+  bindReadyRustMultiplayerRuntimeV2,
+  createRustMultiplayerGuestAuthorityFactoryV2,
+  createRustMultiplayerRuntimeDescriptorV2,
+  validateRustMultiplayerRuntimeDescriptorV2,
+  type RustMultiplayerRuntimeBindingV2,
   type RustMultiplayerRuntimeManagerPortV1,
 } from "../app/game/rust-multiplayer-runtime-bootstrap.ts";
 import type { RustIntegratedRuntimeIdentityV1 } from "../app/game/rust-integrated-runtime-contract.ts";
@@ -24,11 +24,13 @@ import {
   CONTENT_HASH,
   FixtureRtcNetwork,
   FixtureRustAuthority,
+  GENERATION_OPTIONS_JSON,
   GENERATOR_HASH,
   GUEST_IDENTITY,
   HOST_IDENTITY,
   RUNTIME_DESCRIPTOR,
   RUNTIME_INTEREST,
+  TERRAIN_CONTENT_HASH,
   deferred,
   deterministicRuntimeIds,
   unsafeInviteCode,
@@ -70,7 +72,7 @@ function runtimeBinding(
   authority: FixtureRustAuthority,
   shutdown: () => Promise<unknown>,
   descriptor = RUNTIME_DESCRIPTOR,
-): RustMultiplayerRuntimeBindingV1 {
+): RustMultiplayerRuntimeBindingV2 {
   return { descriptor, authority, interest: () => RUNTIME_INTEREST, shutdown };
 }
 
@@ -79,6 +81,42 @@ async function hostOffer(network: FixtureRtcNetwork) {
   const offer = await host.createHostInvite();
   return { host, offer, signal: decodeInviteCode(offer.inviteCode) };
 }
+
+test("runtime descriptor V2 seals the exact canonical terrain identity", () => {
+  assert.equal(RUNTIME_DESCRIPTOR.schema, 2);
+  assert.equal(RUNTIME_DESCRIPTOR.terrainContentHash, TERRAIN_CONTENT_HASH);
+  assert.equal(RUNTIME_DESCRIPTOR.generationOptionsJson, GENERATION_OPTIONS_JSON);
+  assert.equal(RUNTIME_DESCRIPTOR.descriptorHash, "0c3c5dd8ba9c03cc50de0b40d1a7c5bb");
+  assert.equal(validateRustMultiplayerRuntimeDescriptorV2(RUNTIME_DESCRIPTOR), true);
+  assert.equal(validateRustMultiplayerRuntimeDescriptorV2({ ...RUNTIME_DESCRIPTOR, schema: 1 }), false, "V1 is rejected rather than defaulted");
+  assert.equal(validateRustMultiplayerRuntimeDescriptorV2({ ...RUNTIME_DESCRIPTOR, futureField: true }), false);
+  assert.equal(validateRustMultiplayerRuntimeDescriptorV2({ ...RUNTIME_DESCRIPTOR, terrainContentHash: "d".repeat(32) }), false);
+  assert.equal(validateRustMultiplayerRuntimeDescriptorV2({
+    ...RUNTIME_DESCRIPTOR,
+    generationOptionsJson: `${GENERATION_OPTIONS_JSON} `,
+  }), false);
+
+  const options = JSON.parse(GENERATION_OPTIONS_JSON) as Record<string, unknown>;
+  assert.throws(() => createRustMultiplayerRuntimeDescriptorV2({
+    ...RUNTIME_DESCRIPTOR,
+    generationOptionsJson: JSON.stringify(Object.fromEntries(Object.entries(options).reverse())),
+  }), /canonical terrain option shape and order/iu);
+  assert.throws(() => createRustMultiplayerRuntimeDescriptorV2({
+    ...RUNTIME_DESCRIPTOR,
+    generationOptionsJson: JSON.stringify({ ...options, origin: { mode: "wilderness" } }),
+  }), /canonical terrain option shape and order/iu);
+  assert.throws(() => createRustMultiplayerRuntimeDescriptorV2({
+    ...RUNTIME_DESCRIPTOR,
+    generationOptionsJson: JSON.stringify({ ...options, biomeScale: 4.01 }),
+  }), /unsupported|non-normalized/iu);
+
+  const changedOptions = JSON.stringify({ ...options, resourceAbundance: 2 });
+  const changed = createRustMultiplayerRuntimeDescriptorV2({
+    ...RUNTIME_DESCRIPTOR,
+    generationOptionsJson: changedOptions,
+  });
+  assert.notEqual(changed.descriptorHash, RUNTIME_DESCRIPTOR.descriptorHash);
+});
 
 test("authoritative offers use the prebound session and reject missing or tampered descriptors before guest startup", async () => {
   const network = new FixtureRtcNetwork();
@@ -102,7 +140,7 @@ test("authoritative offers use the prebound session and reject missing or tamper
     ...signal,
     runtime: { ...signal.runtime!, locationId: "tampered-surface" },
   };
-  assert.equal(validateRustMultiplayerRuntimeDescriptorV1(tampered.runtime), false);
+  assert.equal(validateRustMultiplayerRuntimeDescriptorV2(tampered.runtime), false);
   await assert.rejects(guest.createGuestAnswer(unsafeInviteCode(tampered)), MultiplayerProtocolError);
   assert.equal(factoryCalls, 0);
   assert.equal(network.connections.length, 1);
@@ -112,7 +150,7 @@ test("authoritative offers use the prebound session and reject missing or tamper
 test("guest factory bindings must match address, fingerprints, and session and are cleaned before any negotiation on mismatch", async () => {
   const network = new FixtureRtcNetwork();
   const { host, offer } = await hostOffer(network);
-  const wrongFingerprint = createRustMultiplayerRuntimeDescriptorV1({
+  const wrongFingerprint = createRustMultiplayerRuntimeDescriptorV2({
     ...RUNTIME_DESCRIPTOR,
     contentHash: "c".repeat(32),
   });
@@ -152,9 +190,12 @@ test("host rejects a guest answer that echoes a different valid runtime fingerpr
   const answer = await guest.createGuestAnswer(offer.inviteCode);
   const signal = decodeInviteCode(answer.answerCode);
   assert.equal(signal.kind, "answer");
-  const different = createRustMultiplayerRuntimeDescriptorV1({
+  const different = createRustMultiplayerRuntimeDescriptorV2({
     ...RUNTIME_DESCRIPTOR,
-    contentHash: "c".repeat(32),
+    generationOptionsJson: JSON.stringify({
+      ...(JSON.parse(GENERATION_OPTIONS_JSON) as Record<string, unknown>),
+      caveFrequency: 2,
+    }),
   });
   const tampered = { ...signal, runtime: different };
   const negotiationsBefore = hostAuthority.events.filter((event) => event === "negotiate").length;
@@ -179,7 +220,7 @@ test("factory failure remains fail closed and leaves no peer or adopted runtime"
 test("dispose cancels pending guest startup and cleans a late factory result exactly once", async () => {
   const network = new FixtureRtcNetwork();
   const { host, offer } = await hostOffer(network);
-  const pending = deferred<RustMultiplayerRuntimeBindingV1>();
+  const pending = deferred<RustMultiplayerRuntimeBindingV2>();
   const factorySignals: AbortSignal[] = [];
   let shutdowns = 0;
   const guest = guestSession(network, async ({ signal }) => {
@@ -221,7 +262,7 @@ test("dispose aborts in-flight authority negotiation before shutting down the ow
 test("concurrent joins invoke one factory, then normal disposal drains and shuts down the adopted runtime", async () => {
   const network = new FixtureRtcNetwork();
   const { host, offer } = await hostOffer(network);
-  const pending = deferred<RustMultiplayerRuntimeBindingV1>();
+  const pending = deferred<RustMultiplayerRuntimeBindingV2>();
   const authority = new FixtureRustAuthority();
   let calls = 0;
   let shutdowns = 0;
@@ -310,9 +351,10 @@ class FixtureRuntimeManager implements RustMultiplayerRuntimeManagerPortV1 {
 
 test("production guest bootstrap attests manager identity/content and rejects local fingerprint drift", async () => {
   const manager = new FixtureRuntimeManager();
-  const factory = createRustMultiplayerGuestAuthorityFactoryV1({
+  const factory = createRustMultiplayerGuestAuthorityFactoryV2({
     manager,
     generatorHash: GENERATOR_HASH,
+    terrainContentHash: TERRAIN_CONTENT_HASH,
     waterBlockId: 7,
     directionalBlockIds: [9, 2, 9],
     waterloggedBlockIds: [18],
@@ -325,6 +367,8 @@ test("production guest bootstrap attests manager identity/content and rejects lo
     locationId: RUNTIME_DESCRIPTOR.locationId,
     sessionId: RUNTIME_DESCRIPTOR.runtimeSessionId,
     generatorHash: GENERATOR_HASH,
+    terrainContentHash: TERRAIN_CONTENT_HASH,
+    generationOptionsJson: GENERATION_OPTIONS_JSON,
     waterBlockId: 7,
     directionalBlockIds: [2, 9],
     waterloggedBlockIds: [18],
@@ -335,9 +379,10 @@ test("production guest bootstrap attests manager identity/content and rejects lo
 
   const contentMismatchManager = new FixtureRuntimeManager();
   contentMismatchManager.contentHash = "f".repeat(32);
-  const contentFactory = createRustMultiplayerGuestAuthorityFactoryV1({
+  const contentFactory = createRustMultiplayerGuestAuthorityFactoryV2({
     manager: contentMismatchManager,
     generatorHash: GENERATOR_HASH,
+    terrainContentHash: TERRAIN_CONTENT_HASH,
     waterBlockId: 7,
     directionalBlockIds: [],
     waterloggedBlockIds: [],
@@ -346,11 +391,12 @@ test("production guest bootstrap attests manager identity/content and rejects lo
   await assert.rejects(contentFactory({ descriptor: RUNTIME_DESCRIPTOR, signal: new AbortController().signal }), /differs|mismatch/iu);
   assert.equal(contentMismatchManager.shutdowns, 1);
 
-  const generatorMismatch = createRustMultiplayerRuntimeDescriptorV1({ ...RUNTIME_DESCRIPTOR, generatorHash: "f".repeat(32) });
+  const generatorMismatch = createRustMultiplayerRuntimeDescriptorV2({ ...RUNTIME_DESCRIPTOR, generatorHash: "f".repeat(32) });
   const freshManager = new FixtureRuntimeManager();
-  const generatorFactory = createRustMultiplayerGuestAuthorityFactoryV1({
+  const generatorFactory = createRustMultiplayerGuestAuthorityFactoryV2({
     manager: freshManager,
     generatorHash: GENERATOR_HASH,
+    terrainContentHash: TERRAIN_CONTENT_HASH,
     waterBlockId: 7,
     directionalBlockIds: [],
     waterloggedBlockIds: [],
@@ -358,6 +404,26 @@ test("production guest bootstrap attests manager identity/content and rejects lo
   });
   await assert.rejects(generatorFactory({ descriptor: generatorMismatch, signal: new AbortController().signal }), /generator fingerprints differ/iu);
   assert.equal(freshManager.configs.length, 0);
+
+  const terrainMismatch = createRustMultiplayerRuntimeDescriptorV2({
+    ...RUNTIME_DESCRIPTOR,
+    terrainContentHash: "f".repeat(32),
+  });
+  const terrainManager = new FixtureRuntimeManager();
+  const terrainFactory = createRustMultiplayerGuestAuthorityFactoryV2({
+    manager: terrainManager,
+    generatorHash: GENERATOR_HASH,
+    terrainContentHash: TERRAIN_CONTENT_HASH,
+    waterBlockId: 7,
+    directionalBlockIds: [],
+    waterloggedBlockIds: [],
+    interest: () => ({ sequence: 1, chunks: [], entityIds: [] }),
+  });
+  await assert.rejects(
+    terrainFactory({ descriptor: terrainMismatch, signal: new AbortController().signal }),
+    /terrain corpus fingerprints differ/iu,
+  );
+  assert.equal(terrainManager.configs.length, 0, "terrain corpus drift fails before runtime activation");
 });
 
 test("ready-host binding rejects interest or authority addresses outside the attested runtime", () => {
@@ -367,17 +433,25 @@ test("ready-host binding rejects interest or authority addresses outside the att
     locationId: RUNTIME_DESCRIPTOR.locationId,
     sessionId: RUNTIME_DESCRIPTOR.runtimeSessionId,
     generatorHash: GENERATOR_HASH,
+    terrainContentHash: TERRAIN_CONTENT_HASH,
+    generationOptionsJson: GENERATION_OPTIONS_JSON,
     waterBlockId: 7,
     directionalBlockIds: [],
     waterloggedBlockIds: [],
   };
-  assert.throws(() => bindReadyRustMultiplayerRuntimeV1(
+  assert.throws(() => bindReadyRustMultiplayerRuntimeV2(
     managedHost(config, new FixtureRustAuthority(config.universeId, "wrong-location")),
     () => ({ sequence: 1, chunks: [], entityIds: [] }),
   ), /address/iu);
-  const binding = bindReadyRustMultiplayerRuntimeV1(
+  assert.throws(() => bindReadyRustMultiplayerRuntimeV2(
+    managedHost({ ...config, generationOptionsJson: `${GENERATION_OPTIONS_JSON} ` }, new FixtureRustAuthority()),
+    () => ({ sequence: 1, chunks: [], entityIds: [] }),
+  ), /canonical terrain option shape and order/iu);
+  const binding = bindReadyRustMultiplayerRuntimeV2(
     managedHost(config, new FixtureRustAuthority()),
     () => ({ sequence: 1, chunks: [{ universeId: config.universeId, locationId: "wrong-location", chunkX: 0, chunkZ: 0 }], entityIds: [] }),
   );
+  assert.equal(binding.descriptor.terrainContentHash, config.terrainContentHash);
+  assert.equal(binding.descriptor.generationOptionsJson, config.generationOptionsJson);
   assert.throws(() => binding.interest({ sessionId: config.sessionId, local: HOST_IDENTITY, peer: GUEST_IDENTITY, role: "host" }), /escaped|address/iu);
 });

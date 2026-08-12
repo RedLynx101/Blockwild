@@ -23,7 +23,7 @@ import type {
   RustMultiplayerInboundCommandV1,
   RustMultiplayerDeltaFrameV1,
 } from "../app/game/rust-multiplayer-authority.ts";
-import { createRustMultiplayerRuntimeDescriptorV1 } from "../app/game/rust-multiplayer-runtime-bootstrap.ts";
+import { createRustMultiplayerRuntimeDescriptorV2 } from "../app/game/rust-multiplayer-runtime-bootstrap.ts";
 import type { AgentCapabilityGrant, AgentCommandEnvelope } from "../app/game/agent-platform.ts";
 
 const HOST: PeerIdentity = { id: "player_host_001", name: "Host", color: "#44aaee" };
@@ -38,13 +38,27 @@ const INTEREST = createNetworkInterestSetV1({
   chunks: [{ universeId: "blockwild", locationId: "world-main", chunkX: 0, chunkZ: 0 }],
   entityIds: [],
 });
-const RUNTIME = createRustMultiplayerRuntimeDescriptorV1({
+const RUNTIME = createRustMultiplayerRuntimeDescriptorV2({
   worldSeed: "rust-live-authority-fixture",
   universeId: WORLD_IDENTITY.address.universeId,
   locationId: WORLD_IDENTITY.address.locationId,
   runtimeSessionId: "session_rust_live_001",
   generatorHash: "a".repeat(32),
   contentHash: "b".repeat(32),
+  terrainContentHash: "c".repeat(32),
+  generationOptionsJson: JSON.stringify({
+    biomeScale: 1.35,
+    caveFrequency: 1,
+    enabledFactions: ["hobbits", "goblins", "atlantians", "sugarcourt", "wood-elves", "dwarves"],
+    largeTownFrequency: "balanced",
+    profile: "world-below-v15",
+    resourceAbundance: 1,
+    roadCoverage: "regional",
+    settlementClustering: "regional",
+    settlementDensity: 1,
+    settlementPattern: "heartlands-v2",
+    structures: true,
+  }),
 });
 
 class FakeChannel implements DataChannelLike {

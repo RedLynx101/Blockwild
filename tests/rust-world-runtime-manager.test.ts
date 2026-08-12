@@ -13,6 +13,7 @@ import type {
   RustWorldRuntimeHostDiagnosticsV1,
 } from "../app/game/rust-world-runtime-host";
 import type { RustMultiplayerAuthorityV1 } from "../app/game/rust-multiplayer-authority";
+import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract";
 
 const config = (locationId: string): RustWorldRuntimeHostConfigV1 => Object.freeze({
   worldSeed: `seed:${locationId}`,
@@ -20,6 +21,7 @@ const config = (locationId: string): RustWorldRuntimeHostConfigV1 => Object.free
   locationId,
   sessionId: `session:${locationId}`,
   generatorHash: "a".repeat(32),
+  ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
   waterBlockId: 7,
   directionalBlockIds: Object.freeze([9, 2, 9]),
   waterloggedBlockIds: Object.freeze([18]),

@@ -19,6 +19,7 @@ import type {
   RustIntegratedRuntimeRequestV1,
   RustIntegratedRuntimeResponseV1,
 } from "../app/game/rust-integrated-runtime-contract";
+import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract";
 import { RustIntegratedRuntimeServiceError, RustIntegratedRuntimeServiceV1 } from "../app/game/rust-integrated-runtime-service";
 import {
   installRustIntegratedRuntimeWorkerHandlerV1,
@@ -153,6 +154,7 @@ test("content-aware browser worker remains fail closed until one Rust attestatio
   await service.start({
     worldSeed: "content", universeId: "1", locationId: "blockwild", sessionId: "local",
     contentHash: compiled.manifest!.manifestHash, generatorHash: ZERO, waterBlockId: 7,
+    ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
     directionalBlockIds: [], waterloggedBlockIds: [],
   });
   assert.equal(service.isAuthoritative(), false);
@@ -173,7 +175,7 @@ test("service rejects a bundle that differs from the configured network content 
   const loopback = new WorkerLoopback(); const kernel = new ContentKernel();
   installRustIntegratedRuntimeWorkerHandlerV1(loopback.scope, kernel);
   const service = new RustIntegratedRuntimeServiceV1({ expectedArtifactHash: "artifact", transportFactory: () => new RustIntegratedRuntimeWorkerTransportV1(loopback.port) });
-  await service.start({ worldSeed: "x", universeId: "1", locationId: "blockwild", sessionId: "local", contentHash: "f".repeat(32), generatorHash: ZERO, waterBlockId: 7, directionalBlockIds: [], waterloggedBlockIds: [] });
+  await service.start({ worldSeed: "x", universeId: "1", locationId: "blockwild", sessionId: "local", contentHash: "f".repeat(32), generatorHash: ZERO, ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1, waterBlockId: 7, directionalBlockIds: [], waterloggedBlockIds: [] });
   await assert.rejects(service.installContent(compiled), (error: unknown) => error instanceof RustIntegratedRuntimeServiceError && error.code === "content-install");
   assert.equal(service.isAuthoritative(), false);
   await service.shutdown();

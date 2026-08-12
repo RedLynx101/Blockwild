@@ -4,6 +4,21 @@ pub const RUNTIME_WIRE_V1: u16 = 1;
 pub const RUNTIME_SCHEMA_V2: u16 = 2;
 /// Schema 3 adds bounded rising-edge action receipts to fixed-step responses.
 pub const RUNTIME_SCHEMA_V3: u16 = 3;
+/// Schema 4 adds immutable terrain corpus identity and canonical generation
+/// options to Create requests. Other request/response payloads retain their
+/// existing schemas.
+pub const RUNTIME_SCHEMA_V4: u16 = 4;
+pub const DEFAULT_TERRAIN_CONTENT_HASH_V2: WireHash = WireHash([
+    0xcc, 0x59, 0x90, 0x3b, 0xe7, 0x7d, 0xfe, 0x30, 0x10, 0x9d, 0x15, 0xbf, 0xaf, 0x0e, 0x30, 0x22,
+]);
+pub const DEFAULT_GENERATION_OPTIONS_JSON_V1: &str = concat!(
+    "{\"biomeScale\":1.35,\"caveFrequency\":1,\"enabledFactions\":[\"hobbits\",\"goblins\",",
+    "\"atlantians\",\"sugarcourt\",\"wood-elves\",\"dwarves\"],\"largeTownFrequency\":\"balanced\",",
+    "\"profile\":\"world-below-v15\",\"resourceAbundance\":1,",
+    "\"roadCoverage\":\"regional\",\"settlementClustering\":\"regional\",\"settlementDensity\":1,",
+    "\"settlementPattern\":\"heartlands-v2\",\"structures\":true}",
+);
+pub const MAX_GENERATION_OPTIONS_JSON_BYTES: usize = 16 * 1024;
 pub const RUNTIME_FIXED_STEP_US: u64 = 50_000;
 pub const MAX_WIRE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_DOMAIN_PAYLOAD_BYTES: usize = 1024 * 1024;
@@ -146,6 +161,8 @@ pub struct RuntimeConfigV1 {
     pub session_id: String,
     pub content_hash: WireHash,
     pub generator_hash: WireHash,
+    pub terrain_content_hash: WireHash,
+    pub generation_options_json: String,
     pub water_block_id: u16,
     pub directional_block_ids: Vec<u16>,
     pub waterlogged_block_ids: Vec<u16>,

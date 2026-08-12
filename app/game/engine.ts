@@ -656,8 +656,8 @@ import {
   type TombstoneBatch,
 } from "./multiplayer";
 import {
-  bindReadyRustMultiplayerRuntimeV1,
-  createRustMultiplayerGuestAuthorityFactoryV1,
+  bindReadyRustMultiplayerRuntimeV2,
+  createRustMultiplayerGuestAuthorityFactoryV2,
   type RustMultiplayerAuthorityInterestInputV1,
 } from "./rust-multiplayer-runtime-bootstrap";
 import {
@@ -764,6 +764,7 @@ import {
 import {
   DEFAULT_WORLD_OPTIONS,
   WorldStorage,
+  deriveWorldGenerationIdentityV1,
   generationOptionsFromWorldOptions,
   normalizeWorldOptions,
   requiredSleepers,
@@ -5394,11 +5395,13 @@ export class VoxelEngine {
     worldId: string,
     worldSeed: string,
     save: WorldSave | null,
+    generationIdentity: NonNullable<WorldMetadata["generationIdentity"]>,
   ) {
     const config = createRustWorldRuntimeLiveConfigV1({
       worldId,
       worldSeed,
       sessionId: createRustWorldRuntimeSessionIdV1(),
+      generationIdentity,
     });
     let host: RustWorldRuntimeManagedHostV1 | null = null;
     try {
@@ -5446,7 +5449,15 @@ export class VoxelEngine {
       throw new Error("Browser world storage could not allocate a durable world ID");
     }
     try {
-      await this.activateRustWorldRuntime(generation, "create", created.id, this.world.seedText, null);
+      if (!created.generationIdentity) throw new Error("New world catalog is missing its exact terrain generation identity");
+      await this.activateRustWorldRuntime(
+        generation,
+        "create",
+        created.id,
+        this.world.seedText,
+        null,
+        created.generationIdentity,
+      );
       this.rustRuntimeOperationsBlocked = false;
       this.running = true;
       this.paused = false;
@@ -5468,7 +5479,14 @@ export class VoxelEngine {
     if (!worldId) throw new Error("A durable world ID is required before Rust save hydration");
     const generation = ++this.rustRuntimeTransitionGeneration;
     await this.prepareRustWorldTransition("world-load");
-    await this.activateRustWorldRuntime(generation, "load", worldId, save.seed, save);
+    await this.activateRustWorldRuntime(
+      generation,
+      "load",
+      worldId,
+      save.seed,
+      save,
+      deriveWorldGenerationIdentityV1(save, options),
+    );
     if (generation !== this.rustRuntimeTransitionGeneration || this.disposed) {
       this.rustRuntimeOperationsBlocked = true;
       throw new Error("Rust world load was superseded before the browser mirror could open");
@@ -5490,12 +5508,15 @@ export class VoxelEngine {
   async loadStoredWorldWithRustRuntime(id: string) {
     const metadata = this.worldStorage.listWorlds().find((world) => world.id === id);
     if (!metadata) throw new Error("That world does not exist on this device.");
+    if (!metadata.generationIdentity) {
+      throw new Error("This world's catalog lacks an exact native terrain identity. Its compatibility save remains protected until an explicit migration records one.");
+    }
     const generation = ++this.rustRuntimeTransitionGeneration;
     await this.prepareRustWorldTransition("world-load");
     // Recover and hydrate before parsing or presenting the compatibility
     // document. A legacy-only rich save therefore remains byte-for-byte
     // protected when no lossless native migration adapter exists.
-    await this.activateRustWorldRuntime(generation, "load", id, metadata.seed, null);
+    await this.activateRustWorldRuntime(generation, "load", id, metadata.seed, null, metadata.generationIdentity);
     if (generation !== this.rustRuntimeTransitionGeneration || this.disposed) {
       this.rustRuntimeOperationsBlocked = true;
       throw new Error("Rust world load was superseded before the browser mirror could open");
@@ -7138,9 +7159,10 @@ export class VoxelEngine {
       worldSeed: this.world.seedText || "guest-bootstrap",
       sessionId: createRustWorldRuntimeSessionIdV1(),
     });
-    const factory = createRustMultiplayerGuestAuthorityFactoryV1({
+    const factory = createRustMultiplayerGuestAuthorityFactoryV2({
       manager: this.rustRuntimeManager,
       generatorHash: template.generatorHash,
+      terrainContentHash: template.terrainContentHash,
       waterBlockId: template.waterBlockId,
       directionalBlockIds: template.directionalBlockIds,
       waterloggedBlockIds: template.waterloggedBlockIds,
@@ -7219,7 +7241,7 @@ export class VoxelEngine {
     const artificialLatencyMs = typeof window !== "undefined" ? parseMultiplayerLatencyRange(window.location.search) : undefined;
     if (role === "host") {
       if (this.rustRuntimeOperationsBlocked) throw new Error("Rust world runtime is not ready for multiplayer hosting");
-      const binding = bindReadyRustMultiplayerRuntimeV1(
+      const binding = bindReadyRustMultiplayerRuntimeV2(
         this.rustRuntimeManager.requireReady(),
         (input) => this.rustAuthorityInterestSource(input),
       );

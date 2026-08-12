@@ -29,6 +29,226 @@ fn rejection(receipt: GameplayReceipt) -> Rejection {
     }
 }
 
+fn exact_inventory_import_fixture() -> (GameplayAuthority, GameplayActor, ImportPlayerInventoryV1) {
+    let inventory = ContainerKey::player("player-import");
+    let mut state = GameplayState::new(WorldKey::new("import-universe", "surface"), 4);
+    state
+        .inventory
+        .register_item(ItemDefinition {
+            code: 41,
+            content_id: "moonberry".into(),
+            max_stack: 64,
+            tags: BTreeSet::new(),
+        })
+        .unwrap();
+    state
+        .inventory
+        .register_item(ItemDefinition {
+            code: 42,
+            content_id: "named-creature-cage".into(),
+            max_stack: 1,
+            tags: BTreeSet::new(),
+        })
+        .unwrap();
+    state
+        .inventory
+        .insert_container(Container::new(inventory.clone(), PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1))
+        .unwrap();
+
+    let mut metadata = ItemInstanceMetadataV1 {
+        hash: CanonicalHash::default(),
+        type_id: "blockwild.item.instance".into(),
+        schema_id: "creature-cage".into(),
+        schema_version: 1,
+        content_version: 7,
+        canonical_json_bytes:
+            "{\"creature\":{\"name\":\"Mizu 水\",\"traits\":[\"swift\",{\"rare\":true}]},\"version\":1}"
+                .as_bytes()
+                .to_vec(),
+        unknown_extension_bytes: vec![0, 0x80, 0xff, 7],
+    };
+    metadata.hash = metadata.calculate_hash();
+    let slots = vec![
+        Some(ItemStack::simple(41, 12)),
+        None,
+        Some(ItemStack {
+            item_code: 42,
+            count: 1,
+            durability_millionths: Some(987_654),
+            metadata_hash: metadata.hash,
+        }),
+        None,
+        Some(ItemStack::simple(41, 3)),
+        None,
+        None,
+        None,
+        Some(ItemStack::simple(41, 1)),
+    ];
+    let command = ImportPlayerInventoryV1 {
+        inventory,
+        expected_revision: 0,
+        slots,
+        metadata: vec![metadata],
+    };
+    let actor = GameplayActor {
+        actor_id: "gameplay-bootstrap-system".into(),
+        player_id: None,
+        entity_id: None,
+        role: ActorRole::System,
+    };
+    let mut authority = GameplayAuthority::new(state);
+    authority
+        .grant_actor(actor.actor_id.clone(), ActorGrant::system())
+        .unwrap();
+    (authority, actor, command)
+}
+
+fn inventory_import_batch(
+    authority: &GameplayAuthority,
+    actor: GameplayActor,
+    suffix: &str,
+    command: ImportPlayerInventoryV1,
+) -> GameplayBatch {
+    GameplayBatch::new(
+        format!("inventory-import-{suffix}"),
+        format!("inventory-import-key-{suffix}"),
+        actor,
+        authority.state.identity(),
+        vec![GameplayCommand::Inventory(InventoryCommand::ImportPlayerInventoryV1(
+            command,
+        ))],
+    )
+}
+
+#[test]
+fn system_inventory_import_preserves_exact_nine_slots_metadata_and_retry() {
+    let (mut authority, actor, command) = exact_inventory_import_fixture();
+    let request = inventory_import_batch(&authority, actor, "exact", command.clone());
+    let first = accepted(authority.apply_batch(&request));
+    let second = accepted(authority.apply_batch(&request));
+    assert_eq!(first, second);
+    assert_eq!(authority.replay().len(), 1);
+    assert_eq!(first.touched_domains, BTreeSet::from([Domain::Inventory]));
+    assert_eq!(first.events[0].kind, "player-inventory-imported-v1");
+    assert_eq!(first.resource_deltas.iter().map(|delta| delta.amount).sum::<i64>(), 17);
+
+    let imported = &authority.state.inventory.containers[&command.inventory];
+    assert_eq!(imported.revision, 1);
+    assert_eq!(imported.slots, command.slots);
+    let metadata = &command.metadata[0];
+    assert_eq!(metadata.hash.to_hex(), "fbfc2e7a712cd603f076be3090f3959f");
+    let stored = &authority.state.inventory.item_instance_metadata[&metadata.hash];
+    assert_eq!(stored.canonical_json_bytes, metadata.canonical_json_bytes);
+    assert_eq!(stored.unknown_extension_bytes, [0, 0x80, 0xff, 7]);
+
+    let snapshot = authority.encode_snapshot(&[0x80, 0xff]).unwrap();
+    let decoded = decode_gameplay_authority_snapshot(&snapshot).unwrap();
+    assert_eq!(decoded.schema_version, GAMEPLAY_SNAPSHOT_SCHEMA_VERSION);
+    assert_eq!(decoded.authority.state, authority.state);
+    assert_eq!(decoded.unknown_extension_bytes, [0x80, 0xff]);
+
+    let mut restore_target = GameplayAuthority::new(GameplayState::new(WorldKey::new("other", "other"), 1));
+    let before_failed_restore = restore_target.state.clone();
+    let mut corrupt = snapshot.clone();
+    let last = corrupt.len() - 1;
+    corrupt[last] ^= 0x80;
+    assert!(restore_target.install_snapshot(&corrupt).is_err());
+    assert_eq!(restore_target.state, before_failed_restore);
+    let report = restore_target.install_snapshot(&snapshot).unwrap();
+    assert_eq!(report.schema_version, GAMEPLAY_SNAPSHOT_SCHEMA_VERSION);
+    assert_eq!(restore_target.state, authority.state);
+}
+
+#[test]
+fn inventory_import_is_system_only_even_for_inventory_admin() {
+    let (mut authority, _, command) = exact_inventory_import_fixture();
+    let actor = GameplayActor {
+        actor_id: "inventory-admin".into(),
+        player_id: Some(PlayerId::new(81, 1)),
+        entity_id: Some(EntityId::new(82, 1)),
+        role: ActorRole::Host,
+    };
+    authority
+        .grant_actor(
+            actor.actor_id.clone(),
+            ActorGrant {
+                player_id: actor.player_id,
+                entity_id: actor.entity_id,
+                role: actor.role,
+                scopes: BTreeSet::from([Scope::InventoryAny]),
+            },
+        )
+        .unwrap();
+    let before = authority.state.clone();
+    let request = inventory_import_batch(&authority, actor, "admin", command);
+    assert_eq!(
+        rejection(authority.apply_batch(&request)).code,
+        RejectionCode::Unauthorized
+    );
+    assert_eq!(authority.state, before);
+}
+
+#[test]
+fn inventory_import_conflict_and_invalid_payloads_roll_back_fully() {
+    type ImportMutation = Box<dyn Fn(&mut GameplayAuthority, &mut ImportPlayerInventoryV1)>;
+    let mutations: Vec<ImportMutation> = vec![
+        Box::new(|_, command| command.expected_revision = 1),
+        Box::new(|_, command| command.slots[0].as_mut().unwrap().count = 65),
+        Box::new(|_, command| command.slots[0].as_mut().unwrap().item_code = 999_999),
+        Box::new(|_, command| command.slots[2].as_mut().unwrap().durability_millionths = Some(1_000_001)),
+        Box::new(|_, command| command.metadata.push(command.metadata[0].clone())),
+        Box::new(|_, command| {
+            command.metadata[0].canonical_json_bytes = b"{\"version\":1,\"creature\":{}}".to_vec();
+            command.metadata[0].hash = command.metadata[0].calculate_hash();
+            command.slots[2].as_mut().unwrap().metadata_hash = command.metadata[0].hash;
+        }),
+        Box::new(|_, command| {
+            command.metadata[0].canonical_json_bytes = b"{not-json}".to_vec();
+            command.metadata[0].hash = command.metadata[0].calculate_hash();
+            command.slots[2].as_mut().unwrap().metadata_hash = command.metadata[0].hash;
+        }),
+        Box::new(|authority, command| {
+            authority
+                .state
+                .inventory
+                .containers
+                .get_mut(&command.inventory)
+                .unwrap()
+                .slots[0] = Some(ItemStack::simple(41, 1));
+        }),
+    ];
+    for (index, mutate) in mutations.into_iter().enumerate() {
+        let (mut authority, actor, mut command) = exact_inventory_import_fixture();
+        mutate(&mut authority, &mut command);
+        let before = authority.state.clone();
+        let request = inventory_import_batch(&authority, actor, &format!("invalid-{index}"), command);
+        assert!(matches!(
+            authority.apply_batch(&request),
+            GameplayReceipt::Rejected { .. }
+        ));
+        assert_eq!(authority.state, before, "mutation {index} was not atomic");
+        assert!(authority.replay().is_empty());
+    }
+}
+
+#[test]
+fn inventory_import_idempotency_key_conflict_does_not_mutate_twice() {
+    let (mut authority, actor, command) = exact_inventory_import_fixture();
+    let first = inventory_import_batch(&authority, actor.clone(), "key-conflict", command.clone());
+    accepted(authority.apply_batch(&first));
+    let after_first = authority.state.clone();
+    let mut conflicting_command = command;
+    conflicting_command.slots[0].as_mut().unwrap().count = 11;
+    let mut conflicting = inventory_import_batch(&authority, actor, "different", conflicting_command);
+    conflicting.idempotency_key = first.idempotency_key;
+    assert_eq!(
+        rejection(authority.apply_batch(&conflicting)).code,
+        RejectionCode::Conflict
+    );
+    assert_eq!(authority.state, after_first);
+    assert_eq!(authority.replay().len(), 1);
+}
+
 #[test]
 fn reference_fixture_is_deterministic_and_complete() {
     let first = run_reference_fixture();

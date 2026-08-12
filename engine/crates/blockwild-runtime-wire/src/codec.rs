@@ -2,10 +2,11 @@ use std::collections::BTreeSet;
 
 use crate::checksum::wire_checksum_v1;
 use crate::model::{
-    MAX_ACTION_RECEIPTS, MAX_DOMAIN_PAYLOAD_BYTES, MAX_EXTRACTION_BYTES, MAX_INPUT_FRAMES, MAX_OPERATIONS,
-    MAX_SAFE_U64, MAX_WIRE_BYTES, RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_SCHEMA_V2, RUNTIME_SCHEMA_V3, RUNTIME_WIRE_V1,
-    RuntimeCommandBatchV1, RuntimeCommandReceiptV1, RuntimeConfigV1, RuntimeDomainOperationV1, RuntimeDomainV1,
-    RuntimeExtractionV1, RuntimeIdentityV1, RuntimeInputActionKindV1, RuntimeInputActionOutcomeV1,
+    DEFAULT_GENERATION_OPTIONS_JSON_V1, DEFAULT_TERRAIN_CONTENT_HASH_V2, MAX_ACTION_RECEIPTS, MAX_DOMAIN_PAYLOAD_BYTES,
+    MAX_EXTRACTION_BYTES, MAX_GENERATION_OPTIONS_JSON_BYTES, MAX_INPUT_FRAMES, MAX_OPERATIONS, MAX_SAFE_U64,
+    MAX_WIRE_BYTES, RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_SCHEMA_V2, RUNTIME_SCHEMA_V3, RUNTIME_SCHEMA_V4,
+    RUNTIME_WIRE_V1, RuntimeCommandBatchV1, RuntimeCommandReceiptV1, RuntimeConfigV1, RuntimeDomainOperationV1,
+    RuntimeDomainV1, RuntimeExtractionV1, RuntimeIdentityV1, RuntimeInputActionKindV1, RuntimeInputActionOutcomeV1,
     RuntimeInputActionReceiptV1, RuntimeInputFrameV1, RuntimeRequestV1, RuntimeResponseV1, RuntimeRevisionV1,
     WireError, WireHash,
 };
@@ -251,7 +252,7 @@ fn encode_envelope(
     let mut output = Vec::with_capacity(HEADER_BYTES + payload.len());
     output.extend_from_slice(&magic);
     output.extend_from_slice(&RUNTIME_WIRE_V1.to_le_bytes());
-    if !matches!(schema, RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3) {
+    if !matches!(schema, RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3 | RUNTIME_SCHEMA_V4) {
         return Err(WireError::new(
             "runtime-schema",
             "integrated runtime schema is unsupported",
@@ -288,7 +289,7 @@ fn decode_envelope(value: &[u8], magic: [u8; 4]) -> Result<(EnvelopeHeader, &[u8
         ));
     }
     let schema = reader.u16()?;
-    if !matches!(schema, RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3) {
+    if !matches!(schema, RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3 | RUNTIME_SCHEMA_V4) {
         return Err(WireError::new(
             "runtime-schema",
             "integrated runtime schema is unsupported",
@@ -341,6 +342,29 @@ fn decode_envelope(value: &[u8], magic: [u8; 4]) -> Result<(EnvelopeHeader, &[u8
     ))
 }
 
+fn validate_operation_schema(operation: u8, schema: u16, response: bool) -> Result<(), WireError> {
+    let valid = if response {
+        match operation {
+            3 => matches!(schema, RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3),
+            1 | 2 | 4 | 5 | 6 | 7 | 255 => schema == RUNTIME_SCHEMA_V2,
+            _ => true,
+        }
+    } else {
+        match operation {
+            1 => matches!(schema, RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V4),
+            2..=8 => schema == RUNTIME_SCHEMA_V2,
+            _ => true,
+        }
+    };
+    if !valid {
+        return Err(WireError::new(
+            "runtime-schema",
+            "integrated runtime schema is not valid for this operation",
+        ));
+    }
+    Ok(())
+}
+
 fn write_identity(writer: &mut Writer, value: &RuntimeIdentityV1) -> Result<(), WireError> {
     writer.string(&value.universe_id, "identity.universeId", 64)?;
     writer.string(&value.location_id, "identity.locationId", 128)?;
@@ -385,6 +409,12 @@ fn write_config(writer: &mut Writer, value: &RuntimeConfigV1) -> Result<(), Wire
     writer.string(&value.session_id, "config.sessionId", 160)?;
     writer.hash(value.content_hash);
     writer.hash(value.generator_hash);
+    writer.hash(value.terrain_content_hash);
+    writer.string(
+        &value.generation_options_json,
+        "config.generationOptionsJson",
+        MAX_GENERATION_OPTIONS_JSON_BYTES,
+    )?;
     writer.u16(value.water_block_id);
     for values in [&value.directional_block_ids, &value.waterlogged_block_ids] {
         let normalized = normalized_block_ids(values);
@@ -415,14 +445,33 @@ fn read_block_ids(reader: &mut Reader<'_>) -> Result<Vec<u16>, WireError> {
     Ok(values)
 }
 
-fn read_config(reader: &mut Reader<'_>) -> Result<RuntimeConfigV1, WireError> {
+fn read_config(reader: &mut Reader<'_>, schema: u16) -> Result<RuntimeConfigV1, WireError> {
+    let world_seed = reader.string("config.worldSeed", 2_048)?;
+    let universe_id = reader.string("config.universeId", 64)?;
+    let location_id = reader.string("config.locationId", 128)?;
+    let session_id = reader.string("config.sessionId", 160)?;
+    let content_hash = reader.hash()?;
+    let generator_hash = reader.hash()?;
+    let (terrain_content_hash, generation_options_json) = if schema >= RUNTIME_SCHEMA_V4 {
+        (
+            reader.hash()?,
+            reader.string("config.generationOptionsJson", MAX_GENERATION_OPTIONS_JSON_BYTES)?,
+        )
+    } else {
+        (
+            DEFAULT_TERRAIN_CONTENT_HASH_V2,
+            DEFAULT_GENERATION_OPTIONS_JSON_V1.to_owned(),
+        )
+    };
     Ok(RuntimeConfigV1 {
-        world_seed: reader.string("config.worldSeed", 2_048)?,
-        universe_id: reader.string("config.universeId", 64)?,
-        location_id: reader.string("config.locationId", 128)?,
-        session_id: reader.string("config.sessionId", 160)?,
-        content_hash: reader.hash()?,
-        generator_hash: reader.hash()?,
+        world_seed,
+        universe_id,
+        location_id,
+        session_id,
+        content_hash,
+        generator_hash,
+        terrain_content_hash,
+        generation_options_json,
         water_block_id: reader.u16()?,
         directional_block_ids: read_block_ids(reader)?,
         waterlogged_block_ids: read_block_ids(reader)?,
@@ -1035,11 +1084,16 @@ pub fn encode_request_v1(request: &RuntimeRequestV1) -> Result<Vec<u8>, WireErro
             7
         }
     };
+    let schema = if matches!(request, RuntimeRequestV1::Create { .. }) {
+        RUNTIME_SCHEMA_V4
+    } else {
+        RUNTIME_SCHEMA_V2
+    };
     encode_envelope(
         REQUEST_MAGIC,
-        RUNTIME_SCHEMA_V2,
+        schema,
         EnvelopeHeader {
-            schema: RUNTIME_SCHEMA_V2,
+            schema,
             operation,
             status: 0,
             request_id: request.request_id(),
@@ -1059,12 +1113,13 @@ pub fn decode_request_v1(value: &[u8]) -> Result<RuntimeRequestV1, WireError> {
             "runtime requests must have zero status and worker epoch",
         ));
     }
+    validate_operation_schema(header.operation, header.schema, false)?;
     let mut reader = Reader::new(payload);
     let request = match header.operation {
         1 => RuntimeRequestV1::Create {
             request_id: header.request_id,
             client_epoch: header.client_epoch,
-            config: read_config(&mut reader)?,
+            config: read_config(&mut reader, header.schema)?,
         },
         2 => RuntimeRequestV1::Command {
             request_id: header.request_id,
@@ -1291,6 +1346,7 @@ pub fn decode_response_v1(value: &[u8]) -> Result<RuntimeResponseV1, WireError> 
             "runtime response is missing a worker epoch",
         ));
     }
+    validate_operation_schema(header.operation, header.schema, true)?;
     let mut reader = Reader::new(payload);
     let response = match header.operation {
         1 => {
@@ -1565,6 +1621,8 @@ mod tests {
                 session_id: "s".into(),
                 content_hash: hash(0),
                 generator_hash: hash(1),
+                terrain_content_hash: DEFAULT_TERRAIN_CONTENT_HASH_V2,
+                generation_options_json: DEFAULT_GENERATION_OPTIONS_JSON_V1.into(),
                 water_block_id: 2,
                 directional_block_ids: vec![],
                 waterlogged_block_ids: vec![],
@@ -1578,6 +1636,49 @@ mod tests {
             decode_request_v1(&bytes).expect_err("invalid UTF-8 must reject").code,
             "invalid-unicode"
         );
+    }
+
+    #[test]
+    fn schemas_are_valid_only_for_their_versioned_operations() {
+        let payload = vec![0x80, 0xff];
+        let operation = RuntimeDomainOperationV1 {
+            domain: RuntimeDomainV1::World,
+            type_id: "world.test".into(),
+            schema: 1,
+            payload_hash: WireHash(wire_checksum_v1(&payload)),
+            payload,
+        };
+        let mut batch = RuntimeCommandBatchV1 {
+            command_id: "command:schema".into(),
+            idempotency_key: "key:schema".into(),
+            actor_id: "actor:schema".into(),
+            expected: identity(),
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        };
+        batch.command_hash = WireHash(wire_checksum_v1(&command_body(&batch).unwrap()));
+        let mut command = encode_request_v1(&RuntimeRequestV1::Command {
+            request_id: 11,
+            client_epoch: 2,
+            batch,
+        })
+        .unwrap();
+        command[6..8].copy_from_slice(&RUNTIME_SCHEMA_V4.to_le_bytes());
+        assert_eq!(decode_request_v1(&command).unwrap_err().code, "runtime-schema");
+
+        let mut ready = encode_response_v1(&RuntimeResponseV1::Ready {
+            request_id: 11,
+            client_epoch: 2,
+            worker_epoch: 3,
+            runtime_handle: 1,
+            identity: identity(),
+            artifact_hash: "artifact".into(),
+            instance_id: "instance:schema".into(),
+            capabilities: vec!["integrated-runtime-v1".into()],
+        })
+        .unwrap();
+        ready[6..8].copy_from_slice(&RUNTIME_SCHEMA_V4.to_le_bytes());
+        assert_eq!(decode_response_v1(&ready).unwrap_err().code, "runtime-schema");
     }
 
     #[test]
@@ -1756,11 +1857,17 @@ mod tests {
 
     #[test]
     fn native_decoder_and_encoder_match_typescript_fixture_bytes_exactly() {
-        for name in ["create-unicode-sorted-block-sets", "command-high-binary-payload"] {
+        for name in ["create-v4-unicode-sorted-block-sets", "command-high-binary-payload"] {
             let bytes = from_hex(&fixture_string(name, "hex"));
             let decoded = decode_request_v1(&bytes).expect("decode TypeScript request fixture");
             assert_eq!(encode_request_v1(&decoded).expect("re-encode native request"), bytes);
         }
+        let legacy = from_hex(&fixture_string("create-unicode-sorted-block-sets", "hex"));
+        let RuntimeRequestV1::Create { config, .. } = decode_request_v1(&legacy).expect("decode legacy create") else {
+            panic!("legacy create fixture decoded to wrong request")
+        };
+        assert_eq!(config.terrain_content_hash, DEFAULT_TERRAIN_CONTENT_HASH_V2);
+        assert_eq!(config.generation_options_json, DEFAULT_GENERATION_OPTIONS_JSON_V1);
         for name in [
             "ready-unicode-identity",
             "native-accepted-receipt-high-binary",

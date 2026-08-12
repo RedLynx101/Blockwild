@@ -46,6 +46,8 @@ export type RustWorldRuntimeHostConfigV1 = Readonly<{
   /** Browser catalog identity. Multiplayer guests intentionally omit it. */
   catalogWorldId?: string | null;
   generatorHash: string;
+  terrainContentHash: string;
+  generationOptionsJson: string;
   waterBlockId: number;
   directionalBlockIds: readonly number[];
   waterloggedBlockIds: readonly number[];
@@ -155,6 +157,8 @@ function runtimeConfig(
     sessionId: input.sessionId,
     contentHash,
     generatorHash: requireCanonicalHash(input.generatorHash, "Rust generator hash"),
+    terrainContentHash: requireCanonicalHash(input.terrainContentHash, "Rust terrain content hash"),
+    generationOptionsJson: input.generationOptionsJson,
     waterBlockId: input.waterBlockId,
     directionalBlockIds: Object.freeze([...input.directionalBlockIds]),
     waterloggedBlockIds: Object.freeze([...input.waterloggedBlockIds]),

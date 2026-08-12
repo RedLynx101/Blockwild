@@ -13,20 +13,36 @@ import type {
   RustMultiplayerAuthorityDecisionV1,
   RustMultiplayerAuthorityV1,
 } from "../../app/game/rust-multiplayer-authority.ts";
-import { createRustMultiplayerRuntimeDescriptorV1 } from "../../app/game/rust-multiplayer-runtime-bootstrap.ts";
+import { createRustMultiplayerRuntimeDescriptorV2 } from "../../app/game/rust-multiplayer-runtime-bootstrap.ts";
 
 export const RUNTIME_SESSION_ID = "session_runtime_bootstrap_001";
 export const GENERATOR_HASH = "a".repeat(32);
 export const CONTENT_HASH = "b".repeat(32);
+export const TERRAIN_CONTENT_HASH = "c".repeat(32);
+export const GENERATION_OPTIONS_JSON = JSON.stringify({
+  biomeScale: 1.35,
+  caveFrequency: 1,
+  enabledFactions: ["hobbits", "goblins", "atlantians", "sugarcourt", "wood-elves", "dwarves"],
+  largeTownFrequency: "balanced",
+  profile: "world-below-v15",
+  resourceAbundance: 1,
+  roadCoverage: "regional",
+  settlementClustering: "regional",
+  settlementDensity: 1,
+  settlementPattern: "heartlands-v2",
+  structures: true,
+});
 export const HOST_IDENTITY: PeerIdentity = { id: "player_runtime_host_001", name: "Runtime Host", color: "#44aaee" };
 export const GUEST_IDENTITY: PeerIdentity = { id: "player_runtime_guest_001", name: "Runtime Guest", color: "#ee8844" };
-export const RUNTIME_DESCRIPTOR = createRustMultiplayerRuntimeDescriptorV1({
+export const RUNTIME_DESCRIPTOR = createRustMultiplayerRuntimeDescriptorV2({
   worldSeed: "runtime-bootstrap-world",
   universeId: "blockwild",
   locationId: "surface",
   runtimeSessionId: RUNTIME_SESSION_ID,
   generatorHash: GENERATOR_HASH,
   contentHash: CONTENT_HASH,
+  terrainContentHash: TERRAIN_CONTENT_HASH,
+  generationOptionsJson: GENERATION_OPTIONS_JSON,
 });
 
 export const RUNTIME_INTEREST = createNetworkInterestSetV1({

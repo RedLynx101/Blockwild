@@ -66,6 +66,8 @@ export function rustWorldRuntimeFingerprintV1(config: RustWorldRuntimeHostConfig
     sessionId: config.sessionId,
     catalogWorldId: config.catalogWorldId ?? null,
     generatorHash: config.generatorHash,
+    terrainContentHash: config.terrainContentHash,
+    generationOptionsJson: config.generationOptionsJson,
     waterBlockId: config.waterBlockId,
     directionalBlockIds: normalizedIds(config.directionalBlockIds),
     waterloggedBlockIds: normalizedIds(config.waterloggedBlockIds),

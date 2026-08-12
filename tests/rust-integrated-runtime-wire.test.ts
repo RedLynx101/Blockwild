@@ -19,6 +19,7 @@ import type {
   RustIntegratedRuntimeRequestV1,
   RustIntegratedRuntimeResponseV1,
 } from "../app/game/rust-integrated-runtime-contract.ts";
+import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract.ts";
 import {
   RustIntegratedRuntimeServiceError,
   RustIntegratedRuntimeServiceV1,
@@ -155,6 +156,7 @@ function createRequest(): Extract<RustIntegratedRuntimeRequestV1, { type: "runti
       sessionId: "local-host",
       contentHash: "2".repeat(32),
       generatorHash: "3".repeat(32),
+      ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
       waterBlockId: 7,
       directionalBlockIds: Object.freeze([91, 12, 91]),
       waterloggedBlockIds: Object.freeze([300, 18]),
@@ -190,6 +192,39 @@ test("integrated wire rejects lone surrogates instead of silently changing ident
   );
 });
 
+test("integrated wire accepts schemas only on their versioned operations", () => {
+  const commandRequest = encodeRustIntegratedRuntimeRequestV1({
+    type: "runtime-command-v1",
+    requestId: 9,
+    clientEpoch: 2,
+    batch: command(),
+  });
+  const commandAsV4 = Uint8Array.from(commandRequest);
+  new DataView(commandAsV4.buffer).setUint16(6, 4, true);
+  assert.throws(
+    () => decodeRustIntegratedRuntimeRequestV1(commandAsV4),
+    (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "runtime-schema",
+  );
+
+  const ready = encodeRustIntegratedRuntimeResponseV1({
+    type: "runtime-ready-v1",
+    requestId: 9,
+    clientEpoch: 2,
+    workerEpoch: 3,
+    runtimeHandle: 1,
+    identity: identity(),
+    artifactHash: ARTIFACT_HASH,
+    instanceId: "instance:operation-schema",
+    capabilities: CAPABILITIES,
+  });
+  const readyAsV4 = Uint8Array.from(ready);
+  new DataView(readyAsV4.buffer).setUint16(6, 4, true);
+  assert.throws(
+    () => decodeRustIntegratedRuntimeResponseV1(readyAsV4),
+    (error: unknown) => error instanceof RustIntegratedRuntimeCodecError && error.code === "runtime-schema",
+  );
+});
+
 test("legacy canonical hash parity uses Rust's widened u64 rotation for high bytes", () => {
   const fixture = FIXTURE.legacyParityRegression;
   const payload = fromHex(fixture.inputHex);
@@ -217,12 +252,13 @@ test("TypeScript encoder exactly matches the native cross-language fixture bytes
       sessionId: "local-host",
       contentHash: "2".repeat(32),
       generatorHash: "3".repeat(32),
+      ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
       waterBlockId: 7,
       directionalBlockIds: [91, 12, 91],
       waterloggedBlockIds: [300, 18],
     },
   };
-  assert.equal(toHex(encodeRustIntegratedRuntimeRequestV1(create)), fixtureHex("create-unicode-sorted-block-sets"));
+  assert.equal(toHex(encodeRustIntegratedRuntimeRequestV1(create)), fixtureHex("create-v4-unicode-sorted-block-sets"));
   const fixtureCommand = createRustIntegratedRuntimeCommandBatchV1({
     commandId: "command:block-edit:1",
     idempotencyKey: "player-one:block-edit:1",

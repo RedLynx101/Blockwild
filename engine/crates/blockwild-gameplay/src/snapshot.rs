@@ -12,7 +12,8 @@ use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, PlayerId};
 use crate::authority::{GameplayAuthoritySnapshotParts, IdempotencyEntry};
 use crate::*;
 
-pub const GAMEPLAY_SNAPSHOT_SCHEMA_VERSION: u16 = 1;
+pub const GAMEPLAY_SNAPSHOT_SCHEMA_VERSION: u16 = 2;
+pub const GAMEPLAY_SNAPSHOT_MIN_SUPPORTED_SCHEMA_VERSION: u16 = 1;
 pub const MAX_GAMEPLAY_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_GAMEPLAY_SNAPSHOT_EXTENSIONS: usize = 4 * 1024 * 1024;
 
@@ -63,6 +64,7 @@ impl std::error::Error for GameplaySnapshotError {}
 #[derive(Clone, Debug)]
 pub struct DecodedGameplayAuthoritySnapshot {
     pub authority: GameplayAuthority,
+    pub schema_version: u16,
     pub unknown_extension_bytes: Vec<u8>,
     pub snapshot_hash: CanonicalHash,
 }
@@ -682,6 +684,15 @@ struct_codec!(ItemDefinition {
     max_stack,
     tags,
 });
+struct_codec!(ItemInstanceMetadataV1 {
+    hash,
+    type_id,
+    schema_id,
+    schema_version,
+    content_version,
+    canonical_json_bytes,
+    unknown_extension_bytes,
+});
 struct_codec!(Container {
     key,
     revision,
@@ -711,12 +722,35 @@ struct_codec!(FurnaceState {
     last_tick,
     active,
 });
-struct_codec!(InventoryState {
-    items,
-    containers,
-    recipes,
-    furnaces,
-});
+impl SnapshotCodec for InventoryState {
+    fn encode(&self, writer: &mut Writer) -> Result<(), GameplaySnapshotError> {
+        self.items.encode(writer)?;
+        self.containers.encode(writer)?;
+        self.recipes.encode(writer)?;
+        self.furnaces.encode(writer)?;
+        self.item_instance_metadata.encode(writer)
+    }
+
+    fn decode(reader: &mut Reader<'_>) -> Result<Self, GameplaySnapshotError> {
+        Ok(Self {
+            items: SnapshotCodec::decode(reader)?,
+            containers: SnapshotCodec::decode(reader)?,
+            recipes: SnapshotCodec::decode(reader)?,
+            furnaces: SnapshotCodec::decode(reader)?,
+            item_instance_metadata: SnapshotCodec::decode(reader)?,
+        })
+    }
+}
+
+fn decode_inventory_state_v1(reader: &mut Reader<'_>) -> Result<InventoryState, GameplaySnapshotError> {
+    Ok(InventoryState {
+        items: SnapshotCodec::decode(reader)?,
+        containers: SnapshotCodec::decode(reader)?,
+        recipes: SnapshotCodec::decode(reader)?,
+        furnaces: SnapshotCodec::decode(reader)?,
+        item_instance_metadata: BTreeMap::new(),
+    })
+}
 
 struct_codec!(ResourceKey {
     kind,
@@ -1066,15 +1100,43 @@ struct_codec!(GameplayState {
     cardforge,
 });
 
+fn decode_gameplay_state_v1(reader: &mut Reader<'_>) -> Result<GameplayState, GameplaySnapshotError> {
+    Ok(GameplayState {
+        world: SnapshotCodec::decode(reader)?,
+        revision: SnapshotCodec::decode(reader)?,
+        tick: SnapshotCodec::decode(reader)?,
+        inventory: decode_inventory_state_v1(reader)?,
+        machines: SnapshotCodec::decode(reader)?,
+        combat: SnapshotCodec::decode(reader)?,
+        progression: SnapshotCodec::decode(reader)?,
+        cardforge: SnapshotCodec::decode(reader)?,
+    })
+}
+
+#[cfg(test)]
+fn encode_gameplay_state_v1(value: &GameplayState, writer: &mut Writer) -> Result<(), GameplaySnapshotError> {
+    value.world.encode(writer)?;
+    value.revision.encode(writer)?;
+    value.tick.encode(writer)?;
+    value.inventory.items.encode(writer)?;
+    value.inventory.containers.encode(writer)?;
+    value.inventory.recipes.encode(writer)?;
+    value.inventory.furnaces.encode(writer)?;
+    value.machines.encode(writer)?;
+    value.combat.encode(writer)?;
+    value.progression.encode(writer)?;
+    value.cardforge.encode(writer)
+}
+
 impl GameplayAuthority {
     /// Encode the complete authority, including grants, retry receipts, replay
-    /// order, and opaque future bytes, into the canonical V1 persistence record.
+    /// order, and opaque future bytes, into the canonical V2 persistence record.
     pub fn encode_snapshot(&self, unknown_extension_bytes: &[u8]) -> Result<Vec<u8>, GameplaySnapshotError> {
         if unknown_extension_bytes.len() > MAX_GAMEPLAY_SNAPSHOT_EXTENSIONS {
             return Err(GameplaySnapshotError::new(
                 GameplaySnapshotErrorCode::Capacity,
                 0,
-                "snapshot extension exceeds the V1 bound",
+                "snapshot extension exceeds the V2 bound",
             ));
         }
         validate_snapshot_state(&self.state)?;
@@ -1087,7 +1149,7 @@ impl GameplayAuthority {
         parts.replay.encode(&mut payload)?;
         payload.bounded_bytes(unknown_extension_bytes, MAX_GAMEPLAY_SNAPSHOT_EXTENSIONS)?;
 
-        let payload_hash = payload_hash(&payload.bytes);
+        let payload_hash = payload_hash(GAMEPLAY_SNAPSHOT_SCHEMA_VERSION, &payload.bytes);
         let state_hash = self.state.state_hash();
         let replay_hash = self.replay_hash();
         let total = HEADER_BYTES.checked_add(payload.bytes.len()).ok_or_else(|| {
@@ -1097,7 +1159,7 @@ impl GameplayAuthority {
             return Err(GameplaySnapshotError::new(
                 GameplaySnapshotErrorCode::Capacity,
                 0,
-                "snapshot exceeds the V1 file bound",
+                "snapshot exceeds the V2 file bound",
             ));
         }
 
@@ -1126,7 +1188,7 @@ impl GameplayAuthority {
     pub fn install_snapshot(&mut self, bytes: &[u8]) -> Result<GameplaySnapshotInstallReport, GameplaySnapshotError> {
         let decoded = decode_gameplay_authority_snapshot(bytes)?;
         let report = GameplaySnapshotInstallReport {
-            schema_version: GAMEPLAY_SNAPSHOT_SCHEMA_VERSION,
+            schema_version: decoded.schema_version,
             state_hash: decoded.authority.state.state_hash(),
             replay_hash: decoded.authority.replay_hash(),
             snapshot_hash: decoded.snapshot_hash,
@@ -1144,7 +1206,7 @@ pub fn decode_gameplay_authority_snapshot(
         return Err(GameplaySnapshotError::new(
             GameplaySnapshotErrorCode::Capacity,
             0,
-            "snapshot exceeds the V1 file bound",
+            "snapshot exceeds the gameplay file bound",
         ));
     }
     if bytes.len() < HEADER_BYTES {
@@ -1163,7 +1225,7 @@ pub fn decode_gameplay_authority_snapshot(
         ));
     }
     let schema = u16::decode(&mut header)?;
-    if schema != GAMEPLAY_SNAPSHOT_SCHEMA_VERSION {
+    if !(GAMEPLAY_SNAPSHOT_MIN_SUPPORTED_SCHEMA_VERSION..=GAMEPLAY_SNAPSHOT_SCHEMA_VERSION).contains(&schema) {
         return Err(GameplaySnapshotError::new(
             GameplaySnapshotErrorCode::UnsupportedVersion,
             SNAPSHOT_MAGIC.len(),
@@ -1197,7 +1259,7 @@ pub fn decode_gameplay_authority_snapshot(
     }
     let payload = header.raw(payload_length)?.to_vec();
     header.finish()?;
-    if payload_hash(&payload) != expected_payload_hash {
+    if payload_hash(schema, &payload) != expected_payload_hash {
         return Err(GameplaySnapshotError::new(
             GameplaySnapshotErrorCode::Corrupt,
             HEADER_BYTES,
@@ -1206,7 +1268,11 @@ pub fn decode_gameplay_authority_snapshot(
     }
 
     let mut reader = Reader::new(&payload);
-    let state = GameplayState::decode(&mut reader)?;
+    let state = if schema == 1 {
+        decode_gameplay_state_v1(&mut reader)?
+    } else {
+        GameplayState::decode(&mut reader)?
+    };
     let grants = BTreeMap::<String, ActorGrant>::decode(&mut reader)?;
     let idempotency = BTreeMap::<(String, String), IdempotencyEntry>::decode(&mut reader)?;
     let idempotency_order = VecDeque::<(String, String)>::decode(&mut reader)?;
@@ -1238,6 +1304,7 @@ pub fn decode_gameplay_authority_snapshot(
     }
     Ok(DecodedGameplayAuthoritySnapshot {
         authority,
+        schema_version: schema,
         unknown_extension_bytes,
         snapshot_hash: snapshot_hash(bytes),
     })
@@ -1259,9 +1326,9 @@ pub fn canonical_gameplay_snapshot_hash(bytes: &[u8]) -> CanonicalHash {
     snapshot_hash(bytes)
 }
 
-fn payload_hash(bytes: &[u8]) -> CanonicalHash {
+fn payload_hash(schema_version: u16, bytes: &[u8]) -> CanonicalHash {
     let mut hasher = CanonicalHasher::new("blockwild.gameplay.snapshot.payload.v1");
-    hasher.write_u16(GAMEPLAY_SNAPSHOT_SCHEMA_VERSION);
+    hasher.write_u16(schema_version);
     hasher.write_bytes(bytes);
     hasher.finish()
 }
@@ -1317,6 +1384,12 @@ fn validate_inventory(state: &InventoryState) -> Result<(), GameplaySnapshotErro
         {
             return invalid("furnace references an unknown recipe or container");
         }
+    }
+    for (hash, metadata) in &state.item_instance_metadata {
+        if hash != &metadata.hash {
+            return invalid("item-instance metadata map key disagrees with its record");
+        }
+        metadata.validate().map_err(authority_error)?;
     }
     Ok(())
 }
@@ -1638,6 +1711,31 @@ fn invalid<T>(message: &str) -> Result<T, GameplaySnapshotError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn encode_v1_fixture(authority: &GameplayAuthority, extensions: &[u8]) -> Vec<u8> {
+        assert!(authority.state.inventory.item_instance_metadata.is_empty());
+        let parts = authority.snapshot_parts();
+        let mut payload = Writer::default();
+        encode_gameplay_state_v1(&parts.state, &mut payload).unwrap();
+        parts.grants.encode(&mut payload).unwrap();
+        parts.idempotency.encode(&mut payload).unwrap();
+        parts.idempotency_order.encode(&mut payload).unwrap();
+        parts.replay.encode(&mut payload).unwrap();
+        payload
+            .bounded_bytes(extensions, MAX_GAMEPLAY_SNAPSHOT_EXTENSIONS)
+            .unwrap();
+
+        let mut output = Writer::default();
+        output.raw(&SNAPSHOT_MAGIC);
+        1_u16.encode(&mut output).unwrap();
+        SNAPSHOT_FLAGS.encode(&mut output).unwrap();
+        u64::try_from(payload.bytes.len()).unwrap().encode(&mut output).unwrap();
+        authority.state.state_hash().encode(&mut output).unwrap();
+        authority.replay_hash().encode(&mut output).unwrap();
+        payload_hash(1, &payload.bytes).encode(&mut output).unwrap();
+        output.raw(&payload.bytes);
+        output.bytes
+    }
 
     fn representative_authority() -> (GameplayAuthority, GameplayBatch, AcceptedReceipt) {
         let owner = "player-élan".to_string();
@@ -2260,7 +2358,7 @@ mod tests {
 
         let mut invalid_utf8 = bytes.clone();
         invalid_utf8[HEADER_BYTES + 4] = 0xff;
-        let checksum = payload_hash(&invalid_utf8[HEADER_BYTES..]);
+        let checksum = payload_hash(GAMEPLAY_SNAPSHOT_SCHEMA_VERSION, &invalid_utf8[HEADER_BYTES..]);
         invalid_utf8[52..68].copy_from_slice(checksum.as_bytes());
         assert_eq!(
             decode_gameplay_authority_snapshot(&invalid_utf8)
@@ -2278,7 +2376,7 @@ mod tests {
                 .expect("test bound fits")
                 .to_le_bytes(),
         );
-        let checksum = payload_hash(&malicious[HEADER_BYTES..]);
+        let checksum = payload_hash(GAMEPLAY_SNAPSHOT_SCHEMA_VERSION, &malicious[HEADER_BYTES..]);
         malicious[52..68].copy_from_slice(checksum.as_bytes());
         assert_eq!(
             decode_gameplay_authority_snapshot(&malicious)
@@ -2304,11 +2402,26 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_fixture_vector_is_stable() {
+    fn snapshot_v2_fixture_vector_is_stable() {
         let (authority, _, _) = representative_authority();
         let bytes = authority
             .encode_snapshot(&[0, 0x80, 0xff, 7, 9])
             .expect("fixture snapshot encodes");
+        let actual = format!(
+            "schema={}\nbytes={}\nstate_hash={}\nreplay_hash={}\nsnapshot_hash={}\n",
+            GAMEPLAY_SNAPSHOT_SCHEMA_VERSION,
+            bytes.len(),
+            authority.state.state_hash().to_hex(),
+            authority.replay_hash().to_hex(),
+            canonical_gameplay_snapshot_hash(&bytes).to_hex()
+        );
+        assert_eq!(actual, include_str!("../fixtures/gameplay-snapshot-v2.txt"));
+    }
+
+    #[test]
+    fn snapshot_v1_fixture_decodes_with_an_empty_metadata_store() {
+        let (authority, _, _) = representative_authority();
+        let bytes = encode_v1_fixture(&authority, &[0, 0x80, 0xff, 7, 9]);
         let actual = format!(
             "schema=1\nbytes={}\nstate_hash={}\nreplay_hash={}\nsnapshot_hash={}\n",
             bytes.len(),
@@ -2317,5 +2430,16 @@ mod tests {
             canonical_gameplay_snapshot_hash(&bytes).to_hex()
         );
         assert_eq!(actual, include_str!("../fixtures/gameplay-snapshot-v1.txt"));
+
+        let decoded = decode_gameplay_authority_snapshot(&bytes).expect("V1 fixture remains readable");
+        assert_eq!(decoded.schema_version, 1);
+        assert!(decoded.authority.state.inventory.item_instance_metadata.is_empty());
+        assert_eq!(decoded.authority.state, authority.state);
+        assert_eq!(decoded.authority.replay_hash(), authority.replay_hash());
+        let v2 = decoded
+            .authority
+            .encode_snapshot(&decoded.unknown_extension_bytes)
+            .unwrap();
+        assert_eq!(decode_gameplay_authority_snapshot(&v2).unwrap().schema_version, 2);
     }
 }

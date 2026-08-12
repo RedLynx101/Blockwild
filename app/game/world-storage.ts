@@ -18,6 +18,11 @@ import type {
   RustNativeWorldPersistenceSessionV1,
 } from "./rust-native-world-persistence";
 import { WorldPersistenceCoordinatorV1 } from "./world-persistence-coordinator";
+import {
+  LEGACY_TERRAIN_CONTENT_HASH_V2,
+  legacyTerrainGeneratorHashV2,
+  stableTerrainGenerationJsonV2,
+} from "./terrain-generation-contract";
 
 export const WORLD_CATALOG_VERSION = 1;
 export const WORLD_EXPORT_VERSION = 1;
@@ -26,6 +31,7 @@ export const WORLD_DATA_PREFIX = "blockwild-world-data-v1:";
 export const LEGACY_WORLD_KEY = "blockwild-world-v2";
 export const WORLD_OWNERSHIP = "host-device" as const;
 export const WORLD_OWNERSHIP_NOTICE = "Worlds are stored only in this browser on this host device. Export a world to move or back it up.";
+export const WORLD_GENERATION_IDENTITY_SCHEMA_V1 = 1 as const;
 
 const LEGACY_GENERATOR_MIN_Y = -32;
 const MAX_NAME_LENGTH = 64;
@@ -92,7 +98,17 @@ export type WorldMetadata = {
   lastPlayedAt: number | null;
   playTimeMs: number;
   lastSavedGameVersion: string;
+  /** Small fail-closed bootstrap identity. Legacy catalogs intentionally retain null. */
+  generationIdentity: WorldGenerationIdentityV1 | null;
 };
+
+export type WorldGenerationIdentityV1 = Readonly<{
+  schemaVersion: typeof WORLD_GENERATION_IDENTITY_SCHEMA_V1;
+  terrainContentHash: string;
+  generatorHash: string;
+  /** Canonical JSON containing exactly the 11 terrain behavior keys; origin is excluded. */
+  generationOptionsJson: string;
+}>;
 
 export type StoredWorld = {
   version: typeof WORLD_CATALOG_VERSION;
@@ -161,7 +177,8 @@ type StorageEventTarget = {
   removeEventListener(type: "storage", listener: (event: StorageEvent) => void): void;
 };
 
-type StoredWorldShell = Pick<StoredWorld, "version" | "metadata" | "options">;
+type StoredWorldShell = Pick<StoredWorld, "version" | "metadata" | "options">
+  & Readonly<{ save: Pick<WorldSave, "generatorProfile" | "generatorVersion"> }>;
 type CachedWorldShell = { revision: number; shell: StoredWorldShell };
 type StorageRevisionState = { catalog: number; documents: Map<string, number> };
 
@@ -289,6 +306,116 @@ export function generationOptionsFromWorldOptions(
   };
 }
 
+const WORLD_GENERATION_OPTION_KEYS_V1 = Object.freeze([
+  "biomeScale",
+  "caveFrequency",
+  "enabledFactions",
+  "largeTownFrequency",
+  "profile",
+  "resourceAbundance",
+  "roadCoverage",
+  "settlementClustering",
+  "settlementDensity",
+  "settlementPattern",
+  "structures",
+] as const);
+const WORLD_GENERATION_IDENTITY_KEYS_V1 = Object.freeze([
+  "generationOptionsJson",
+  "generatorHash",
+  "schemaVersion",
+  "terrainContentHash",
+] as const);
+const WORLD_GENERATION_IDENTITY_HASH_PATTERN_V1 = /^[0-9a-f]{32}$/u;
+const MAX_WORLD_GENERATION_OPTIONS_JSON_LENGTH_V1 = 4_096;
+
+function worldGenerationProfileFromSave(save: Pick<WorldSave, "generatorProfile">): WorldGenerationOptions["profile"] {
+  return save.generatorProfile === "legacy-v14" ? "legacy-v14" : "world-below-v15";
+}
+
+/** Canonical terrain behavior JSON used by both the catalog and native runtime bootstrap. */
+export function canonicalWorldGenerationOptionsJsonV1(
+  value?: Partial<WorldOptions> | null,
+  profile: WorldGenerationOptions["profile"] = "world-below-v15",
+) {
+  const options = generationOptionsFromWorldOptions(value, profile);
+  return stableTerrainGenerationJsonV2({
+    profile: options.profile,
+    caveFrequency: options.caveFrequency,
+    biomeScale: options.biomeScale,
+    resourceAbundance: options.resourceAbundance,
+    structures: options.structures,
+    enabledFactions: options.enabledFactions,
+    settlementPattern: options.settlementPattern,
+    settlementDensity: options.settlementDensity,
+    settlementClustering: options.settlementClustering,
+    roadCoverage: options.roadCoverage,
+    largeTownFrequency: options.largeTownFrequency,
+  });
+}
+
+/** Derive a fresh identity only when exact save/options bytes are already trusted. */
+export function deriveWorldGenerationIdentityV1(
+  save: Pick<WorldSave, "generatorProfile" | "generatorVersion">,
+  options?: Partial<WorldOptions> | null,
+): WorldGenerationIdentityV1 {
+  return Object.freeze({
+    schemaVersion: WORLD_GENERATION_IDENTITY_SCHEMA_V1,
+    terrainContentHash: LEGACY_TERRAIN_CONTENT_HASH_V2,
+    generatorHash: legacyTerrainGeneratorHashV2(`g${save.generatorVersion}`),
+    generationOptionsJson: canonicalWorldGenerationOptionsJsonV1(options, worldGenerationProfileFromSave(save)),
+  });
+}
+
+function normalizeWorldGenerationIdentityV1(value: unknown): WorldGenerationIdentityV1 | null {
+  if (!isRecord(value)) return null;
+  const keys = Object.keys(value).sort();
+  if (keys.length !== WORLD_GENERATION_IDENTITY_KEYS_V1.length
+    || keys.some((key, index) => key !== WORLD_GENERATION_IDENTITY_KEYS_V1[index])) return null;
+  if (value.schemaVersion !== WORLD_GENERATION_IDENTITY_SCHEMA_V1
+    || typeof value.terrainContentHash !== "string"
+    || !WORLD_GENERATION_IDENTITY_HASH_PATTERN_V1.test(value.terrainContentHash)
+    || typeof value.generatorHash !== "string"
+    || !WORLD_GENERATION_IDENTITY_HASH_PATTERN_V1.test(value.generatorHash)
+    || typeof value.generationOptionsJson !== "string"
+    || value.generationOptionsJson.length > MAX_WORLD_GENERATION_OPTIONS_JSON_LENGTH_V1) return null;
+
+  let generationOptions: unknown;
+  try {
+    generationOptions = JSON.parse(value.generationOptionsJson);
+  } catch {
+    return null;
+  }
+  if (!isRecord(generationOptions)) return null;
+  const optionKeys = Object.keys(generationOptions).sort();
+  if (optionKeys.length !== WORLD_GENERATION_OPTION_KEYS_V1.length
+    || optionKeys.some((key, index) => key !== WORLD_GENERATION_OPTION_KEYS_V1[index])) return null;
+  const profile = generationOptions.profile;
+  if (profile !== "legacy-v14" && profile !== "world-below-v15") return null;
+  const canonical = canonicalWorldGenerationOptionsJsonV1(
+    generationOptions as Partial<WorldOptions>,
+    profile,
+  );
+  if (canonical !== value.generationOptionsJson) return null;
+  return Object.freeze({
+    schemaVersion: WORLD_GENERATION_IDENTITY_SCHEMA_V1,
+    terrainContentHash: value.terrainContentHash,
+    generatorHash: value.generatorHash,
+    generationOptionsJson: value.generationOptionsJson,
+  });
+}
+
+function terrainGenerationInputsChanged(
+  previousSave: Pick<WorldSave, "generatorProfile" | "generatorVersion">,
+  previousOptions: Partial<WorldOptions> | null,
+  nextSave: Pick<WorldSave, "generatorProfile" | "generatorVersion">,
+  nextOptions: Partial<WorldOptions> | null,
+) {
+  return legacyTerrainGeneratorHashV2(`g${previousSave.generatorVersion}`)
+      !== legacyTerrainGeneratorHashV2(`g${nextSave.generatorVersion}`)
+    || canonicalWorldGenerationOptionsJsonV1(previousOptions, worldGenerationProfileFromSave(previousSave))
+      !== canonicalWorldGenerationOptionsJsonV1(nextOptions, worldGenerationProfileFromSave(nextSave));
+}
+
 function normalizeName(value: unknown, fallback = "New World") {
   const name = typeof value === "string" ? value.replace(/[\u0000-\u001f\u007f]/g, " ").trim().replace(/\s+/g, " ") : "";
   return (name || fallback).slice(0, MAX_NAME_LENGTH);
@@ -409,6 +536,7 @@ function normalizeMetadata(value: unknown, fallback: { id: string; save: WorldSa
     lastPlayedAt: input.lastPlayedAt === null || input.lastPlayedAt === undefined ? null : finiteTimestamp(input.lastPlayedAt, createdAt),
     playTimeMs: clamp(Math.trunc(finite(input.playTimeMs, 0)), 0, Number.MAX_SAFE_INTEGER),
     lastSavedGameVersion: normalizeGameVersion(input.lastSavedGameVersion, normalizeGameVersion(fallback.save.lastSavedGameVersion)),
+    generationIdentity: normalizeWorldGenerationIdentityV1(input.generationIdentity),
   };
 }
 
@@ -452,6 +580,7 @@ function metadataFromCatalog(value: unknown, now: number): WorldMetadata | null 
     lastPlayedAt: value.lastPlayedAt === null || value.lastPlayedAt === undefined ? null : finiteTimestamp(value.lastPlayedAt, createdAt),
     playTimeMs: clamp(Math.trunc(finite(value.playTimeMs, 0)), 0, Number.MAX_SAFE_INTEGER),
     lastSavedGameVersion: normalizeGameVersion(value.lastSavedGameVersion, LEGACY_GAME_VERSION),
+    generationIdentity: normalizeWorldGenerationIdentityV1(value.generationIdentity),
   };
 }
 
@@ -616,6 +745,7 @@ export class WorldStorage {
     if (!save) return fail("invalid", "The new world save is incomplete or invalid.");
     const id = this.uniqueId();
     const now = this.now();
+    const options = normalizeWorldOptions(input.options);
     const metadata: WorldMetadata = {
       id,
       ownership: WORLD_OWNERSHIP,
@@ -627,8 +757,9 @@ export class WorldStorage {
       lastPlayedAt: null,
       playTimeMs: 0,
       lastSavedGameVersion: normalizeGameVersion(save.lastSavedGameVersion),
+      generationIdentity: deriveWorldGenerationIdentityV1(save, options),
     };
-    const document: StoredWorld = { version: WORLD_CATALOG_VERSION, metadata, options: normalizeWorldOptions(input.options), save };
+    const document: StoredWorld = { version: WORLD_CATALOG_VERSION, metadata, options, save };
     const nextCatalog = this.copyCatalog({ activeWorldId: id, worlds: [...this.catalog.worlds, metadata] });
     const committed = this.commitDocument(document, nextCatalog);
     return committed.ok ? ok({ ...metadata }) : committed;
@@ -701,6 +832,10 @@ export class WorldStorage {
     const save = migrateLegacyWorldSave(input.save);
     if (!save) return fail("invalid", "The world save is incomplete or invalid.", this.dataKey(id));
     const now = this.now();
+    const options = input.options ? normalizeWorldOptions({ ...loaded.value.options, ...input.options }) : loaded.value.options;
+    const generationIdentity = terrainGenerationInputsChanged(loaded.value.save, loaded.value.options, save, options)
+      ? deriveWorldGenerationIdentityV1(save, options)
+      : loaded.value.metadata.generationIdentity;
     const metadata: WorldMetadata = {
       ...loaded.value.metadata,
       seed: save.seed,
@@ -709,11 +844,12 @@ export class WorldStorage {
       lastPlayedAt: input.markPlayed === false ? loaded.value.metadata.lastPlayedAt : now,
       playTimeMs: clamp(Math.trunc(loaded.value.metadata.playTimeMs + normalizeNumber(input.playTimeDeltaMs, 0, 0, Number.MAX_SAFE_INTEGER, 0)), 0, Number.MAX_SAFE_INTEGER),
       lastSavedGameVersion: normalizeGameVersion(save.lastSavedGameVersion),
+      generationIdentity,
     };
     const document: StoredWorld = {
       version: loaded.value.version,
       metadata,
-      options: input.options ? normalizeWorldOptions({ ...loaded.value.options, ...input.options }) : loaded.value.options,
+      options,
       save,
     };
     const nextCatalog = this.copyCatalog({ worlds: this.catalog.worlds.map((entry) => entry.id === id ? metadata : entry) });
@@ -750,8 +886,14 @@ export class WorldStorage {
   updateWorldOptions(id: string, patch: Partial<WorldOptions>): WorldStorageResult<WorldOptions> {
     const loaded = this.readDocument(id);
     if (!loaded.ok) return loaded;
-    const metadata = { ...loaded.value.metadata, updatedAt: this.now() };
     const options = normalizeWorldOptions({ ...loaded.value.options, ...patch });
+    const metadata: WorldMetadata = {
+      ...loaded.value.metadata,
+      updatedAt: this.now(),
+      generationIdentity: terrainGenerationInputsChanged(loaded.value.save, loaded.value.options, loaded.value.save, options)
+        ? deriveWorldGenerationIdentityV1(loaded.value.save, options)
+        : loaded.value.metadata.generationIdentity,
+    };
     const document: StoredWorld = { ...loaded.value, metadata, options };
     const nextCatalog = this.copyCatalog({ worlds: this.catalog.worlds.map((entry) => entry.id === id ? metadata : entry) });
     const committed = this.commitDocument(document, nextCatalog);
@@ -860,6 +1002,7 @@ export class WorldStorage {
     // Imports are distinct world instances. Private runner notebooks must be
     // explicitly relinked instead of silently merging on seed equality.
     const save: WorldSave = { ...sourceSave, agentWorldFingerprint: `worldfp_import_${id}_${now.toString(36)}` };
+    const options = normalizeWorldOptions(value.world.options as Partial<WorldOptions>);
     const metadata: WorldMetadata = {
       ...sourceMetadata,
       id,
@@ -867,8 +1010,9 @@ export class WorldStorage {
       seed: save.seed,
       mode: save.mode,
       updatedAt: Math.max(sourceMetadata.updatedAt, now),
+      generationIdentity: deriveWorldGenerationIdentityV1(save, options),
     };
-    const document: StoredWorld = { version: WORLD_CATALOG_VERSION, metadata, options: normalizeWorldOptions(value.world.options as Partial<WorldOptions>), save };
+    const document: StoredWorld = { version: WORLD_CATALOG_VERSION, metadata, options, save };
     const nextCatalog = this.copyCatalog({
       activeWorldId: this.catalog.activeWorldId ?? id,
       worlds: [...this.catalog.worlds, metadata],
@@ -968,6 +1112,7 @@ export class WorldStorage {
       lastPlayedAt: finiteTimestamp(save.savedAt, now),
       playTimeMs: 0,
       lastSavedGameVersion: normalizeGameVersion(save.lastSavedGameVersion),
+      generationIdentity: null,
     };
     const document: StoredWorld = { version: WORLD_CATALOG_VERSION, metadata, options: normalizeWorldOptions({ settlementPattern: "legacy-scattered-v1" }), save };
     const nextCatalog = this.copyCatalog({ activeWorldId: id, legacyMigrated: true, worlds: [...this.catalog.worlds, metadata] });
@@ -1122,6 +1267,10 @@ export class WorldStorage {
         version: document.version,
         metadata: { ...document.metadata },
         options: { ...document.options, enabledFactions: [...document.options.enabledFactions] },
+        save: {
+          generatorProfile: document.save.generatorProfile,
+          generatorVersion: document.save.generatorVersion,
+        },
       },
     });
   }

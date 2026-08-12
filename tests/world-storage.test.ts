@@ -6,12 +6,19 @@ import { MemoryPersistenceAdapterV1 } from "../app/game/indexeddb-persistence-ad
 import { WorldPersistenceCoordinatorV1 } from "../app/game/world-persistence-coordinator.ts";
 import type { RustNativeWorldPersistenceSessionV1 } from "../app/game/rust-native-world-persistence.ts";
 import {
+  LEGACY_TERRAIN_CONTENT_HASH_V2,
+  legacyTerrainGeneratorHashV2,
+} from "../app/game/terrain-generation-contract.ts";
+import {
   DEFAULT_WORLD_OPTIONS,
   LEGACY_WORLD_KEY,
   WORLD_CATALOG_KEY,
   WORLD_DATA_PREFIX,
+  WORLD_GENERATION_IDENTITY_SCHEMA_V1,
   WORLD_OWNERSHIP,
   WorldStorage,
+  canonicalWorldGenerationOptionsJsonV1,
+  deriveWorldGenerationIdentityV1,
   generationOptionsFromWorldOptions,
   migrateLegacyWorldSave,
   normalizeWorldOptions,
@@ -341,6 +348,43 @@ test("advanced world options use safe defaults and bounded numeric controls", ()
   assert.equal(requiredSleepers({ sleepRule: "all-players", sleepPercentage: 50 }, 4), 4);
 });
 
+test("world metadata freezes an exact origin-free terrain generation identity", () => {
+  const storage = new MemoryStorage();
+  const worlds = new WorldStorage(storage, { now: () => 900, idFactory: () => "terrain-identity" });
+  const options = {
+    caveFrequency: 2.25,
+    biomeScale: 3,
+    resourceAbundance: 0.5,
+    structures: true,
+    enabledFactions: ["dwarves", "goblins"] as const,
+    settlementPattern: "legacy-scattered-v1" as const,
+    settlementDensity: 1.7,
+    settlementClustering: "strong" as const,
+    roadCoverage: "dense" as const,
+    largeTownFrequency: "frequent" as const,
+    origin: { mode: "near-any-settlement" as const },
+  };
+  const created = worlds.createWorld({
+    save: { ...save("IDENTITY"), generatorProfile: "legacy-v14" },
+    options,
+  });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const identity = created.value.generationIdentity;
+  assert.ok(identity);
+  assert.equal(Object.isFrozen(identity), true);
+  assert.equal(identity.schemaVersion, WORLD_GENERATION_IDENTITY_SCHEMA_V1);
+  assert.equal(identity.terrainContentHash, LEGACY_TERRAIN_CONTENT_HASH_V2);
+  assert.equal(identity.generatorHash, legacyTerrainGeneratorHashV2(`g${GENERATOR_VERSION}`));
+  assert.equal(identity.generationOptionsJson, canonicalWorldGenerationOptionsJsonV1(options, "legacy-v14"));
+  const parsed = JSON.parse(identity.generationOptionsJson) as Record<string, unknown>;
+  assert.equal(Object.keys(parsed).length, 11);
+  assert.equal("origin" in parsed, false);
+  assert.equal(parsed.profile, "legacy-v14");
+  assert.deepEqual(parsed.enabledFactions, ["goblins", "dwarves"]);
+});
+
 test("device-local catalog supports synchronous CRUD, active selection, metadata, and sorting", () => {
   const storage = new MemoryStorage();
   let now = 1_000;
@@ -378,13 +422,18 @@ test("device-local catalog supports synchronous CRUD, active selection, metadata
   assert.equal(duplicate.value.id, "fixed-id-2", "ID factories and imports must never overwrite an existing payload");
   assert.equal(duplicate.value.name, "Alpha Ridge Copy");
   assert.equal(duplicate.value.playTimeMs, 0);
+  assert.deepEqual(duplicate.value.generationIdentity, saved.value.generationIdentity);
   assert.equal(worlds.activeWorldId, duplicate.value.id);
 
   const renamed = worlds.renameWorld(duplicate.value.id, "Beta Vale");
   assert.equal(renamed.ok && renamed.value.name, "Beta Vale");
+  const identityBeforeOptions = duplicate.value.generationIdentity;
   const options = worlds.updateWorldOptions(duplicate.value.id, { difficulty: "peaceful", structures: false });
   assert.equal(options.ok && options.value.difficulty, "peaceful");
   assert.equal(options.ok && options.value.structures, false);
+  const identityAfterOptions = worlds.listWorlds().find((world) => world.id === duplicate.value.id)?.generationIdentity;
+  assert.notDeepEqual(identityAfterOptions, identityBeforeOptions, "a terrain behavior update must replace the bootstrap identity");
+  assert.equal(JSON.parse(identityAfterOptions!.generationOptionsJson).structures, false);
   assert.deepEqual(worlds.listWorlds({ sortBy: "name", direction: "asc" }).map((world) => world.name), ["Alpha Ridge", "Beta Vale"]);
   assert.deepEqual(worlds.listWorlds({ sortBy: "playTimeMs", direction: "desc" }).map((world) => world.id), [created.value.id, duplicate.value.id]);
 
@@ -399,6 +448,64 @@ test("device-local catalog supports synchronous CRUD, active selection, metadata
   assert.equal(reopened.activeWorldId, duplicate.value.id);
 });
 
+test("catalog identity survives refresh and unrelated world-rule changes", () => {
+  const storage = new MemoryStorage();
+  const first = new WorldStorage(storage, { now: () => 1_000, idFactory: () => "identity-refresh" });
+  const created = first.createWorld({ save: save("REFRESH"), options: { biomeScale: 2 } });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const expected = {
+    ...created.value.generationIdentity!,
+    terrainContentHash: "b".repeat(32),
+    generatorHash: "c".repeat(32),
+  };
+  const catalog = JSON.parse(storage.getItem(WORLD_CATALOG_KEY)!) as { worlds: Array<Record<string, unknown>> };
+  catalog.worlds[0].generationIdentity = expected;
+  storage.setItem(WORLD_CATALOG_KEY, JSON.stringify(catalog));
+
+  const refreshed = new WorldStorage(storage, { now: () => 2_000, idFactory: () => "unused" });
+  assert.deepEqual(refreshed.listWorlds()[0]?.generationIdentity, expected);
+  assert.equal(refreshed.updateWorldOptions(created.value.id, {
+    difficulty: "hard",
+    weather: false,
+    keepInventory: true,
+    origin: { mode: "near-any-settlement" },
+  }).ok, true);
+  assert.deepEqual(
+    refreshed.listWorlds()[0]?.generationIdentity,
+    expected,
+    "non-terrain rules and the deliberately excluded origin must retain the frozen identity",
+  );
+});
+
+test("missing or malformed catalog identities remain explicit null without reading world bytes", () => {
+  const storage = new MemoryStorage();
+  const worlds = new WorldStorage(storage, { now: () => 1_000, idFactory: () => "legacy-catalog" });
+  const first = worlds.createWorld({ save: save("MISSING-IDENTITY") });
+  const second = worlds.createWorld({ save: save("INVALID-IDENTITY") });
+  assert.equal(first.ok && second.ok, true);
+  if (!first.ok || !second.ok) return;
+
+  const catalog = JSON.parse(storage.getItem(WORLD_CATALOG_KEY)!) as { worlds: Array<Record<string, unknown>> };
+  delete catalog.worlds.find((entry) => entry.id === first.value.id)!.generationIdentity;
+  catalog.worlds.find((entry) => entry.id === second.value.id)!.generationIdentity = {
+    ...second.value.generationIdentity,
+    generationOptionsJson: '{"profile":"world-below-v15"}',
+  };
+  storage.setItem(WORLD_CATALOG_KEY, JSON.stringify(catalog));
+  storage.getItemCalls.clear();
+
+  const reopened = new WorldStorage(storage, { now: () => 2_000, idFactory: () => "unused" });
+  const listed = reopened.listWorlds();
+  assert.equal(listed.find((entry) => entry.id === first.value.id)?.generationIdentity, null);
+  assert.equal(listed.find((entry) => entry.id === second.value.id)?.generationIdentity, null);
+  assert.equal(
+    [...storage.getItemCalls.keys()].some((key) => key.startsWith(WORLD_DATA_PREFIX)),
+    false,
+    "catalog bootstrap must not parse rich compatibility documents to infer missing identity",
+  );
+});
+
 test("a legacy single-world save migrates once into the versioned catalog without moving its blocks", () => {
   const storage = new MemoryStorage();
   const legacy = save("OLD-WILD", "survival", 2);
@@ -409,6 +516,7 @@ test("a legacy single-world save migrates once into the versioned catalog withou
   const listed = worlds.listWorlds();
   assert.equal(listed.length, 1);
   assert.equal(listed[0].id, "legacy-world");
+  assert.equal(listed[0].generationIdentity, null, "legacy catalogs must require an explicit compatibility migration before native bootstrap");
   assert.equal(worlds.activeWorldId, "legacy-world");
   const loaded = worlds.loadWorld("legacy-world", false);
   assert.equal(loaded.ok, true);
@@ -474,8 +582,13 @@ test("world exports validate on import and use collision-safe local IDs", () => 
   if (!exported.ok) return;
   const parsed = JSON.parse(exported.value);
   assert.equal(parsed.ownershipNotice.includes("host device"), true);
+  assert.deepEqual(parsed.world.metadata.generationIdentity, created.value.generationIdentity);
+  parsed.world.metadata.generationIdentity = {
+    ...parsed.world.metadata.generationIdentity,
+    terrainContentHash: "a".repeat(32),
+  };
 
-  const imported = worlds.importWorld(exported.value);
+  const imported = worlds.importWorld(JSON.stringify(parsed));
   assert.equal(imported.ok, true);
   if (!imported.ok) return;
   assert.equal(imported.value.id, "same-id-2");
@@ -488,6 +601,12 @@ test("world exports validate on import and use collision-safe local IDs", () => 
   assert.equal(copy.value.options.difficulty, "hard");
   assert.equal(copy.value.options.keepInventory, true);
   assert.equal(copy.value.options.biomeScale, 2.5);
+  assert.deepEqual(
+    imported.value.generationIdentity,
+    deriveWorldGenerationIdentityV1(copy.value.save, copy.value.options),
+    "imports must derive identity from their normalized save profile and options instead of trusting exported metadata",
+  );
+  assert.equal(imported.value.generationIdentity?.terrainContentHash, LEGACY_TERRAIN_CONTENT_HASH_V2);
 
   assert.deepEqual(worlds.importWorld("not json"), { ok: false, error: { code: "invalid", message: "That file is not valid JSON." } });
   const unsupported = JSON.stringify({ ...parsed, version: 999 });

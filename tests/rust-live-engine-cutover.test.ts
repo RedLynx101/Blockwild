@@ -9,6 +9,12 @@ import {
 } from "../app/game/engine.ts";
 import type { RustWorldRuntimeHostConfigV1 } from "../app/game/rust-world-runtime-host.ts";
 import type { RustWorldRuntimeManagedHostV1 } from "../app/game/rust-world-runtime-manager.ts";
+import { deriveWorldGenerationIdentityV1 } from "../app/game/world-storage.ts";
+
+const GENERATION_IDENTITY = deriveWorldGenerationIdentityV1({
+  generatorVersion: 18,
+  generatorProfile: "world-below-v15",
+} as WorldSave, {});
 
 type Deferred = Readonly<{ promise: Promise<void>; resolve: () => void }>;
 function deferred(): Deferred {
@@ -111,7 +117,7 @@ test("production creation stays blocked until its sole Rust host is ready", asyn
   manager.gate = deferred();
   const hydration: string[] = [];
   const engine = harness(manager, async ({ kind, worldId }) => { hydration.push(`${kind}:${worldId}`); });
-  (engine as unknown as { createWorld: () => { id: string } }).createWorld = () => ({ id: "world-cutover-a" });
+  (engine as unknown as { createWorld: () => { id: string; generationIdentity: typeof GENERATION_IDENTITY } }).createWorld = () => ({ id: "world-cutover-a", generationIdentity: GENERATION_IDENTITY });
 
   const pending = engine.createWorldWithRustRuntime("CUTOVER-SEED", "survival");
   await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -131,7 +137,7 @@ test("activation and hydration failures leave gameplay closed and stop the candi
   const manager = new FakeManager();
   manager.failure = new Error("artifact attestation failed");
   const engine = harness(manager);
-  (engine as unknown as { createWorld: () => { id: string } }).createWorld = () => ({ id: "world-cutover-b" });
+  (engine as unknown as { createWorld: () => { id: string; generationIdentity: typeof GENERATION_IDENTITY } }).createWorld = () => ({ id: "world-cutover-b", generationIdentity: GENERATION_IDENTITY });
   await assert.rejects(engine.createWorldWithRustRuntime("CUTOVER-SEED", "builder"), /attestation failed/u);
   assert.equal(engine.running, false);
   assert.equal(engine.getRustRuntimeDiagnostics().hydration, "blocked");
@@ -148,7 +154,7 @@ test("switching worlds derives distinct durable universes and sessions before op
   const manager = new FakeManager();
   const hydrated: string[] = [];
   const engine = harness(manager, async ({ kind, worldId }) => { hydrated.push(`${kind}:${worldId}`); });
-  (engine as unknown as { createWorld: () => { id: string } }).createWorld = () => ({ id: "world-first" });
+  (engine as unknown as { createWorld: () => { id: string; generationIdentity: typeof GENERATION_IDENTITY } }).createWorld = () => ({ id: "world-first", generationIdentity: GENERATION_IDENTITY });
   (engine as unknown as { loadWorld: (save: WorldSave, options: unknown, id: string) => void }).loadWorld = (_save, _options, id) => {
     engine.activeWorldId = id;
     engine.running = true;
@@ -166,9 +172,9 @@ test("switching worlds derives distinct durable universes and sessions before op
 test("browser entry points bind host and guest Rust authority and never call synchronous world paths", () => {
   const engineSource = readFileSync(new URL("../app/game/engine.ts", import.meta.url), "utf8");
   const shellSource = readFileSync(new URL("../app/game/VoxelGame.tsx", import.meta.url), "utf8");
-  assert.match(engineSource, /bindReadyRustMultiplayerRuntimeV1\([\s\S]*sessionId: binding\.descriptor\.runtimeSessionId/u);
+  assert.match(engineSource, /bindReadyRustMultiplayerRuntimeV2\([\s\S]*sessionId: binding\.descriptor\.runtimeSessionId/u);
   assert.match(engineSource, /guestAuthorityFactory: this\.guestRustAuthorityFactory\(\)/u);
-  assert.match(engineSource, /createRustMultiplayerGuestAuthorityFactoryV1\(\{/u);
+  assert.match(engineSource, /createRustMultiplayerGuestAuthorityFactoryV2\(\{/u);
   assert.match(engineSource, /async submitAgentCommand\([\s\S]*pendingAgentCommandReceipts/u);
   assert.match(shellSource, /await engine\.createWorldWithRustRuntime/u);
   assert.match(shellSource, /await engine\.loadStoredWorldWithRustRuntime\(worldId\)/u);

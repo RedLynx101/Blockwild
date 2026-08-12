@@ -30,6 +30,35 @@ test("duplicated seeds remain separate universes and future locations remain exp
   assert.equal(second.locationId, "orbit:station-1");
 });
 
+test("live config consumes an exact catalog terrain identity without substituting defaults", () => {
+  const generationOptionsJson = "{\"biomeScale\":2,\"caveFrequency\":1,\"enabledFactions\":[\"hobbits\"],\"largeTownFrequency\":\"rare\",\"profile\":\"legacy-v14\",\"resourceAbundance\":0.5,\"roadCoverage\":\"local\",\"settlementClustering\":\"even\",\"settlementDensity\":0.75,\"settlementPattern\":\"legacy-scattered-v1\",\"structures\":true}";
+  const config = createRustWorldRuntimeLiveConfigV1({
+    worldId: "catalog-exact",
+    worldSeed: "same",
+    sessionId: "runtime.12345678",
+    generationIdentity: {
+      schemaVersion: 1,
+      terrainContentHash: "a".repeat(32),
+      generatorHash: "b".repeat(32),
+      generationOptionsJson,
+    },
+  });
+  assert.equal(config.terrainContentHash, "a".repeat(32));
+  assert.equal(config.generatorHash, "b".repeat(32));
+  assert.equal(config.generationOptionsJson, generationOptionsJson);
+  assert.throws(() => createRustWorldRuntimeLiveConfigV1({
+    worldId: "catalog-exact",
+    worldSeed: "same",
+    sessionId: "runtime.12345678",
+    generationIdentity: {
+      schemaVersion: 1,
+      terrainContentHash: "a".repeat(32),
+      generatorHash: "b".repeat(32),
+      generationOptionsJson: "{\"profile\":\"world-below-v15\"}",
+    },
+  }), /exact canonical/u);
+});
+
 test("session generation is secure-injectable and invalid identities fail closed", () => {
   assert.equal(
     createRustWorldRuntimeSessionIdV1(() => "123e4567-e89b-12d3-a456-426614174000"),
