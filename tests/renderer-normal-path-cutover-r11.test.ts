@@ -47,16 +47,21 @@ test("avatar previews lazy-load Three behind a deterministic no-WebGL fallback",
 
 test("engine extraction copies coarse records plus renderer-neutral terrain pages", async () => {
   const engine = await source("engine.ts");
+  const snapshotStart = engine.indexOf("  private rustRendererShellSnapshotR11(");
+  const snapshotEnd = engine.indexOf("\n  publishRendererExtractionR11(now: number)", snapshotStart);
+  assert.ok(snapshotStart >= 0 && snapshotEnd > snapshotStart, "renderer-neutral shell snapshot method is present");
+  const snapshot = engine.slice(snapshotStart, snapshotEnd);
   const start = engine.indexOf("  publishRendererExtractionR11(now: number)");
   const end = engine.indexOf("\n  updateAdaptiveResolution", start);
   assert.ok(start >= 0 && end > start, "normal-path extraction method is present");
   const extraction = engine.slice(start, end);
   for (const forbidden of ["this.scene", ".traverse(", "this.world.getBlock", "this.mobs", "this.renderer.info"]) {
-    assert.ok(!extraction.includes(forbidden), `extraction must not scrape ${forbidden}`);
+    assert.ok(!snapshot.includes(forbidden) && !extraction.includes(forbidden), `extraction must not scrape ${forbidden}`);
   }
   for (const required of ["this.camera.position", "this.camera.quaternion", "this.daylightAmount()", "this.weatherState.kind", "this.cameraEnvironment.caveBackdropBlend", "this.world.rendererTerrainSnapshotR11"]) {
-    assert.ok(extraction.includes(required), `extraction omitted ${required}`);
+    assert.ok(snapshot.includes(required), `renderer-neutral snapshot omitted ${required}`);
   }
+  assert.match(extraction, /this\.rustRendererShellSnapshotR11\(now, authoritativeTick\)/u);
 });
 
 test("world extraction reads the immutable page registry, never Three, voxel, or material state", async () => {

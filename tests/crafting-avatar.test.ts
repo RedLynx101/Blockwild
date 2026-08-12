@@ -156,7 +156,7 @@ test("player variants and equipment alter the production rig", () => {
 test("SSR and the first browser render share deterministic settings text", () => {
   assert.deepEqual(initialHydrationSettings(), {
     volume: 0.55, muted: false, sensitivity: 0.0022, fov: 72, weather: "clear",
-    renderDistance: 10, simulationDistance: 8, basicRenderDistance: 20, showFps: false, showMinimap: false, showBreakingTexture: true, showBreakProgress: false, showToolEffectiveness: true, debugTelemetry: false, debugTelemetryMaxMinutes: 60, musicVolume: 0.72, resourceMode: "auto", agentVoiceMode: "spatial",
+    renderDistance: 10, simulationDistance: 8, basicRenderDistance: 10, rememberedBasicRenderDistance: 20, showFps: false, showMinimap: false, showBreakingTexture: true, showBreakProgress: false, showToolEffectiveness: true, debugTelemetry: false, debugTelemetryMaxMinutes: 60, musicVolume: 0.72, resourceMode: "auto", agentVoiceMode: "spatial",
   });
   const serverHtml = renderToString(createElement(VoxelGame));
   assert.match(serverHtml, /aria-label="Main menu"/u);
