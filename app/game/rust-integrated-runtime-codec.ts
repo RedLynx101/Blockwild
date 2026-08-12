@@ -8,9 +8,11 @@ import {
   RUST_INTEGRATED_RUNTIME_SCHEMA_V2,
   RUST_INTEGRATED_RUNTIME_SCHEMA_V3,
   RUST_INTEGRATED_RUNTIME_SCHEMA_V4,
+  RUST_INTEGRATED_RUNTIME_SCHEMA_V5,
   RUST_INTEGRATED_RUNTIME_DEFAULT_GENERATION_OPTIONS_JSON_V1,
   RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONTENT_HASH_V2,
   RUST_INTEGRATED_RUNTIME_MAX_GENERATION_OPTIONS_JSON_BYTES,
+  RUST_INTEGRATED_RUNTIME_MAX_VIEWPORT_DIMENSION_V1,
   RUST_INTEGRATED_RUNTIME_WIRE_V1,
   RUST_RUNTIME_INPUT_BUTTON_MASK_V1,
   RUST_RUNTIME_INPUT_FLAG_MASK_V1,
@@ -673,7 +675,7 @@ function encodeEnvelope(
   output.set(magic, 0);
   const view = new DataView(output.buffer);
   view.setUint16(4, RUST_INTEGRATED_RUNTIME_WIRE_V1, true);
-  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V4) {
+  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V4 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V5) {
     throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is unsupported");
   }
   view.setUint16(6, schema, true);
@@ -700,7 +702,7 @@ function decodeEnvelope(value: Uint8Array | ArrayBuffer, magic: Uint8Array): Hea
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (view.getUint16(4, true) !== RUST_INTEGRATED_RUNTIME_WIRE_V1) throw new RustIntegratedRuntimeCodecError("wire-version", "integrated runtime wire version is unsupported");
   const schema = view.getUint16(6, true);
-  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V4) throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is unsupported");
+  if (schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V2 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V3 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V4 && schema !== RUST_INTEGRATED_RUNTIME_SCHEMA_V5) throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is unsupported");
   if (view.getUint16(10, true) !== 0) throw new RustIntegratedRuntimeCodecError("reserved", "integrated runtime reserved header bits must be zero");
   const payloadLength = view.getUint32(24, true);
   if (payloadLength !== bytes.byteLength - HEADER_BYTES) throw new RustIntegratedRuntimeCodecError("length", "integrated runtime envelope length does not match its payload");
@@ -722,9 +724,11 @@ function validateOperationSchema(operation: number, schema: number, response: bo
         : true
     : operation === 1
       ? schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V2 || schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V4
-      : [2, 3, 4, 5, 6, 7, 8].includes(operation)
-        ? schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V2
-        : true;
+      : operation === 4
+        ? schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V2 || schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V5
+        : [2, 3, 5, 6, 7, 8].includes(operation)
+          ? schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V2
+          : true;
   if (!valid) {
     throw new RustIntegratedRuntimeCodecError("runtime-schema", "integrated runtime schema is not valid for this operation");
   }
@@ -748,6 +752,11 @@ export function encodeRustIntegratedRuntimeRequestV1(request: RustIntegratedRunt
       writeIdentity(writer, request.expected);
       writer.u64(request.afterRevision);
       writer.u32(integer(request.maxBytes, 1, RUST_INTEGRATED_RUNTIME_MAX_EXTRACTION_BYTES, "extract.maxBytes"));
+      if (request.view) {
+        writer.u32(integer(request.view.viewportWidth, 1, RUST_INTEGRATED_RUNTIME_MAX_VIEWPORT_DIMENSION_V1, "extract.viewportWidth"));
+        writer.u32(integer(request.view.viewportHeight, 1, RUST_INTEGRATED_RUNTIME_MAX_VIEWPORT_DIMENSION_V1, "extract.viewportHeight"));
+        writer.u64(request.view.viewRevision);
+      }
       break;
     case "runtime-restore-v1":
       writer.hash(request.expectedCheckpointHash, "restore.expectedCheckpointHash");
@@ -767,7 +776,11 @@ export function encodeRustIntegratedRuntimeRequestV1(request: RustIntegratedRunt
     request.clientEpoch,
     0,
     writer.finish(),
-    request.type === "runtime-create-v1" ? RUST_INTEGRATED_RUNTIME_SCHEMA_V4 : RUST_INTEGRATED_RUNTIME_SCHEMA_V2,
+    request.type === "runtime-create-v1"
+      ? RUST_INTEGRATED_RUNTIME_SCHEMA_V4
+      : request.type === "runtime-extract-v1" && request.view
+        ? RUST_INTEGRATED_RUNTIME_SCHEMA_V5
+        : RUST_INTEGRATED_RUNTIME_SCHEMA_V2,
   );
 }
 
@@ -791,7 +804,29 @@ export function decodeRustIntegratedRuntimeRequestV1(value: Uint8Array | ArrayBu
       request = Object.freeze({ ...base, type: "runtime-step-v1", expected, monotonicTimeUs, budgetUs, inputs: Object.freeze(Array.from({ length: count }, () => readInput(reader))) });
       break;
     }
-    case 4: request = Object.freeze({ ...base, type: "runtime-extract-v1", expected: readIdentity(reader), afterRevision: reader.u64(), maxBytes: reader.u32() }); break;
+    case 4: {
+      const expected = readIdentity(reader);
+      const afterRevision = reader.u64();
+      const maxBytes = reader.u32();
+      if (maxBytes < 1 || maxBytes > RUST_INTEGRATED_RUNTIME_MAX_EXTRACTION_BYTES) {
+        throw new RustIntegratedRuntimeCodecError("invalid-integer", "extraction byte budget is out of range");
+      }
+      request = header.schema === RUST_INTEGRATED_RUNTIME_SCHEMA_V5
+        ? Object.freeze({
+          ...base,
+          type: "runtime-extract-v1",
+          expected,
+          afterRevision,
+          maxBytes,
+          view: Object.freeze({
+            viewportWidth: integer(reader.u32(), 1, RUST_INTEGRATED_RUNTIME_MAX_VIEWPORT_DIMENSION_V1, "extract.viewportWidth"),
+            viewportHeight: integer(reader.u32(), 1, RUST_INTEGRATED_RUNTIME_MAX_VIEWPORT_DIMENSION_V1, "extract.viewportHeight"),
+            viewRevision: reader.u64(),
+          }),
+        })
+        : Object.freeze({ ...base, type: "runtime-extract-v1", expected, afterRevision, maxBytes });
+      break;
+    }
     case 5: request = Object.freeze({ ...base, type: "runtime-restore-v1", expectedCheckpointHash: reader.hash(), checkpoint: reader.bytes(RUST_INTEGRATED_RUNTIME_MAX_REQUEST_BYTES - HEADER_BYTES - 32) }); break;
     case 6: {
       const present = reader.u8();

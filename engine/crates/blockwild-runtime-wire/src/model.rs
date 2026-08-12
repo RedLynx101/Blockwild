@@ -8,6 +8,9 @@ pub const RUNTIME_SCHEMA_V3: u16 = 3;
 /// options to Create requests. Other request/response payloads retain their
 /// existing schemas.
 pub const RUNTIME_SCHEMA_V4: u16 = 4;
+/// Schema 5 adds browser-owned viewport dimensions and a presentation-only
+/// view revision to Extract requests. No response operation uses schema 5.
+pub const RUNTIME_SCHEMA_V5: u16 = 5;
 pub const DEFAULT_TERRAIN_CONTENT_HASH_V2: WireHash = WireHash([
     0xcc, 0x59, 0x90, 0x3b, 0xe7, 0x7d, 0xfe, 0x30, 0x10, 0x9d, 0x15, 0xbf, 0xaf, 0x0e, 0x30, 0x22,
 ]);
@@ -27,6 +30,7 @@ pub const MAX_OPERATIONS: usize = 256;
 pub const MAX_INPUT_FRAMES: usize = 128;
 pub const MAX_ACTION_RECEIPTS: usize = MAX_INPUT_FRAMES * 6;
 pub const MAX_SAFE_U64: u64 = 9_007_199_254_740_991;
+pub const MAX_VIEWPORT_DIMENSION_V1: u32 = 16_384;
 
 // RuntimeInputFrameV1 is a public cross-language ABI. Buttons are a sampled
 // bitset; consumers detect rising edges for toggle actions rather than relying
@@ -305,6 +309,18 @@ pub enum RuntimeRequestV1 {
         after_revision: u64,
         max_bytes: u32,
     },
+    /// View-aware extraction keeps the schema-2 payload as an exact prefix.
+    /// The viewport is presentation-only and must never enter authority hashes.
+    ExtractView {
+        request_id: u32,
+        client_epoch: u32,
+        expected: RuntimeIdentityV1,
+        after_revision: u64,
+        max_bytes: u32,
+        viewport_width: u32,
+        viewport_height: u32,
+        view_revision: u64,
+    },
     Restore {
         request_id: u32,
         client_epoch: u32,
@@ -332,6 +348,7 @@ impl RuntimeRequestV1 {
             | Self::RecoverCommand { request_id, .. }
             | Self::Step { request_id, .. }
             | Self::Extract { request_id, .. }
+            | Self::ExtractView { request_id, .. }
             | Self::Restore { request_id, .. }
             | Self::Shutdown { request_id, .. }
             | Self::Checkpoint { request_id, .. } => *request_id,
@@ -346,6 +363,7 @@ impl RuntimeRequestV1 {
             | Self::RecoverCommand { client_epoch, .. }
             | Self::Step { client_epoch, .. }
             | Self::Extract { client_epoch, .. }
+            | Self::ExtractView { client_epoch, .. }
             | Self::Restore { client_epoch, .. }
             | Self::Shutdown { client_epoch, .. }
             | Self::Checkpoint { client_epoch, .. } => *client_epoch,

@@ -7,6 +7,7 @@ import {
   type RustIntegratedRuntimeCommandReceiptV1,
   type RustIntegratedRuntimeConfigV1,
   type RustIntegratedRuntimeExtractionV1,
+  type RustIntegratedRuntimeExtractionViewV1,
   type RustIntegratedRuntimeIdentityV1,
   type RustIntegratedRuntimeInputFrameV1,
   type RustIntegratedRuntimeRequestV1,
@@ -455,7 +456,11 @@ export class RustIntegratedRuntimeServiceV1 {
     });
   }
 
-  extract(afterRevision: number, maxBytes = RUST_INTEGRATED_RUNTIME_MAX_EXTRACTION_BYTES): Promise<RustIntegratedRuntimeExtractionV1> {
+  extract(
+    afterRevision: number,
+    maxBytes = RUST_INTEGRATED_RUNTIME_MAX_EXTRACTION_BYTES,
+    view?: RustIntegratedRuntimeExtractionViewV1,
+  ): Promise<RustIntegratedRuntimeExtractionV1> {
     this.requireReady();
     this.requireBoundedExtractionAvailable();
     return this.enqueue(async () => {
@@ -469,6 +474,7 @@ export class RustIntegratedRuntimeServiceV1 {
           expected,
           afterRevision,
           maxBytes,
+          ...(view ? { view } : {}),
         });
         this.acceptWorkerEpoch(response);
         if (response.type !== "runtime-extraction-v1") throw new RustIntegratedRuntimeServiceError("invalid-response", "runtime extract did not return an extraction batch");

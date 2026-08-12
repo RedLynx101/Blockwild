@@ -33,8 +33,13 @@ use blockwild_network::{
     NetworkDeltaRecordV1, NetworkInterestChunkV1, NetworkInterestSetV1, NetworkPeerGrantV1, NetworkPeerKindV1,
     NetworkPeerRoleV1, ReplicationScopeV1, ScopedDeltaRecordV1, WorldAddressV1 as NetworkWorldAddressV1,
 };
-use blockwild_runtime_wire::{MAX_DOMAIN_PAYLOAD_BYTES, RuntimeInputFrameV1, WireError, wire_checksum_v1};
-use blockwild_types::{CanonicalHash, EntityId, LocationId, PlayerId};
+use blockwild_runtime_wire::{
+    MAX_DOMAIN_PAYLOAD_BYTES, MAX_SAFE_U64, RuntimeInputFrameV1, WireError, wire_checksum_v1,
+};
+use blockwild_simulation::{
+    CameraModeV1, CameraPoseInputV1, CameraProfileV1, Vec3 as SimulationVec3, derive_camera_pose_v1,
+};
+use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, LocationId, PlayerId};
 
 use crate::{
     INTEGRATED_RUNTIME_MAX_TERRAIN_RECONCILE_EVICTED_CHUNKS_V2, INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1,
@@ -82,6 +87,8 @@ const PLAYER_BOOTSTRAP_STATUS_QUERY_MAGIC: [u8; 4] = *b"BWS5";
 const PLAYER_BOOTSTRAP_STATUS_RECEIPT_MAGIC: [u8; 4] = *b"BWO5";
 const PLAYER_INVENTORY_IMPORT_MAGIC: [u8; 4] = *b"BWP7";
 const PLAYER_INVENTORY_IMPORT_RECEIPT_MAGIC: [u8; 4] = *b"BWI7";
+const CAMERA_CONFIG_MAGIC: [u8; 4] = *b"BWC5";
+const CAMERA_CONFIG_RECEIPT_MAGIC: [u8; 4] = *b"BWR5";
 
 pub const CONTENT_INSTALL_PAGE_TYPE_V1: &str = "blockwild.gameplay.content-install-page.v1";
 pub const CONTENT_INSTALL_RECEIPT_TYPE_V1: &str = "blockwild.gameplay.content-install-receipt.v1";
@@ -105,6 +112,26 @@ pub const PLAYER_INVENTORY_IMPORT_TYPE_V1: &str = "blockwild.gameplay.player-inv
 pub const PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1: &str = "blockwild.gameplay.player-inventory-import-receipt.r7.v1";
 pub const SIMULATION_PLAYER_BIND_TYPE_V3: &str = "blockwild.simulation.player-bind.r5.v3";
 pub const SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3: &str = "blockwild.simulation.player-bind-final-receipt.r5.v3";
+pub const SIMULATION_CAMERA_CONFIG_TYPE_V1: &str = "blockwild.simulation.camera-config.r5.v1";
+pub const SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1: &str = "blockwild.simulation.camera-config-receipt.r5.v1";
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RuntimeCameraConfigWireV1 {
+    /// Compare-and-set seam. Zero denotes the initial camera configuration.
+    pub expected_camera_revision: u64,
+    pub mode: CameraModeV1,
+    pub profile: CameraProfileV1,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RuntimeCameraConfigReceiptWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub previous_camera_revision: u64,
+    pub resulting_camera_revision: u64,
+    pub mode: CameraModeV1,
+    pub profile: CameraProfileV1,
+    pub camera_state_hash: CanonicalHash,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EntityAuthorityExportWireV1 {
@@ -418,6 +445,187 @@ pub fn decode_runtime_player_binding_v1(bytes: &[u8]) -> Result<RuntimePlayerBin
     };
     reader.finish()?;
     value.validate()?;
+    Ok(value)
+}
+
+fn camera_mode_tag_v1(value: CameraModeV1) -> u8 {
+    match value {
+        CameraModeV1::FirstPerson => 0,
+        CameraModeV1::ThirdRear => 1,
+        CameraModeV1::ThirdFront => 2,
+    }
+}
+
+fn read_camera_mode_v1(reader: &mut Reader<'_>) -> Result<CameraModeV1, WireError> {
+    match reader.u8()? {
+        0 => Ok(CameraModeV1::FirstPerson),
+        1 => Ok(CameraModeV1::ThirdRear),
+        2 => Ok(CameraModeV1::ThirdFront),
+        _ => Err(WireError::new("camera-mode", "camera configuration mode is unknown")),
+    }
+}
+
+fn camera_profile_values_v1(value: CameraProfileV1) -> [f64; 12] {
+    [
+        value.eye_height,
+        value.third_person_target_height,
+        value.third_person_distance,
+        value.third_person_pitch_scale,
+        value.rear_shoulder_offset,
+        value.collision_radius,
+        value.collision_padding,
+        value.minimum_distance,
+        value.base_vertical_fov_radians,
+        value.aim_vertical_fov_radians,
+        value.near,
+        value.far,
+    ]
+}
+
+fn validate_camera_profile_v1(value: CameraProfileV1) -> Result<(), WireError> {
+    derive_camera_pose_v1(
+        None,
+        CameraPoseInputV1 {
+            body_position: SimulationVec3::new(0.0, 0.0, 0.0),
+            look_yaw: 0.0,
+            look_pitch: 0.0,
+            mode: CameraModeV1::FirstPerson,
+            aiming: false,
+            viewport: [1, 1],
+            profile: value,
+        },
+    )
+    .map(|_| ())
+    .map_err(|_| {
+        WireError::new(
+            "camera-profile",
+            "camera configuration profile is outside the simulation contract",
+        )
+    })
+}
+
+fn write_camera_profile_v1(writer: &mut Writer, value: CameraProfileV1) {
+    for field in camera_profile_values_v1(value) {
+        writer.f64(field);
+    }
+}
+
+fn read_camera_profile_v1(reader: &mut Reader<'_>) -> Result<CameraProfileV1, WireError> {
+    let value = CameraProfileV1 {
+        eye_height: reader.f64()?,
+        third_person_target_height: reader.f64()?,
+        third_person_distance: reader.f64()?,
+        third_person_pitch_scale: reader.f64()?,
+        rear_shoulder_offset: reader.f64()?,
+        collision_radius: reader.f64()?,
+        collision_padding: reader.f64()?,
+        minimum_distance: reader.f64()?,
+        base_vertical_fov_radians: reader.f64()?,
+        aim_vertical_fov_radians: reader.f64()?,
+        near: reader.f64()?,
+        far: reader.f64()?,
+    };
+    validate_camera_profile_v1(value)?;
+    Ok(value)
+}
+
+#[must_use]
+pub fn runtime_camera_config_state_hash_v1(
+    camera_revision: u64,
+    mode: CameraModeV1,
+    profile: CameraProfileV1,
+) -> CanonicalHash {
+    let mut hasher = CanonicalHasher::new("blockwild-camera-config-state-v1");
+    hasher.write_u16(1);
+    hasher.write_u64(camera_revision);
+    hasher.write_u16(u16::from(camera_mode_tag_v1(mode)));
+    for field in camera_profile_values_v1(profile) {
+        hasher.write_bytes(&field.to_le_bytes());
+    }
+    hasher.finish()
+}
+
+pub fn encode_runtime_camera_config_v1(value: &RuntimeCameraConfigWireV1) -> Result<Vec<u8>, WireError> {
+    if value.expected_camera_revision > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "camera-revision",
+            "expected camera revision exceeds JavaScript's safe integer range",
+        ));
+    }
+    validate_camera_profile_v1(value.profile)?;
+    let mut writer = Writer::default();
+    writer.u64(value.expected_camera_revision);
+    writer.u8(camera_mode_tag_v1(value.mode));
+    write_camera_profile_v1(&mut writer, value.profile);
+    wrap(CAMERA_CONFIG_MAGIC, writer.finish())
+}
+
+pub fn decode_runtime_camera_config_v1(bytes: &[u8]) -> Result<RuntimeCameraConfigWireV1, WireError> {
+    let mut reader = Reader::new(unwrap(CAMERA_CONFIG_MAGIC, bytes)?);
+    let expected_camera_revision = reader.u64()?;
+    if expected_camera_revision > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "camera-revision",
+            "expected camera revision exceeds JavaScript's safe integer range",
+        ));
+    }
+    let mode = read_camera_mode_v1(&mut reader)?;
+    let profile = read_camera_profile_v1(&mut reader)?;
+    reader.finish()?;
+    Ok(RuntimeCameraConfigWireV1 {
+        expected_camera_revision,
+        mode,
+        profile,
+    })
+}
+
+fn validate_camera_config_receipt_v1(value: &RuntimeCameraConfigReceiptWireV1) -> Result<(), WireError> {
+    if value.previous_camera_revision > MAX_SAFE_U64
+        || value.resulting_camera_revision > MAX_SAFE_U64
+        || (value.resulting_camera_revision != value.previous_camera_revision
+            && value.previous_camera_revision.checked_add(1) != Some(value.resulting_camera_revision))
+    {
+        return Err(WireError::new(
+            "camera-revision",
+            "camera receipt revision must stay unchanged or advance exactly once",
+        ));
+    }
+    validate_camera_profile_v1(value.profile)?;
+    if value.camera_state_hash
+        != runtime_camera_config_state_hash_v1(value.resulting_camera_revision, value.mode, value.profile)
+    {
+        return Err(WireError::new(
+            "camera-state-hash",
+            "camera receipt terminal state hash is invalid",
+        ));
+    }
+    Ok(())
+}
+
+pub fn encode_runtime_camera_config_receipt_v1(value: &RuntimeCameraConfigReceiptWireV1) -> Result<Vec<u8>, WireError> {
+    validate_camera_config_receipt_v1(value)?;
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    writer.u64(value.previous_camera_revision);
+    writer.u64(value.resulting_camera_revision);
+    writer.u8(camera_mode_tag_v1(value.mode));
+    write_camera_profile_v1(&mut writer, value.profile);
+    writer.hash(value.camera_state_hash);
+    wrap(CAMERA_CONFIG_RECEIPT_MAGIC, writer.finish())
+}
+
+pub fn decode_runtime_camera_config_receipt_v1(bytes: &[u8]) -> Result<RuntimeCameraConfigReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap(CAMERA_CONFIG_RECEIPT_MAGIC, bytes)?);
+    let value = RuntimeCameraConfigReceiptWireV1 {
+        request_payload_hash: reader.hash()?,
+        previous_camera_revision: reader.u64()?,
+        resulting_camera_revision: reader.u64()?,
+        mode: read_camera_mode_v1(&mut reader)?,
+        profile: read_camera_profile_v1(&mut reader)?,
+        camera_state_hash: reader.hash()?,
+    };
+    reader.finish()?;
+    validate_camera_config_receipt_v1(&value)?;
     Ok(value)
 }
 
@@ -4884,6 +5092,156 @@ fn read_content_domain(value: u8) -> Result<ContentDomain, WireError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CROSS_LANGUAGE_FIXTURES: &str =
+        include_str!("../../../../tests/fixtures/rust-engine/integrated-runtime-v1/wire-fixtures.json");
+
+    fn fixture_hex_v1(name: &str) -> Vec<u8> {
+        let name_marker = format!("\"name\": \"{name}\"");
+        let start = CROSS_LANGUAGE_FIXTURES
+            .find(&name_marker)
+            .unwrap_or_else(|| panic!("missing fixture {name}"));
+        let key_marker = "\"hex\": \"";
+        let value_start = CROSS_LANGUAGE_FIXTURES[start..]
+            .find(key_marker)
+            .map(|offset| start + offset + key_marker.len())
+            .unwrap_or_else(|| panic!("missing hex for fixture {name}"));
+        let value_end = CROSS_LANGUAGE_FIXTURES[value_start..]
+            .find('"')
+            .map(|offset| value_start + offset)
+            .unwrap_or_else(|| panic!("unterminated fixture {name}"));
+        let value = &CROSS_LANGUAGE_FIXTURES[value_start..value_end];
+        assert_eq!(value.len() % 2, 0);
+        (0..value.len())
+            .step_by(2)
+            .map(|index| u8::from_str_radix(&value[index..index + 2], 16).expect("fixture hex"))
+            .collect()
+    }
+
+    fn camera_profile_fixture_v1() -> CameraProfileV1 {
+        CameraProfileV1::default()
+    }
+
+    #[test]
+    fn camera_config_wire_is_absolute_exact_and_hash_attested() {
+        let config = RuntimeCameraConfigWireV1 {
+            expected_camera_revision: 7,
+            mode: CameraModeV1::ThirdRear,
+            profile: camera_profile_fixture_v1(),
+        };
+        let bytes = encode_runtime_camera_config_v1(&config).unwrap();
+        assert_eq!(&bytes[..8], b"BWC5\x01\0\x01\0");
+        assert_eq!(bytes, fixture_hex_v1("camera-config-bwc5-third-rear"));
+        assert_eq!(decode_runtime_camera_config_v1(&bytes).unwrap(), config);
+
+        let receipt = RuntimeCameraConfigReceiptWireV1 {
+            request_payload_hash: CanonicalHash(wire_checksum_v1(&bytes)),
+            previous_camera_revision: 7,
+            resulting_camera_revision: 8,
+            mode: config.mode,
+            profile: config.profile,
+            camera_state_hash: runtime_camera_config_state_hash_v1(8, config.mode, config.profile),
+        };
+        let receipt_bytes = encode_runtime_camera_config_receipt_v1(&receipt).unwrap();
+        assert_eq!(&receipt_bytes[..8], b"BWR5\x01\0\x01\0");
+        assert_eq!(receipt_bytes, fixture_hex_v1("camera-config-receipt-bwr5-changed"));
+        assert_eq!(
+            decode_runtime_camera_config_receipt_v1(&receipt_bytes).unwrap(),
+            receipt
+        );
+
+        let idempotent = RuntimeCameraConfigReceiptWireV1 {
+            previous_camera_revision: 8,
+            ..receipt
+        };
+        assert_eq!(
+            decode_runtime_camera_config_receipt_v1(&encode_runtime_camera_config_receipt_v1(&idempotent).unwrap())
+                .unwrap(),
+            idempotent
+        );
+    }
+
+    #[test]
+    fn camera_config_wire_rejects_malformed_revision_profile_hash_and_trailing_bytes() {
+        let config = RuntimeCameraConfigWireV1 {
+            expected_camera_revision: MAX_SAFE_U64 + 1,
+            mode: CameraModeV1::FirstPerson,
+            profile: camera_profile_fixture_v1(),
+        };
+        assert_eq!(
+            encode_runtime_camera_config_v1(&config).unwrap_err().code,
+            "camera-revision"
+        );
+        let config = RuntimeCameraConfigWireV1 {
+            expected_camera_revision: 0,
+            mode: CameraModeV1::FirstPerson,
+            profile: CameraProfileV1 {
+                far: 0.01,
+                ..camera_profile_fixture_v1()
+            },
+        };
+        assert_eq!(
+            encode_runtime_camera_config_v1(&config).unwrap_err().code,
+            "camera-profile"
+        );
+
+        let config = RuntimeCameraConfigWireV1 {
+            expected_camera_revision: 1,
+            mode: CameraModeV1::FirstPerson,
+            profile: camera_profile_fixture_v1(),
+        };
+        let mut unknown_mode = encode_runtime_camera_config_v1(&config).unwrap();
+        unknown_mode[DOMAIN_HEADER_BYTES + 8] = u8::MAX;
+        let checksum = wire_checksum_v1(&unknown_mode[DOMAIN_HEADER_BYTES..]);
+        unknown_mode[12..28].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_runtime_camera_config_v1(&unknown_mode).unwrap_err().code,
+            "camera-mode"
+        );
+
+        let mut unsafe_revision = encode_runtime_camera_config_v1(&config).unwrap();
+        unsafe_revision[DOMAIN_HEADER_BYTES..DOMAIN_HEADER_BYTES + 8]
+            .copy_from_slice(&(MAX_SAFE_U64 + 1).to_le_bytes());
+        let checksum = wire_checksum_v1(&unsafe_revision[DOMAIN_HEADER_BYTES..]);
+        unsafe_revision[12..28].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_runtime_camera_config_v1(&unsafe_revision).unwrap_err().code,
+            "camera-revision"
+        );
+
+        let mut trailing = encode_runtime_camera_config_v1(&config).unwrap();
+        trailing.push(0xaa);
+        let body_length = (trailing.len() - DOMAIN_HEADER_BYTES) as u32;
+        trailing[8..12].copy_from_slice(&body_length.to_le_bytes());
+        let checksum = wire_checksum_v1(&trailing[DOMAIN_HEADER_BYTES..]);
+        trailing[12..28].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_runtime_camera_config_v1(&trailing).unwrap_err().code,
+            "domain-trailing"
+        );
+
+        let invalid = RuntimeCameraConfigReceiptWireV1 {
+            request_payload_hash: CanonicalHash::default(),
+            previous_camera_revision: 1,
+            resulting_camera_revision: 3,
+            mode: config.mode,
+            profile: config.profile,
+            camera_state_hash: runtime_camera_config_state_hash_v1(3, config.mode, config.profile),
+        };
+        assert_eq!(
+            encode_runtime_camera_config_receipt_v1(&invalid).unwrap_err().code,
+            "camera-revision"
+        );
+        let invalid = RuntimeCameraConfigReceiptWireV1 {
+            resulting_camera_revision: 2,
+            camera_state_hash: CanonicalHash::default(),
+            ..invalid
+        };
+        assert_eq!(
+            encode_runtime_camera_config_receipt_v1(&invalid).unwrap_err().code,
+            "camera-state-hash"
+        );
+    }
 
     #[test]
     fn gameplay_schedule_command_wire_uses_frozen_tag_and_rejects_unknown_tags() {

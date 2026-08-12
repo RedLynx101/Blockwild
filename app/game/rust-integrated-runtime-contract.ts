@@ -13,6 +13,8 @@ export const RUST_INTEGRATED_RUNTIME_SCHEMA_V2 = 2 as const;
 export const RUST_INTEGRATED_RUNTIME_SCHEMA_V3 = 3 as const;
 /** Schema 4 adds immutable terrain identity to Create requests only. */
 export const RUST_INTEGRATED_RUNTIME_SCHEMA_V4 = 4 as const;
+/** Schema 5 adds a presentation-only viewport to Extract requests only. */
+export const RUST_INTEGRATED_RUNTIME_SCHEMA_V5 = 5 as const;
 export const RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONTENT_HASH_V2 = "cc59903be77dfe30109d15bfaf0e3022" as const;
 export const RUST_INTEGRATED_RUNTIME_DEFAULT_GENERATION_OPTIONS_JSON_V1 = "{\"biomeScale\":1.35,\"caveFrequency\":1,\"enabledFactions\":[\"hobbits\",\"goblins\",\"atlantians\",\"sugarcourt\",\"wood-elves\",\"dwarves\"],\"largeTownFrequency\":\"balanced\",\"profile\":\"world-below-v15\",\"resourceAbundance\":1,\"roadCoverage\":\"regional\",\"settlementClustering\":\"regional\",\"settlementDensity\":1,\"settlementPattern\":\"heartlands-v2\",\"structures\":true}" as const;
 export const RUST_INTEGRATED_RUNTIME_MAX_GENERATION_OPTIONS_JSON_BYTES = 16 * 1024;
@@ -28,6 +30,7 @@ export const RUST_INTEGRATED_RUNTIME_MAX_EXTRACTION_BYTES = 6 * 1024 * 1024;
 export const RUST_INTEGRATED_RUNTIME_MAX_OPERATIONS = 256;
 export const RUST_INTEGRATED_RUNTIME_MAX_INPUT_FRAMES = 128;
 export const RUST_INTEGRATED_RUNTIME_MAX_ACTION_RECEIPTS = RUST_INTEGRATED_RUNTIME_MAX_INPUT_FRAMES * 6;
+export const RUST_INTEGRATED_RUNTIME_MAX_VIEWPORT_DIMENSION_V1 = 16_384;
 export const RUST_INTEGRATED_RUNTIME_MAX_PENDING_REQUESTS = 128;
 export const RUST_INTEGRATED_RUNTIME_MAX_IDEMPOTENCY_RECEIPTS = 4_096;
 
@@ -164,6 +167,13 @@ export type RustIntegratedRuntimeCommandBatchV1 = Readonly<{
   commandHash: string;
 }>;
 
+/** Browser presentation input carried only by schema-5 ExtractView requests. */
+export type RustIntegratedRuntimeExtractionViewV1 = Readonly<{
+  viewportWidth: number;
+  viewportHeight: number;
+  viewRevision: number;
+}>;
+
 export type RustIntegratedRuntimeRequestV1 =
   | Readonly<{
     type: "runtime-create-v1";
@@ -200,6 +210,8 @@ export type RustIntegratedRuntimeRequestV1 =
     expected: RustIntegratedRuntimeIdentityV1;
     afterRevision: number;
     maxBytes: number;
+    /** Present as one complete object only on schema-5 requests. */
+    view?: RustIntegratedRuntimeExtractionViewV1;
   }>
   | Readonly<{
     type: "runtime-restore-v1";

@@ -4,11 +4,11 @@ use crate::checksum::wire_checksum_v1;
 use crate::model::{
     DEFAULT_GENERATION_OPTIONS_JSON_V1, DEFAULT_TERRAIN_CONTENT_HASH_V2, MAX_ACTION_RECEIPTS, MAX_DOMAIN_PAYLOAD_BYTES,
     MAX_EXTRACTION_BYTES, MAX_GENERATION_OPTIONS_JSON_BYTES, MAX_INPUT_FRAMES, MAX_OPERATIONS, MAX_SAFE_U64,
-    MAX_WIRE_BYTES, RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_SCHEMA_V2, RUNTIME_SCHEMA_V3, RUNTIME_SCHEMA_V4,
-    RUNTIME_WIRE_V1, RuntimeCommandBatchV1, RuntimeCommandReceiptV1, RuntimeConfigV1, RuntimeDomainOperationV1,
-    RuntimeDomainV1, RuntimeExtractionV1, RuntimeIdentityV1, RuntimeInputActionKindV1, RuntimeInputActionOutcomeV1,
-    RuntimeInputActionReceiptV1, RuntimeInputFrameV1, RuntimeRequestV1, RuntimeResponseV1, RuntimeRevisionV1,
-    WireError, WireHash,
+    MAX_VIEWPORT_DIMENSION_V1, MAX_WIRE_BYTES, RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_SCHEMA_V2, RUNTIME_SCHEMA_V3,
+    RUNTIME_SCHEMA_V4, RUNTIME_SCHEMA_V5, RUNTIME_WIRE_V1, RuntimeCommandBatchV1, RuntimeCommandReceiptV1,
+    RuntimeConfigV1, RuntimeDomainOperationV1, RuntimeDomainV1, RuntimeExtractionV1, RuntimeIdentityV1,
+    RuntimeInputActionKindV1, RuntimeInputActionOutcomeV1, RuntimeInputActionReceiptV1, RuntimeInputFrameV1,
+    RuntimeRequestV1, RuntimeResponseV1, RuntimeRevisionV1, WireError, WireHash,
 };
 
 const REQUEST_MAGIC: [u8; 4] = *b"BWRQ";
@@ -252,7 +252,10 @@ fn encode_envelope(
     let mut output = Vec::with_capacity(HEADER_BYTES + payload.len());
     output.extend_from_slice(&magic);
     output.extend_from_slice(&RUNTIME_WIRE_V1.to_le_bytes());
-    if !matches!(schema, RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3 | RUNTIME_SCHEMA_V4) {
+    if !matches!(
+        schema,
+        RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3 | RUNTIME_SCHEMA_V4 | RUNTIME_SCHEMA_V5
+    ) {
         return Err(WireError::new(
             "runtime-schema",
             "integrated runtime schema is unsupported",
@@ -289,7 +292,10 @@ fn decode_envelope(value: &[u8], magic: [u8; 4]) -> Result<(EnvelopeHeader, &[u8
         ));
     }
     let schema = reader.u16()?;
-    if !matches!(schema, RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3 | RUNTIME_SCHEMA_V4) {
+    if !matches!(
+        schema,
+        RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V3 | RUNTIME_SCHEMA_V4 | RUNTIME_SCHEMA_V5
+    ) {
         return Err(WireError::new(
             "runtime-schema",
             "integrated runtime schema is unsupported",
@@ -352,7 +358,8 @@ fn validate_operation_schema(operation: u8, schema: u16, response: bool) -> Resu
     } else {
         match operation {
             1 => matches!(schema, RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V4),
-            2..=8 => schema == RUNTIME_SCHEMA_V2,
+            4 => matches!(schema, RUNTIME_SCHEMA_V2 | RUNTIME_SCHEMA_V5),
+            2 | 3 | 5..=8 => schema == RUNTIME_SCHEMA_V2,
             _ => true,
         }
     };
@@ -1063,6 +1070,39 @@ pub fn encode_request_v1(request: &RuntimeRequestV1) -> Result<Vec<u8>, WireErro
             writer.u32(*max_bytes);
             4
         }
+        RuntimeRequestV1::ExtractView {
+            expected,
+            after_revision,
+            max_bytes,
+            viewport_width,
+            viewport_height,
+            view_revision,
+            ..
+        } => {
+            if *max_bytes == 0 || usize::try_from(*max_bytes).unwrap_or(usize::MAX) > MAX_EXTRACTION_BYTES {
+                return Err(WireError::new(
+                    "invalid-integer",
+                    "extraction byte budget is out of range",
+                ));
+            }
+            if *viewport_width == 0
+                || *viewport_width > MAX_VIEWPORT_DIMENSION_V1
+                || *viewport_height == 0
+                || *viewport_height > MAX_VIEWPORT_DIMENSION_V1
+            {
+                return Err(WireError::new(
+                    "invalid-viewport",
+                    "extraction viewport dimensions are outside 1..16384",
+                ));
+            }
+            write_identity(&mut writer, expected)?;
+            writer.u64(*after_revision, "extract.afterRevision")?;
+            writer.u32(*max_bytes);
+            writer.u32(*viewport_width);
+            writer.u32(*viewport_height);
+            writer.u64(*view_revision, "extract.viewRevision")?;
+            4
+        }
         RuntimeRequestV1::Restore {
             expected_checkpoint_hash,
             checkpoint,
@@ -1084,10 +1124,10 @@ pub fn encode_request_v1(request: &RuntimeRequestV1) -> Result<Vec<u8>, WireErro
             7
         }
     };
-    let schema = if matches!(request, RuntimeRequestV1::Create { .. }) {
-        RUNTIME_SCHEMA_V4
-    } else {
-        RUNTIME_SCHEMA_V2
+    let schema = match request {
+        RuntimeRequestV1::Create { .. } => RUNTIME_SCHEMA_V4,
+        RuntimeRequestV1::ExtractView { .. } => RUNTIME_SCHEMA_V5,
+        _ => RUNTIME_SCHEMA_V2,
     };
     encode_envelope(
         REQUEST_MAGIC,
@@ -1165,12 +1205,37 @@ pub fn decode_request_v1(value: &[u8]) -> Result<RuntimeRequestV1, WireError> {
                     "extraction byte budget is out of range",
                 ));
             }
-            RuntimeRequestV1::Extract {
-                request_id: header.request_id,
-                client_epoch: header.client_epoch,
-                expected,
-                after_revision,
-                max_bytes,
+            if header.schema == RUNTIME_SCHEMA_V5 {
+                let viewport_width = reader.u32()?;
+                let viewport_height = reader.u32()?;
+                if viewport_width == 0
+                    || viewport_width > MAX_VIEWPORT_DIMENSION_V1
+                    || viewport_height == 0
+                    || viewport_height > MAX_VIEWPORT_DIMENSION_V1
+                {
+                    return Err(WireError::new(
+                        "invalid-viewport",
+                        "extraction viewport dimensions are outside 1..16384",
+                    ));
+                }
+                RuntimeRequestV1::ExtractView {
+                    request_id: header.request_id,
+                    client_epoch: header.client_epoch,
+                    expected,
+                    after_revision,
+                    max_bytes,
+                    viewport_width,
+                    viewport_height,
+                    view_revision: reader.u64()?,
+                }
+            } else {
+                RuntimeRequestV1::Extract {
+                    request_id: header.request_id,
+                    client_epoch: header.client_epoch,
+                    expected,
+                    after_revision,
+                    max_bytes,
+                }
             }
         }
         5 => RuntimeRequestV1::Restore {
@@ -1682,6 +1747,113 @@ mod tests {
     }
 
     #[test]
+    fn extract_view_v5_is_exact_bounded_and_request_only() {
+        let request = RuntimeRequestV1::ExtractView {
+            request_id: 41,
+            client_epoch: 3,
+            expected: identity(),
+            after_revision: 9,
+            max_bytes: MAX_EXTRACTION_BYTES as u32,
+            viewport_width: 1_920,
+            viewport_height: 1_080,
+            view_revision: 11,
+        };
+        let encoded = encode_request_v1(&request).unwrap();
+        assert_eq!(u16::from_le_bytes([encoded[6], encoded[7]]), RUNTIME_SCHEMA_V5);
+        assert_eq!(decode_request_v1(&encoded).unwrap(), request);
+
+        let legacy = RuntimeRequestV1::Extract {
+            request_id: 41,
+            client_epoch: 3,
+            expected: identity(),
+            after_revision: 9,
+            max_bytes: MAX_EXTRACTION_BYTES as u32,
+        };
+        let legacy_encoded = encode_request_v1(&legacy).unwrap();
+        assert_eq!(
+            u16::from_le_bytes([legacy_encoded[6], legacy_encoded[7]]),
+            RUNTIME_SCHEMA_V2
+        );
+        assert_eq!(
+            &encoded[HEADER_BYTES..encoded.len() - 16],
+            &legacy_encoded[HEADER_BYTES..]
+        );
+
+        let mut invalid_viewport = encoded.clone();
+        let viewport_offset = invalid_viewport.len() - 16;
+        invalid_viewport[viewport_offset..viewport_offset + 4].copy_from_slice(&0_u32.to_le_bytes());
+        let checksum = wire_checksum_v1(&invalid_viewport[HEADER_BYTES..]);
+        invalid_viewport[28..HEADER_BYTES].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_request_v1(&invalid_viewport).unwrap_err().code,
+            "invalid-viewport"
+        );
+
+        let mut unsafe_revision = encoded.clone();
+        let revision_offset = unsafe_revision.len() - 8;
+        unsafe_revision[revision_offset..].copy_from_slice(&(MAX_SAFE_U64 + 1).to_le_bytes());
+        let checksum = wire_checksum_v1(&unsafe_revision[HEADER_BYTES..]);
+        unsafe_revision[28..HEADER_BYTES].copy_from_slice(&checksum);
+        assert_eq!(decode_request_v1(&unsafe_revision).unwrap_err().code, "unsafe-u64");
+
+        let mut v5_as_v2 = encoded.clone();
+        v5_as_v2[6..8].copy_from_slice(&RUNTIME_SCHEMA_V2.to_le_bytes());
+        assert_eq!(decode_request_v1(&v5_as_v2).unwrap_err().code, "trailing-bytes");
+
+        for invalid in [
+            RuntimeRequestV1::ExtractView {
+                request_id: 41,
+                client_epoch: 3,
+                expected: identity(),
+                after_revision: 9,
+                max_bytes: MAX_EXTRACTION_BYTES as u32,
+                viewport_width: 0,
+                viewport_height: 1_080,
+                view_revision: 11,
+            },
+            RuntimeRequestV1::ExtractView {
+                request_id: 41,
+                client_epoch: 3,
+                expected: identity(),
+                after_revision: 9,
+                max_bytes: MAX_EXTRACTION_BYTES as u32,
+                viewport_width: 1_920,
+                viewport_height: MAX_VIEWPORT_DIMENSION_V1 + 1,
+                view_revision: 11,
+            },
+            RuntimeRequestV1::ExtractView {
+                request_id: 41,
+                client_epoch: 3,
+                expected: identity(),
+                after_revision: 9,
+                max_bytes: MAX_EXTRACTION_BYTES as u32,
+                viewport_width: 1_920,
+                viewport_height: 1_080,
+                view_revision: MAX_SAFE_U64 + 1,
+            },
+        ] {
+            assert!(encode_request_v1(&invalid).is_err());
+        }
+
+        let mut shutdown = encode_request_v1(&RuntimeRequestV1::Shutdown {
+            request_id: 42,
+            client_epoch: 3,
+            expected: None,
+        })
+        .unwrap();
+        shutdown[6..8].copy_from_slice(&RUNTIME_SCHEMA_V5.to_le_bytes());
+        assert_eq!(decode_request_v1(&shutdown).unwrap_err().code, "runtime-schema");
+        let mut response = encode_response_v1(&RuntimeResponseV1::Shutdown {
+            request_id: 42,
+            client_epoch: 3,
+            worker_epoch: 2,
+        })
+        .unwrap();
+        response[6..8].copy_from_slice(&RUNTIME_SCHEMA_V5.to_le_bytes());
+        assert_eq!(decode_response_v1(&response).unwrap_err().code, "runtime-schema");
+    }
+
+    #[test]
     fn restored_response_re_attests_new_worker_generation() {
         let response = RuntimeResponseV1::Restored {
             request_id: 7,
@@ -1857,7 +2029,11 @@ mod tests {
 
     #[test]
     fn native_decoder_and_encoder_match_typescript_fixture_bytes_exactly() {
-        for name in ["create-v4-unicode-sorted-block-sets", "command-high-binary-payload"] {
+        for name in [
+            "create-v4-unicode-sorted-block-sets",
+            "command-high-binary-payload",
+            "extract-view-v5-1920x1080",
+        ] {
             let bytes = from_hex(&fixture_string(name, "hex"));
             let decoded = decode_request_v1(&bytes).expect("decode TypeScript request fixture");
             assert_eq!(encode_request_v1(&decoded).expect("re-encode native request"), bytes);
