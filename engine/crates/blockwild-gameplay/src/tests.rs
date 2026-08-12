@@ -1534,6 +1534,30 @@ fn furnace_advances_analytically_and_conserves_declared_recipe_delta() {
     );
 }
 
+fn combat_test_combatant(record_id: &str, x_milli: i32) -> CombatantState {
+    CombatantState {
+        record_id: record_id.into(),
+        owner_id: None,
+        revision: 0,
+        position: FixedVec3 {
+            x_milli,
+            y_milli: 0,
+            z_milli: 0,
+        },
+        health: 100,
+        max_health: 100,
+        stamina: 100,
+        mana: 100,
+        armor: 0,
+        resist_per_mille: BTreeMap::new(),
+        statuses: BTreeMap::new(),
+        cooldown_until: BTreeMap::new(),
+        alive: true,
+        vital_units: CombatVitalUnits::LegacyWholeHeartsV1,
+        entity_id: None,
+    }
+}
+
 #[test]
 fn projectile_magic_applies_damage_status_and_cooldown_deterministically() {
     let mut combat = CombatState::default();
@@ -1556,28 +1580,7 @@ fn projectile_magic_applies_damage_status_and_cooldown_deterministically() {
         })
         .unwrap();
     for (id, x) in [("mage", 0), ("target", 1_000)] {
-        combat.combatants.insert(
-            id.into(),
-            CombatantState {
-                record_id: id.into(),
-                owner_id: None,
-                revision: 0,
-                position: FixedVec3 {
-                    x_milli: x,
-                    y_milli: 0,
-                    z_milli: 0,
-                },
-                health: 100,
-                max_health: 100,
-                stamina: 100,
-                mana: 100,
-                armor: 0,
-                resist_per_mille: BTreeMap::new(),
-                statuses: BTreeMap::new(),
-                cooldown_until: BTreeMap::new(),
-                alive: true,
-            },
-        );
+        combat.combatants.insert(id.into(), combat_test_combatant(id, x));
     }
     combat
         .apply(&CombatCommand::UseAbility {
@@ -1612,6 +1615,135 @@ fn projectile_magic_applies_damage_status_and_cooldown_deterministically() {
     assert_eq!(combat.combatants["target"].statuses["chilled"].stacks, 1);
     assert_eq!(combat.combatants["mage"].mana, 95);
     assert_eq!(combat.combatants["mage"].cooldown_until["frost-bolt"], 21);
+}
+
+#[test]
+fn precision_vital_direct_damage_rejects_atomically_and_legacy_damage_still_works() {
+    let mut combat = CombatState::default();
+    combat
+        .register_ability(AbilitySpec {
+            ability_id: "strike".into(),
+            damage_kind: DamageKind::Physical,
+            base_damage: 20,
+            range_milli: 5_000,
+            cooldown_ticks: 20,
+            stamina_cost: 3,
+            mana_cost: 4,
+            projectile_speed_milli: None,
+            status: None,
+        })
+        .unwrap();
+    combat
+        .combatants
+        .insert("source".into(), combat_test_combatant("source", 0));
+    combat
+        .combatants
+        .insert("target".into(), combat_test_combatant("target", 1_000));
+    let target = combat.combatants.get_mut("target").unwrap();
+    target.vital_units = CombatVitalUnits::MilliheartsV1;
+    target.entity_id = Some(EntityId::new(71, 3));
+
+    let command = CombatCommand::UseAbility {
+        source_id: "source".into(),
+        expected_source_revision: 0,
+        target_id: "target".into(),
+        expected_target_revision: 0,
+        ability_id: "strike".into(),
+        projectile_id: None,
+        aim: FixedVec3::default(),
+        tick: 1,
+    };
+    let before = combat.clone();
+    let rejected = combat
+        .apply(&command)
+        .expect_err("precision direct damage must fail closed");
+    assert_eq!(rejected.code, RejectionCode::InvalidCommand);
+    assert_eq!(
+        combat, before,
+        "rejection cannot spend resources, author cooldowns, or deal damage"
+    );
+
+    let target = combat.combatants.get_mut("target").unwrap();
+    target.vital_units = CombatVitalUnits::LegacyWholeHeartsV1;
+    target.entity_id = None;
+    combat.apply(&command).expect("legacy direct damage remains supported");
+    assert_eq!(combat.combatants["source"].stamina, 97);
+    assert_eq!(combat.combatants["source"].mana, 96);
+    assert_eq!(combat.combatants["source"].cooldown_until["strike"], 21);
+    assert_eq!(combat.combatants["target"].health, 80);
+}
+
+#[test]
+fn precision_vital_projectile_damage_rejects_before_removal_and_can_retry_as_legacy() {
+    let mut combat = CombatState::default();
+    combat
+        .register_ability(AbilitySpec {
+            ability_id: "bolt".into(),
+            damage_kind: DamageKind::Arcane,
+            base_damage: 20,
+            range_milli: 5_000,
+            cooldown_ticks: 20,
+            stamina_cost: 0,
+            mana_cost: 5,
+            projectile_speed_milli: Some(500),
+            status: None,
+        })
+        .unwrap();
+    combat
+        .combatants
+        .insert("source".into(), combat_test_combatant("source", 0));
+    combat
+        .combatants
+        .insert("target".into(), combat_test_combatant("target", 1_000));
+    combat
+        .apply(&CombatCommand::UseAbility {
+            source_id: "source".into(),
+            expected_source_revision: 0,
+            target_id: "target".into(),
+            expected_target_revision: 0,
+            ability_id: "bolt".into(),
+            projectile_id: Some("bolt-precision-guard".into()),
+            aim: FixedVec3 {
+                x_milli: 500,
+                y_milli: 0,
+                z_milli: 0,
+            },
+            tick: 1,
+        })
+        .expect("legacy projectile spawn remains supported");
+    let source = combat.combatants.get_mut("source").unwrap();
+    source.vital_units = CombatVitalUnits::MilliheartsV1;
+    source.entity_id = Some(EntityId::new(72, 3));
+
+    let resolve = CombatCommand::ResolveProjectile {
+        projectile_id: "bolt-precision-guard".into(),
+        expected_revision: 0,
+        target_id: Some("target".into()),
+        impact: FixedVec3 {
+            x_milli: 1_000,
+            y_milli: 0,
+            z_milli: 0,
+        },
+        tick: 2,
+    };
+    let before = combat.clone();
+    let rejected = combat
+        .apply(&resolve)
+        .expect_err("precision projectile damage must fail closed");
+    assert_eq!(rejected.code, RejectionCode::InvalidCommand);
+    assert_eq!(
+        combat, before,
+        "rejection cannot remove the projectile or mutate either combatant"
+    );
+
+    let source = combat.combatants.get_mut("source").unwrap();
+    source.vital_units = CombatVitalUnits::LegacyWholeHeartsV1;
+    source.entity_id = None;
+    combat
+        .apply(&resolve)
+        .expect("preserved legacy projectile remains resolvable");
+    assert!(!combat.projectiles.contains_key("bolt-precision-guard"));
+    assert_eq!(combat.combatants["target"].health, 80);
 }
 
 #[test]

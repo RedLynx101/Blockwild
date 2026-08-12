@@ -12649,6 +12649,8 @@ mod tests {
                 CombatantState {
                     record_id: record_id.into(),
                     owner_id: None,
+                    vital_units: blockwild_gameplay::CombatVitalUnits::LegacyWholeHeartsV1,
+                    entity_id: None,
                     revision: 0,
                     position: FixedVec3 {
                         x_milli,

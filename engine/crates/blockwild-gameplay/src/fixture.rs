@@ -169,6 +169,8 @@ pub(crate) fn reference_authority() -> GameplayAuthority {
             statuses: BTreeMap::new(),
             cooldown_until: BTreeMap::new(),
             alive: true,
+            vital_units: crate::CombatVitalUnits::LegacyWholeHeartsV1,
+            entity_id: None,
         },
     );
     state.combat.combatants.insert(
@@ -191,6 +193,8 @@ pub(crate) fn reference_authority() -> GameplayAuthority {
             statuses: BTreeMap::new(),
             cooldown_until: BTreeMap::new(),
             alive: true,
+            vital_units: crate::CombatVitalUnits::LegacyWholeHeartsV1,
+            entity_id: None,
         },
     );
     state.combat.creatures.insert(

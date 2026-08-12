@@ -12,7 +12,7 @@ use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, PlayerId};
 use crate::authority::{GameplayAuthoritySnapshotParts, IdempotencyEntry};
 use crate::*;
 
-pub const GAMEPLAY_SNAPSHOT_SCHEMA_VERSION: u16 = 3;
+pub const GAMEPLAY_SNAPSHOT_SCHEMA_VERSION: u16 = 4;
 pub const GAMEPLAY_SNAPSHOT_MIN_SUPPORTED_SCHEMA_VERSION: u16 = 1;
 pub const MAX_GAMEPLAY_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_GAMEPLAY_SNAPSHOT_EXTENSIONS: usize = 4 * 1024 * 1024;
@@ -564,6 +564,10 @@ unit_enum_codec!(CaptureReadiness {
     CaptureReadiness::Captured => 4,
     CaptureReadiness::Bonded => 5,
 });
+unit_enum_codec!(CombatVitalUnits {
+    CombatVitalUnits::LegacyWholeHeartsV1 => 0,
+    CombatVitalUnits::MilliheartsV1 => 1,
+});
 unit_enum_codec!(CardRarity {
     CardRarity::Common => 0,
     CardRarity::Uncommon => 1,
@@ -829,6 +833,86 @@ struct_codec!(StatusInstance {
     expires_tick,
     stacks,
 });
+
+/// Exact combatant payload emitted by gameplay snapshot schemas V1-V3.
+///
+/// Keep this independent from `CombatantState` so adding fields to the current
+/// authority never changes a frozen legacy decoder.
+#[derive(Clone)]
+struct LegacyCombatantStateV3 {
+    record_id: String,
+    owner_id: Option<String>,
+    revision: u64,
+    position: FixedVec3,
+    health: u32,
+    max_health: u32,
+    stamina: u32,
+    mana: u32,
+    armor: u32,
+    resist_per_mille: BTreeMap<DamageKind, u16>,
+    statuses: BTreeMap<String, StatusInstance>,
+    cooldown_until: BTreeMap<String, u64>,
+    alive: bool,
+}
+
+struct_codec!(LegacyCombatantStateV3 {
+    record_id,
+    owner_id,
+    revision,
+    position,
+    health,
+    max_health,
+    stamina,
+    mana,
+    armor,
+    resist_per_mille,
+    statuses,
+    cooldown_until,
+    alive,
+});
+
+impl From<&CombatantState> for LegacyCombatantStateV3 {
+    fn from(value: &CombatantState) -> Self {
+        Self {
+            record_id: value.record_id.clone(),
+            owner_id: value.owner_id.clone(),
+            revision: value.revision,
+            position: value.position,
+            health: value.health,
+            max_health: value.max_health,
+            stamina: value.stamina,
+            mana: value.mana,
+            armor: value.armor,
+            resist_per_mille: value.resist_per_mille.clone(),
+            statuses: value.statuses.clone(),
+            cooldown_until: value.cooldown_until.clone(),
+            alive: value.alive,
+        }
+    }
+}
+
+impl From<LegacyCombatantStateV3> for CombatantState {
+    fn from(value: LegacyCombatantStateV3) -> Self {
+        Self {
+            record_id: value.record_id,
+            owner_id: value.owner_id,
+            revision: value.revision,
+            position: value.position,
+            health: value.health,
+            max_health: value.max_health,
+            stamina: value.stamina,
+            mana: value.mana,
+            armor: value.armor,
+            resist_per_mille: value.resist_per_mille,
+            statuses: value.statuses,
+            cooldown_until: value.cooldown_until,
+            alive: value.alive,
+            vital_units: CombatVitalUnits::LegacyWholeHeartsV1,
+            entity_id: None,
+        }
+    }
+}
+
 struct_codec!(CombatantState {
     record_id,
     owner_id,
@@ -843,6 +927,8 @@ struct_codec!(CombatantState {
     statuses,
     cooldown_until,
     alive,
+    vital_units,
+    entity_id,
 });
 struct_codec!(StatusTemplate {
     status_id,
@@ -1175,8 +1261,36 @@ fn encode_gameplay_state_v2(value: &GameplayState, writer: &mut Writer) -> Resul
     value.cardforge.encode(writer)
 }
 
+fn decode_gameplay_state_v3(reader: &mut Reader<'_>) -> Result<GameplayState, GameplaySnapshotError> {
+    Ok(GameplayState {
+        world: SnapshotCodec::decode(reader)?,
+        revision: SnapshotCodec::decode(reader)?,
+        tick: SnapshotCodec::decode(reader)?,
+        inventory: SnapshotCodec::decode(reader)?,
+        machines: SnapshotCodec::decode(reader)?,
+        combat: decode_combat_state_v3(reader)?,
+        progression: SnapshotCodec::decode(reader)?,
+        cardforge: SnapshotCodec::decode(reader)?,
+    })
+}
+
+#[cfg(test)]
+fn encode_gameplay_state_v3(value: &GameplayState, writer: &mut Writer) -> Result<(), GameplaySnapshotError> {
+    value.world.encode(writer)?;
+    value.revision.encode(writer)?;
+    value.tick.encode(writer)?;
+    value.inventory.encode(writer)?;
+    value.machines.encode(writer)?;
+    encode_combat_state_v3(&value.combat, writer)?;
+    value.progression.encode(writer)?;
+    value.cardforge.encode(writer)
+}
+
 fn decode_combat_state_v2(reader: &mut Reader<'_>) -> Result<CombatState, GameplaySnapshotError> {
-    let combatants = BTreeMap::<String, CombatantState>::decode(reader)?;
+    let combatants = BTreeMap::<String, LegacyCombatantStateV3>::decode(reader)?
+        .into_iter()
+        .map(|(id, value)| (id, value.into()))
+        .collect();
     let abilities = BTreeMap::<String, AbilitySpec>::decode(reader)?;
     let legacy_projectiles = BTreeMap::<String, LegacyProjectileStateV2>::decode(reader)?;
     let creatures = BTreeMap::<String, CreatureCompatibilityRecord>::decode(reader)?;
@@ -1231,7 +1345,12 @@ fn decode_combat_state_v2(reader: &mut Reader<'_>) -> Result<CombatState, Gamepl
 
 #[cfg(test)]
 fn encode_combat_state_v2(value: &CombatState, writer: &mut Writer) -> Result<(), GameplaySnapshotError> {
-    value.combatants.encode(writer)?;
+    value
+        .combatants
+        .iter()
+        .map(|(id, combatant)| (id.clone(), LegacyCombatantStateV3::from(combatant)))
+        .collect::<BTreeMap<_, _>>()
+        .encode(writer)?;
     value.abilities.encode(writer)?;
     value
         .projectiles
@@ -1246,6 +1365,35 @@ fn encode_combat_state_v2(value: &CombatState, writer: &mut Writer) -> Result<()
         .map(|(id, summon)| (id.clone(), LegacySummonStateV2::from(summon)))
         .collect::<BTreeMap<_, _>>()
         .encode(writer)?;
+    value.tick.encode(writer)
+}
+
+fn decode_combat_state_v3(reader: &mut Reader<'_>) -> Result<CombatState, GameplaySnapshotError> {
+    Ok(CombatState {
+        combatants: BTreeMap::<String, LegacyCombatantStateV3>::decode(reader)?
+            .into_iter()
+            .map(|(id, value)| (id, value.into()))
+            .collect(),
+        abilities: SnapshotCodec::decode(reader)?,
+        projectiles: SnapshotCodec::decode(reader)?,
+        creatures: SnapshotCodec::decode(reader)?,
+        summons: SnapshotCodec::decode(reader)?,
+        tick: SnapshotCodec::decode(reader)?,
+    })
+}
+
+#[cfg(test)]
+fn encode_combat_state_v3(value: &CombatState, writer: &mut Writer) -> Result<(), GameplaySnapshotError> {
+    value
+        .combatants
+        .iter()
+        .map(|(id, combatant)| (id.clone(), LegacyCombatantStateV3::from(combatant)))
+        .collect::<BTreeMap<_, _>>()
+        .encode(writer)?;
+    value.abilities.encode(writer)?;
+    value.projectiles.encode(writer)?;
+    value.creatures.encode(writer)?;
+    value.summons.encode(writer)?;
     value.tick.encode(writer)
 }
 
@@ -1327,13 +1475,13 @@ impl From<&SummonState> for LegacySummonStateV2 {
 
 impl GameplayAuthority {
     /// Encode the complete authority, including grants, retry receipts, replay
-    /// order, and opaque future bytes, into the canonical V3 persistence record.
+    /// order, and opaque future bytes, into the canonical V4 persistence record.
     pub fn encode_snapshot(&self, unknown_extension_bytes: &[u8]) -> Result<Vec<u8>, GameplaySnapshotError> {
         if unknown_extension_bytes.len() > MAX_GAMEPLAY_SNAPSHOT_EXTENSIONS {
             return Err(GameplaySnapshotError::new(
                 GameplaySnapshotErrorCode::Capacity,
                 0,
-                "snapshot extension exceeds the V3 bound",
+                "snapshot extension exceeds the V4 bound",
             ));
         }
         validate_snapshot_state(&self.state)?;
@@ -1356,7 +1504,7 @@ impl GameplayAuthority {
             return Err(GameplaySnapshotError::new(
                 GameplaySnapshotErrorCode::Capacity,
                 0,
-                "snapshot exceeds the V2 file bound",
+                "snapshot exceeds the V4 file bound",
             ));
         }
 
@@ -1468,6 +1616,7 @@ pub fn decode_gameplay_authority_snapshot(
     let state = match schema {
         1 => decode_gameplay_state_v1(&mut reader)?,
         2 => decode_gameplay_state_v2(&mut reader)?,
+        3 => decode_gameplay_state_v3(&mut reader)?,
         _ => GameplayState::decode(&mut reader)?,
     };
     let grants = BTreeMap::<String, ActorGrant>::decode(&mut reader)?;
@@ -1639,6 +1788,7 @@ fn validate_machines(state: &MachineStateSet) -> Result<(), GameplaySnapshotErro
 
 fn validate_combat(state: &CombatState) -> Result<(), GameplaySnapshotError> {
     let mut validated = CombatState::default();
+    let mut linked_entities = BTreeSet::new();
     for (ability_id, ability) in &state.abilities {
         if ability_id != &ability.ability_id {
             return invalid("ability map key disagrees with its definition");
@@ -1652,6 +1802,19 @@ fn validate_combat(state: &CombatState) -> Result<(), GameplaySnapshotError> {
         validate_identifier("combatant", record_id)?;
         if combatant.max_health == 0 || combatant.health > combatant.max_health {
             return invalid("combatant health is outside its bounds");
+        }
+        if (combatant.vital_units != CombatVitalUnits::LegacyWholeHeartsV1 || combatant.entity_id.is_some())
+            && combatant.alive != (combatant.health > 0)
+        {
+            return invalid("linked or precision combatant alive state disagrees with health");
+        }
+        if let Some(entity_id) = combatant.entity_id {
+            if entity_id.packed() == 0 {
+                return invalid("combatant entity link uses the reserved id");
+            }
+            if !linked_entities.insert(entity_id) {
+                return invalid("combatant entity link is duplicated");
+            }
         }
         for (status_id, status) in &combatant.statuses {
             if status_id != &status.status_id {
@@ -1984,6 +2147,29 @@ mod tests {
         output.bytes
     }
 
+    fn encode_v3_fixture(authority: &GameplayAuthority, extensions: &[u8]) -> Vec<u8> {
+        let parts = authority.snapshot_parts();
+        let mut payload = Writer::default();
+        encode_gameplay_state_v3(&parts.state, &mut payload).unwrap();
+        parts.grants.encode(&mut payload).unwrap();
+        parts.idempotency.encode(&mut payload).unwrap();
+        parts.idempotency_order.encode(&mut payload).unwrap();
+        parts.replay.encode(&mut payload).unwrap();
+        payload
+            .bounded_bytes(extensions, MAX_GAMEPLAY_SNAPSHOT_EXTENSIONS)
+            .unwrap();
+        let mut output = Writer::default();
+        output.raw(&SNAPSHOT_MAGIC);
+        3_u16.encode(&mut output).unwrap();
+        SNAPSHOT_FLAGS.encode(&mut output).unwrap();
+        u64::try_from(payload.bytes.len()).unwrap().encode(&mut output).unwrap();
+        authority.state.state_hash().encode(&mut output).unwrap();
+        authority.replay_hash().encode(&mut output).unwrap();
+        payload_hash(3, &payload.bytes).encode(&mut output).unwrap();
+        output.raw(&payload.bytes);
+        output.bytes
+    }
+
     fn representative_authority() -> (GameplayAuthority, GameplayBatch, AcceptedReceipt) {
         let owner = "player-élan".to_string();
         let actor_owner = "actor-é".to_string();
@@ -2167,6 +2353,8 @@ mod tests {
                 )]),
                 cooldown_until: BTreeMap::from([("star-bolt-é".into(), 1_002)]),
                 alive: true,
+                vital_units: CombatVitalUnits::LegacyWholeHeartsV1,
+                entity_id: None,
             },
         );
         state.combat.combatants.insert(
@@ -2189,6 +2377,8 @@ mod tests {
                 statuses: BTreeMap::new(),
                 cooldown_until: BTreeMap::new(),
                 alive: true,
+                vital_units: CombatVitalUnits::LegacyWholeHeartsV1,
+                entity_id: None,
             },
         );
         state.combat.projectiles.insert(
@@ -2544,7 +2734,120 @@ mod tests {
     }
 
     #[test]
-    fn v3_linked_combat_identity_round_trips_high_u64_unicode_and_extensions_exactly() {
+    fn v4_combat_vital_units_and_entity_links_round_trip_canonically() {
+        let (authority, _, _) = representative_authority();
+        let legacy_hash = authority.state.state_hash();
+        let mut state = authority.state.clone();
+        let hero = state.combat.combatants.get_mut("hero-é").expect("fixture hero");
+        hero.health = 19_500;
+        hero.max_health = 20_000;
+        hero.vital_units = CombatVitalUnits::MilliheartsV1;
+        hero.entity_id = Some(EntityId::new(u32::MAX - 7, u32::MAX));
+        let creature = state.combat.combatants.get_mut("creature-é").expect("fixture creature");
+        creature.entity_id = Some(EntityId::new(u32::MAX - 8, u32::MAX - 1));
+        let authority = GameplayAuthority::new(state);
+        let extensions = [0, 0x80, 0xff, 0, 7];
+        let bytes = authority.encode_snapshot(&extensions).expect("V4 authority encodes");
+        let decoded = decode_gameplay_authority_snapshot(&bytes).expect("V4 authority decodes");
+
+        assert_eq!(decoded.schema_version, 4);
+        assert_eq!(decoded.authority.state, authority.state);
+        assert_eq!(decoded.unknown_extension_bytes, extensions);
+        assert_ne!(decoded.authority.state.state_hash(), legacy_hash);
+        assert_eq!(decoded.authority.encode_snapshot(&extensions).unwrap(), bytes);
+    }
+
+    #[test]
+    fn v4_combat_link_and_vital_bounds_fail_closed() {
+        let (authority, _, _) = representative_authority();
+        let linked = EntityId::new(77, 9);
+
+        let mut duplicate = authority.state.clone();
+        for combatant in duplicate.combat.combatants.values_mut() {
+            combatant.entity_id = Some(linked);
+        }
+        assert_eq!(
+            GameplayAuthority::new(duplicate)
+                .encode_snapshot(&[])
+                .expect_err("duplicate R6 combat links must fail")
+                .code,
+            GameplaySnapshotErrorCode::InvalidValue
+        );
+
+        let mut reserved = authority.state.clone();
+        reserved
+            .combat
+            .combatants
+            .get_mut("hero-é")
+            .expect("fixture hero")
+            .entity_id = Some(EntityId::default());
+        assert_eq!(
+            GameplayAuthority::new(reserved)
+                .encode_snapshot(&[])
+                .expect_err("reserved R6 combat link must fail")
+                .code,
+            GameplaySnapshotErrorCode::InvalidValue
+        );
+
+        let mut health = authority.state.clone();
+        health.combat.combatants.get_mut("hero-é").expect("fixture hero").health = 21;
+        assert_eq!(
+            GameplayAuthority::new(health)
+                .encode_snapshot(&[])
+                .expect_err("combat health above its declared maximum must fail")
+                .code,
+            GameplaySnapshotErrorCode::InvalidValue
+        );
+
+        let mut inconsistent = authority.state.clone();
+        let hero = inconsistent.combat.combatants.get_mut("hero-é").expect("fixture hero");
+        hero.vital_units = CombatVitalUnits::MilliheartsV1;
+        hero.health = 0;
+        hero.alive = true;
+        assert_eq!(
+            GameplayAuthority::new(inconsistent)
+                .encode_snapshot(&[])
+                .expect_err("precision combat alive state must match its health")
+                .code,
+            GameplaySnapshotErrorCode::InvalidValue
+        );
+
+        let mut legacy_inconsistent = authority.state.clone();
+        let hero = legacy_inconsistent
+            .combat
+            .combatants
+            .get_mut("hero-é")
+            .expect("fixture hero");
+        hero.health = 0;
+        hero.alive = true;
+        GameplayAuthority::new(legacy_inconsistent)
+            .encode_snapshot(&[])
+            .expect("legacy unlinked combat snapshots preserve their historical validation contract");
+
+        let mut reader = Reader::new(&[2]);
+        assert_eq!(
+            CombatVitalUnits::decode(&mut reader)
+                .expect_err("unknown vital-unit tags must fail")
+                .code,
+            GameplaySnapshotErrorCode::InvalidValue
+        );
+    }
+
+    #[test]
+    fn v4_payload_tampering_is_rejected_before_authority_install() {
+        let (authority, _, _) = representative_authority();
+        let mut bytes = authority.encode_snapshot(&[]).expect("V4 authority encodes");
+        bytes[HEADER_BYTES + 1] ^= 0x80;
+        assert_eq!(
+            decode_gameplay_authority_snapshot(&bytes)
+                .expect_err("V4 payload tampering must fail")
+                .code,
+            GameplaySnapshotErrorCode::Corrupt
+        );
+    }
+
+    #[test]
+    fn v4_linked_combat_identity_round_trips_high_u64_unicode_and_extensions_exactly() {
         let (authority, _, _) = representative_authority();
         let mut state = authority.state.clone();
         let projectile_link = CombatPresentationLinkV1 {
@@ -2739,6 +3042,41 @@ mod tests {
                 .values()
                 .all(|summon| summon.presentation.is_none() && summon.position.is_none())
         );
+        assert!(decoded.authority.state.combat.combatants.values().all(|combatant| {
+            combatant.vital_units == CombatVitalUnits::LegacyWholeHeartsV1 && combatant.entity_id.is_none()
+        }));
+    }
+
+    #[test]
+    fn snapshot_v3_combatant_abi_decodes_as_explicit_legacy_defaults() {
+        let (authority, _, _) = representative_authority();
+        let extensions = [0, 0x80, 0xff, 7, 9];
+        let bytes = encode_v3_fixture(&authority, &extensions);
+        let decoded = decode_gameplay_authority_snapshot(&bytes).expect("V3 fixture remains readable");
+
+        assert_eq!(decoded.schema_version, 3);
+        assert_eq!(decoded.authority.state, authority.state);
+        assert_eq!(decoded.authority.state.state_hash(), authority.state.state_hash());
+        assert_eq!(decoded.authority.replay_hash(), authority.replay_hash());
+        assert_eq!(decoded.unknown_extension_bytes, extensions);
+        assert!(decoded.authority.state.combat.combatants.values().all(|combatant| {
+            combatant.vital_units == CombatVitalUnits::LegacyWholeHeartsV1 && combatant.entity_id.is_none()
+        }));
+        assert_eq!(
+            canonical_gameplay_snapshot_hash(&bytes).to_hex(),
+            "2898ef983c1ce9f310288b80dfc95c1d"
+        );
+        let current = decoded
+            .authority
+            .encode_snapshot(&extensions)
+            .expect("legacy state upgrades to V4");
+        assert_ne!(
+            current, bytes,
+            "V4 writes explicit combat-unit/link fields even when both use defaults"
+        );
+        let current = decode_gameplay_authority_snapshot(&current).expect("upgraded V4 snapshot decodes");
+        assert_eq!(current.schema_version, 4);
+        assert_eq!(current.authority.state.state_hash(), authority.state.state_hash());
     }
 
     #[test]
@@ -2758,6 +3096,9 @@ mod tests {
         assert_eq!(decoded.schema_version, 1);
         assert!(decoded.authority.state.inventory.item_instance_metadata.is_empty());
         assert_eq!(decoded.authority.state, authority.state);
+        assert!(decoded.authority.state.combat.combatants.values().all(|combatant| {
+            combatant.vital_units == CombatVitalUnits::LegacyWholeHeartsV1 && combatant.entity_id.is_none()
+        }));
         assert_eq!(decoded.authority.replay_hash(), authority.replay_hash());
         let current = decoded
             .authority

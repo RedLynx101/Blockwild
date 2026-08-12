@@ -4,8 +4,9 @@ import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow";
 export const RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V1 = 1 as const;
 export const RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V2 = 2 as const;
 export const RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V3 = 3 as const;
+export const RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V4 = 4 as const;
 export const RUST_GAMEPLAY_SNAPSHOT_MIN_SCHEMA_R7 = RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V1;
-export const RUST_GAMEPLAY_SNAPSHOT_CURRENT_SCHEMA_R7 = RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V3;
+export const RUST_GAMEPLAY_SNAPSHOT_CURRENT_SCHEMA_R7 = RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V4;
 export const RUST_GAMEPLAY_SNAPSHOT_HEADER_BYTES_R7 = 68;
 export const RUST_GAMEPLAY_MAX_SNAPSHOT_BYTES_R7 = 256 * 1_048_576;
 export const RUST_GAMEPLAY_MAX_SNAPSHOT_EXTENSION_BYTES_R7 = 4 * 1_048_576;
@@ -24,7 +25,8 @@ const U64_MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
 export type RustGameplaySnapshotSchemaR7 =
   | typeof RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V1
   | typeof RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V2
-  | typeof RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V3;
+  | typeof RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V3
+  | typeof RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V4;
 
 export type RustGameplaySnapshotEnvelopeR7<Schema extends RustGameplaySnapshotSchemaR7 = RustGameplaySnapshotSchemaR7> = Readonly<{
   schema: Schema;
@@ -47,8 +49,10 @@ export type RustGameplaySnapshotEnvelopeR7<Schema extends RustGameplaySnapshotSc
 export type RustGameplaySnapshotEnvelopeR7V1 = RustGameplaySnapshotEnvelopeR7<typeof RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V1>;
 /** Exact legacy V2 envelope shape retained for compatibility-oriented callers. */
 export type RustGameplaySnapshotEnvelopeR7V2 = RustGameplaySnapshotEnvelopeR7<typeof RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V2>;
-/** Exact current V3 envelope shape emitted by `blockwild-gameplay`. */
+/** Exact legacy V3 envelope shape retained for compatibility-oriented callers. */
 export type RustGameplaySnapshotEnvelopeR7V3 = RustGameplaySnapshotEnvelopeR7<typeof RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V3>;
+/** Exact current V4 envelope shape emitted by `blockwild-gameplay`. */
+export type RustGameplaySnapshotEnvelopeR7V4 = RustGameplaySnapshotEnvelopeR7<typeof RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V4>;
 
 export type RustGameplaySnapshotEnvelopeErrorCodeR7 =
   | "capacity"
@@ -158,7 +162,7 @@ export function cloneValidatedRustGameplaySnapshotR7(value: Uint8Array | ArrayBu
   return inspectRustGameplaySnapshotEnvelopeR7(value).bytes.slice();
 }
 
-/** @deprecated The R7 preflight now accepts every supported V1-V3 envelope. */
+/** @deprecated The R7 preflight now accepts every supported V1-V4 envelope. */
 export const inspectRustGameplaySnapshotEnvelopeR7V1 = inspectRustGameplaySnapshotEnvelopeR7;
 /** @deprecated Use `cloneValidatedRustGameplaySnapshotR7`. */
 export const cloneValidatedRustGameplaySnapshotR7V1 = cloneValidatedRustGameplaySnapshotR7;

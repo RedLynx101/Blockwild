@@ -71,6 +71,19 @@ pub struct StatusInstance {
     pub stacks: u16,
 }
 
+/// Unit contract for the integer combat vital fields.
+///
+/// Legacy snapshots used whole-heart integers. New integrated combatants may
+/// opt into milliheart precision without reinterpreting any persisted legacy
+/// value.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+#[repr(u8)]
+pub enum CombatVitalUnits {
+    #[default]
+    LegacyWholeHeartsV1 = 0,
+    MilliheartsV1 = 1,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CombatantState {
     pub record_id: String,
@@ -86,6 +99,9 @@ pub struct CombatantState {
     pub statuses: BTreeMap<String, StatusInstance>,
     pub cooldown_until: BTreeMap<String, u64>,
     pub alive: bool,
+    pub vital_units: CombatVitalUnits,
+    /// Optional authoritative R6 entity joined to this R7 combat record.
+    pub entity_id: Option<EntityId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -899,6 +915,7 @@ impl CombatState {
             .ok_or_else(|| Rejection::new(RejectionCode::InvalidTarget, "target combatant does not exist"))?;
         check_combatant(&source, source_revision)?;
         check_combatant(&target, target_revision)?;
+        ensure_legacy_damage_units(Some(&source), &target)?;
         if source.cooldown_until.get(ability_id).copied().unwrap_or(0) > tick {
             return Err(Rejection::new(RejectionCode::Cooldown, "ability is on cooldown"));
         }
@@ -1026,6 +1043,7 @@ impl CombatState {
             .combatants
             .get(target_id)
             .ok_or_else(|| Rejection::new(RejectionCode::InvalidTarget, "projectile target does not exist"))?;
+        ensure_legacy_damage_units(self.combatants.get(&projectile.source_id), target)?;
         if !integrated_linked_resolution && target.position.distance_squared(impact) > 2_250_000 {
             return Err(Rejection::new(
                 RejectionCode::InvalidTarget,
@@ -1491,6 +1509,17 @@ impl CombatState {
                 hasher.write_u64(status.expires_tick);
                 hasher.write_u16(status.stacks);
             }
+            if combatant.vital_units != CombatVitalUnits::LegacyWholeHeartsV1 || combatant.entity_id.is_some() {
+                hasher.write_u16(0xc704);
+                hasher.write_u16(combatant.vital_units as u16);
+                match combatant.entity_id {
+                    Some(entity_id) => {
+                        hasher.write_u16(1);
+                        hasher.write_u64(entity_id.packed());
+                    }
+                    None => hasher.write_u16(0),
+                }
+            }
         }
         hasher.write_u64(self.creatures.len() as u64);
         for creature in self.creatures.values() {
@@ -1571,6 +1600,18 @@ fn check_combatant(combatant: &CombatantState, expected_revision: u64) -> Result
     }
     if !combatant.alive {
         return Err(Rejection::new(RejectionCode::InvalidTarget, "combatant is not alive"));
+    }
+    Ok(())
+}
+
+fn ensure_legacy_damage_units(source: Option<&CombatantState>, target: &CombatantState) -> Result<(), Rejection> {
+    if source.is_some_and(|combatant| combatant.vital_units != CombatVitalUnits::LegacyWholeHeartsV1)
+        || target.vital_units != CombatVitalUnits::LegacyWholeHeartsV1
+    {
+        return Err(Rejection::new(
+            RejectionCode::InvalidCommand,
+            "combat damage does not support precision vital units",
+        ));
     }
     Ok(())
 }
