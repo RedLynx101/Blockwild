@@ -325,6 +325,7 @@ function managedHost(
     multiplayerAuthority: () => authority,
     authorityInterest: (source) => createNetworkInterestSetV1(source),
     runtimeAdapter: () => ({}) as ReturnType<RustWorldRuntimeManagedHostV1["runtimeAdapter"]>,
+    runtimeService: () => ({}) as ReturnType<RustWorldRuntimeManagedHostV1["runtimeService"]>,
     diagnostics: () => Object.freeze({
       state: "ready" as const,
       artifactHash: "e".repeat(64),

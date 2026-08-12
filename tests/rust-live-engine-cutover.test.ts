@@ -31,6 +31,7 @@ function readyHost(config: RustWorldRuntimeHostConfigV1): RustWorldRuntimeManage
     multiplayerAuthority() { return {} as ReturnType<RustWorldRuntimeManagedHostV1["multiplayerAuthority"]>; },
     authorityInterest() { return {} as ReturnType<RustWorldRuntimeManagedHostV1["authorityInterest"]>; },
     runtimeAdapter() { return {} as ReturnType<RustWorldRuntimeManagedHostV1["runtimeAdapter"]>; },
+    runtimeService() { return {} as ReturnType<RustWorldRuntimeManagedHostV1["runtimeService"]>; },
     nativePersistenceSession() { return null; },
     diagnostics() {
       return {

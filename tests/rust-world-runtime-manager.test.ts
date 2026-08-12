@@ -13,6 +13,7 @@ import type {
   RustWorldRuntimeHostDiagnosticsV1,
 } from "../app/game/rust-world-runtime-host";
 import type { RustMultiplayerAuthorityV1 } from "../app/game/rust-multiplayer-authority";
+import type { RustIntegratedRuntimeServiceV1 } from "../app/game/rust-integrated-runtime-service";
 import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "../app/game/rust-integrated-runtime-contract";
 
 const config = (locationId: string): RustWorldRuntimeHostConfigV1 => Object.freeze({
@@ -36,6 +37,7 @@ function deferred(): Deferred {
 
 class FakeHost implements RustWorldRuntimeManagedHostV1 {
   readonly calls: string[] = [];
+  readonly service = Object.freeze({ fixture: "managed-runtime-service" }) as unknown as RustIntegratedRuntimeServiceV1;
   startGate: Deferred | null = null;
   state: RustWorldRuntimeHostDiagnosticsV1["state"] = "idle";
 
@@ -56,6 +58,7 @@ class FakeHost implements RustWorldRuntimeManagedHostV1 {
   multiplayerAuthority() { return {} as RustMultiplayerAuthorityV1; }
   authorityInterest() { return {} as ReturnType<RustWorldRuntimeManagedHostV1["authorityInterest"]>; }
   runtimeAdapter() { return {} as RustWorldRuntimeAdapterV1; }
+  runtimeService() { return this.service; }
 
   diagnostics(): RustWorldRuntimeHostDiagnosticsV1 {
     return Object.freeze({
@@ -115,10 +118,18 @@ test("a newer activation can never expose a superseded worker", async () => {
 });
 
 test("readiness fails closed before activation and after shutdown", async () => {
-  const manager = new RustWorldRuntimeManagerV1({ hostFactory: (value) => new FakeHost(value) });
+  const hosts: FakeHost[] = [];
+  const manager = new RustWorldRuntimeManagerV1({ hostFactory: (value) => {
+    const host = new FakeHost(value);
+    hosts.push(host);
+    return host;
+  } });
   assert.throws(() => manager.requireReady(), /not ready/u);
+  assert.throws(() => manager.runtimeService(), /not ready/u);
   await manager.activate(config("surface"));
   assert.equal(manager.requireReady().config.locationId, "surface");
+  assert.equal(manager.runtimeService(), hosts[0].service, "manager forwards the active host's exact service");
   await manager.shutdown();
   assert.throws(() => manager.requireReady(), /not ready/u);
+  assert.throws(() => manager.runtimeService(), /not ready/u);
 });

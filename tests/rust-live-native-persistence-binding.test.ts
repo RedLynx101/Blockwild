@@ -223,6 +223,7 @@ function managedHost(config: RustWorldRuntimeHostConfigV1, session: RustNativeWo
     multiplayerAuthority: () => authority([]),
     authorityInterest: () => ({}) as ReturnType<RustWorldRuntimeManagedHostV1["authorityInterest"]>,
     runtimeAdapter: () => ({}) as ReturnType<RustWorldRuntimeManagedHostV1["runtimeAdapter"]>,
+    runtimeService: () => ({}) as ReturnType<RustWorldRuntimeManagedHostV1["runtimeService"]>,
     nativePersistenceSession: () => session,
     diagnostics: () => ({
       state: "ready" as const,

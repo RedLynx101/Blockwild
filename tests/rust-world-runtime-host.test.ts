@@ -3,6 +3,7 @@ import test from "node:test";
 
 import type { RustContentInstallReceiptV1, RustProductionContentBundle } from "../app/game/rust-integrated-runtime-content";
 import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1, type RustIntegratedRuntimeConfigV1, type RustIntegratedRuntimeIdentityV1 } from "../app/game/rust-integrated-runtime-contract";
+import type { RustIntegratedRuntimeServiceV1 } from "../app/game/rust-integrated-runtime-service";
 import type { RustMultiplayerAuthorityV1 } from "../app/game/rust-multiplayer-authority";
 import {
   RustWorldRuntimeHostV1,
@@ -35,6 +36,7 @@ const bundle = (): RustProductionContentBundle => Object.freeze({
 }) as unknown as RustProductionContentBundle;
 
 class FakeAdapter implements RustWorldRuntimeAdapterV1 {
+  readonly service = Object.freeze({ fixture: "sole-runtime-service" }) as unknown as RustIntegratedRuntimeServiceV1;
   current = identity();
   calls: string[] = [];
   authoritative = true;
@@ -114,12 +116,15 @@ test("one world host installs content before exposing its multiplayer authority"
       return fakeAuthority(adapter.calls);
     },
   });
+  assert.throws(() => host.runtimeService(), /not ready/u);
   await host.start();
   assert.deepEqual(adapter.calls.slice(0, 2), [`start:${CONTENT}:${GENERATOR}`, `content:${CONTENT}`]);
   assert.equal(host.diagnostics().state, "ready");
   assert.equal(host.multiplayerAuthority().backend, "rust-wasm-worker");
+  assert.equal(host.runtimeService(), adapter.service, "host exposes the exact service owned by its adapter");
   await host.shutdown();
   assert.deepEqual(adapter.calls.slice(-2), ["drain", "shutdown"]);
+  assert.throws(() => host.runtimeService(), /not ready/u);
 });
 
 test("failed content attestation shuts down the sole worker and exposes no authority", async () => {

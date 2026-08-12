@@ -368,6 +368,10 @@ export class RustWorldRuntimeHostV1 {
 
   runtimeAdapter() { return this.requireAdapter(); }
 
+  runtimeService(): RustIntegratedRuntimeServiceV1 {
+    return productionRuntimeService(this.requireAdapter());
+  }
+
   nativePersistenceSession() {
     if (this.state !== "ready") throw new Error("Rust world runtime is not ready");
     return this.nativePersistence?.session ?? null;

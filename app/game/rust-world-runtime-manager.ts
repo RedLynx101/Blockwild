@@ -7,6 +7,7 @@ import {
 import type { NetworkInterestSetSourceV1, NetworkInterestSetV1 } from "./network-authority-contract";
 import type { RustMultiplayerAuthorityV1 } from "./rust-multiplayer-authority";
 import type { RustNativeWorldPersistenceSessionV1 } from "./rust-native-world-persistence";
+import type { RustIntegratedRuntimeServiceV1 } from "./rust-integrated-runtime-service";
 
 export type RustWorldRuntimeManagerStateV1 =
   | "idle"
@@ -24,6 +25,7 @@ export interface RustWorldRuntimeManagedHostV1 {
   multiplayerAuthority(): RustMultiplayerAuthorityV1;
   authorityInterest(source: NetworkInterestSetSourceV1): NetworkInterestSetV1;
   runtimeAdapter(): RustWorldRuntimeAdapterV1;
+  runtimeService(): RustIntegratedRuntimeServiceV1;
   nativePersistenceSession?(): RustNativeWorldPersistenceSessionV1 | null;
   diagnostics(): RustWorldRuntimeHostDiagnosticsV1;
 }
@@ -159,6 +161,10 @@ export class RustWorldRuntimeManagerV1 {
   requireReady() {
     if (this.state !== "ready" || !this.host) throw new Error("Rust world runtime is not ready");
     return this.host;
+  }
+
+  runtimeService(): RustIntegratedRuntimeServiceV1 {
+    return this.requireReady().runtimeService();
   }
 
   diagnostics(): RustWorldRuntimeManagerDiagnosticsV1 {
