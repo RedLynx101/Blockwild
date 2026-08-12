@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use blockwild_entity::EntityAuthority;
+use blockwild_entity::{EntityAuthority, EntityClass};
 use blockwild_gameplay::{
     AtmosphereGravityStateV1, CelestialSkyStateV1, ContainerKey, DroppedItemSpatialV1, EnvironmentLightingStateV1,
     GameplayActor, GameplayState, ItemStack, MachineSpatialAnchorV1, PlayerDropStageRequestV1,
@@ -114,6 +114,85 @@ pub fn validate_world_view_entity_links_v1(
     Ok(())
 }
 
+/// Validate explicit R7 combat presentation owners against their sole R6
+/// spatial records. Legacy unlinked V1/V2 records remain loadable but are not
+/// silently promoted into this graph.
+pub fn validate_combat_entity_links_v1(
+    gameplay: &GameplayState,
+    entities: &EntityAuthority,
+) -> Result<(), WorldViewRuntimeErrorV1> {
+    let mut claims = BTreeMap::<EntityId, &'static str>::new();
+    for projectile in gameplay.combat.projectiles.values() {
+        let Some(link) = &projectile.presentation else {
+            continue;
+        };
+        require_hot_entity(entities, link.entity_id, "combat projectile")?;
+        if let Some(previous) = claims.insert(link.entity_id, "combat projectile") {
+            return Err(entity_conflict(link.entity_id, previous, "combat projectile"));
+        }
+        let record = entities
+            .compatibility_record(link.entity_id)
+            .expect("live R6 projectile");
+        if record.class != EntityClass::Projectile
+            || record.external_entity_id != projectile.projectile_id
+            || record.kind_key != link.content_id
+            || fixed_milli(record.position.x) != Some(projectile.position.x_milli)
+            || fixed_milli(record.position.y) != Some(projectile.position.y_milli)
+            || fixed_milli(record.position.z) != Some(projectile.position.z_milli)
+            || fixed_milli(record.velocity.x) != Some(projectile.velocity.x_milli)
+            || fixed_milli(record.velocity.y) != Some(projectile.velocity.y_milli)
+            || fixed_milli(record.velocity.z) != Some(projectile.velocity.z_milli)
+        {
+            return Err(WorldViewRuntimeErrorV1::new(
+                WorldViewRuntimeErrorCodeV1::EntityReferenceConflict,
+                format!(
+                    "R7 projectile {} disagrees with linked R6 entity {}",
+                    projectile.projectile_id,
+                    link.entity_id.packed()
+                ),
+            ));
+        }
+    }
+    for summon in gameplay.combat.summons.values() {
+        let (Some(link), Some(position)) = (&summon.presentation, summon.position) else {
+            continue;
+        };
+        require_hot_entity(entities, link.entity_id, "combat summon")?;
+        if let Some(previous) = claims.insert(link.entity_id, "combat summon") {
+            return Err(entity_conflict(link.entity_id, previous, "combat summon"));
+        }
+        let record = entities.compatibility_record(link.entity_id).expect("live R6 summon");
+        let components = entities.components(link.entity_id).expect("live R6 summon components");
+        if record.class != EntityClass::Creature
+            || record.external_entity_id != summon.summon_id
+            || record.kind_key != link.content_id
+            || fixed_milli(record.position.x) != Some(position.x_milli)
+            || fixed_milli(record.position.y) != Some(position.y_milli)
+            || fixed_milli(record.position.z) != Some(position.z_milli)
+            || components.summon.as_ref().is_none_or(|value| {
+                value.summoner_id.as_deref() != Some(summon.owner_id.as_str())
+                    || value.grounded != summon.grounded
+                    || value.expires_tick != summon.expires_tick.unwrap_or(u64::MAX)
+            })
+        {
+            return Err(WorldViewRuntimeErrorV1::new(
+                WorldViewRuntimeErrorCodeV1::EntityReferenceConflict,
+                format!(
+                    "R7 summon {} disagrees with linked R6 entity {}",
+                    summon.summon_id,
+                    link.entity_id.packed()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn fixed_milli(value: f32) -> Option<i32> {
+    let scaled = (f64::from(value) * 1_000.0).round();
+    (scaled.is_finite() && scaled >= f64::from(i32::MIN) && scaled <= f64::from(i32::MAX)).then_some(scaled as i32)
+}
+
 /// Validate all gameplay custody links and all R6 entity links at the same
 /// staged boundary. This must run after every integrated multi-domain batch,
 /// even when that batch has no world-view commands, because another domain may
@@ -129,7 +208,36 @@ pub fn validate_world_view_runtime_links_v1(
             rejection.code, rejection.message
         ))
     })?;
-    validate_world_view_entity_links_v1(state, entities)
+    validate_world_view_entity_links_v1(state, entities)?;
+    for (entity_id, claim) in gameplay
+        .combat
+        .projectiles
+        .values()
+        .filter_map(|projectile| {
+            projectile
+                .presentation
+                .as_ref()
+                .map(|link| (link.entity_id, "combat projectile"))
+        })
+        .chain(gameplay.combat.summons.values().filter_map(|summon| {
+            summon
+                .presentation
+                .as_ref()
+                .map(|link| (link.entity_id, "combat summon"))
+        }))
+    {
+        if state
+            .player_bindings
+            .values()
+            .any(|binding| binding.entity_id == entity_id)
+        {
+            return Err(entity_conflict(entity_id, "player binding", claim));
+        }
+        if state.dropped_items.values().any(|drop| drop.entity_id == entity_id) {
+            return Err(entity_conflict(entity_id, "dropped item", claim));
+        }
+    }
+    validate_combat_entity_links_v1(gameplay, entities)
 }
 
 fn require_live_entity(
@@ -144,6 +252,23 @@ fn require_live_entity(
         WorldViewRuntimeErrorCodeV1::EntityReferenceMissing,
         format!(
             "world-view {claim} references absent or stale R6 entity {}",
+            entity_id.packed()
+        ),
+    ))
+}
+
+fn require_hot_entity(
+    entities: &EntityAuthority,
+    entity_id: EntityId,
+    claim: &'static str,
+) -> Result<(), WorldViewRuntimeErrorV1> {
+    if entities.hot().contains_key(&entity_id) {
+        return Ok(());
+    }
+    Err(WorldViewRuntimeErrorV1::new(
+        WorldViewRuntimeErrorCodeV1::EntityReferenceMissing,
+        format!(
+            "world-view {claim} references an absent, stale, or cold R6 entity {}",
             entity_id.packed()
         ),
     ))

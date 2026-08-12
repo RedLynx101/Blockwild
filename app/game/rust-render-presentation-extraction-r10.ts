@@ -70,6 +70,19 @@ export type RustPresentationExtractionDiagnosticsR10 = Readonly<{
   machineBindings: number;
   machineBlockers: readonly RustMachinePresentationBlockerR10[];
   machines: readonly RustMachinePresentationR10[];
+  combatBindings: number;
+  combatBlockers: readonly RustCombatPresentationBlockerR10[];
+}>;
+
+export type RustCombatPresentationBlockerR10 = Readonly<{
+  id: string;
+  status: "missing" | "unmapped" | "unavailable";
+  role: "projectile" | "summon" | null;
+  recordId: string | null;
+  entityId: bigint | null;
+  contentId: string | null;
+  presentationId: string | null;
+  blockerId: string | null;
 }>;
 
 export type RustDroppedPresentationBlockerR10 = Readonly<{
@@ -138,6 +151,8 @@ type PreparedPresentationExtractionR10 = Readonly<{
   machines: readonly PreparedMachinePresentationR10[];
   machineBindings: number;
   machineBlockers: readonly RustMachinePresentationBlockerR10[];
+  combatBindings: number;
+  combatBlockers: readonly RustCombatPresentationBlockerR10[];
 }>;
 
 type PreparedMachinePresentationR10 = Omit<RustMachinePresentationR10, "instanceIds"> & Readonly<{
@@ -171,6 +186,13 @@ function exactField(row: RustDomainRowR10, name: string): RustDomainValueR10 {
 
 function optionalField(row: RustDomainRowR10, name: string) {
   return row.fields.find(([field]) => field === name)?.[1];
+}
+
+function optionalString(row: RustDomainRowR10, name: string) {
+  const value = optionalField(row, name);
+  invariant(value === undefined || typeof value === "string",
+    `R10 domain row '${row.key}' ${name} is not an optional string`);
+  return value ?? null;
 }
 
 function exactBool(row: RustDomainRowR10, name: string) {
@@ -763,6 +785,63 @@ function assertExactDroppedPresentation(
     `R10 dropped item '${row.key}' BWR6 model hash differs from its presentation content`);
 }
 
+function combatBlocker(
+  status: "missing" | "unmapped" | "unavailable",
+  role: "projectile" | "summon" | null,
+  recordId: string | null,
+  entityId: bigint | null,
+  contentId: string | null,
+  presentationId: string | null,
+  blockerId: string | null,
+): RustCombatPresentationBlockerR10 {
+  return Object.freeze({
+    id: `combat:${status}:${role ?? "domain"}:${recordId ?? "none"}:${entityId ?? "none"}:${blockerId ?? "none"}`,
+    status, role, recordId, entityId, contentId, presentationId, blockerId,
+  });
+}
+
+function assertExactCombatPresentation(
+  row: RustDomainRowR10,
+  role: "projectile" | "summon",
+  recordId: string,
+  record: RustEntityExtractionR6V3["records"][number],
+  presentations: AttestedRenderPresentationCatalogV1,
+  contentIdentity: RustPresentationContentIdentityR10,
+) {
+  const expectedDomain = role === "projectile" ? "item" : "creature-profile";
+  invariant(exactString(row, "presentation.role") === role,
+    `R10 combat '${row.key}' presentation role is invalid`);
+  invariant(exactString(row, "presentation.contentDomain") === expectedDomain,
+    `R10 combat '${row.key}' primary content domain is invalid`);
+  const contentId = exactString(row, "presentation.contentId");
+  if (role === "summon") invariant(exactString(row, "contentId") === contentId,
+    `R10 summon '${row.key}' content differs from its presentation primary ref`);
+  const presentationId = exactString(row, "presentation.presentationId");
+  const binding = presentations.registry.resolveProfileId(role, presentationId);
+  invariant(binding.status === "exact", `R10 combat '${row.key}' suppresses a non-exact catalog binding`);
+  invariant(binding.profile.contentRefs.some((reference) => reference.domain === expectedDomain && reference.id === contentId),
+    `R10 combat '${row.key}' primary ref is absent from the exact profile`);
+  if (role === "summon") invariant(binding.profile.contentRefs.some((reference) => reference.domain === "ability-spell"),
+    `R10 summon '${row.key}' exact profile has no paired spell ref`);
+  invariant(exactString(row, "presentation.status") === "exact"
+    && exactString(row, "presentation.profileId") === binding.profile.id
+    && binding.profile.id === presentationId,
+  `R10 combat '${row.key}' exact profile identity differs from the attested registry`);
+  invariant(exactString(row, "presentation.modelId") === binding.profile.model.id,
+    `R10 combat '${row.key}' exact model differs from the attested registry`);
+  invariant(exactU32(row, "presentation.contentVersion", false) === contentIdentity.contentVersion
+    && equalBytes(exactHash(row, "presentation.contentHash"), contentIdentity.contentHash),
+  `R10 combat '${row.key}' presentation content identity differs from the installed catalog`);
+  invariant(record.externalEntityId === recordId,
+    `R10 combat '${row.key}' external id differs from BWR6`);
+  invariant(record.class === (role === "projectile" ? "projectile" : "creature"),
+    `R10 combat '${row.key}' references a wrong-class BWR6 entity`);
+  invariant(record.modelKey === binding.profile.model.id
+    && record.modelRevision === contentIdentity.contentVersion
+    && equalBytes(record.modelHash, contentIdentity.contentHash),
+  `R10 combat '${row.key}' BWR6 identity differs from the exact profile`);
+}
+
 function augmentPresentations(
   extraction: RustIntegratedRuntimeExtractionV1,
   presentations: AttestedRenderPresentationCatalogV1,
@@ -773,19 +852,23 @@ function augmentPresentations(
   let source = decoded.entities;
   let heldAttachments = 0;
   let droppedBindings = 0;
+  let combatBindings = 0;
   const heldBlockers: RustHeldPresentationBlockerR10[] = [];
   const droppedBlockers: RustDroppedPresentationBlockerR10[] = [];
   const machines: PreparedMachinePresentationR10[] = [];
   const machineBlockers: RustMachinePresentationBlockerR10[] = [];
+  const combatBlockers: RustCombatPresentationBlockerR10[] = [];
   if (decoded.domains === null) {
     heldBlockers.push(unavailableBlocker("player-domain-envelope-absent", "domain-extraction-not-submitted"));
     droppedBlockers.push(droppedUnavailableBlocker("inventory-domain-envelope-absent", "domain-extraction-not-submitted"));
     machineBlockers.push(machineUnavailableBlocker("machine-domain-envelope-absent", "domain-extraction-not-submitted"));
+    combatBlockers.push(combatBlocker("unavailable", null, null, null, null, null, "domain-extraction-not-submitted"));
     return Object.freeze({
       renderBytes: Uint8Array.from(extraction.render), source, extractionRevision: decoded.extractionRevision,
       heldAttachments, heldBlockers: Object.freeze(heldBlockers),
       droppedBindings, droppedBlockers: Object.freeze(droppedBlockers),
       machines: Object.freeze(machines), machineBindings: 0, machineBlockers: Object.freeze(machineBlockers),
+      combatBindings, combatBlockers: Object.freeze(combatBlockers),
     });
   }
   invariant(decoded.domains.contentReady, "R10 presentation content is not installed and attested");
@@ -913,6 +996,101 @@ function augmentPresentations(
     }
   }
 
+  const combatView = decoded.domains.views.find((view) => view.domain === 5);
+  invariant(combatView !== undefined, "R10 domain bundle has no combat view");
+  const presentationOnlyCombatBlockers = new Set([
+    "combat-projectile-and-summon-render-presentation-not-authoritative",
+    "combat-general-r7-r6-health-parity-not-authoritative",
+    "combat-projectile-presentation-missing",
+    "combat-projectile-presentation-unmapped",
+    "combat-projectile-r6-link-missing",
+    "combat-summon-presentation-missing",
+    "combat-summon-presentation-unmapped",
+    "combat-summon-r6-link-missing",
+  ]);
+  const blockedCombatEntities = new Set<bigint>();
+  const joinedCombatEntities = new Set<bigint>();
+  for (const row of combatView.rows.filter((candidate) => candidate.kind === 3 || candidate.kind === 5)) {
+    const role = row.kind === 3 ? "projectile" as const : "summon" as const;
+    const prefix = `${role}:`;
+    invariant(row.key.startsWith(prefix) && row.key.length > prefix.length,
+      `R10 combat row '${row.key}' has an invalid ${role} key`);
+    const recordId = row.key.slice(prefix.length);
+    invariant(exactString(row, "presentation.role") === role,
+      `R10 combat '${row.key}' presentation role is invalid`);
+    const status = exactString(row, "presentation.status");
+    if (status === "unlinked") {
+      const fallback = records?.find((record) => record.externalEntityId === recordId);
+      if (fallback !== undefined) blockedCombatEntities.add(fallback.entityId);
+      combatBlockers.push(combatBlocker(
+        "unavailable", role, recordId, fallback?.entityId ?? null, null, null,
+        exactString(row, "presentation.blockerId"),
+      ));
+      continue;
+    }
+    if (status === "invalid-link") {
+      const entityId = exactU64(row, "entityId");
+      if (recordIndexes.has(entityId)) blockedCombatEntities.add(entityId);
+      combatBlockers.push(combatBlocker(
+        "unavailable", role, recordId, entityId, optionalString(row, "presentation.contentId"),
+        optionalString(row, "presentation.presentationId"),
+        exactString(row, "presentation.blockerId"),
+      ));
+      continue;
+    }
+    invariant(status === "exact" || status === "missing" || status === "unmapped",
+      `R10 combat '${row.key}' presentation status is invalid`);
+    const entityId = exactU64(row, "entityId");
+    invariant(!joinedCombatEntities.has(entityId), `R10 combat entity ${entityId} is duplicated`);
+    joinedCombatEntities.add(entityId);
+    const recordIndex = recordIndexes.get(entityId);
+    invariant(recordIndex !== undefined && records !== null,
+      `R10 combat '${row.key}' references a missing BWR6 entity`);
+    const record = records[recordIndex];
+    invariant(exactU64(row, "entityRevision") === record.entityRevision,
+      `R10 combat '${row.key}' entity revision differs from BWR6`);
+    const expectedDomain = role === "projectile" ? "item" : "creature-profile";
+    invariant(exactString(row, "presentation.contentDomain") === expectedDomain,
+      `R10 combat '${row.key}' primary content domain is invalid`);
+    const contentId = exactString(row, "presentation.contentId");
+    const presentationId = exactString(row, "presentation.presentationId");
+    const binding = presentations.registry.resolveProfileId(role, presentationId);
+    if (binding.status === "exact") {
+      invariant(status === "exact", `R10 combat '${row.key}' suppresses an exact presentation`);
+      assertExactCombatPresentation(row, role, recordId, record, presentations, presentationContent);
+      combatBindings += 1;
+      continue;
+    }
+    invariant(record.modelKey === "unresolved:combat-presentation" && record.modelRevision === 0
+      && record.modelHash.every((value) => value === 0),
+    `R10 combat '${row.key}' used a creature or generic fallback for an unresolved presentation`);
+    blockedCombatEntities.add(entityId);
+    if (binding.status === "missing") {
+      invariant(status === "missing" && exactString(row, "presentation.blockerId") === binding.blocker.id
+        && binding.blocker.contentRefs.some((reference) => reference.domain === expectedDomain && reference.id === contentId),
+      `R10 combat '${row.key}' missing blocker differs from the attested registry`);
+      presentationOnlyCombatBlockers.add(binding.blocker.id);
+      combatBlockers.push(combatBlocker(
+        "missing", role, recordId, entityId, contentId, presentationId, binding.blocker.id,
+      ));
+    } else {
+      invariant(status === "unmapped"
+        && exactString(row, "presentation.blockerId") === `combat-${role}-presentation-unmapped`,
+      `R10 combat '${row.key}' unmapped blocker is inconsistent`);
+      combatBlockers.push(combatBlocker(
+        "unmapped", role, recordId, entityId, contentId, presentationId,
+        `combat-${role}-presentation-unmapped`,
+      ));
+    }
+  }
+  const unavailableCombat = combatView.blockers.filter((value) => !presentationOnlyCombatBlockers.has(value));
+  if (combatView.status === "absent" || unavailableCombat.length > 0) {
+    const blockerId = unavailableCombat.join(",");
+    combatBlockers.push(combatBlocker(
+      "unavailable", null, null, null, null, null, blockerId || "combat-domain-unavailable",
+    ));
+  }
+
   const machineView = decoded.domains.views.find((view) => view.domain === 4);
   invariant(machineView !== undefined, "R10 domain bundle has no machine view");
   const presentationOnlyMachineBlockers = new Set([
@@ -946,7 +1124,16 @@ function augmentPresentations(
   droppedBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
   machines.sort((left, right) => compareCanonicalUtf8R10(left.machineId, right.machineId));
   machineBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
-  if (source !== null && records !== null) source = Object.freeze({ ...source, records: Object.freeze(records) });
+  combatBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
+  if (source !== null && records !== null) {
+    const visibleRecords = Object.freeze(records.filter((record) => !blockedCombatEntities.has(record.entityId)));
+    source = Object.freeze({
+      ...source,
+      total: visibleRecords.length + source.omitted,
+      selected: visibleRecords.length,
+      records: visibleRecords,
+    });
+  }
   return Object.freeze({
     renderBytes: Uint8Array.from(extraction.render),
     source,
@@ -958,6 +1145,8 @@ function augmentPresentations(
     machines: Object.freeze(machines),
     machineBindings: machines.length,
     machineBlockers: Object.freeze(machineBlockers),
+    combatBindings,
+    combatBlockers: Object.freeze(combatBlockers),
   });
 }
 
@@ -1007,6 +1196,8 @@ export class RustPresentationEntityExtractionR10 {
     machineBindings: 0,
     machineBlockers: Object.freeze([]),
     machines: Object.freeze([]),
+    combatBindings: 0,
+    combatBlockers: Object.freeze([]),
   });
 
   constructor(
@@ -1048,6 +1239,8 @@ export class RustPresentationEntityExtractionR10 {
       machineBindings: this.pending.machineBindings,
       machineBlockers: this.pending.machineBlockers,
       machines: this.pendingMachinePresentations ?? Object.freeze([]),
+      combatBindings: this.pending.combatBindings,
+      combatBlockers: this.pending.combatBlockers,
     });
     if (accepted && this.pendingMachineResourceState !== null) {
       this.machineResourceEpoch = this.pendingMachineResourceState.epoch;

@@ -154,6 +154,14 @@ function equalBytes(left: Uint8Array, right: Uint8Array) {
   return difference === 0;
 }
 
+function compareBytes(left: Uint8Array, right: Uint8Array) {
+  const length = Math.min(left.byteLength, right.byteLength);
+  for (let index = 0; index < length; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return left.byteLength - right.byteLength;
+}
+
 function finite(value: number, label: string) {
   invariant(Number.isFinite(value), `${label} is not finite`);
   return Math.fround(value);
@@ -418,7 +426,7 @@ function cloneMount(mount: RenderEntityAuthoritativeRecordR10["mount"]): RenderE
 export class RustEntityRenderExtractionR10 {
   private readonly catalog: RenderEntityCompiledModelCatalogR10;
   private readonly expectedContentManifestHash: Uint8Array;
-  private readonly modelAttestations = new Map<string, RenderEntityModelAttestationR10>();
+  private readonly modelAttestations = new Map<string, RenderEntityModelAttestationR10[]>();
   private readonly equipmentModels = new Map<string, string>();
   private readonly modelResourceCache = new Map<string, RenderEntityModelResourcesR10>();
   private readonly emittedModelIds = new Set<string>();
@@ -434,14 +442,21 @@ export class RustEntityRenderExtractionR10 {
     this.expectedContentManifestHash = Uint8Array.from(hash16(options.expectedContentManifestHash, "expected content manifest hash"));
     for (const attestation of options.modelAttestations) {
       nonEmpty(attestation.modelKey, "attested model key");
-      invariant(!this.modelAttestations.has(attestation.modelKey), "duplicate model attestation");
       u32(attestation.revision, "attested model revision");
       invariant(attestation.revision > 0, "attested model revision is unresolved");
       hash16(attestation.contentHash, "attested model hash");
-      this.modelAttestations.set(attestation.modelKey, Object.freeze({
+      const owned = Object.freeze({
         ...attestation,
         contentHash: Uint8Array.from(attestation.contentHash),
-      }));
+      });
+      const candidates = this.modelAttestations.get(attestation.modelKey) ?? [];
+      if (candidates.some((candidate) => candidate.revision === owned.revision
+        && equalBytes(candidate.contentHash, owned.contentHash))) continue;
+      invariant(candidates.length < 8, "model attestation identity cap exceeded");
+      candidates.push(owned);
+      candidates.sort((left, right) => left.revision - right.revision
+        || compareBytes(left.contentHash, right.contentHash));
+      this.modelAttestations.set(attestation.modelKey, candidates);
     }
     invariant(this.modelAttestations.size > 0, "no model attestations were supplied");
     for (const mapping of options.equipmentModels ?? []) {
@@ -491,10 +506,12 @@ export class RustEntityRenderExtractionR10 {
       recordsById.set(record.entityId, record);
       const model = findRenderEntityCompiledModelR10(this.catalog, record.modelKey);
       invariant(model !== null, `missing compiled entity model '${record.modelKey}'`);
-      const attestation = this.modelAttestations.get(record.modelKey);
-      invariant(attestation !== undefined, `missing content attestation for model '${record.modelKey}'`);
-      invariant(record.modelRevision === attestation.revision, `model revision mismatch for '${record.modelKey}'`);
-      invariant(equalBytes(record.modelHash, attestation.contentHash), `model content hash mismatch for '${record.modelKey}'`);
+      const attestations = this.modelAttestations.get(record.modelKey);
+      invariant(attestations !== undefined, `missing content attestation for model '${record.modelKey}'`);
+      const revisionAttestations = attestations.filter((attestation) => record.modelRevision === attestation.revision);
+      invariant(revisionAttestations.length > 0, `model revision mismatch for '${record.modelKey}'`);
+      invariant(revisionAttestations.some((attestation) => equalBytes(record.modelHash, attestation.contentHash)),
+        `model content hash mismatch for '${record.modelKey}'`);
       for (const [, equipment] of record.equipment) {
         invariant(this.equipmentModels.has(equipment.itemKey), `missing equipment model mapping for '${equipment.itemKey}'`);
       }

@@ -1978,6 +1978,12 @@ struct DroppedItemRenderBindingV1<'a> {
     binding: IntegratedRuntimeRenderPresentationBindingV1<'a>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CombatRenderBindingV1<'a> {
+    entity_revision: Option<u64>,
+    binding: IntegratedRuntimeRenderPresentationBindingV1<'a>,
+}
+
 fn dropped_item_render_bindings_v1<'a>(
     runtime: &'a IntegratedRuntimeV2,
     world_view: Option<&'a WorldViewExtractionInputV1>,
@@ -1999,6 +2005,51 @@ fn dropped_item_render_bindings_v1<'a>(
     })
 }
 
+fn combat_render_bindings_v1(runtime: &IntegratedRuntimeV2) -> BTreeMap<u64, CombatRenderBindingV1<'_>> {
+    let mut bindings = BTreeMap::new();
+    for projectile in runtime.gameplay().state.combat.projectiles.values() {
+        let Some(link) = &projectile.presentation else {
+            continue;
+        };
+        bindings.insert(
+            link.entity_id.packed(),
+            CombatRenderBindingV1 {
+                entity_revision: runtime
+                    .entities()
+                    .hot()
+                    .get(&link.entity_id)
+                    .map(|entity| entity.entity_revision),
+                binding: runtime.projectile_render_presentation_binding_v1(
+                    &link.presentation_id,
+                    link.content_domain,
+                    &link.content_id,
+                ),
+            },
+        );
+    }
+    for summon in runtime.gameplay().state.combat.summons.values() {
+        let Some(link) = &summon.presentation else {
+            continue;
+        };
+        bindings.insert(
+            link.entity_id.packed(),
+            CombatRenderBindingV1 {
+                entity_revision: runtime
+                    .entities()
+                    .hot()
+                    .get(&link.entity_id)
+                    .map(|entity| entity.entity_revision),
+                binding: runtime.summon_render_presentation_binding_v1(
+                    &link.presentation_id,
+                    link.content_domain,
+                    &link.content_id,
+                ),
+            },
+        );
+    }
+    bindings
+}
+
 fn encode_render_extraction_at(
     runtime: &IntegratedRuntimeV2,
     extraction_revision: u64,
@@ -2006,6 +2057,7 @@ fn encode_render_extraction_at(
 ) -> Vec<u8> {
     let entities = runtime.entities();
     let dropped_item_bindings = dropped_item_render_bindings_v1(runtime, world_view);
+    let combat_bindings = combat_render_bindings_v1(runtime);
     let total = entities.len();
     let mut records = Vec::with_capacity(total.min(MAX_ENTITY_EXTRACTION_RECORDS_V3).saturating_mul(256));
     let mut selected = 0_usize;
@@ -2039,7 +2091,7 @@ fn encode_render_extraction_at(
         if selected >= MAX_ENTITY_EXTRACTION_RECORDS_V3 {
             break;
         }
-        let encoded = encode_render_entity_record(runtime, &candidate, &dropped_item_bindings);
+        let encoded = encode_render_entity_record(runtime, &candidate, &dropped_item_bindings, &combat_bindings);
         if ENTITY_EXTRACTION_HEADER_BYTES_V3
             .saturating_add(records.len())
             .saturating_add(encoded.len())
@@ -2080,6 +2132,7 @@ fn encode_render_entity_record(
     runtime: &IntegratedRuntimeV2,
     source: &RenderEntityExtractionSourceV3<'_>,
     dropped_item_bindings: &BTreeMap<u64, DroppedItemRenderBindingV1<'_>>,
+    combat_bindings: &BTreeMap<u64, CombatRenderBindingV1<'_>>,
 ) -> Vec<u8> {
     let record = source.record;
     let components = source.components;
@@ -2089,7 +2142,22 @@ fn encode_render_entity_record(
         .get("modelKey")
         .or_else(|| record.custom.get("model"))
         .map_or(record.kind_key.as_str(), String::as_str);
-    let (model_key, model_hash, model_revision) = if is_dropped_item {
+    let (model_key, model_hash, model_revision) = if let Some(CombatRenderBindingV1 {
+        entity_revision,
+        binding:
+            IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                model_id,
+                content_hash,
+                content_version,
+                ..
+            },
+    }) = combat_bindings.get(&source.entity_id)
+        && *entity_revision == Some(source.entity_revision)
+    {
+        (*model_id, *content_hash, *content_version)
+    } else if combat_bindings.contains_key(&source.entity_id) {
+        ("unresolved:combat-presentation", CanonicalHash::default(), 0)
+    } else if is_dropped_item {
         match dropped_item_bindings.get(&source.entity_id) {
             Some(DroppedItemRenderBindingV1 {
                 entity_revision,
@@ -3037,6 +3105,10 @@ fn machine_domain_view(runtime: &IntegratedRuntimeV2, world_view: Option<&WorldV
 fn combat_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
     let state = &runtime.gameplay().state.combat;
     let mut rows = Vec::new();
+    let mut blockers = vec![
+        "combat-projectile-and-summon-render-presentation-not-authoritative".into(),
+        "combat-general-r7-r6-health-parity-not-authoritative".into(),
+    ];
     for (record_id, combatant) in &state.combatants {
         let mut row = domain_row(1, format!("combatant:{record_id}"), combatant.revision);
         option_string_field(&mut row, "ownerId", combatant.owner_id.as_deref());
@@ -3099,6 +3171,7 @@ fn combat_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
     }
     for (projectile_id, projectile) in &state.projectiles {
         let mut row = domain_row(3, format!("projectile:{projectile_id}"), projectile.revision);
+        u64_field(&mut row, "authorityRevision", projectile.revision);
         string_field(&mut row, "sourceId", &projectile.source_id);
         option_string_field(&mut row, "targetId", projectile.target_id.as_deref());
         string_field(&mut row, "abilityId", &projectile.ability_id);
@@ -3114,6 +3187,56 @@ fn combat_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
         }
         u64_field(&mut row, "spawnedTick", projectile.spawned_tick);
         u64_field(&mut row, "expiresTick", projectile.expires_tick);
+        string_field(&mut row, "presentation.role", "projectile");
+        if let Some(link) = &projectile.presentation {
+            u64_field(&mut row, "entityId", link.entity_id.packed());
+            string_field(&mut row, "presentation.contentDomain", "item");
+            string_field(&mut row, "presentation.contentId", &link.content_id);
+            string_field(&mut row, "presentation.presentationId", &link.presentation_id);
+            if let Some(entity) = runtime.entities().hot().get(&link.entity_id) {
+                u64_field(&mut row, "entityRevision", entity.entity_revision);
+                match runtime.projectile_render_presentation_binding_v1(
+                    &link.presentation_id,
+                    link.content_domain,
+                    &link.content_id,
+                ) {
+                    IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                        profile_id,
+                        model_id,
+                        content_hash,
+                        content_version,
+                    } => {
+                        string_field(&mut row, "presentation.status", "exact");
+                        string_field(&mut row, "presentation.profileId", profile_id);
+                        string_field(&mut row, "presentation.modelId", model_id);
+                        hash_field(&mut row, "presentation.contentHash", content_hash);
+                        u64_field(&mut row, "presentation.contentVersion", u64::from(content_version));
+                    }
+                    IntegratedRuntimeRenderPresentationBindingV1::Missing { blocker_id } => {
+                        string_field(&mut row, "presentation.status", "missing");
+                        string_field(&mut row, "presentation.blockerId", blocker_id);
+                        blockers.push("combat-projectile-presentation-missing".into());
+                    }
+                    IntegratedRuntimeRenderPresentationBindingV1::Unmapped => {
+                        string_field(&mut row, "presentation.status", "unmapped");
+                        string_field(
+                            &mut row,
+                            "presentation.blockerId",
+                            "combat-projectile-presentation-unmapped",
+                        );
+                        blockers.push("combat-projectile-presentation-unmapped".into());
+                    }
+                }
+            } else {
+                string_field(&mut row, "presentation.status", "invalid-link");
+                string_field(&mut row, "presentation.blockerId", "combat-projectile-r6-link-missing");
+                blockers.push("combat-projectile-r6-link-missing".into());
+            }
+        } else {
+            string_field(&mut row, "presentation.status", "unlinked");
+            string_field(&mut row, "presentation.blockerId", "combat-projectile-r6-link-missing");
+            blockers.push("combat-projectile-r6-link-missing".into());
+        }
         rows.push(row);
     }
     for (record_id, creature) in &state.creatures {
@@ -3138,6 +3261,7 @@ fn combat_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
     }
     for (summon_id, summon) in &state.summons {
         let mut row = domain_row(5, format!("summon:{summon_id}"), summon.revision);
+        u64_field(&mut row, "authorityRevision", summon.revision);
         string_field(&mut row, "contentId", &summon.content_id);
         string_field(&mut row, "ownerId", &summon.owner_id);
         u64_field(&mut row, "spawnedTick", summon.spawned_tick);
@@ -3146,6 +3270,65 @@ fn combat_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
             u64_field(&mut row, "expiresTick.value", value);
         }
         bool_field(&mut row, "grounded", summon.grounded);
+        if let Some(position) = summon.position {
+            for (key, value) in [
+                ("position.xMilli", position.x_milli),
+                ("position.yMilli", position.y_milli),
+                ("position.zMilli", position.z_milli),
+            ] {
+                i64_field(&mut row, key, i64::from(value));
+            }
+        }
+        string_field(&mut row, "presentation.role", "summon");
+        if let Some(link) = &summon.presentation {
+            u64_field(&mut row, "entityId", link.entity_id.packed());
+            string_field(&mut row, "presentation.contentDomain", "creature-profile");
+            string_field(&mut row, "presentation.contentId", &link.content_id);
+            string_field(&mut row, "presentation.presentationId", &link.presentation_id);
+            if let Some(entity) = runtime.entities().hot().get(&link.entity_id) {
+                u64_field(&mut row, "entityRevision", entity.entity_revision);
+                match runtime.summon_render_presentation_binding_v1(
+                    &link.presentation_id,
+                    link.content_domain,
+                    &link.content_id,
+                ) {
+                    IntegratedRuntimeRenderPresentationBindingV1::Exact {
+                        profile_id,
+                        model_id,
+                        content_hash,
+                        content_version,
+                    } => {
+                        string_field(&mut row, "presentation.status", "exact");
+                        string_field(&mut row, "presentation.profileId", profile_id);
+                        string_field(&mut row, "presentation.modelId", model_id);
+                        hash_field(&mut row, "presentation.contentHash", content_hash);
+                        u64_field(&mut row, "presentation.contentVersion", u64::from(content_version));
+                    }
+                    IntegratedRuntimeRenderPresentationBindingV1::Missing { blocker_id } => {
+                        string_field(&mut row, "presentation.status", "missing");
+                        string_field(&mut row, "presentation.blockerId", blocker_id);
+                        blockers.push("combat-summon-presentation-missing".into());
+                    }
+                    IntegratedRuntimeRenderPresentationBindingV1::Unmapped => {
+                        string_field(&mut row, "presentation.status", "unmapped");
+                        string_field(
+                            &mut row,
+                            "presentation.blockerId",
+                            "combat-summon-presentation-unmapped",
+                        );
+                        blockers.push("combat-summon-presentation-unmapped".into());
+                    }
+                }
+            } else {
+                string_field(&mut row, "presentation.status", "invalid-link");
+                string_field(&mut row, "presentation.blockerId", "combat-summon-r6-link-missing");
+                blockers.push("combat-summon-r6-link-missing".into());
+            }
+        } else {
+            string_field(&mut row, "presentation.status", "unlinked");
+            string_field(&mut row, "presentation.blockerId", "combat-summon-r6-link-missing");
+            blockers.push("combat-summon-r6-link-missing".into());
+        }
         rows.push(row);
     }
     DomainViewV1 {
@@ -3153,7 +3336,7 @@ fn combat_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
         revision: runtime.gameplay().state.revision.combat,
         status: DomainViewStatusV1::Partial,
         rows,
-        blockers: vec!["combat-projectile-and-summon-render-presentation-not-authoritative".into()],
+        blockers,
     }
 }
 
@@ -6238,7 +6421,12 @@ mod tests {
             },
         )]);
         assert_eq!(
-            read_model(&encode_render_entity_record(&runtime, &source, &exact)),
+            read_model(&encode_render_entity_record(
+                &runtime,
+                &source,
+                &exact,
+                &BTreeMap::new()
+            )),
             ("test-drop-model".into(), 7, identity)
         );
 
@@ -6256,7 +6444,12 @@ mod tests {
                 },
             )]);
             assert_eq!(
-                read_model(&encode_render_entity_record(&runtime, &source, &unresolved)),
+                read_model(&encode_render_entity_record(
+                    &runtime,
+                    &source,
+                    &unresolved,
+                    &BTreeMap::new()
+                )),
                 ("unresolved:dropped-item".into(), 0, CanonicalHash::default())
             );
         }
@@ -6274,7 +6467,12 @@ mod tests {
             },
         )]);
         assert_eq!(
-            read_model(&encode_render_entity_record(&runtime, &source, &stale)),
+            read_model(&encode_render_entity_record(
+                &runtime,
+                &source,
+                &stale,
+                &BTreeMap::new()
+            )),
             ("unresolved:dropped-item".into(), 0, CanonicalHash::default())
         );
     }

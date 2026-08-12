@@ -25,7 +25,7 @@ import {
   loadAttestedRenderPresentationCatalogV1,
   RENDER_PRESENTATION_CATALOG_ID_V1,
   RENDER_PRESENTATION_CATALOG_SCHEMA_ID_V1,
-  RENDER_PRESENTATION_CATALOG_SCHEMA_V1,
+  RENDER_PRESENTATION_CATALOG_SCHEMA_CURRENT,
   type AttestedRenderPresentationCatalogV1,
 } from "./rust-render-presentation-profile.ts";
 import {
@@ -110,6 +110,14 @@ function equalBytes(left: Uint8Array, right: Uint8Array) {
   return difference === 0;
 }
 
+function compareBytes(left: Uint8Array, right: Uint8Array) {
+  const length = Math.min(left.byteLength, right.byteLength);
+  for (let index = 0; index < length; index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return left.byteLength - right.byteLength;
+}
+
 function errorText(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -143,10 +151,10 @@ export function createProductionRenderModelAttestationsR10(
   const presentationArtifact = attestProductionRenderPresentationsR10(profile, presentations, artifacts);
   const models = new Set(profile.catalog.models.map((model) => model.modelId));
   const artifactKeys = new Set<string>();
-  const attestations = new Map<string, RenderEntityModelAttestationR10>();
+  const attestations = new Map<string, RenderEntityModelAttestationR10[]>();
   let playerArtifact: RustContentArtifact | null = null;
 
-  const installAttestation = (modelKey: string, artifact: RustContentArtifact) => {
+  const installAttestation = (modelKey: string, artifact: RustContentArtifact, allowAdditionalIdentity = false) => {
     invariant(artifact.contentVersion > 0 && Number.isSafeInteger(artifact.contentVersion),
       `content revision for render model '${modelKey}' is invalid`);
     const candidate = Object.freeze({
@@ -154,11 +162,14 @@ export function createProductionRenderModelAttestationsR10(
       revision: artifact.contentVersion,
       contentHash: hex16(artifact.blobHash, `content hash for render model '${modelKey}'`),
     });
-    const existing = attestations.get(modelKey);
-    invariant(existing === undefined || (existing.revision === candidate.revision
-      && equalBytes(existing.contentHash, candidate.contentHash)),
-    `render model '${modelKey}' has ambiguous content identities`);
-    attestations.set(modelKey, candidate);
+    const existing = attestations.get(modelKey) ?? [];
+    if (existing.some((value) => value.revision === candidate.revision
+      && equalBytes(value.contentHash, candidate.contentHash))) return;
+    invariant(existing.length === 0 || allowAdditionalIdentity,
+      `render model '${modelKey}' has ambiguous content identities`);
+    invariant(existing.length < 8, `render model '${modelKey}' exceeds its attestation identity cap`);
+    existing.push(candidate);
+    attestations.set(modelKey, existing);
   };
 
   for (const artifact of artifacts) {
@@ -179,15 +190,18 @@ export function createProductionRenderModelAttestationsR10(
   installAttestation(PLAYER_RENDER_MODEL_ID_V1, playerArtifact);
 
   for (const presentation of presentations.profileCatalog.profiles) {
-    if (presentation.role !== "dropped-item") continue;
+    if (!new Set(["dropped-item", "projectile", "summon"]).has(presentation.role)) continue;
     invariant(presentations.modelsByProfileId.get(presentation.id)?.modelId === presentation.model.id,
-      `dropped presentation '${presentation.id}' has no exact attested BWM2 model`);
+      `render presentation '${presentation.id}' has no exact attested BWM2 model`);
     invariant(models.has(presentation.model.id),
-      `dropped presentation '${presentation.id}' references a model outside the attested BWM2 catalog`);
-    installAttestation(presentation.model.id, presentationArtifact);
+      `render presentation '${presentation.id}' references a model outside the attested BWM2 catalog`);
+    installAttestation(presentation.model.id, presentationArtifact, presentation.role === "summon");
   }
 
-  return Object.freeze([...attestations.values()].sort((left, right) => left.modelKey.localeCompare(right.modelKey)));
+  return Object.freeze([...attestations.values()].flat().sort((left, right) =>
+    left.modelKey.localeCompare(right.modelKey)
+      || left.revision - right.revision
+      || compareBytes(left.contentHash, right.contentHash)));
 }
 
 function attestProductionRenderPresentationsR10(
@@ -209,8 +223,8 @@ function attestProductionRenderPresentationsR10(
   invariant(candidates.length === 1, "production content has no unique render presentation catalog");
   const artifact = candidates[0];
   invariant(artifact.schemaId === RENDER_PRESENTATION_CATALOG_SCHEMA_ID_V1
-    && artifact.schemaVersion === RENDER_PRESENTATION_CATALOG_SCHEMA_V1
-    && artifact.contentVersion === 1,
+    && artifact.schemaVersion === RENDER_PRESENTATION_CATALOG_SCHEMA_CURRENT
+    && artifact.contentVersion === 2,
   "production render presentation catalog schema is unsupported");
   let installed: unknown;
   try {

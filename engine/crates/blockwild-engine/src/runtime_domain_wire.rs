@@ -2963,6 +2963,34 @@ fn write_combat_command(writer: &mut Writer, value: &CombatCommand) -> Result<()
             writer.fixed_vec3(*aim);
             writer.u64(*tick);
         }
+        CombatCommand::UseLinkedProjectile {
+            source_id,
+            expected_source_revision,
+            target_id,
+            expected_target_revision,
+            ability_id,
+            projectile_id,
+            entity_id,
+            content_domain,
+            content_id,
+            presentation_id,
+            aim,
+            tick,
+        } => {
+            writer.u8(7);
+            writer.string(source_id)?;
+            writer.u64(*expected_source_revision);
+            writer.string(target_id)?;
+            writer.u64(*expected_target_revision);
+            writer.string(ability_id)?;
+            writer.string(projectile_id)?;
+            writer.u64(entity_id.packed());
+            writer.u8(content_domain_tag(*content_domain));
+            writer.string(content_id)?;
+            writer.string(presentation_id)?;
+            writer.fixed_vec3(*aim);
+            writer.u64(*tick);
+        }
         CombatCommand::ResolveProjectile {
             projectile_id,
             expected_revision,
@@ -2975,6 +3003,32 @@ fn write_combat_command(writer: &mut Writer, value: &CombatCommand) -> Result<()
             writer.u64(*expected_revision);
             writer.option_string(target_id.as_deref())?;
             writer.fixed_vec3(*impact);
+            writer.u64(*tick);
+        }
+        CombatCommand::ResolveLinkedProjectile {
+            projectile_id,
+            expected_revision,
+            target_id,
+            impact,
+            tick,
+        } => {
+            writer.u8(9);
+            writer.string(projectile_id)?;
+            writer.u64(*expected_revision);
+            writer.option_string(target_id.as_deref())?;
+            writer.fixed_vec3(*impact);
+            writer.u64(*tick);
+        }
+        CombatCommand::AdvanceLinkedProjectile {
+            projectile_id,
+            expected_revision,
+            position,
+            tick,
+        } => {
+            writer.u8(10);
+            writer.string(projectile_id)?;
+            writer.u64(*expected_revision);
+            writer.fixed_vec3(*position);
             writer.u64(*tick);
         }
         CombatCommand::Capture {
@@ -3042,6 +3096,30 @@ fn write_combat_command(writer: &mut Writer, value: &CombatCommand) -> Result<()
             writer.option_u32(*grounding_item_code);
             writer.u64(*tick);
         }
+        CombatCommand::SummonLinked {
+            source_id,
+            summon_id,
+            entity_id,
+            content_domain,
+            content_id,
+            presentation_id,
+            position,
+            duration_ticks,
+            grounding_item_code,
+            tick,
+        } => {
+            writer.u8(8);
+            writer.string(source_id)?;
+            writer.string(summon_id)?;
+            writer.u64(entity_id.packed());
+            writer.u8(content_domain_tag(*content_domain));
+            writer.string(content_id)?;
+            writer.string(presentation_id)?;
+            writer.fixed_vec3(*position);
+            writer.option_u32(*duration_ticks);
+            writer.option_u32(*grounding_item_code);
+            writer.u64(*tick);
+        }
         CombatCommand::Advance { to_tick } => {
             writer.u8(6);
             writer.u64(*to_tick);
@@ -3062,11 +3140,38 @@ fn read_combat_command(reader: &mut Reader<'_>) -> Result<CombatCommand, WireErr
             aim: reader.fixed_vec3()?,
             tick: reader.u64()?,
         }),
+        7 => Ok(CombatCommand::UseLinkedProjectile {
+            source_id: reader.string()?,
+            expected_source_revision: reader.u64()?,
+            target_id: reader.string()?,
+            expected_target_revision: reader.u64()?,
+            ability_id: reader.string()?,
+            projectile_id: reader.string()?,
+            entity_id: unpack_entity_id(reader.u64()?)?,
+            content_domain: read_content_domain(reader.u8()?)?,
+            content_id: reader.string()?,
+            presentation_id: reader.string()?,
+            aim: reader.fixed_vec3()?,
+            tick: reader.u64()?,
+        }),
         1 => Ok(CombatCommand::ResolveProjectile {
             projectile_id: reader.string()?,
             expected_revision: reader.u64()?,
             target_id: reader.option_string()?,
             impact: reader.fixed_vec3()?,
+            tick: reader.u64()?,
+        }),
+        9 => Ok(CombatCommand::ResolveLinkedProjectile {
+            projectile_id: reader.string()?,
+            expected_revision: reader.u64()?,
+            target_id: reader.option_string()?,
+            impact: reader.fixed_vec3()?,
+            tick: reader.u64()?,
+        }),
+        10 => Ok(CombatCommand::AdvanceLinkedProjectile {
+            projectile_id: reader.string()?,
+            expected_revision: reader.u64()?,
+            position: reader.fixed_vec3()?,
             tick: reader.u64()?,
         }),
         2 => Ok(CombatCommand::Capture {
@@ -3100,6 +3205,18 @@ fn read_combat_command(reader: &mut Reader<'_>) -> Result<CombatCommand, WireErr
             source_id: reader.string()?,
             summon_id: reader.string()?,
             content_id: reader.string()?,
+            duration_ticks: reader.option_u32()?,
+            grounding_item_code: reader.option_u32()?,
+            tick: reader.u64()?,
+        }),
+        8 => Ok(CombatCommand::SummonLinked {
+            source_id: reader.string()?,
+            summon_id: reader.string()?,
+            entity_id: unpack_entity_id(reader.u64()?)?,
+            content_domain: read_content_domain(reader.u8()?)?,
+            content_id: reader.string()?,
+            presentation_id: reader.string()?,
+            position: reader.fixed_vec3()?,
             duration_ticks: reader.option_u32()?,
             grounding_item_code: reader.option_u32()?,
             tick: reader.u64()?,
@@ -5270,6 +5387,77 @@ mod tests {
         let unknown_command = writer.finish();
         let mut reader = Reader::new(&unknown_command);
         assert_eq!(read_gameplay_command(&mut reader).unwrap_err().code, "gameplay-command");
+    }
+
+    #[test]
+    fn linked_combat_wire_preserves_high_u64_unicode_and_every_system_transition() {
+        let state = blockwild_gameplay::GameplayState::new(WorldKey::new("universe", "surface"), 1);
+        let entity_id = EntityId::new(u32::MAX - 1, u32::MAX);
+        let batch = GameplayBatch::new(
+            "combat:水",
+            "combat:key:🏹",
+            GameplayActor {
+                actor_id: "gameplay-scheduler:水".into(),
+                player_id: None,
+                entity_id: None,
+                role: ActorRole::System,
+            },
+            state.identity(),
+            vec![
+                GameplayCommand::Combat(CombatCommand::UseLinkedProjectile {
+                    source_id: "source:水".into(),
+                    expected_source_revision: MAX_SAFE_U64,
+                    target_id: "target:🐉".into(),
+                    expected_target_revision: MAX_SAFE_U64 - 1,
+                    ability_id: "ability:水".into(),
+                    projectile_id: "projectile:🏹".into(),
+                    entity_id,
+                    content_domain: ContentDomain::Item,
+                    content_id: "202".into(),
+                    presentation_id: "projectile:水".into(),
+                    aim: FixedVec3 {
+                        x_milli: i32::MAX,
+                        y_milli: i32::MIN,
+                        z_milli: -1,
+                    },
+                    tick: MAX_SAFE_U64,
+                }),
+                GameplayCommand::Combat(CombatCommand::AdvanceLinkedProjectile {
+                    projectile_id: "projectile:🏹".into(),
+                    expected_revision: MAX_SAFE_U64 - 2,
+                    position: FixedVec3 {
+                        x_milli: -1,
+                        y_milli: 0,
+                        z_milli: 1,
+                    },
+                    tick: MAX_SAFE_U64,
+                }),
+                GameplayCommand::Combat(CombatCommand::ResolveLinkedProjectile {
+                    projectile_id: "projectile:🏹".into(),
+                    expected_revision: MAX_SAFE_U64 - 1,
+                    target_id: Some("target:🐉".into()),
+                    impact: FixedVec3::default(),
+                    tick: MAX_SAFE_U64,
+                }),
+                GameplayCommand::Combat(CombatCommand::SummonLinked {
+                    source_id: "source:水".into(),
+                    summon_id: "summon:🐉".into(),
+                    entity_id: EntityId::new(u32::MAX - 2, u32::MAX),
+                    content_domain: ContentDomain::CreatureProfile,
+                    content_id: "asterjaw".into(),
+                    presentation_id: "summon:asterjaw:水".into(),
+                    position: FixedVec3::default(),
+                    duration_ticks: Some(u32::MAX),
+                    grounding_item_code: Some(u32::MAX),
+                    tick: MAX_SAFE_U64,
+                }),
+            ],
+        );
+        let encoded = encode_gameplay_batch_v1(&batch).unwrap();
+        assert_eq!(decode_gameplay_batch_v1(&encoded).unwrap(), batch);
+        let mut corrupt = encoded;
+        corrupt.push(0xff);
+        assert!(decode_gameplay_batch_v1(&corrupt).is_err());
     }
 
     #[test]

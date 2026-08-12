@@ -12,7 +12,7 @@ use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, PlayerId};
 use crate::authority::{GameplayAuthoritySnapshotParts, IdempotencyEntry};
 use crate::*;
 
-pub const GAMEPLAY_SNAPSHOT_SCHEMA_VERSION: u16 = 2;
+pub const GAMEPLAY_SNAPSHOT_SCHEMA_VERSION: u16 = 3;
 pub const GAMEPLAY_SNAPSHOT_MIN_SUPPORTED_SCHEMA_VERSION: u16 = 1;
 pub const MAX_GAMEPLAY_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
 pub const MAX_GAMEPLAY_SNAPSHOT_EXTENSIONS: usize = 4 * 1024 * 1024;
@@ -596,6 +596,19 @@ unit_enum_codec!(Domain {
     Domain::Progression => 3,
     Domain::Cardforge => 4,
 });
+unit_enum_codec!(ContentDomain {
+    ContentDomain::Item => 0,
+    ContentDomain::CraftingRecipe => 1,
+    ContentDomain::MachineRecipe => 2,
+    ContentDomain::MachineProfile => 3,
+    ContentDomain::AbilitySpell => 4,
+    ContentDomain::CreatureProfile => 5,
+    ContentDomain::CreatureTypeChart => 6,
+    ContentDomain::QuestGuild => 7,
+    ContentDomain::Economy => 8,
+    ContentDomain::CardforgeCard => 9,
+    ContentDomain::CardforgePack => 10,
+});
 
 struct_codec!(GameplayRevision {
     epoch,
@@ -858,6 +871,13 @@ struct_codec!(ProjectileState {
     spawned_tick,
     expires_tick,
     revision,
+    presentation,
+});
+struct_codec!(CombatPresentationLinkV1 {
+    entity_id,
+    content_domain,
+    content_id,
+    presentation_id,
 });
 struct_codec!(CreatureCompatibilityRecord {
     record_id,
@@ -883,6 +903,8 @@ struct_codec!(SummonState {
     expires_tick,
     grounded,
     revision,
+    position,
+    presentation,
 });
 struct_codec!(CombatState {
     combatants,
@@ -1107,7 +1129,7 @@ fn decode_gameplay_state_v1(reader: &mut Reader<'_>) -> Result<GameplayState, Ga
         tick: SnapshotCodec::decode(reader)?,
         inventory: decode_inventory_state_v1(reader)?,
         machines: SnapshotCodec::decode(reader)?,
-        combat: SnapshotCodec::decode(reader)?,
+        combat: decode_combat_state_v2(reader)?,
         progression: SnapshotCodec::decode(reader)?,
         cardforge: SnapshotCodec::decode(reader)?,
     })
@@ -1123,20 +1145,195 @@ fn encode_gameplay_state_v1(value: &GameplayState, writer: &mut Writer) -> Resul
     value.inventory.recipes.encode(writer)?;
     value.inventory.furnaces.encode(writer)?;
     value.machines.encode(writer)?;
-    value.combat.encode(writer)?;
+    encode_combat_state_v2(&value.combat, writer)?;
     value.progression.encode(writer)?;
     value.cardforge.encode(writer)
 }
 
+fn decode_gameplay_state_v2(reader: &mut Reader<'_>) -> Result<GameplayState, GameplaySnapshotError> {
+    Ok(GameplayState {
+        world: SnapshotCodec::decode(reader)?,
+        revision: SnapshotCodec::decode(reader)?,
+        tick: SnapshotCodec::decode(reader)?,
+        inventory: SnapshotCodec::decode(reader)?,
+        machines: SnapshotCodec::decode(reader)?,
+        combat: decode_combat_state_v2(reader)?,
+        progression: SnapshotCodec::decode(reader)?,
+        cardforge: SnapshotCodec::decode(reader)?,
+    })
+}
+
+#[cfg(test)]
+fn encode_gameplay_state_v2(value: &GameplayState, writer: &mut Writer) -> Result<(), GameplaySnapshotError> {
+    value.world.encode(writer)?;
+    value.revision.encode(writer)?;
+    value.tick.encode(writer)?;
+    value.inventory.encode(writer)?;
+    value.machines.encode(writer)?;
+    encode_combat_state_v2(&value.combat, writer)?;
+    value.progression.encode(writer)?;
+    value.cardforge.encode(writer)
+}
+
+fn decode_combat_state_v2(reader: &mut Reader<'_>) -> Result<CombatState, GameplaySnapshotError> {
+    let combatants = BTreeMap::<String, CombatantState>::decode(reader)?;
+    let abilities = BTreeMap::<String, AbilitySpec>::decode(reader)?;
+    let legacy_projectiles = BTreeMap::<String, LegacyProjectileStateV2>::decode(reader)?;
+    let creatures = BTreeMap::<String, CreatureCompatibilityRecord>::decode(reader)?;
+    let legacy_summons = BTreeMap::<String, LegacySummonStateV2>::decode(reader)?;
+    let tick = u64::decode(reader)?;
+    Ok(CombatState {
+        combatants,
+        abilities,
+        projectiles: legacy_projectiles
+            .into_iter()
+            .map(|(id, value)| {
+                (
+                    id,
+                    ProjectileState {
+                        projectile_id: value.projectile_id,
+                        source_id: value.source_id,
+                        target_id: value.target_id,
+                        ability_id: value.ability_id,
+                        position: value.position,
+                        velocity: value.velocity,
+                        spawned_tick: value.spawned_tick,
+                        expires_tick: value.expires_tick,
+                        revision: value.revision,
+                        presentation: None,
+                    },
+                )
+            })
+            .collect(),
+        creatures,
+        summons: legacy_summons
+            .into_iter()
+            .map(|(id, value)| {
+                (
+                    id,
+                    SummonState {
+                        summon_id: value.summon_id,
+                        content_id: value.content_id,
+                        owner_id: value.owner_id,
+                        spawned_tick: value.spawned_tick,
+                        expires_tick: value.expires_tick,
+                        grounded: value.grounded,
+                        revision: value.revision,
+                        position: None,
+                        presentation: None,
+                    },
+                )
+            })
+            .collect(),
+        tick,
+    })
+}
+
+#[cfg(test)]
+fn encode_combat_state_v2(value: &CombatState, writer: &mut Writer) -> Result<(), GameplaySnapshotError> {
+    value.combatants.encode(writer)?;
+    value.abilities.encode(writer)?;
+    value
+        .projectiles
+        .iter()
+        .map(|(id, projectile)| (id.clone(), LegacyProjectileStateV2::from(projectile)))
+        .collect::<BTreeMap<_, _>>()
+        .encode(writer)?;
+    value.creatures.encode(writer)?;
+    value
+        .summons
+        .iter()
+        .map(|(id, summon)| (id.clone(), LegacySummonStateV2::from(summon)))
+        .collect::<BTreeMap<_, _>>()
+        .encode(writer)?;
+    value.tick.encode(writer)
+}
+
+#[derive(Clone)]
+struct LegacyProjectileStateV2 {
+    projectile_id: String,
+    source_id: String,
+    target_id: Option<String>,
+    ability_id: String,
+    position: FixedVec3,
+    velocity: FixedVec3,
+    spawned_tick: u64,
+    expires_tick: u64,
+    revision: u64,
+}
+
+struct_codec!(LegacyProjectileStateV2 {
+    projectile_id,
+    source_id,
+    target_id,
+    ability_id,
+    position,
+    velocity,
+    spawned_tick,
+    expires_tick,
+    revision,
+});
+
+impl From<&ProjectileState> for LegacyProjectileStateV2 {
+    fn from(value: &ProjectileState) -> Self {
+        Self {
+            projectile_id: value.projectile_id.clone(),
+            source_id: value.source_id.clone(),
+            target_id: value.target_id.clone(),
+            ability_id: value.ability_id.clone(),
+            position: value.position,
+            velocity: value.velocity,
+            spawned_tick: value.spawned_tick,
+            expires_tick: value.expires_tick,
+            revision: value.revision,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct LegacySummonStateV2 {
+    summon_id: String,
+    content_id: String,
+    owner_id: String,
+    spawned_tick: u64,
+    expires_tick: Option<u64>,
+    grounded: bool,
+    revision: u64,
+}
+
+struct_codec!(LegacySummonStateV2 {
+    summon_id,
+    content_id,
+    owner_id,
+    spawned_tick,
+    expires_tick,
+    grounded,
+    revision,
+});
+
+impl From<&SummonState> for LegacySummonStateV2 {
+    fn from(value: &SummonState) -> Self {
+        Self {
+            summon_id: value.summon_id.clone(),
+            content_id: value.content_id.clone(),
+            owner_id: value.owner_id.clone(),
+            spawned_tick: value.spawned_tick,
+            expires_tick: value.expires_tick,
+            grounded: value.grounded,
+            revision: value.revision,
+        }
+    }
+}
+
 impl GameplayAuthority {
     /// Encode the complete authority, including grants, retry receipts, replay
-    /// order, and opaque future bytes, into the canonical V2 persistence record.
+    /// order, and opaque future bytes, into the canonical V3 persistence record.
     pub fn encode_snapshot(&self, unknown_extension_bytes: &[u8]) -> Result<Vec<u8>, GameplaySnapshotError> {
         if unknown_extension_bytes.len() > MAX_GAMEPLAY_SNAPSHOT_EXTENSIONS {
             return Err(GameplaySnapshotError::new(
                 GameplaySnapshotErrorCode::Capacity,
                 0,
-                "snapshot extension exceeds the V2 bound",
+                "snapshot extension exceeds the V3 bound",
             ));
         }
         validate_snapshot_state(&self.state)?;
@@ -1268,10 +1465,10 @@ pub fn decode_gameplay_authority_snapshot(
     }
 
     let mut reader = Reader::new(&payload);
-    let state = if schema == 1 {
-        decode_gameplay_state_v1(&mut reader)?
-    } else {
-        GameplayState::decode(&mut reader)?
+    let state = match schema {
+        1 => decode_gameplay_state_v1(&mut reader)?,
+        2 => decode_gameplay_state_v2(&mut reader)?,
+        _ => GameplayState::decode(&mut reader)?,
     };
     let grants = BTreeMap::<String, ActorGrant>::decode(&mut reader)?;
     let idempotency = BTreeMap::<(String, String), IdempotencyEntry>::decode(&mut reader)?;
@@ -1481,6 +1678,18 @@ fn validate_combat(state: &CombatState) -> Result<(), GameplaySnapshotError> {
         {
             return invalid("projectile has an invalid lifetime or authority reference");
         }
+        if let Some(link) = &projectile.presentation {
+            validate_identifier("projectile presentation content", &link.content_id)?;
+            validate_identifier("projectile presentation profile", &link.presentation_id)?;
+            let elapsed_ticks = state.tick.checked_sub(projectile.spawned_tick);
+            if link.entity_id.packed() == 0
+                || link.content_domain != ContentDomain::Item
+                || elapsed_ticks != Some(projectile.revision)
+                || projectile.expires_tick <= state.tick
+            {
+                return invalid("projectile presentation link is invalid");
+            }
+        }
     }
     for (record_id, creature) in &state.creatures {
         if record_id != &creature.record_id || !state.combatants.contains_key(record_id) {
@@ -1498,6 +1707,21 @@ fn validate_combat(state: &CombatState) -> Result<(), GameplaySnapshotError> {
         validate_identifier("summon", summon_id)?;
         validate_identifier("summon content", &summon.content_id)?;
         validate_identifier("summon owner", &summon.owner_id)?;
+        if summon.presentation.is_some() != summon.position.is_some() {
+            return invalid("summon presentation link and position must have equal presence");
+        }
+        if let Some(link) = &summon.presentation {
+            validate_identifier("summon presentation content", &link.content_id)?;
+            validate_identifier("summon presentation profile", &link.presentation_id)?;
+            if link.entity_id.packed() == 0
+                || link.content_domain != ContentDomain::CreatureProfile
+                || link.content_id != summon.content_id
+                || summon.spawned_tick > state.tick
+                || summon.expires_tick.is_some_and(|expires| expires <= state.tick)
+            {
+                return invalid("summon presentation link is invalid");
+            }
+        }
     }
     Ok(())
 }
@@ -1737,6 +1961,29 @@ mod tests {
         output.bytes
     }
 
+    fn encode_v2_fixture(authority: &GameplayAuthority, extensions: &[u8]) -> Vec<u8> {
+        let parts = authority.snapshot_parts();
+        let mut payload = Writer::default();
+        encode_gameplay_state_v2(&parts.state, &mut payload).unwrap();
+        parts.grants.encode(&mut payload).unwrap();
+        parts.idempotency.encode(&mut payload).unwrap();
+        parts.idempotency_order.encode(&mut payload).unwrap();
+        parts.replay.encode(&mut payload).unwrap();
+        payload
+            .bounded_bytes(extensions, MAX_GAMEPLAY_SNAPSHOT_EXTENSIONS)
+            .unwrap();
+        let mut output = Writer::default();
+        output.raw(&SNAPSHOT_MAGIC);
+        2_u16.encode(&mut output).unwrap();
+        SNAPSHOT_FLAGS.encode(&mut output).unwrap();
+        u64::try_from(payload.bytes.len()).unwrap().encode(&mut output).unwrap();
+        authority.state.state_hash().encode(&mut output).unwrap();
+        authority.replay_hash().encode(&mut output).unwrap();
+        payload_hash(2, &payload.bytes).encode(&mut output).unwrap();
+        output.raw(&payload.bytes);
+        output.bytes
+    }
+
     fn representative_authority() -> (GameplayAuthority, GameplayBatch, AcceptedReceipt) {
         let owner = "player-élan".to_string();
         let actor_owner = "actor-é".to_string();
@@ -1960,6 +2207,7 @@ mod tests {
                 spawned_tick: 990,
                 expires_tick: 1_020,
                 revision: 1,
+                presentation: None,
             },
         );
         state.combat.creatures.insert(
@@ -1991,6 +2239,8 @@ mod tests {
                 expires_tick: Some(1_100),
                 grounded: true,
                 revision: 2,
+                position: None,
+                presentation: None,
             },
         );
         state.combat.tick = 1_000;
@@ -2294,6 +2544,62 @@ mod tests {
     }
 
     #[test]
+    fn v3_linked_combat_identity_round_trips_high_u64_unicode_and_extensions_exactly() {
+        let (authority, _, _) = representative_authority();
+        let mut state = authority.state.clone();
+        let projectile_link = CombatPresentationLinkV1 {
+            entity_id: EntityId::new(7, u32::MAX),
+            content_domain: ContentDomain::Item,
+            content_id: "202".into(),
+            presentation_id: "projectile:水:🏹".into(),
+        };
+        state
+            .combat
+            .projectiles
+            .get_mut("bolt-é")
+            .expect("fixture projectile")
+            .presentation = Some(projectile_link);
+        state
+            .combat
+            .projectiles
+            .get_mut("bolt-é")
+            .expect("fixture projectile")
+            .revision = 10;
+        let summon = state.combat.summons.get_mut("summon-é").expect("fixture summon");
+        summon.position = Some(FixedVec3 {
+            x_milli: i32::MIN + 1,
+            y_milli: 70_000,
+            z_milli: i32::MAX,
+        });
+        summon.presentation = Some(CombatPresentationLinkV1 {
+            entity_id: EntityId::new(8, u32::MAX - 1),
+            content_domain: ContentDomain::CreatureProfile,
+            content_id: summon.content_id.clone(),
+            presentation_id: "summon:水:🐉".into(),
+        });
+        let authority = GameplayAuthority::new(state);
+        let extensions = [0, 0x80, 0xff, 0, 7];
+        let bytes = authority.encode_snapshot(&extensions).unwrap();
+        let decoded = decode_gameplay_authority_snapshot(&bytes).unwrap();
+        assert_eq!(decoded.schema_version, GAMEPLAY_SNAPSHOT_SCHEMA_VERSION);
+        assert_eq!(decoded.authority.state, authority.state);
+        assert_eq!(decoded.unknown_extension_bytes, extensions);
+        assert_eq!(decoded.authority.encode_snapshot(&extensions).unwrap(), bytes);
+
+        let mut corrupt = authority.state.clone();
+        corrupt
+            .combat
+            .projectiles
+            .get_mut("bolt-é")
+            .expect("fixture projectile")
+            .revision = 9;
+        let error = GameplayAuthority::new(corrupt)
+            .encode_snapshot(&extensions)
+            .expect_err("linked projectile revision must attest exact elapsed ticks");
+        assert_eq!(error.code, GameplaySnapshotErrorCode::InvalidValue);
+    }
+
+    #[test]
     fn install_is_atomic_and_restores_grants_for_new_commands() {
         let (authority, _, _) = representative_authority();
         let bytes = authority.encode_snapshot(&[]).expect("snapshot encodes");
@@ -2404,18 +2710,35 @@ mod tests {
     #[test]
     fn snapshot_v2_fixture_vector_is_stable() {
         let (authority, _, _) = representative_authority();
-        let bytes = authority
-            .encode_snapshot(&[0, 0x80, 0xff, 7, 9])
-            .expect("fixture snapshot encodes");
+        let bytes = encode_v2_fixture(&authority, &[0, 0x80, 0xff, 7, 9]);
         let actual = format!(
-            "schema={}\nbytes={}\nstate_hash={}\nreplay_hash={}\nsnapshot_hash={}\n",
-            GAMEPLAY_SNAPSHOT_SCHEMA_VERSION,
+            "schema=2\nbytes={}\nstate_hash={}\nreplay_hash={}\nsnapshot_hash={}\n",
             bytes.len(),
             authority.state.state_hash().to_hex(),
             authority.replay_hash().to_hex(),
             canonical_gameplay_snapshot_hash(&bytes).to_hex()
         );
         assert_eq!(actual, include_str!("../fixtures/gameplay-snapshot-v2.txt"));
+        let decoded = decode_gameplay_authority_snapshot(&bytes).unwrap();
+        assert_eq!(decoded.schema_version, 2);
+        assert!(
+            decoded
+                .authority
+                .state
+                .combat
+                .projectiles
+                .values()
+                .all(|projectile| projectile.presentation.is_none())
+        );
+        assert!(
+            decoded
+                .authority
+                .state
+                .combat
+                .summons
+                .values()
+                .all(|summon| summon.presentation.is_none() && summon.position.is_none())
+        );
     }
 
     #[test]
@@ -2436,10 +2759,13 @@ mod tests {
         assert!(decoded.authority.state.inventory.item_instance_metadata.is_empty());
         assert_eq!(decoded.authority.state, authority.state);
         assert_eq!(decoded.authority.replay_hash(), authority.replay_hash());
-        let v2 = decoded
+        let current = decoded
             .authority
             .encode_snapshot(&decoded.unknown_extension_bytes)
             .unwrap();
-        assert_eq!(decode_gameplay_authority_snapshot(&v2).unwrap().schema_version, 2);
+        assert_eq!(
+            decode_gameplay_authority_snapshot(&current).unwrap().schema_version,
+            GAMEPLAY_SNAPSHOT_SCHEMA_VERSION
+        );
     }
 }

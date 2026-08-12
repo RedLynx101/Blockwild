@@ -1330,6 +1330,57 @@ fn projectile_magic_applies_damage_status_and_cooldown_deterministically() {
 }
 
 #[test]
+fn linked_projectile_cumulative_fixed_step_remainder_is_signed_and_exact() {
+    let run = |velocity: i32, steps: u64| {
+        let mut position = FixedVec3::default();
+        for revision in 0..steps {
+            position = advance_projectile_position_v1(
+                position,
+                FixedVec3 {
+                    x_milli: velocity,
+                    ..FixedVec3::default()
+                },
+                revision,
+                1,
+            )
+            .unwrap();
+        }
+        position.x_milli
+    };
+
+    assert_eq!(run(1, 19), 0);
+    assert_eq!(run(-1, 19), 0);
+    assert_eq!(run(1, 20), 1);
+    assert_eq!(run(-1, 20), -1);
+    assert_eq!(run(1, 21), 1);
+    assert_eq!(run(-1, 21), -1);
+}
+
+#[test]
+fn linked_summon_is_system_only_until_spell_resource_authority_exists() {
+    let mut authority = reference_authority();
+    let before = authority.state.identity();
+    let receipt = authority.apply_batch(&batch(
+        &authority,
+        "linked-summon-player-rejected",
+        vec![GameplayCommand::Combat(CombatCommand::SummonLinked {
+            source_id: "player-one".into(),
+            summon_id: "summon-水".into(),
+            entity_id: EntityId::new(u32::MAX, u32::MAX),
+            content_domain: ContentDomain::CreatureProfile,
+            content_id: "creature-水".into(),
+            presentation_id: "summon-水-profile".into(),
+            position: FixedVec3::default(),
+            duration_ticks: Some(20),
+            grounding_item_code: None,
+            tick: authority.state.tick,
+        })],
+    ));
+    assert_eq!(rejection(receipt).code, RejectionCode::Unauthorized);
+    assert_eq!(authority.state.identity(), before);
+}
+
+#[test]
 fn malformed_identifiers_and_wrong_world_are_rejected() {
     let mut authority = reference_authority();
     let mut malformed = batch(

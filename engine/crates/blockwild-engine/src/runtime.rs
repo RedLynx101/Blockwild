@@ -35,8 +35,8 @@ use blockwild_gameplay::{
     ItemInstanceMetadataV1, ItemStack, MetadataBlobStore, PlayerDropStageRequestV1, PlayerInventoryBindingV1,
     RejectionCode, RemoveEmptyDropCustodyCommand, RotationMicroturnsV1, SlotRef, TransferCommand, WorldKey,
     WorldViewAcceptedReceiptV1, WorldViewAuthorityV1, WorldViewBatchV1, WorldViewCommandV1, WorldViewReceiptV1,
-    compile_content_bundle, decode_gameplay_authority_snapshot, install_content_bundle, materialize_content_runtime,
-    stage_player_drop_v1,
+    advance_projectile_position_v1, compile_content_bundle, decode_gameplay_authority_snapshot, install_content_bundle,
+    materialize_content_runtime, stage_player_drop_v1,
 };
 use blockwild_generation::{
     Block as GeneratedBlock, ChunkPayloadV2, GENERATOR_VERSION, GenerateChunkRequestV2, GenerationDiagnostics,
@@ -76,10 +76,11 @@ use blockwild_simulation::{
     GravityProfileV1, LiquidFrontierResultV1, LiquidFrontierStepV1, PHYSICS_CONTACT_HEAD_SUBMERGED,
     PHYSICS_CONTACT_IN_LIQUID, PHYSICS_CONTROL_CROUCH, PHYSICS_CONTROL_JUMP, PHYSICS_CONTROL_SPRINT, PathJobResultV1,
     PathJobV1, PhysicsBodyV1, PhysicsControlsV1, PhysicsEventKindV1, PhysicsStepInputV1, PhysicsStepResultV1,
-    PhysicsSwimProfileV1, RAYCAST_MAX_VISITED_CELLS_V1, SimulationJobIdentityV1, Vec3 as SimulationVec3,
-    VoxelRayHitKindV1, VoxelRaycastQueryV1, WorldAddressV1 as SimulationWorldAddressV1, WorldIdentityV1,
-    WorldReadWindowV1, WorldRevisionV1, derive_camera_pose_v1, find_path, raycast_action_target, solve_air_zones,
-    step_liquid_frontier, step_physics,
+    PhysicsSwimProfileV1, ProjectileContactKindV1, ProjectileSweepV1, RAYCAST_MAX_VISITED_CELLS_V1,
+    SimulationJobIdentityV1, SweepTargetV1, Vec3 as SimulationVec3, VoxelRayHitKindV1, VoxelRaycastQueryV1,
+    WorldAddressV1 as SimulationWorldAddressV1, WorldIdentityV1, WorldReadWindowV1, WorldRevisionV1,
+    derive_camera_pose_v1, find_path, raycast_action_target, solve_air_zones, step_liquid_frontier, step_physics,
+    sweep_projectile_contacts_batch,
 };
 use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, PlayerId, seed_stream};
 
@@ -118,6 +119,8 @@ pub const INTEGRATED_RUNTIME_MAX_RECOVERY_ASSEMBLERS: usize = 2;
 pub const INTEGRATED_RUNTIME_MAX_HYDRATED_EXPORTS: usize = 2;
 pub const INTEGRATED_RUNTIME_CONTENT_MAX_ENTRIES_V1: usize = blockwild_gameplay::MAX_CONTENT_ENTRIES;
 pub const INTEGRATED_RUNTIME_MAX_ENTITY_SCHEDULE_JOBS_V1: usize = 256;
+
+type CombatScheduleCommandsV1 = (Vec<GameplayCommand>, Vec<EntityCommand>, BTreeMap<EntityId, String>);
 pub const INTEGRATED_RUNTIME_MAX_ECOLOGY_SCHEDULE_JOBS_V1: usize = 64;
 pub const INTEGRATED_RUNTIME_MAX_PATH_SCHEDULE_JOBS_V1: usize = 64;
 pub const INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1: usize = 25;
@@ -1294,6 +1297,201 @@ impl IntegratedRuntimeV2 {
         self.render_presentation_profile_binding_v1(ContentRenderPresentationRole::Machine, presentation_id)
     }
 
+    /// Resolve a combat role by its persisted profile id, then require that
+    /// the command's explicit primary content ref belongs to that exact
+    /// profile. This prevents a valid profile id from being paired with a
+    /// different item/creature and avoids ambiguous ref-first summon lookup.
+    #[must_use]
+    pub fn combat_render_presentation_binding_v1(
+        &self,
+        role: ContentRenderPresentationRole,
+        presentation_id: &str,
+        domain: ContentDomain,
+        content_id: &str,
+    ) -> IntegratedRuntimeRenderPresentationBindingV1<'_> {
+        match self
+            .gameplay_content_runtime
+            .render_presentation_profile_binding(role, presentation_id)
+        {
+            ContentRenderPresentationBinding::Exact { catalog, profile }
+                if profile
+                    .content_refs
+                    .iter()
+                    .any(|reference| reference.domain == domain && reference.id == content_id) =>
+            {
+                if role == ContentRenderPresentationRole::Summon
+                    && !profile
+                        .content_refs
+                        .iter()
+                        .any(|reference| reference.domain == ContentDomain::AbilitySpell)
+                {
+                    return IntegratedRuntimeRenderPresentationBindingV1::Unmapped;
+                }
+                Self::integrated_render_presentation_binding_v1(ContentRenderPresentationBinding::Exact {
+                    catalog,
+                    profile,
+                })
+            }
+            ContentRenderPresentationBinding::Exact { .. } => IntegratedRuntimeRenderPresentationBindingV1::Unmapped,
+            ContentRenderPresentationBinding::Missing { catalog, blocker }
+                if blocker
+                    .content_refs
+                    .iter()
+                    .any(|reference| reference.domain == domain && reference.id == content_id) =>
+            {
+                if role == ContentRenderPresentationRole::Summon
+                    && !blocker
+                        .content_refs
+                        .iter()
+                        .any(|reference| reference.domain == ContentDomain::AbilitySpell)
+                {
+                    return IntegratedRuntimeRenderPresentationBindingV1::Unmapped;
+                }
+                Self::integrated_render_presentation_binding_v1(ContentRenderPresentationBinding::Missing {
+                    catalog,
+                    blocker,
+                })
+            }
+            ContentRenderPresentationBinding::Missing { .. } => IntegratedRuntimeRenderPresentationBindingV1::Unmapped,
+            binding => Self::integrated_render_presentation_binding_v1(binding),
+        }
+    }
+
+    #[must_use]
+    pub fn projectile_render_presentation_binding_v1(
+        &self,
+        presentation_id: &str,
+        domain: ContentDomain,
+        content_id: &str,
+    ) -> IntegratedRuntimeRenderPresentationBindingV1<'_> {
+        self.combat_render_presentation_binding_v1(
+            ContentRenderPresentationRole::Projectile,
+            presentation_id,
+            domain,
+            content_id,
+        )
+    }
+
+    #[must_use]
+    pub fn summon_render_presentation_binding_v1(
+        &self,
+        presentation_id: &str,
+        domain: ContentDomain,
+        content_id: &str,
+    ) -> IntegratedRuntimeRenderPresentationBindingV1<'_> {
+        self.combat_render_presentation_binding_v1(
+            ContentRenderPresentationRole::Summon,
+            presentation_id,
+            domain,
+            content_id,
+        )
+    }
+
+    fn validate_combat_presentation_bindings_v1(&self) -> Result<(), IntegratedRuntimeError> {
+        for projectile in self.gameplay.state.combat.projectiles.values() {
+            let Some(link) = &projectile.presentation else {
+                continue;
+            };
+            if link.content_domain != ContentDomain::Item
+                || matches!(
+                    self.combat_render_presentation_binding_v1(
+                        ContentRenderPresentationRole::Projectile,
+                        &link.presentation_id,
+                        link.content_domain,
+                        &link.content_id,
+                    ),
+                    IntegratedRuntimeRenderPresentationBindingV1::Unmapped
+                )
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "combat-projectile-presentation",
+                    "projectile presentation id and primary content ref do not identify one authored role profile",
+                ));
+            }
+        }
+        for summon in self.gameplay.state.combat.summons.values() {
+            let Some(link) = &summon.presentation else {
+                continue;
+            };
+            if link.content_domain != ContentDomain::CreatureProfile
+                || summon.content_id != link.content_id
+                || matches!(
+                    self.combat_render_presentation_binding_v1(
+                        ContentRenderPresentationRole::Summon,
+                        &link.presentation_id,
+                        link.content_domain,
+                        &link.content_id,
+                    ),
+                    IntegratedRuntimeRenderPresentationBindingV1::Unmapped
+                )
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "combat-summon-presentation",
+                    "summon presentation id and creature content ref do not identify one authored role profile",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Creation is stricter than restore: an installed blocker may keep an
+    /// already-persisted link loadable and extraction-blocked, but new linked
+    /// authority can only be created from an exact authored profile.
+    fn validate_new_combat_presentation_commands_v1(
+        &self,
+        batch: &GameplayBatch,
+    ) -> Result<(), IntegratedRuntimeError> {
+        for command in &batch.commands {
+            let GameplayCommand::Combat(command) = command else {
+                continue;
+            };
+            let (role, presentation_id, domain, content_id, error_code) = match command {
+                CombatCommand::UseLinkedProjectile {
+                    presentation_id,
+                    content_domain,
+                    content_id,
+                    ..
+                } => (
+                    ContentRenderPresentationRole::Projectile,
+                    presentation_id,
+                    *content_domain,
+                    content_id,
+                    "combat-projectile-presentation",
+                ),
+                CombatCommand::SummonLinked {
+                    presentation_id,
+                    content_domain,
+                    content_id,
+                    ..
+                } => (
+                    ContentRenderPresentationRole::Summon,
+                    presentation_id,
+                    *content_domain,
+                    content_id,
+                    "combat-summon-presentation",
+                ),
+                _ => continue,
+            };
+            let role_domain_is_exact = match role {
+                ContentRenderPresentationRole::Projectile => domain == ContentDomain::Item,
+                ContentRenderPresentationRole::Summon => domain == ContentDomain::CreatureProfile,
+                _ => false,
+            };
+            if !role_domain_is_exact
+                || !matches!(
+                    self.combat_render_presentation_binding_v1(role, presentation_id, domain, content_id),
+                    IntegratedRuntimeRenderPresentationBindingV1::Exact { .. }
+                )
+            {
+                return Err(IntegratedRuntimeError::new(
+                    error_code,
+                    "new linked combat authority requires one exact authored role profile and primary content ref",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn integrated_render_presentation_binding_v1<'a>(
         binding: ContentRenderPresentationBinding<'a>,
     ) -> IntegratedRuntimeRenderPresentationBindingV1<'a> {
@@ -2280,6 +2478,7 @@ impl IntegratedRuntimeV2 {
             &candidate.entities,
         )
         .map_err(|error| IntegratedRuntimeError::new("recovery-world-view", error.to_string()))?;
+        candidate.validate_combat_presentation_bindings_v1()?;
         if candidate
             .player
             .as_ref()
@@ -3485,6 +3684,9 @@ impl IntegratedRuntimeV2 {
             }
         }
         for command in &batch.gameplay {
+            if let Err(error) = self.validate_new_combat_presentation_commands_v1(command) {
+                return reject_batch(&batch.batch_id, error.code, &error.message, before);
+            }
             let receipt = staged_gameplay.apply_batch(command);
             if let GameplayReceipt::Rejected { rejection, .. } = &receipt {
                 return reject_batch(
@@ -3529,6 +3731,9 @@ impl IntegratedRuntimeV2 {
                 sequence.max(receipt.sequence)
             });
         if let Err(error) = staged_runtime.sync_entity_schedules(&entity_receipts) {
+            return reject_batch(&batch.batch_id, error.code, &error.message, before);
+        }
+        if let Err(error) = staged_runtime.validate_combat_presentation_bindings_v1() {
             return reject_batch(&batch.batch_id, error.code, &error.message, before);
         }
         *self = staged_runtime;
@@ -5611,7 +5816,31 @@ impl IntegratedRuntimeV2 {
         }
         let mut candidate_scheduler = self.entity_scheduler.clone();
         let mut commands = Vec::with_capacity(due.len().saturating_mul(2));
+        let combat_entity_ids = self
+            .gameplay
+            .state
+            .combat
+            .projectiles
+            .values()
+            .filter_map(|projectile| projectile.presentation.as_ref().map(|link| link.entity_id))
+            .chain(
+                self.gameplay
+                    .state
+                    .combat
+                    .summons
+                    .values()
+                    .filter_map(|summon| summon.presentation.as_ref().map(|link| link.entity_id)),
+            )
+            .collect::<BTreeSet<_>>();
         for token in due {
+            if combat_entity_ids.contains(&token.id) {
+                // R6 combat presentation entities advance only in the atomic
+                // R7/R6 combat transaction below. The receipt synchronizer may
+                // schedule them again, but each due token is removed here
+                // before any generic aging/range mutation can race that lane.
+                candidate_scheduler.remove(token.id);
+                continue;
+            }
             let Some(current_revision) = self.entities.entity_revision(token.id) else {
                 candidate_scheduler.remove(token.id);
                 self.entity_schedule_diagnostics.entity_jobs_rejected_stale = self
@@ -5860,6 +6089,8 @@ impl IntegratedRuntimeV2 {
         self.advance_entity_scheduler()?;
         self.advance_ecology_scheduler();
 
+        let (combat_commands, mut combat_entity_commands, combat_health_syncs) = self.combat_schedule_commands_v1()?;
+
         let expected_tick = self.gameplay.state.tick;
         let expected_world_view_tick = self.world_view.state.tick;
         if self.tick <= expected_tick || self.tick <= expected_world_view_tick {
@@ -5869,6 +6100,12 @@ impl IntegratedRuntimeV2 {
             ));
         }
         let batch_id = format!("gameplay-schedule:{}", self.tick);
+        let mut gameplay_commands = combat_commands;
+        gameplay_commands.push(GameplayCommand::AdvanceSchedule(GameplayScheduleAdvanceV1 {
+            expected_tick,
+            to_tick: self.tick,
+            machine_budget: INTEGRATED_RUNTIME_MAX_MACHINES_PER_STEP as u16,
+        }));
         let batch = GameplayBatch::new(
             &batch_id,
             &batch_id,
@@ -5879,11 +6116,7 @@ impl IntegratedRuntimeV2 {
                 role: ActorRole::System,
             },
             self.gameplay.state.identity(),
-            vec![GameplayCommand::AdvanceSchedule(GameplayScheduleAdvanceV1 {
-                expected_tick,
-                to_tick: self.tick,
-                machine_budget: INTEGRATED_RUNTIME_MAX_MACHINES_PER_STEP as u16,
-            })],
+            gameplay_commands,
         );
         let mut staged_gameplay = self.gameplay.clone();
         match staged_gameplay.apply_batch(&batch) {
@@ -5892,6 +6125,73 @@ impl IntegratedRuntimeV2 {
                 return Err(IntegratedRuntimeError::new(
                     "gameplay-schedule",
                     format!("{:?}: {}", rejection.code, rejection.message),
+                ));
+            }
+        }
+        let combat_health_expectations = combat_health_syncs.clone();
+        let mut combat_health_commands = Vec::with_capacity(combat_health_syncs.len());
+        for (target_entity_id, target_record_id) in combat_health_syncs {
+            let combatant = staged_gameplay
+                .state
+                .combat
+                .combatants
+                .get(&target_record_id)
+                .ok_or_else(|| {
+                    IntegratedRuntimeError::new(
+                        "combat-target-health",
+                        "projectile target combatant disappeared before R6 health synchronization",
+                    )
+                })?;
+            let entity = self.entities.hot().get(&target_entity_id).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "combat-target-health",
+                    "projectile target R6 entity disappeared before health synchronization",
+                )
+            })?;
+            let mut record = entity.record.clone();
+            record.health = combatant.health as f32;
+            record.maximum_health = combatant.max_health as f32;
+            combat_health_commands.push(EntityCommand::ReplaceCompatibilityRecord {
+                id: target_entity_id,
+                value: record,
+            });
+        }
+        combat_health_commands.append(&mut combat_entity_commands);
+        combat_entity_commands = combat_health_commands;
+        let mut staged_entities = self.entities.clone();
+        let entity_receipt = if combat_entity_commands.is_empty() {
+            None
+        } else {
+            let sequence = self.entity_command_sequence.saturating_add(1).max(1);
+            Some(
+                staged_entities
+                    .apply_batch(&EntityCommandBatch {
+                        schema: ENTITY_COMMAND_SCHEMA,
+                        sequence,
+                        expected_revision: staged_entities.revision(),
+                        tick: self.tick,
+                        commands: combat_entity_commands,
+                    })
+                    .map_err(|error| IntegratedRuntimeError::new("combat-entity-schedule", error.to_string()))?,
+            )
+        };
+        for (target_entity_id, target_record_id) in &combat_health_expectations {
+            let combatant = staged_gameplay
+                .state
+                .combat
+                .combatants
+                .get(target_record_id)
+                .expect("health synchronization retained its combatant");
+            let record = staged_entities.compatibility_record(*target_entity_id).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "combat-target-health",
+                    "projectile target R6 entity disappeared during health synchronization",
+                )
+            })?;
+            if record.health != combatant.health as f32 || record.maximum_health != combatant.max_health as f32 {
+                return Err(IntegratedRuntimeError::new(
+                    "combat-target-health",
+                    "linked projectile target R7 and R6 health did not commit exactly",
                 ));
             }
         }
@@ -5921,11 +6221,195 @@ impl IntegratedRuntimeV2 {
                 ));
             }
         }
-        validate_world_view_runtime_links_v1(&staged_world_view.state, &staged_gameplay.state, &self.entities)
+        validate_world_view_runtime_links_v1(&staged_world_view.state, &staged_gameplay.state, &staged_entities)
             .map_err(|error| IntegratedRuntimeError::new("world-view-schedule", error.to_string()))?;
         self.gameplay = staged_gameplay;
+        self.entities = staged_entities;
         self.world_view = staged_world_view;
+        if let Some(receipt) = entity_receipt {
+            self.entity_command_sequence = self.entity_command_sequence.max(receipt.sequence);
+            self.sync_entity_schedules(std::slice::from_ref(&receipt))?;
+        }
+        self.validate_combat_presentation_bindings_v1()?;
         Ok(())
+    }
+
+    fn combat_schedule_commands_v1(&self) -> Result<CombatScheduleCommandsV1, IntegratedRuntimeError> {
+        let mut gameplay_commands = Vec::new();
+        let mut entity_commands = Vec::new();
+        let mut health_syncs = BTreeMap::new();
+        for projectile in self.gameplay.state.combat.projectiles.values() {
+            let Some(link) = &projectile.presentation else {
+                continue;
+            };
+            let entity = self.entities.hot().get(&link.entity_id).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "combat-projectile-residency",
+                    "linked projectile must remain a hot R6 entity",
+                )
+            })?;
+            let origin = SimulationVec3::new(
+                f64::from(projectile.position.x_milli) / 1_000.0,
+                f64::from(projectile.position.y_milli) / 1_000.0,
+                f64::from(projectile.position.z_milli) / 1_000.0,
+            );
+            let end_fixed =
+                advance_projectile_position_v1(projectile.position, projectile.velocity, projectile.revision, 1)
+                    .map_err(|error| IntegratedRuntimeError::new("combat-projectile-motion", error.message))?;
+            let end = SimulationVec3::new(
+                f64::from(end_fixed.x_milli) / 1_000.0,
+                f64::from(end_fixed.y_milli) / 1_000.0,
+                f64::from(end_fixed.z_milli) / 1_000.0,
+            );
+            let displacement = end - origin;
+            let radius = f64::from(entity.components.locomotion.radius);
+            let lower = SimulationVec3::new(
+                origin.x.min(end.x) - radius,
+                origin.y.min(end.y) - radius,
+                origin.z.min(end.z) - radius,
+            );
+            let upper = SimulationVec3::new(
+                origin.x.max(end.x) + radius,
+                origin.y.max(end.y) + radius,
+                origin.z.max(end.z) + radius,
+            );
+            let low = [
+                floor_i32(lower.x + 0.5)?,
+                floor_i32(lower.y + 0.5)?,
+                floor_i32(lower.z + 0.5)?,
+            ];
+            let high = [
+                floor_i32(upper.x + 0.5)?,
+                floor_i32(upper.y + 0.5)?,
+                floor_i32(upper.z + 0.5)?,
+            ];
+            let span = |axis: usize| {
+                high[axis]
+                    .checked_sub(low[axis])
+                    .and_then(|value| value.checked_add(1))
+                    .and_then(|value| u16::try_from(value).ok())
+                    .ok_or_else(|| {
+                        IntegratedRuntimeError::new(
+                            "combat-projectile-window",
+                            "projectile sweep exceeds the bounded R4 read window",
+                        )
+                    })
+            };
+            let window = self.capture_simulation_window(
+                ReadOriginV1 {
+                    x: low[0],
+                    y: low[1],
+                    z: low[2],
+                },
+                ReadSizeV1 {
+                    x: span(0)?,
+                    y: span(1)?,
+                    z: span(2)?,
+                },
+            )?;
+            let targets = self
+                .entities
+                .hot()
+                .iter()
+                .filter(|(entity_id, candidate)| {
+                    **entity_id != link.entity_id
+                        && candidate.record.external_entity_id != projectile.source_id
+                        && candidate.record.health > 0.0
+                        && self
+                            .gameplay
+                            .state
+                            .combat
+                            .combatants
+                            .contains_key(&candidate.record.external_entity_id)
+                })
+                .map(|(entity_id, candidate)| {
+                    let center = SimulationVec3::new(
+                        f64::from(candidate.record.position.x),
+                        f64::from(candidate.record.position.y),
+                        f64::from(candidate.record.position.z),
+                    );
+                    let body_radius = f64::from(candidate.components.locomotion.radius);
+                    let half_height = f64::from(candidate.components.locomotion.half_height);
+                    SweepTargetV1 {
+                        target_id: entity_id.packed(),
+                        bounds: AabbV1::new(
+                            SimulationVec3::new(center.x - body_radius, center.y - half_height, center.z - body_radius),
+                            SimulationVec3::new(center.x + body_radius, center.y + half_height, center.z + body_radius),
+                        ),
+                    }
+                })
+                .collect::<Vec<_>>();
+            let sweep = ProjectileSweepV1 {
+                projectile_id: link.entity_id.packed(),
+                origin,
+                displacement,
+                radius,
+            };
+            let contact = sweep_projectile_contacts_batch(&window, &[sweep], &targets)
+                .map_err(|error| IntegratedRuntimeError::new("combat-projectile-sweep", error.to_string()))?
+                .into_iter()
+                .next();
+            if let Some(contact) = contact {
+                let target_id = match (contact.kind, contact.target_id) {
+                    (ProjectileContactKindV1::Target, Some(target)) => {
+                        let target_entity_id = EntityId::new(target as u32, (target >> 32) as u32);
+                        self.entities.compatibility_record(target_entity_id).map(|record| {
+                            health_syncs.insert(target_entity_id, record.external_entity_id.clone());
+                            record.external_entity_id.clone()
+                        })
+                    }
+                    _ => None,
+                };
+                gameplay_commands.push(GameplayCommand::Combat(CombatCommand::ResolveLinkedProjectile {
+                    projectile_id: projectile.projectile_id.clone(),
+                    expected_revision: projectile.revision,
+                    target_id,
+                    impact: simulation_position_to_fixed_v1(contact.hit.point)?,
+                    tick: self.tick,
+                }));
+                entity_commands.push(EntityCommand::Despawn {
+                    id: link.entity_id,
+                    reason: DespawnReason::NaturalRange,
+                });
+            } else {
+                gameplay_commands.push(GameplayCommand::Combat(CombatCommand::AdvanceLinkedProjectile {
+                    projectile_id: projectile.projectile_id.clone(),
+                    expected_revision: projectile.revision,
+                    position: end_fixed,
+                    tick: self.tick,
+                }));
+                if projectile.expires_tick <= self.tick {
+                    entity_commands.push(EntityCommand::Despawn {
+                        id: link.entity_id,
+                        reason: DespawnReason::NaturalRange,
+                    });
+                } else {
+                    entity_commands.push(EntityCommand::UpdateMotion {
+                        id: link.entity_id,
+                        position: EntityVec3::new(end.x as f32, end.y as f32, end.z as f32),
+                        yaw: entity.record.yaw,
+                        velocity: EntityVec3::new(
+                            projectile.velocity.x_milli as f32 / 1_000.0,
+                            projectile.velocity.y_milli as f32 / 1_000.0,
+                            projectile.velocity.z_milli as f32 / 1_000.0,
+                        ),
+                    });
+                }
+            }
+        }
+        for summon in self.gameplay.state.combat.summons.values() {
+            if summon
+                .expires_tick
+                .is_some_and(|expires_tick| expires_tick <= self.tick)
+                && let Some(link) = &summon.presentation
+            {
+                entity_commands.push(EntityCommand::Despawn {
+                    id: link.entity_id,
+                    reason: DespawnReason::NaturalRange,
+                });
+            }
+        }
+        Ok((gameplay_commands, entity_commands, health_syncs))
     }
 
     /// Advance the bounded canonical prefix of dropped items and resolve
@@ -8271,6 +8755,25 @@ fn floor_i32(value: f64) -> Result<i32, IntegratedRuntimeError> {
     }
 }
 
+fn simulation_position_to_fixed_v1(value: SimulationVec3) -> Result<FixedVec3, IntegratedRuntimeError> {
+    let component = |value: f64| {
+        let value = (value * 1_000.0).round();
+        if !value.is_finite() || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+            Err(IntegratedRuntimeError::new(
+                "combat-projectile-impact",
+                "projectile contact is outside fixed-point coordinate bounds",
+            ))
+        } else {
+            Ok(value as i32)
+        }
+    };
+    Ok(FixedVec3 {
+        x_milli: component(value.x)?,
+        y_milli: component(value.y)?,
+        z_milli: component(value.z)?,
+    })
+}
+
 fn parse_custom_bool(values: &BTreeMap<String, String>, key: &str, fallback: bool) -> bool {
     values
         .get(key)
@@ -10228,7 +10731,7 @@ mod tests {
     use blockwild_entity::{
         ENTITY_COMMAND_SCHEMA, EntityCommand, EntityCompatibilityRecord, EntityResidency, MountSeat, MountState,
     };
-    use blockwild_gameplay::{ItemDefinition, ItemStack};
+    use blockwild_gameplay::{AbilitySpec, CombatantState, DamageKind, ItemDefinition, ItemStack};
     use blockwild_network::{NetworkCapabilityV1, NetworkPeerKindV1, NetworkPeerRoleV1};
 
     use super::*;
@@ -10312,6 +10815,548 @@ mod tests {
             })
             .unwrap();
         runtime
+    }
+
+    fn linked_projectile_runtime_v1(speed_milli_per_second: u32, aim_x_milli: i32) -> IntegratedRuntimeV2 {
+        let item = ContentArtifact {
+            domain: ContentDomain::Item,
+            id: "202".into(),
+            schema_id: "item-definition".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["item:202".into()],
+            canonical_bytes: br#"{"id":202,"maxStack":64,"name":"Linked Arrow"}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let missing_item = ContentArtifact {
+            domain: ContentDomain::Item,
+            id: "377".into(),
+            schema_id: "item-definition".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["item:377".into()],
+            canonical_bytes: br#"{"id":377,"maxStack":64,"name":"Missing Linked Bolt"}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let summon_spell = ContentArtifact {
+            domain: ContentDomain::AbilitySpell,
+            id: "move:summon-test".into(),
+            schema_id: "creature-move".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["ability-spell:move:summon-test".into()],
+            canonical_bytes: br#"{"activeSeconds":0.1,"channel":"physical","cooldownSeconds":1,"exertionCost":0,"id":"summon-test","name":"Summon Test","packets":[{"share":1,"type":"wild"}],"power":1,"radius":1,"range":2,"recoverySeconds":0.2,"shape":"contact","target":"hostile","type":"wild","verticalTolerance":1,"windupSeconds":0.2,"worldImpact":"visual"}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let summon_creature = ContentArtifact {
+            domain: ContentDomain::CreatureProfile,
+            id: "summon-test".into(),
+            schema_id: "creature-profile".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["creature-profile:summon-test".into()],
+            canonical_bytes: br#"{"captureProfile":"gentle","kind":"summon-test","moves":{"basicMoveId":"summon-test","unlocks":[{"level":1,"moveId":"summon-test"}]},"naturalTypes":["wild"],"stats":{"maximumLevel":50}}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let wild_type = ContentArtifact {
+            domain: ContentDomain::CreatureTypeChart,
+            id: "type:wild".into(),
+            schema_id: "creature-type".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["creature-type-chart:type:wild".into()],
+            canonical_bytes: br##"{"color":"#5a9d55","glyph":"W","id":"wild","name":"Wild"}"##.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let presentation = ContentArtifact {
+            domain: ContentDomain::MachineProfile,
+            id: blockwild_gameplay::RENDER_PRESENTATION_CATALOG_ID.into(),
+            schema_id: "render-presentation-catalog".into(),
+            schema_version: 1,
+            content_version: 7,
+            aliases: vec!["machine-profile:render-presentations".into()],
+            canonical_bytes: br#"{"catalog":{"byteLength":1,"canonicalHash":"11111111111111111111111111111111","format":"blockwild-compiled-model-catalog-v2","modelCount":2,"nodeCount":2,"revision":1,"schema":2,"sha256":"1111111111111111111111111111111111111111111111111111111111111111","source":"linked combat test"},"integrationBlockers":["combat-general-r7-r6-health-parity-not-authoritative"],"missingProfiles":[{"contentRefs":[{"domain":"item","id":"377"}],"id":"missing:projectile:test","reason":"Fixture intentionally has no exact projectile model.","role":"projectile","sourcePresentationIds":["fixture:missing-projectile"]}],"profiles":[{"contentRefs":[{"domain":"item","id":"202"}],"id":"projectile:test","model":{"category":4,"groundYBits":null,"id":"test-arrow-model","label":"Test Arrow","nodeCount":1},"role":"projectile"},{"contentRefs":[{"domain":"ability-spell","id":"move:summon-test"},{"domain":"creature-profile","id":"summon-test"}],"id":"summon:test","model":{"category":1,"groundYBits":0,"id":"test-summon-model","label":"Test Summon","nodeCount":1},"role":"summon"}],"schema":1}"#.to_vec(),
+            unknown_extension_bytes: vec![0x80, 0xff, 7],
+        };
+        let artifacts = vec![
+            item,
+            missing_item,
+            summon_spell,
+            summon_creature,
+            wild_type,
+            presentation,
+        ];
+        let bundle = compile_content_bundle("linked-combat-test-v1", artifacts.clone()).unwrap();
+        let mut runtime = runtime_with_section_config(IntegratedRuntimeConfigV2 {
+            content_hash: bundle.manifest.manifest_hash,
+            ..IntegratedRuntimeConfigV2::default()
+        });
+        let page = ContentInstallPageWireV1 {
+            install_id: "linked-combat-content".into(),
+            manifest_schema: bundle.manifest.schema_version,
+            source_revision: bundle.manifest.source_revision,
+            manifest_hash: bundle.manifest.manifest_hash,
+            domains: bundle.manifest.domains,
+            page_index: 0,
+            page_count: 1,
+            artifacts: bundle.artifacts.clone(),
+        };
+        let page_bytes = crate::encode_content_install_page_v1(&page).unwrap();
+        runtime
+            .install_content_page(
+                page,
+                CanonicalHash(blockwild_runtime_wire::wire_checksum_v1(&page_bytes)),
+            )
+            .unwrap();
+
+        let mut state = runtime.gameplay.state.clone();
+        state.combat.abilities.insert(
+            "ability:linked-arrow".into(),
+            AbilitySpec {
+                ability_id: "ability:linked-arrow".into(),
+                damage_kind: DamageKind::Physical,
+                base_damage: 5,
+                range_milli: 10_000,
+                cooldown_ticks: 1,
+                stamina_cost: 0,
+                mana_cost: 0,
+                projectile_speed_milli: Some(speed_milli_per_second),
+                status: None,
+            },
+        );
+        for (record_id, x_milli) in [("source:水", 8_000), ("target:水", aim_x_milli)] {
+            state.combat.combatants.insert(
+                record_id.into(),
+                CombatantState {
+                    record_id: record_id.into(),
+                    owner_id: None,
+                    revision: 0,
+                    position: FixedVec3 {
+                        x_milli,
+                        y_milli: 70_000,
+                        z_milli: 8_000,
+                    },
+                    health: 20,
+                    max_health: 20,
+                    stamina: 20,
+                    mana: 20,
+                    armor: 0,
+                    resist_per_mille: BTreeMap::new(),
+                    statuses: BTreeMap::new(),
+                    cooldown_until: BTreeMap::new(),
+                    alive: true,
+                },
+            );
+        }
+        state.revision.sequence = state.revision.sequence.saturating_add(1);
+        state.revision.combat = state.revision.combat.saturating_add(1);
+        runtime.gameplay = GameplayAuthority::new(state);
+        runtime
+            .gameplay
+            .grant_actor(GAMEPLAY_SCHEDULER_ACTOR_ID_V1, ActorGrant::system())
+            .unwrap();
+
+        let entity_id = EntityId::new(3, 0xffff_fffe);
+        let direction = if aim_x_milli >= 8_000 { 1.0 } else { -1.0 };
+        let mut record = EntityCompatibilityRecord::new("projectile:水", "projectile:水", "202");
+        record.class = EntityClass::Projectile;
+        record.position = EntityVec3::new(8.0, 70.0, 8.0);
+        record.velocity = EntityVec3::new(direction * speed_milli_per_second as f32 / 1_000.0, 0.0, 0.0);
+        let mut batch = IntegratedRuntimeBatchV2::empty("spawn-linked-projectile", runtime.identity());
+        batch.entities.push(EntityCommandBatch {
+            schema: ENTITY_COMMAND_SCHEMA,
+            sequence: runtime.entity_command_sequence.saturating_add(1),
+            expected_revision: runtime.entities.revision(),
+            tick: 0,
+            commands: vec![EntityCommand::SpawnAt {
+                id: entity_id,
+                record,
+                residency: EntityResidency::Hot,
+            }],
+        });
+        batch.gameplay.push(GameplayBatch::new(
+            "spawn-linked-projectile",
+            "spawn-linked-projectile",
+            GameplayActor {
+                actor_id: GAMEPLAY_SCHEDULER_ACTOR_ID_V1.into(),
+                player_id: None,
+                entity_id: None,
+                role: ActorRole::System,
+            },
+            runtime.gameplay.state.identity(),
+            vec![GameplayCommand::Combat(CombatCommand::UseLinkedProjectile {
+                source_id: "source:水".into(),
+                expected_source_revision: 0,
+                target_id: "target:水".into(),
+                expected_target_revision: 0,
+                ability_id: "ability:linked-arrow".into(),
+                projectile_id: "projectile:水".into(),
+                entity_id,
+                content_domain: ContentDomain::Item,
+                content_id: "202".into(),
+                presentation_id: "projectile:test".into(),
+                aim: FixedVec3 {
+                    x_milli: aim_x_milli,
+                    y_milli: 70_000,
+                    z_milli: 8_000,
+                },
+                tick: 0,
+            })],
+        ));
+        let receipt = runtime.commit(batch);
+        assert!(receipt.accepted(), "linked projectile spawn rejected: {receipt:?}");
+        runtime
+    }
+
+    fn spawn_linked_projectile_target_entity_v1(runtime: &mut IntegratedRuntimeV2) -> EntityId {
+        let id = EntityId::new(4, 0xffff_fffd);
+        let mut record = EntityCompatibilityRecord::new("target:水", "target:水", "target-creature");
+        record.class = EntityClass::Creature;
+        record.position = EntityVec3::new(9.0, 70.0, 8.0);
+        record.health = 20.0;
+        record.maximum_health = 20.0;
+        let mut batch = IntegratedRuntimeBatchV2::empty("spawn-linked-target", runtime.identity());
+        batch.entities.push(EntityCommandBatch {
+            schema: ENTITY_COMMAND_SCHEMA,
+            sequence: runtime.entity_command_sequence.saturating_add(1),
+            expected_revision: runtime.entities.revision(),
+            tick: runtime.tick,
+            commands: vec![EntityCommand::SpawnAt {
+                id,
+                record,
+                residency: EntityResidency::Hot,
+            }],
+        });
+        let receipt = runtime.commit(batch);
+        assert!(
+            receipt.accepted(),
+            "linked projectile target spawn rejected: {receipt:?}"
+        );
+        id
+    }
+
+    #[test]
+    fn linked_projectile_fixed_steps_keep_signed_r7_r6_motion_exact_and_restore() {
+        for (aim_x_milli, expected_twenty, expected_twenty_one) in [(9_000, 8_001, 8_001), (7_000, 7_999, 7_999)] {
+            let mut runtime = linked_projectile_runtime_v1(1, aim_x_milli);
+            let projectile = runtime.gameplay.state.combat.projectiles.get("projectile:水").unwrap();
+            let entity_id = projectile.presentation.as_ref().unwrap().entity_id;
+            let mut timestamp = 1_000_000_u64;
+            runtime.step(timestamp, 8_000).unwrap();
+            let mut previous_entity_revision = runtime.entities.entity_revision(entity_id).unwrap();
+            for tick in 1..=21 {
+                timestamp += INTEGRATED_RUNTIME_FIXED_STEP_US;
+                assert_eq!(runtime.step(timestamp, 8_000).unwrap().fixed_steps, 1);
+                assert_eq!(runtime.tick, tick);
+                let projectile = runtime.gameplay.state.combat.projectiles.get("projectile:水").unwrap();
+                let entity = runtime.entities.hot().get(&entity_id).unwrap();
+                assert_eq!(
+                    runtime.entities.entity_revision(entity_id).unwrap(),
+                    previous_entity_revision + 1
+                );
+                previous_entity_revision += 1;
+                assert_eq!(
+                    (entity.record.position.x * 1_000.0).round() as i32,
+                    projectile.position.x_milli
+                );
+                if tick == 19 {
+                    assert_eq!(projectile.position.x_milli, 8_000);
+                } else if tick == 20 {
+                    assert_eq!(projectile.position.x_milli, expected_twenty);
+                } else if tick == 21 {
+                    assert_eq!(projectile.position.x_milli, expected_twenty_one);
+                }
+            }
+            let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+            let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+                &checkpoint,
+                integrated_runtime_checkpoint_hash_v1(&checkpoint),
+            )
+            .unwrap();
+            assert_eq!(restored.identity(), runtime.identity());
+            assert_eq!(
+                restored.gameplay.state.combat.projectiles["projectile:水"],
+                runtime.gameplay.state.combat.projectiles["projectile:水"]
+            );
+        }
+    }
+
+    #[test]
+    fn linked_projectile_hit_commits_exact_target_health_or_rolls_back_every_domain() {
+        let mut runtime = linked_projectile_runtime_v1(20_000, 9_000);
+        let target_id = spawn_linked_projectile_target_entity_v1(&mut runtime);
+        runtime.tick = 1;
+        runtime.advance_entity_and_gameplay_schedules().unwrap();
+        assert_eq!(runtime.gameplay.state.combat.combatants["target:水"].health, 15);
+        assert_eq!(runtime.entities.compatibility_record(target_id).unwrap().health, 15.0);
+        assert!(!runtime.gameplay.state.combat.projectiles.contains_key("projectile:水"));
+
+        let mut rejected = linked_projectile_runtime_v1(20_000, 9_000);
+        spawn_linked_projectile_target_entity_v1(&mut rejected);
+        rejected
+            .gameplay
+            .state
+            .combat
+            .combatants
+            .get_mut("target:水")
+            .unwrap()
+            .max_health = 0;
+        rejected.step(1_000_000, 8_000).unwrap();
+        let before_step = rejected.identity();
+        let error = rejected.step(1_050_000, 8_000).unwrap_err();
+        assert_eq!(error.code, "combat-entity-schedule");
+        assert_eq!(rejected.identity(), before_step);
+        assert_eq!(rejected.gameplay.state.combat.combatants["target:水"].health, 20);
+        assert!(rejected.gameplay.state.combat.projectiles.contains_key("projectile:水"));
+    }
+
+    #[test]
+    fn missing_linked_projectile_is_loadable_but_new_creation_fails_atomically() {
+        let mut runtime = linked_projectile_runtime_v1(20_000, 9_000);
+        assert!(matches!(
+            runtime.projectile_render_presentation_binding_v1("missing:projectile:test", ContentDomain::Item, "377",),
+            IntegratedRuntimeRenderPresentationBindingV1::Missing {
+                blocker_id: "missing:projectile:test",
+            }
+        ));
+
+        let before = runtime.identity();
+        let before_entity_sequence = runtime.entity_command_sequence;
+        let entity_id = EntityId::new(9, 0xffff_fffc);
+        let mut record = EntityCompatibilityRecord::new("projectile:missing:水", "projectile:missing:水", "377");
+        record.class = EntityClass::Projectile;
+        record.position = EntityVec3::new(8.0, 70.0, 8.0);
+        record.velocity = EntityVec3::new(20.0, 0.0, 0.0);
+        let mut batch = IntegratedRuntimeBatchV2::empty("spawn-missing-linked-projectile", runtime.identity());
+        batch.entities.push(EntityCommandBatch {
+            schema: ENTITY_COMMAND_SCHEMA,
+            sequence: before_entity_sequence.saturating_add(1),
+            expected_revision: runtime.entities.revision(),
+            tick: runtime.tick,
+            commands: vec![EntityCommand::SpawnAt {
+                id: entity_id,
+                record,
+                residency: EntityResidency::Hot,
+            }],
+        });
+        batch.gameplay.push(GameplayBatch::new(
+            "spawn-missing-linked-projectile",
+            "spawn-missing-linked-projectile",
+            GameplayActor {
+                actor_id: GAMEPLAY_SCHEDULER_ACTOR_ID_V1.into(),
+                player_id: None,
+                entity_id: None,
+                role: ActorRole::System,
+            },
+            runtime.gameplay.state.identity(),
+            vec![GameplayCommand::Combat(CombatCommand::UseLinkedProjectile {
+                source_id: "source:水".into(),
+                expected_source_revision: 1,
+                target_id: "target:水".into(),
+                expected_target_revision: 0,
+                ability_id: "ability:linked-arrow".into(),
+                projectile_id: "projectile:missing:水".into(),
+                entity_id,
+                content_domain: ContentDomain::Item,
+                content_id: "377".into(),
+                presentation_id: "missing:projectile:test".into(),
+                aim: FixedVec3 {
+                    x_milli: 9_000,
+                    y_milli: 70_000,
+                    z_milli: 8_000,
+                },
+                tick: runtime.gameplay.state.combat.tick,
+            })],
+        ));
+        let receipt = runtime.commit(batch);
+        assert!(!receipt.accepted());
+        assert_eq!(runtime.identity(), before);
+        assert_eq!(runtime.entity_command_sequence, before_entity_sequence);
+        assert!(runtime.entities.residency(entity_id).is_none());
+        assert!(
+            !runtime
+                .gameplay
+                .state
+                .combat
+                .projectiles
+                .contains_key("projectile:missing:水")
+        );
+
+        let linked_entity_id = runtime.gameplay.state.combat.projectiles["projectile:水"]
+            .presentation
+            .as_ref()
+            .expect("exact linked projectile")
+            .entity_id;
+        let mut missing_record = runtime
+            .entities
+            .compatibility_record(linked_entity_id)
+            .expect("exact linked R6 entity")
+            .clone();
+        missing_record.kind_key = "377".into();
+        let link = runtime
+            .gameplay
+            .state
+            .combat
+            .projectiles
+            .get_mut("projectile:水")
+            .expect("exact linked projectile")
+            .presentation
+            .as_mut()
+            .expect("exact link");
+        link.content_id = "377".into();
+        link.presentation_id = "missing:projectile:test".into();
+        // This branch models a persisted V3 state whose exact catalog entry
+        // became Missing after authoring. Rebuild the authority around that
+        // state so the test does not retain an unrelated Exact-spawn replay
+        // tail while proving decode/restore remains fail-closed and loadable.
+        runtime.gameplay = GameplayAuthority::new(runtime.gameplay.state.clone());
+        runtime
+            .gameplay
+            .grant_actor(GAMEPLAY_SCHEDULER_ACTOR_ID_V1, ActorGrant::system())
+            .unwrap();
+        runtime.gameplay_authority_revision = runtime.gameplay_authority_revision.saturating_add(1);
+        let mut rebind = IntegratedRuntimeBatchV2::empty("restore-missing-linked-projectile", runtime.identity());
+        rebind.entities.push(EntityCommandBatch {
+            schema: ENTITY_COMMAND_SCHEMA,
+            sequence: runtime.entity_command_sequence.saturating_add(1),
+            expected_revision: runtime.entities.revision(),
+            tick: runtime.tick,
+            commands: vec![EntityCommand::ReplaceCompatibilityRecord {
+                id: linked_entity_id,
+                value: missing_record,
+            }],
+        });
+        let receipt = runtime.commit(rebind);
+        assert!(receipt.accepted(), "missing linked restore setup rejected: {receipt:?}");
+        runtime.validate_combat_presentation_bindings_v1().unwrap();
+        let gameplay_snapshot = runtime.gameplay.encode_snapshot(&[0x80, 0xff]).unwrap();
+        let decoded = decode_gameplay_authority_snapshot(&gameplay_snapshot)
+            .expect("persisted missing link remains loadable and extraction-blocked");
+        assert_eq!(decoded.authority.state, runtime.gameplay.state);
+        let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint),
+        )
+        .expect("missing linked runtime checkpoint restores exactly");
+        assert_eq!(restored.identity(), runtime.identity());
+        assert!(matches!(
+            restored.projectile_render_presentation_binding_v1("missing:projectile:test", ContentDomain::Item, "377",),
+            IntegratedRuntimeRenderPresentationBindingV1::Missing { .. }
+        ));
+    }
+
+    #[test]
+    fn linked_summon_spawn_restore_expiry_and_cross_domain_rollback_are_exact() {
+        let mut runtime = linked_projectile_runtime_v1(1, 9_000);
+        let summon_batch = |runtime: &IntegratedRuntimeV2,
+                            batch_id: &str,
+                            summon_id: &str,
+                            entity_id: EntityId,
+                            entity_expires_tick: u64| {
+            let position = FixedVec3 {
+                x_milli: 12_000,
+                y_milli: 70_000,
+                z_milli: 8_000,
+            };
+            let mut record = EntityCompatibilityRecord::new(summon_id, summon_id, "summon-test");
+            record.class = EntityClass::Creature;
+            record.position = EntityVec3::new(12.0, 70.0, 8.0);
+            let mut batch = IntegratedRuntimeBatchV2::empty(batch_id, runtime.identity());
+            batch.entities.push(EntityCommandBatch {
+                schema: ENTITY_COMMAND_SCHEMA,
+                sequence: runtime.entity_command_sequence.saturating_add(1),
+                expected_revision: runtime.entities.revision(),
+                tick: runtime.tick,
+                commands: vec![
+                    EntityCommand::SpawnAt {
+                        id: entity_id,
+                        record,
+                        residency: EntityResidency::Hot,
+                    },
+                    EntityCommand::SetSummonState {
+                        id: entity_id,
+                        value: Some(blockwild_entity::SummonState {
+                            origin_realm_key: "fixture-realm".into(),
+                            summoner_id: Some("summoner:水".into()),
+                            expires_tick: entity_expires_tick,
+                            grounded: false,
+                            grounding_item_key: None,
+                        }),
+                    },
+                ],
+            });
+            batch.gameplay.push(GameplayBatch::new(
+                batch_id,
+                batch_id,
+                GameplayActor {
+                    actor_id: GAMEPLAY_SCHEDULER_ACTOR_ID_V1.into(),
+                    player_id: None,
+                    entity_id: None,
+                    role: ActorRole::System,
+                },
+                runtime.gameplay.state.identity(),
+                vec![GameplayCommand::Combat(CombatCommand::SummonLinked {
+                    source_id: "summoner:水".into(),
+                    summon_id: summon_id.into(),
+                    entity_id,
+                    content_domain: ContentDomain::CreatureProfile,
+                    content_id: "summon-test".into(),
+                    presentation_id: "summon:test".into(),
+                    position,
+                    duration_ticks: Some(2),
+                    grounding_item_code: None,
+                    tick: runtime.gameplay.state.combat.tick,
+                })],
+            ));
+            batch
+        };
+
+        let summon_entity_id = EntityId::new(10, 0xffff_fffb);
+        let receipt = runtime.commit(summon_batch(
+            &runtime,
+            "spawn-linked-summon",
+            "summon:水",
+            summon_entity_id,
+            2,
+        ));
+        assert!(receipt.accepted(), "linked summon spawn rejected: {receipt:?}");
+        assert!(runtime.gameplay.state.combat.summons.contains_key("summon:水"));
+        assert_eq!(runtime.entities.residency(summon_entity_id), Some(EntityResidency::Hot));
+
+        let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint),
+        )
+        .unwrap();
+        assert_eq!(restored.identity(), runtime.identity());
+        assert_eq!(
+            restored.gameplay.state.combat.summons["summon:水"],
+            runtime.gameplay.state.combat.summons["summon:水"]
+        );
+
+        let before_rejected = runtime.identity();
+        let invalid_entity_id = EntityId::new(11, 0xffff_fffa);
+        let rejected = runtime.commit(summon_batch(
+            &runtime,
+            "reject-mismatched-linked-summon",
+            "summon:bad:水",
+            invalid_entity_id,
+            99,
+        ));
+        assert!(!rejected.accepted());
+        assert_eq!(runtime.identity(), before_rejected);
+        assert!(runtime.entities.residency(invalid_entity_id).is_none());
+        assert!(!runtime.gameplay.state.combat.summons.contains_key("summon:bad:水"));
+
+        runtime.step(1_000_000, 8_000).unwrap();
+        runtime.step(1_050_000, 8_000).unwrap();
+        assert!(runtime.gameplay.state.combat.summons.contains_key("summon:水"));
+        assert_eq!(runtime.entities.residency(summon_entity_id), Some(EntityResidency::Hot));
+        runtime.step(1_100_000, 8_000).unwrap();
+        assert!(!runtime.gameplay.state.combat.summons.contains_key("summon:水"));
+        assert!(runtime.entities.residency(summon_entity_id).is_none());
     }
 
     fn player_one_bootstrap_query() -> PlayerBootstrapStatusQueryWireV1 {

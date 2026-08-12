@@ -6,6 +6,7 @@ import {
   RUST_GAMEPLAY_SNAPSHOT_HEADER_BYTES_R7,
   RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V1,
   RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V2,
+  RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V3,
   RustGameplaySnapshotEnvelopeErrorR7,
   cloneValidatedRustGameplaySnapshotR7,
   cloneValidatedRustGameplaySnapshotR7V1,
@@ -14,6 +15,7 @@ import {
   rustGameplaySnapshotFileHashR7,
   rustGameplaySnapshotFileHashR7V1,
 } from "../app/game/rust-gameplay-snapshot-r7.ts";
+import { TypeScriptCanonicalHasher } from "../app/game/rust-kernel-shadow.ts";
 
 const FIXTURE_ROOT = new URL("./fixtures/rust-engine/r7/gameplay/", import.meta.url);
 
@@ -47,6 +49,19 @@ async function fixtureV2() {
     bytes: Uint8Array.from(Buffer.from(encoded.trim(), "base64")),
     expected: JSON.parse(expectedText) as FixtureExpectation,
   };
+}
+
+async function syntheticFixtureV3() {
+  const { bytes: v2 } = await fixtureV2();
+  const bytes = v2.slice();
+  new DataView(bytes.buffer).setUint16(8, RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V3, true);
+  const payload = bytes.subarray(RUST_GAMEPLAY_SNAPSHOT_HEADER_BYTES_R7);
+  const payloadHash = new TypeScriptCanonicalHasher("blockwild.gameplay.snapshot.payload.v1")
+    .writeU16(RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V3)
+    .writeBytes(payload)
+    .finishHex();
+  bytes.set(Uint8Array.from(Buffer.from(payloadHash, "hex")), 52);
+  return { bytes };
 }
 
 function assertFixtureParity(bytes: Uint8Array, expected: FixtureExpectation) {
@@ -91,8 +106,16 @@ test("Rust current V2 gameplay fixture has exact native browser envelope parity"
   assert.equal(inspectRustGameplaySnapshotEnvelopeR7V1(bytes).schema, RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V2);
 });
 
-test("snapshot preflight rejects every outer-envelope corruption class for V1 and V2", async () => {
-  const fixtures = await Promise.all([fixtureV1(), fixtureV2()]);
+test("current V3 gameplay envelope is schema-bound while its native payload remains opaque", async () => {
+  const { bytes } = await syntheticFixtureV3();
+  const envelope = inspectRustGameplaySnapshotEnvelopeR7(bytes);
+  assert.equal(envelope.schema, RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V3);
+  assert.deepEqual(envelope.payload, bytes.subarray(RUST_GAMEPLAY_SNAPSHOT_HEADER_BYTES_R7));
+  assert.deepEqual(cloneValidatedRustGameplaySnapshotR7(bytes), bytes);
+});
+
+test("snapshot preflight rejects every outer-envelope corruption class for V1, V2, and V3", async () => {
+  const fixtures = await Promise.all([fixtureV1(), fixtureV2(), syntheticFixtureV3()]);
   for (const { bytes } of fixtures) {
     for (const cut of [0, 7, 8, 10, 12, 20, 36, 52, 67, 68, bytes.byteLength - 1]) {
       assert.throws(() => inspectRustGameplaySnapshotEnvelopeR7(bytes.subarray(0, cut)), RustGameplaySnapshotEnvelopeErrorR7);
@@ -100,7 +123,7 @@ test("snapshot preflight rejects every outer-envelope corruption class for V1 an
 
     const magic = bytes.slice(); magic[0] ^= 0xff;
     assert.throws(() => inspectRustGameplaySnapshotEnvelopeR7(magic), (error: unknown) => error instanceof RustGameplaySnapshotEnvelopeErrorR7 && error.code === "magic");
-    for (const unsupported of [0, 3, 0xffff]) {
+    for (const unsupported of [0, 4, 0xffff]) {
       const schema = bytes.slice(); new DataView(schema.buffer).setUint16(8, unsupported, true);
       assert.throws(() => inspectRustGameplaySnapshotEnvelopeR7(schema), (error: unknown) => error instanceof RustGameplaySnapshotEnvelopeErrorR7 && error.code === "schema");
     }
@@ -118,7 +141,9 @@ test("snapshot preflight rejects every outer-envelope corruption class for V1 an
       8,
       bytes[8] === RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V1
         ? RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V2
-        : RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V1,
+        : bytes[8] === RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V2
+          ? RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V3
+          : RUST_GAMEPLAY_SNAPSHOT_SCHEMA_R7_V1,
       true,
     );
     assert.throws(
@@ -130,7 +155,7 @@ test("snapshot preflight rejects every outer-envelope corruption class for V1 an
 });
 
 test("snapshot inspection owns buffers and cannot alias later mutation", async () => {
-  for (const { bytes } of await Promise.all([fixtureV1(), fixtureV2()])) {
+  for (const { bytes } of await Promise.all([fixtureV1(), fixtureV2(), syntheticFixtureV3()])) {
     const envelope = inspectRustGameplaySnapshotEnvelopeR7(bytes);
     const original = envelope.bytes[0];
     bytes[0] ^= 0xff;

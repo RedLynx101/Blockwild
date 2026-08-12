@@ -694,6 +694,25 @@ fn authorize_command(
             "gameplay schedule advance requires the system actor",
         ));
     }
+    if matches!(
+        command,
+        GameplayCommand::Combat(
+            CombatCommand::ResolveLinkedProjectile { .. }
+                | CombatCommand::AdvanceLinkedProjectile { .. }
+                | CombatCommand::SummonLinked { .. },
+        )
+    ) {
+        if actor.role == crate::ActorRole::System
+            && grant.role == crate::ActorRole::System
+            && grant.scopes.contains(&Scope::System)
+        {
+            return Ok(());
+        }
+        return Err(Rejection::new(
+            RejectionCode::Unauthorized,
+            "linked projectile resolution requires the integrated system actor",
+        ));
+    }
     if grant.scopes.contains(&Scope::System) {
         return Ok(());
     }
@@ -761,11 +780,15 @@ fn authorize_command(
             require_scope(grant, Scope::CombatSelf)?;
             let source = match command {
                 CombatCommand::UseAbility { source_id, .. }
+                | CombatCommand::UseLinkedProjectile { source_id, .. }
                 | CombatCommand::Capture { source_id, .. }
                 | CombatCommand::Pacify { source_id, .. }
                 | CombatCommand::Care { source_id, .. }
-                | CombatCommand::Summon { source_id, .. } => Some(source_id.as_str()),
-                CombatCommand::ResolveProjectile { projectile_id, .. } => state
+                | CombatCommand::Summon { source_id, .. }
+                | CombatCommand::SummonLinked { source_id, .. } => Some(source_id.as_str()),
+                CombatCommand::ResolveProjectile { projectile_id, .. }
+                | CombatCommand::ResolveLinkedProjectile { projectile_id, .. }
+                | CombatCommand::AdvanceLinkedProjectile { projectile_id, .. } => state
                     .combat
                     .projectiles
                     .get(projectile_id)
