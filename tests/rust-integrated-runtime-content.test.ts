@@ -6,6 +6,8 @@ import test from "node:test";
 import fixture from "./fixtures/rust-engine/r7/content-metadata-roundtrip-v1.json";
 import {
   canonicalMetadataBlobHashV1,
+  RUST_BLOCK_ACTION_CATALOG_ID,
+  RUST_BLOCK_ACTION_CATALOG_SCHEMA,
   compileBlockwildProductionContent,
   compileRustProductionContent,
   requireBlockwildProductionContent,
@@ -14,6 +16,8 @@ import {
   type RustContentDomain,
   type RustContentSourceEntry,
 } from "../app/game/rust-integrated-runtime-content";
+import { isDirectionallyPlacedBlock } from "../app/game/block-facing";
+import { BLOCKS, ITEMS, itemForBlock } from "../app/game/data";
 import {
   attestPlayerRenderProfileV1,
   BLOCKWILD_PLAYER_RENDER_PROFILE_V1,
@@ -79,10 +83,10 @@ test("production compiler covers all eleven canonical domains without blockers o
   const bundle = compileBlockwildProductionContent();
   assert.deepEqual(bundle.blockers, []);
   assert.ok(bundle.manifest);
-  assert.equal(bundle.artifacts.length, 3_246);
-  assert.equal(bundle.manifest.manifestHash, "a316b90f596786e390284a7b66cd64fc");
+  assert.equal(bundle.artifacts.length, 3_247);
+  assert.equal(bundle.manifest.manifestHash, "782888fed91858df90284a7b66cd64fc");
   const expected = {
-    item: { count: 537, hash: "26a64b02690d4fefc8ba9e4a7709ccef" },
+    item: { count: 538, hash: "eb55bc552f18afe1c88e1191e821f9e8" },
     "crafting-recipe": { count: 198, hash: "d1d9d49ba264b18cc83a527d0fca8a83" },
     "machine-recipe": { count: 46, hash: "ed2dd1f09fc42315c85a98f1da201cdf" },
     "machine-profile": { count: 14, hash: "b0d1fa9becc124cdc81a2845cbc5ab14" },
@@ -100,7 +104,7 @@ test("production compiler covers all eleven canonical domains without blockers o
   assert.deepEqual(drift.map((blocker) => blocker.code), ["count-drift", "manifest-hash-drift"]);
   const required = requireBlockwildProductionContent();
   assert.equal(required.report.ok, true);
-  assert.equal(required.report.entryCount, 3_246);
+  assert.equal(required.report.entryCount, 3_247);
   const rejected = compileRustProductionContent("fixture-v1", [
     { domain: "item", id: "same", schemaId: "test", schemaVersion: 1, contentVersion: 1, value: 1 },
     { domain: "item", id: "same", schemaId: "test", schemaVersion: 1, contentVersion: 1, value: 2 },
@@ -109,6 +113,54 @@ test("production compiler covers all eleven canonical domains without blockers o
   assert.equal(rejectedReport.ok, false);
   assert.equal(rejectedReport.manifestHash, null);
   assert.equal(rejectedReport.blockers[0].code, "duplicate-id");
+});
+
+test("production block actions are a bounded exact projection of authored block gameplay", () => {
+  const bundle = compileBlockwildProductionContent();
+  const artifact = bundle.artifacts.find((candidate) =>
+    candidate.domain === "item" && candidate.id === RUST_BLOCK_ACTION_CATALOG_ID);
+  assert.ok(artifact);
+  assert.equal(artifact.schemaId, "block-action-catalog");
+  assert.equal(artifact.schemaVersion, RUST_BLOCK_ACTION_CATALOG_SCHEMA);
+  assert.equal(artifact.canonicalBytes.length, 46_567);
+  assert.equal(artifact.blobHash, "af5b1a0732499ea8c83a571e32b3e97f");
+
+  const decoded = JSON.parse(decoder.decode(artifact.canonicalBytes)) as {
+    schema: number;
+    profiles: Array<Record<string, unknown>>;
+  };
+  const authored = Object.values(BLOCKS).sort((left, right) => left.id - right.id);
+  assert.equal(decoded.schema, 1);
+  assert.equal(decoded.profiles.length, 313);
+  assert.deepEqual(decoded.profiles.map((profile) => profile.id), authored.map((definition) => definition.id));
+
+  for (let index = 0; index < authored.length; index += 1) {
+    const definition = authored[index];
+    const mappedItem = itemForBlock(definition.id);
+    const topologyFlags: string[] = [];
+    if (isDirectionallyPlacedBlock(definition.id)) topologyFlags.push("directional");
+    if (definition.shape === "door" || definition.shape === "bed") topologyFlags.push("paired");
+    if (definition.shape === "torch") topologyFlags.push("attached");
+    if (definition.verticalConnectGroup !== undefined) topologyFlags.push("vertical-connected");
+    if (definition.connectGroup !== undefined) topologyFlags.push("horizontal-connected");
+    if (definition.waterlogged === true) topologyFlags.push("waterlogged");
+    if (definition.shape === "aquarium" || definition.shape === "exhibit") topologyFlags.push("bounded-network");
+    assert.deepEqual(decoded.profiles[index], {
+      id: definition.id,
+      hardness: definition.hardness,
+      solid: definition.solid,
+      replaceable: definition.replaceable === true,
+      preferredTool: definition.preferredTool,
+      requiredTier: definition.requiredTier,
+      ...(ITEMS[mappedItem] === undefined ? {} : { item: mappedItem }),
+      ...(definition.liquid === undefined ? {} : { liquid: definition.liquid }),
+      ...(definition.shape === undefined ? {} : { shape: definition.shape }),
+      ...(definition.collisionHeight === undefined ? {} : { collisionHeight: definition.collisionHeight }),
+      ...(definition.verticalConnectGroup === undefined ? {} : { verticalConnectGroup: definition.verticalConnectGroup }),
+      ...(definition.connectGroup === undefined ? {} : { connectGroup: definition.connectGroup }),
+      topologyFlags,
+    }, `block ${definition.id}`);
+  }
 });
 
 test("production player profile is derived from and pinned to the tracked BWM2 artifact", async () => {

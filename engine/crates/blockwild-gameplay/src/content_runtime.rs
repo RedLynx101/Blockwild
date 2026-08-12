@@ -12,10 +12,92 @@ pub const MAX_CONTENT_JSON_DEPTH: usize = 64;
 pub const MAX_CONTENT_JSON_NODES: usize = 65_536;
 pub const MAX_CONTENT_REFERENCES: usize = 262_144;
 pub const MAX_CONTENT_RESOURCES_PER_ENTRY: usize = 4_096;
+pub const MAX_BLOCK_ACTION_PROFILES: usize = 4_096;
+pub const BLOCK_ACTION_CATALOG_ID: &str = "block-actions";
+pub const CONTENT_ACTION_FIXED_SCALE: u64 = 1_000_000;
+
+pub const BLOCK_TOPOLOGY_DIRECTIONAL: u16 = 1 << 0;
+pub const BLOCK_TOPOLOGY_PAIRED: u16 = 1 << 1;
+pub const BLOCK_TOPOLOGY_ATTACHED: u16 = 1 << 2;
+pub const BLOCK_TOPOLOGY_VERTICAL_CONNECTED: u16 = 1 << 3;
+pub const BLOCK_TOPOLOGY_HORIZONTAL_CONNECTED: u16 = 1 << 4;
+pub const BLOCK_TOPOLOGY_WATERLOGGED: u16 = 1 << 5;
+pub const BLOCK_TOPOLOGY_BOUNDED_NETWORK: u16 = 1 << 6;
+pub const BLOCK_TOPOLOGY_MASK: u16 = BLOCK_TOPOLOGY_DIRECTIONAL
+    | BLOCK_TOPOLOGY_PAIRED
+    | BLOCK_TOPOLOGY_ATTACHED
+    | BLOCK_TOPOLOGY_VERTICAL_CONNECTED
+    | BLOCK_TOPOLOGY_HORIZONTAL_CONNECTED
+    | BLOCK_TOPOLOGY_WATERLOGGED
+    | BLOCK_TOPOLOGY_BOUNDED_NETWORK;
+
+const BLOCK_ACTION_SHAPES: &[&str] = &[
+    "alchemy",
+    "apiary",
+    "aquarium",
+    "aquatic",
+    "archive-shelf",
+    "barrel",
+    "bed",
+    "bush",
+    "cartography",
+    "chair",
+    "chest",
+    "cross",
+    "cube",
+    "distillery",
+    "door",
+    "dragon-egg",
+    "exhibit",
+    "fence",
+    "fireplace",
+    "fruit",
+    "gate",
+    "gold-pile",
+    "incubator",
+    "lightning-bug-jar",
+    "mooncap",
+    "morph-loom",
+    "orb-healer",
+    "orb-rack",
+    "shelf",
+    "stool",
+    "sugarworks",
+    "table",
+    "tall-flower",
+    "tome-display",
+    "torch",
+    "wayshrine",
+    "wild-hive",
+];
+
+const BLOCK_ACTION_VERTICAL_CONNECT_GROUPS: &[&str] = &[
+    "abyss-bloom",
+    "brinegrass",
+    "cave-reed",
+    "cave-root",
+    "cultivated-flower",
+    "double-tall-grass",
+    "egg-reed",
+    "featherwrack",
+    "glow-kelp",
+    "lumen-kelp",
+    "lumenreed",
+    "luminous-algae",
+    "pearlfan",
+    "reed-bloom",
+    "river-ribbon",
+    "rope-ladder",
+    "sailkelp",
+    "star-coral",
+    "tidevine",
+    "wild-peppermint",
+];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum ContentSchema {
     ItemDefinition,
+    BlockActionCatalog,
     CraftingRecipe,
     BlueprintDefinition,
     AlchemyRecipe,
@@ -55,6 +137,7 @@ impl ContentSchema {
     pub const fn as_id(self) -> &'static str {
         match self {
             Self::ItemDefinition => "item-definition@1",
+            Self::BlockActionCatalog => "block-action-catalog@1",
             Self::CraftingRecipe => "crafting-recipe@1",
             Self::BlueprintDefinition => "blueprint-definition@1",
             Self::AlchemyRecipe => "alchemy-recipe@1",
@@ -250,11 +333,105 @@ pub struct ContentRecordCore {
     pub resources: ContentResourceFlow,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentActionToolKind {
+    Hand,
+    Axe,
+    Bow,
+    Crossbow,
+    Firearm,
+    Pickaxe,
+    Shovel,
+    Spear,
+    Staff,
+    Sword,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentActionLiquidKind {
+    Water,
+    Lava,
+    Honey,
+    Syrup,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ContentItemUseKind {
+    Net,
+    ReleaseCreature,
+    Boat,
+    CreatureCage,
+    CaptureOrb,
+    MagicRelic,
+    Plant,
+    Hoe,
+    Scythe,
+    Shears,
+    Bucket,
+    Lead,
+    Shield,
+    Blueprint,
+    Potion,
+    RangedWeapon,
+    Spear,
+    SeedPouch,
+    SpellTome,
+    ManaConsumable,
+    DragonEgg,
+    DragonModule,
+    LairSurvey,
+    SettlementChart,
+    Cardforge,
+}
+
+/// Typed action semantics retained from one installed item-definition blob.
+/// Optional fields remain optional so non-interactive resources do not acquire
+/// fabricated tool, food, or placement behavior during materialization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentItemActionProfile {
+    pub tool_kind: Option<ContentActionToolKind>,
+    pub tier: Option<u16>,
+    pub mining_speed_millionths: Option<u64>,
+    pub max_durability: Option<u32>,
+    pub infinite_durability: Option<bool>,
+    pub food: Option<u32>,
+    pub use_kind: Option<ContentItemUseKind>,
+    pub place_block: Option<u16>,
+    pub plant_block: Option<u16>,
+    pub bucket_liquid: Option<ContentActionLiquidKind>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentBlockActionProfile {
+    pub block_id: u16,
+    pub hardness_millionths: u64,
+    pub solid: bool,
+    pub replaceable: bool,
+    pub liquid: Option<ContentActionLiquidKind>,
+    pub preferred_tool: ContentActionToolKind,
+    pub required_tier: u16,
+    /// Canonical block-to-inventory mapping. Contextual loot rules may replace
+    /// this result, but may not silently change this content-owned identity.
+    pub mapped_item_code: Option<u32>,
+    pub shape: Option<String>,
+    pub collision_height_millionths: Option<u64>,
+    pub vertical_connect_group: Option<String>,
+    pub connect_group: Option<String>,
+    pub topology_flags: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContentBlockActionCatalogRecord {
+    pub core: ContentRecordCore,
+    pub profiles: BTreeMap<u16, ContentBlockActionProfile>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContentItemRecord {
     pub core: ContentRecordCore,
     pub item_code: u32,
     pub max_stack: u32,
+    pub action: ContentItemActionProfile,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -311,6 +488,7 @@ pub struct ContentRuntimeRegistry {
     pub registry_hash: CanonicalHash,
     pub source_revision: String,
     pub items: BTreeMap<String, ContentItemRecord>,
+    pub block_action_catalogs: BTreeMap<String, ContentBlockActionCatalogRecord>,
     pub crafting_recipes: BTreeMap<String, ContentRecipeRecord>,
     pub machine_recipes: BTreeMap<String, ContentRecipeRecord>,
     pub machine_profiles: BTreeMap<String, ContentMachineProfileRecord>,
@@ -332,6 +510,7 @@ impl Default for ContentRuntimeRegistry {
             registry_hash: CanonicalHash([0; 16]),
             source_revision: String::new(),
             items: BTreeMap::new(),
+            block_action_catalogs: BTreeMap::new(),
             crafting_recipes: BTreeMap::new(),
             machine_recipes: BTreeMap::new(),
             machine_profiles: BTreeMap::new(),
@@ -352,6 +531,7 @@ impl ContentRuntimeRegistry {
     #[must_use]
     pub fn len(&self) -> usize {
         self.items.len()
+            + self.block_action_catalogs.len()
             + self.crafting_recipes.len()
             + self.machine_recipes.len()
             + self.machine_profiles.len()
@@ -383,7 +563,11 @@ impl ContentRuntimeRegistry {
     #[must_use]
     pub fn get(&self, domain: ContentDomain, id: &str) -> Option<&ContentRecordCore> {
         match domain {
-            ContentDomain::Item => self.items.get(id).map(|record| &record.core),
+            ContentDomain::Item => self
+                .items
+                .get(id)
+                .map(|record| &record.core)
+                .or_else(|| self.block_action_catalogs.get(id).map(|record| &record.core)),
             ContentDomain::CraftingRecipe => self.crafting_recipes.get(id).map(|record| &record.core),
             ContentDomain::MachineRecipe => self.machine_recipes.get(id).map(|record| &record.core),
             ContentDomain::MachineProfile => self.machine_profiles.get(id).map(|record| &record.core),
@@ -405,6 +589,14 @@ impl ContentRuntimeRegistry {
     pub fn get_by_alias(&self, alias: &str) -> Option<&ContentRecordCore> {
         let (domain, id) = self.aliases.get(alias)?;
         self.get(*domain, id)
+    }
+
+    #[must_use]
+    pub fn block_action(&self, block_id: u16) -> Option<&ContentBlockActionProfile> {
+        self.block_action_catalogs
+            .get(BLOCK_ACTION_CATALOG_ID)?
+            .profiles
+            .get(&block_id)
     }
 }
 
@@ -440,6 +632,8 @@ struct RecordFacts {
     resources: ContentResourceFlow,
     item_code: Option<u32>,
     max_stack: Option<u32>,
+    item_action: Option<ContentItemActionProfile>,
+    block_actions: BTreeMap<u16, ContentBlockActionProfile>,
     capacity_fields: BTreeMap<String, u64>,
     cooldown_millis: u64,
     natural_types: Vec<String>,
@@ -948,6 +1142,7 @@ pub fn materialize_content_runtime(
         }
         insert_record(&mut registry, record, facts);
     }
+    validate_action_links(&registry, &mut blockers);
     if !blockers.is_empty() {
         sort_blockers(&mut blockers);
         return Err(blockers);
@@ -987,6 +1182,34 @@ pub fn materialize_content_runtime(
         completed_stages: CONTENT_RUNTIME_STAGES.to_vec(),
     };
     Ok((registry, report))
+}
+
+fn validate_action_links(registry: &ContentRuntimeRegistry, blockers: &mut Vec<ContentRuntimeBlocker>) {
+    let Some(catalog) = registry.block_action_catalogs.get(BLOCK_ACTION_CATALOG_ID) else {
+        // Legacy manifests remain valid until the production catalog is installed.
+        return;
+    };
+    for item in registry.items.values() {
+        for (path, block_id) in [
+            ("$.placeBlock", item.action.place_block),
+            ("$.plantBlock", item.action.plant_block),
+        ] {
+            let Some(block_id) = block_id else {
+                continue;
+            };
+            if !catalog.profiles.contains_key(&block_id) {
+                blockers.push(runtime_blocker(
+                    ContentRuntimeBlockerCode::MissingDependency,
+                    ContentRuntimeStage::References,
+                    Some(ContentDomain::Item),
+                    Some(item.core.id.clone()),
+                    path,
+                    Some(format!("block-action:{block_id}")),
+                    None,
+                ));
+            }
+        }
+    }
 }
 
 fn validate_manifest(manifest: &ProductionContentManifest) -> Vec<ContentRuntimeBlocker> {
@@ -1151,6 +1374,7 @@ fn resolve_schema(
 ) -> Option<ContentSchema> {
     let schema = match (entry.domain, blob.schema_id.as_str(), blob.schema_version) {
         (ContentDomain::Item, "item-definition", 1) => ContentSchema::ItemDefinition,
+        (ContentDomain::Item, "block-action-catalog", 1) => ContentSchema::BlockActionCatalog,
         (ContentDomain::CraftingRecipe, "crafting-recipe", 1) => ContentSchema::CraftingRecipe,
         (ContentDomain::CraftingRecipe, "blueprint-definition", 1) => ContentSchema::BlueprintDefinition,
         (ContentDomain::MachineRecipe, "alchemy-recipe", 1) => ContentSchema::AlchemyRecipe,
@@ -1214,6 +1438,7 @@ fn validate_record(record: &DecodedRecord, blockers: &mut Vec<ContentRuntimeBloc
     let mut facts = RecordFacts::default();
     match record.schema {
         ContentSchema::ItemDefinition => validate_item(record, object, &mut facts, blockers),
+        ContentSchema::BlockActionCatalog => validate_block_action_catalog(record, object, &mut facts, blockers),
         ContentSchema::CraftingRecipe => validate_crafting(record, object, &mut facts, blockers),
         ContentSchema::BlueprintDefinition => validate_blueprint(record, object, &mut facts, blockers),
         ContentSchema::AlchemyRecipe | ContentSchema::DistilleryRecipe | ContentSchema::SugarworksRecipe => {
@@ -1289,22 +1514,226 @@ fn validate_item(
             blockers,
         );
     }
-    if let Some(value) = optional_string(record, object, "toolKind", blockers) {
-        enum_value(
-            record,
-            "$.toolKind",
-            value,
-            &[
-                "axe", "bow", "crossbow", "firearm", "pickaxe", "shovel", "spear", "staff", "sword",
-            ],
-            blockers,
-        );
-    }
+    let tool_kind = optional_string(record, object, "toolKind", blockers)
+        .and_then(|value| parse_item_tool_kind(record, "$.toolKind", value, blockers));
     if let Some(ammo) = optional_u32(record, object, "ammoItem", 1, u32::MAX, blockers) {
         push_reference(facts, ContentDomain::Item, ammo.to_string(), "$.ammoItem");
     }
     facts.item_code = item_code;
     facts.max_stack = max_stack;
+    let item_action = ContentItemActionProfile {
+        tool_kind,
+        tier: optional_u32(record, object, "tier", 0, u16::MAX.into(), blockers)
+            .and_then(|value| u16::try_from(value).ok()),
+        mining_speed_millionths: optional_millionths(
+            record,
+            object,
+            "miningSpeed",
+            0,
+            u64::from(u32::MAX) * CONTENT_ACTION_FIXED_SCALE,
+            blockers,
+        ),
+        max_durability: optional_u32(record, object, "maxDurability", 1, u32::MAX, blockers),
+        infinite_durability: optional_bool(record, object, "infiniteDurability", blockers),
+        food: optional_u32(record, object, "food", 0, u32::MAX, blockers),
+        use_kind: optional_string(record, object, "useKind", blockers)
+            .and_then(|value| parse_item_use_kind(record, "$.useKind", value, blockers)),
+        place_block: optional_u32(record, object, "placeBlock", 0, u16::MAX.into(), blockers)
+            .and_then(|value| u16::try_from(value).ok()),
+        plant_block: optional_u32(record, object, "plantBlock", 0, u16::MAX.into(), blockers)
+            .and_then(|value| u16::try_from(value).ok()),
+        bucket_liquid: optional_string(record, object, "bucketLiquid", blockers)
+            .and_then(|value| parse_liquid_kind(record, "$.bucketLiquid", value, blockers)),
+    };
+    if item_action.tool_kind.is_none() && (item_action.tier.is_some() || item_action.mining_speed_millionths.is_some())
+    {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            "$.toolKind",
+            "toolKind when tier or miningSpeed is present",
+            "missing",
+        ));
+    }
+    if item_action.bucket_liquid.is_some() && item_action.use_kind != Some(ContentItemUseKind::Bucket) {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            "$.useKind",
+            "bucket when bucketLiquid is present",
+            "missing or non-bucket",
+        ));
+    }
+    facts.item_action = Some(item_action);
+}
+
+fn validate_block_action_catalog(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    facts: &mut RecordFacts,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) {
+    if record.id != BLOCK_ACTION_CATALOG_ID {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            "$.id",
+            BLOCK_ACTION_CATALOG_ID,
+            &record.id,
+        ));
+    }
+    required_u32(record, object, "schema", 1, 1, blockers);
+    let Some(profiles) = required_array(record, object, "profiles", blockers) else {
+        return;
+    };
+    if profiles.is_empty() || profiles.len() > MAX_BLOCK_ACTION_PROFILES {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::Capacity,
+            ContentRuntimeStage::Invariants,
+            "$.profiles",
+            &format!("1..{MAX_BLOCK_ACTION_PROFILES}"),
+            &profiles.len().to_string(),
+        ));
+    }
+
+    let mut previous_id = None;
+    for (index, profile) in profiles.iter().take(MAX_BLOCK_ACTION_PROFILES).enumerate() {
+        let base = format!("$.profiles[{index}]");
+        let Some(profile) = profile.as_object() else {
+            invalid_type(record, &base, "object", profile, blockers);
+            continue;
+        };
+        let block_id = required_u32_at(record, profile, "id", &base, 0, u16::MAX.into(), blockers)
+            .and_then(|value| u16::try_from(value).ok());
+        if let Some(block_id) = block_id {
+            if previous_id.is_some_and(|previous| previous >= block_id) {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::Invariants,
+                    &field_path(&base, "id"),
+                    "strict ascending unique block ids",
+                    &block_id.to_string(),
+                ));
+            }
+            previous_id = Some(block_id);
+        }
+        let hardness_millionths = required_millionths_at(
+            record,
+            profile,
+            "hardness",
+            &base,
+            0,
+            u64::from(u32::MAX) * CONTENT_ACTION_FIXED_SCALE,
+            blockers,
+        );
+        let solid = required_bool_at(record, profile, "solid", &base, blockers);
+        let replaceable = required_bool_at(record, profile, "replaceable", &base, blockers);
+        let preferred_tool = required_nonempty_string_at(record, profile, "preferredTool", &base, blockers)
+            .and_then(|value| parse_block_tool_kind(record, &field_path(&base, "preferredTool"), value, blockers));
+        let required_tier = required_u32_at(record, profile, "requiredTier", &base, 0, u16::MAX.into(), blockers)
+            .and_then(|value| u16::try_from(value).ok());
+        let mapped_item_code = optional_u32_at(record, profile, "item", &base, 1, u32::MAX, blockers);
+        if let Some(item_code) = mapped_item_code {
+            push_reference(
+                facts,
+                ContentDomain::Item,
+                item_code.to_string(),
+                &field_path(&base, "item"),
+            );
+        }
+        let liquid = optional_string_at(record, profile, "liquid", &base, blockers)
+            .and_then(|value| parse_liquid_kind(record, &field_path(&base, "liquid"), value, blockers));
+        let shape = optional_string_at(record, profile, "shape", &base, blockers).map(|value| {
+            enum_value(
+                record,
+                &field_path(&base, "shape"),
+                value,
+                BLOCK_ACTION_SHAPES,
+                blockers,
+            );
+            value.to_owned()
+        });
+        let collision_height_millionths = optional_millionths_at(
+            record,
+            profile,
+            "collisionHeight",
+            &base,
+            0,
+            u64::from(u16::MAX) * CONTENT_ACTION_FIXED_SCALE,
+            blockers,
+        );
+        let vertical_connect_group =
+            optional_string_at(record, profile, "verticalConnectGroup", &base, blockers).map(|value| {
+                enum_value(
+                    record,
+                    &field_path(&base, "verticalConnectGroup"),
+                    value,
+                    BLOCK_ACTION_VERTICAL_CONNECT_GROUPS,
+                    blockers,
+                );
+                value.to_owned()
+            });
+        let connect_group = optional_string_at(record, profile, "connectGroup", &base, blockers).map(|value| {
+            enum_value(record, &field_path(&base, "connectGroup"), value, &["fence"], blockers);
+            value.to_owned()
+        });
+        let topology_flags = parse_topology_flags(record, profile, &base, blockers);
+        validate_topology_consistency(
+            record,
+            &base,
+            topology_flags,
+            vertical_connect_group.as_deref(),
+            connect_group.as_deref(),
+            blockers,
+        );
+
+        if let (
+            Some(block_id),
+            Some(hardness_millionths),
+            Some(solid),
+            Some(replaceable),
+            Some(preferred_tool),
+            Some(required_tier),
+        ) = (
+            block_id,
+            hardness_millionths,
+            solid,
+            replaceable,
+            preferred_tool,
+            required_tier,
+        ) {
+            let profile = ContentBlockActionProfile {
+                block_id,
+                hardness_millionths,
+                solid,
+                replaceable,
+                liquid,
+                preferred_tool,
+                required_tier,
+                mapped_item_code,
+                shape,
+                collision_height_millionths,
+                vertical_connect_group,
+                connect_group,
+                topology_flags,
+            };
+            if facts.block_actions.insert(block_id, profile).is_some() {
+                blockers.push(for_record(
+                    record,
+                    ContentRuntimeBlockerCode::DescriptorMismatch,
+                    ContentRuntimeStage::Invariants,
+                    &field_path(&base, "id"),
+                    "unique block id",
+                    &block_id.to_string(),
+                ));
+            }
+        }
+    }
 }
 
 fn validate_crafting(
@@ -2570,14 +2999,25 @@ fn insert_record(registry: &mut ContentRuntimeRegistry, record: DecodedRecord, f
     };
     match domain {
         ContentDomain::Item => {
-            registry.items.insert(
-                id,
-                ContentItemRecord {
-                    core,
-                    item_code: facts.item_code.expect("validated item has item code"),
-                    max_stack: facts.max_stack.expect("validated item has stack limit"),
-                },
-            );
+            if record.schema == ContentSchema::BlockActionCatalog {
+                registry.block_action_catalogs.insert(
+                    id,
+                    ContentBlockActionCatalogRecord {
+                        core,
+                        profiles: facts.block_actions,
+                    },
+                );
+            } else {
+                registry.items.insert(
+                    id,
+                    ContentItemRecord {
+                        core,
+                        item_code: facts.item_code.expect("validated item has item code"),
+                        max_stack: facts.max_stack.expect("validated item has stack limit"),
+                        action: facts.item_action.expect("validated item has typed action semantics"),
+                    },
+                );
+            }
         }
         ContentDomain::CraftingRecipe => {
             registry.crafting_recipes.insert(id, ContentRecipeRecord { core });
@@ -2682,7 +3122,16 @@ fn canonical_registry_hash(registry: &ContentRuntimeRegistry) -> CanonicalHash {
 
 fn records_for_domain(registry: &ContentRuntimeRegistry, domain: ContentDomain) -> Vec<&ContentRecordCore> {
     match domain {
-        ContentDomain::Item => registry.items.values().map(|record| &record.core).collect(),
+        ContentDomain::Item => {
+            let mut records = registry
+                .items
+                .values()
+                .map(|record| &record.core)
+                .chain(registry.block_action_catalogs.values().map(|record| &record.core))
+                .collect::<Vec<_>>();
+            records.sort_by(|left, right| left.id.cmp(&right.id));
+            records
+        }
         ContentDomain::CraftingRecipe => registry.crafting_recipes.values().map(|record| &record.core).collect(),
         ContentDomain::MachineRecipe => registry.machine_recipes.values().map(|record| &record.core).collect(),
         ContentDomain::MachineProfile => registry.machine_profiles.values().map(|record| &record.core).collect(),
@@ -2912,6 +3361,33 @@ fn optional_u32(
     Some(value)
 }
 
+fn optional_u32_at(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    field: &str,
+    base: &str,
+    minimum: u32,
+    maximum: u32,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<u32> {
+    let value = object.get(field)?;
+    if matches!(value, CanonicalJson::Null) {
+        return None;
+    }
+    let path = field_path(base, field);
+    let Some(value) = json_u32(value, minimum, maximum) else {
+        invalid_type(
+            record,
+            &path,
+            &format!("integer {minimum}..{maximum} or null"),
+            value,
+            blockers,
+        );
+        return None;
+    };
+    Some(value)
+}
+
 fn optional_u64(
     record: &DecodedRecord,
     object: &BTreeMap<String, CanonicalJson>,
@@ -2935,6 +3411,147 @@ fn optional_u64(
         return None;
     };
     Some(value)
+}
+
+fn optional_bool(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    field: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<bool> {
+    let value = object.get(field)?;
+    if matches!(value, CanonicalJson::Null) {
+        return None;
+    }
+    let Some(value) = value.as_bool() else {
+        invalid_type(record, &format!("$.{field}"), "boolean or null", value, blockers);
+        return None;
+    };
+    Some(value)
+}
+
+fn required_bool_at(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    field: &str,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<bool> {
+    let path = field_path(base, field);
+    let Some(value) = object.get(field) else {
+        missing_field(record, &path, "boolean", blockers);
+        return None;
+    };
+    let Some(value) = value.as_bool() else {
+        invalid_type(record, &path, "boolean", value, blockers);
+        return None;
+    };
+    Some(value)
+}
+
+fn optional_millionths(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    field: &str,
+    minimum: u64,
+    maximum: u64,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<u64> {
+    let value = object.get(field)?;
+    if matches!(value, CanonicalJson::Null) {
+        return None;
+    }
+    millionths_at(record, value, &format!("$.{field}"), minimum, maximum, blockers)
+}
+
+fn optional_millionths_at(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    field: &str,
+    base: &str,
+    minimum: u64,
+    maximum: u64,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<u64> {
+    let value = object.get(field)?;
+    if matches!(value, CanonicalJson::Null) {
+        return None;
+    }
+    millionths_at(record, value, &field_path(base, field), minimum, maximum, blockers)
+}
+
+fn required_millionths_at(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    field: &str,
+    base: &str,
+    minimum: u64,
+    maximum: u64,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<u64> {
+    let path = field_path(base, field);
+    let Some(value) = object.get(field) else {
+        missing_field(record, &path, "exact fixed-point number", blockers);
+        return None;
+    };
+    millionths_at(record, value, &path, minimum, maximum, blockers)
+}
+
+fn millionths_at(
+    record: &DecodedRecord,
+    value: &CanonicalJson,
+    path: &str,
+    minimum: u64,
+    maximum: u64,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<u64> {
+    let CanonicalJson::Number(number) = value else {
+        invalid_type(record, path, "exact fixed-point number", value, blockers);
+        return None;
+    };
+    let Some(scaled) = decimal_to_millionths(number).filter(|scaled| (*scaled >= minimum) && (*scaled <= maximum))
+    else {
+        invalid_value(
+            record,
+            path,
+            &format!("exact millionths {minimum}..{maximum}"),
+            number,
+            blockers,
+        );
+        return None;
+    };
+    Some(scaled)
+}
+
+fn decimal_to_millionths(source: &str) -> Option<u64> {
+    let (significand, exponent) = source
+        .split_once(['e', 'E'])
+        .map_or(Some((source, 0_i32)), |(significand, exponent)| {
+            Some((significand, exponent.parse::<i32>().ok()?))
+        })?;
+    if significand.starts_with('-') {
+        return None;
+    }
+    let (whole, fraction) = significand.split_once('.').unwrap_or((significand, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let digits = format!("{whole}{fraction}").parse::<u128>().ok()?;
+    let fraction_len = i32::try_from(fraction.len()).ok()?;
+    let shift = exponent.checked_add(6)?.checked_sub(fraction_len)?;
+    let scaled = if shift >= 0 {
+        digits.checked_mul(10_u128.checked_pow(u32::try_from(shift).ok()?)?)?
+    } else {
+        let divisor = 10_u128.checked_pow(shift.unsigned_abs())?;
+        if digits % divisor != 0 {
+            return None;
+        }
+        digits / divisor
+    };
+    u64::try_from(scaled).ok()
 }
 
 fn required_number(
@@ -3276,6 +3893,244 @@ fn enum_value(
     }
 }
 
+fn parse_item_tool_kind(
+    record: &DecodedRecord,
+    path: &str,
+    value: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentActionToolKind> {
+    let parsed = match value {
+        "axe" => ContentActionToolKind::Axe,
+        "bow" => ContentActionToolKind::Bow,
+        "crossbow" => ContentActionToolKind::Crossbow,
+        "firearm" => ContentActionToolKind::Firearm,
+        "pickaxe" => ContentActionToolKind::Pickaxe,
+        "shovel" => ContentActionToolKind::Shovel,
+        "spear" => ContentActionToolKind::Spear,
+        "staff" => ContentActionToolKind::Staff,
+        "sword" => ContentActionToolKind::Sword,
+        _ => {
+            enum_value(
+                record,
+                path,
+                value,
+                &[
+                    "axe", "bow", "crossbow", "firearm", "pickaxe", "shovel", "spear", "staff", "sword",
+                ],
+                blockers,
+            );
+            return None;
+        }
+    };
+    Some(parsed)
+}
+
+fn parse_block_tool_kind(
+    record: &DecodedRecord,
+    path: &str,
+    value: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentActionToolKind> {
+    let parsed = match value {
+        "hand" => ContentActionToolKind::Hand,
+        "axe" => ContentActionToolKind::Axe,
+        "pickaxe" => ContentActionToolKind::Pickaxe,
+        "shovel" => ContentActionToolKind::Shovel,
+        _ => {
+            enum_value(record, path, value, &["hand", "axe", "pickaxe", "shovel"], blockers);
+            return None;
+        }
+    };
+    Some(parsed)
+}
+
+fn parse_liquid_kind(
+    record: &DecodedRecord,
+    path: &str,
+    value: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentActionLiquidKind> {
+    let parsed = match value {
+        "water" => ContentActionLiquidKind::Water,
+        "lava" => ContentActionLiquidKind::Lava,
+        "honey" => ContentActionLiquidKind::Honey,
+        "syrup" => ContentActionLiquidKind::Syrup,
+        _ => {
+            enum_value(record, path, value, &["water", "lava", "honey", "syrup"], blockers);
+            return None;
+        }
+    };
+    Some(parsed)
+}
+
+fn parse_item_use_kind(
+    record: &DecodedRecord,
+    path: &str,
+    value: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> Option<ContentItemUseKind> {
+    let parsed = match value {
+        "net" => ContentItemUseKind::Net,
+        "release-creature" => ContentItemUseKind::ReleaseCreature,
+        "boat" => ContentItemUseKind::Boat,
+        "creature-cage" => ContentItemUseKind::CreatureCage,
+        "capture-orb" => ContentItemUseKind::CaptureOrb,
+        "magic-relic" => ContentItemUseKind::MagicRelic,
+        "plant" => ContentItemUseKind::Plant,
+        "hoe" => ContentItemUseKind::Hoe,
+        "scythe" => ContentItemUseKind::Scythe,
+        "shears" => ContentItemUseKind::Shears,
+        "bucket" => ContentItemUseKind::Bucket,
+        "lead" => ContentItemUseKind::Lead,
+        "shield" => ContentItemUseKind::Shield,
+        "blueprint" => ContentItemUseKind::Blueprint,
+        "potion" => ContentItemUseKind::Potion,
+        "ranged-weapon" => ContentItemUseKind::RangedWeapon,
+        "spear" => ContentItemUseKind::Spear,
+        "seed-pouch" => ContentItemUseKind::SeedPouch,
+        "spell-tome" => ContentItemUseKind::SpellTome,
+        "mana-consumable" => ContentItemUseKind::ManaConsumable,
+        "dragon-egg" => ContentItemUseKind::DragonEgg,
+        "dragon-module" => ContentItemUseKind::DragonModule,
+        "lair-survey" => ContentItemUseKind::LairSurvey,
+        "settlement-chart" => ContentItemUseKind::SettlementChart,
+        "cardforge" => ContentItemUseKind::Cardforge,
+        _ => {
+            enum_value(
+                record,
+                path,
+                value,
+                &[
+                    "net",
+                    "release-creature",
+                    "boat",
+                    "creature-cage",
+                    "capture-orb",
+                    "magic-relic",
+                    "plant",
+                    "hoe",
+                    "scythe",
+                    "shears",
+                    "bucket",
+                    "lead",
+                    "shield",
+                    "blueprint",
+                    "potion",
+                    "ranged-weapon",
+                    "spear",
+                    "seed-pouch",
+                    "spell-tome",
+                    "mana-consumable",
+                    "dragon-egg",
+                    "dragon-module",
+                    "lair-survey",
+                    "settlement-chart",
+                    "cardforge",
+                ],
+                blockers,
+            );
+            return None;
+        }
+    };
+    Some(parsed)
+}
+
+fn parse_topology_flags(
+    record: &DecodedRecord,
+    object: &BTreeMap<String, CanonicalJson>,
+    base: &str,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) -> u16 {
+    let path = field_path(base, "topologyFlags");
+    let Some(value) = object.get("topologyFlags") else {
+        missing_field(record, &path, "array", blockers);
+        return 0;
+    };
+    let Some(values) = value.as_array() else {
+        invalid_type(record, &path, "array", value, blockers);
+        return 0;
+    };
+    let mut flags = 0_u16;
+    for (index, value) in values.iter().enumerate() {
+        let item_path = format!("{path}[{index}]");
+        let Some(value) = value.as_str() else {
+            invalid_type(record, &item_path, "topology flag string", value, blockers);
+            continue;
+        };
+        let flag = match value {
+            "directional" => BLOCK_TOPOLOGY_DIRECTIONAL,
+            "paired" => BLOCK_TOPOLOGY_PAIRED,
+            "attached" => BLOCK_TOPOLOGY_ATTACHED,
+            "vertical-connected" => BLOCK_TOPOLOGY_VERTICAL_CONNECTED,
+            "horizontal-connected" => BLOCK_TOPOLOGY_HORIZONTAL_CONNECTED,
+            "waterlogged" => BLOCK_TOPOLOGY_WATERLOGGED,
+            "bounded-network" => BLOCK_TOPOLOGY_BOUNDED_NETWORK,
+            _ => {
+                enum_value(
+                    record,
+                    &item_path,
+                    value,
+                    &[
+                        "directional",
+                        "paired",
+                        "attached",
+                        "vertical-connected",
+                        "horizontal-connected",
+                        "waterlogged",
+                        "bounded-network",
+                    ],
+                    blockers,
+                );
+                continue;
+            }
+        };
+        if flags & flag != 0 {
+            blockers.push(for_record(
+                record,
+                ContentRuntimeBlockerCode::DescriptorMismatch,
+                ContentRuntimeStage::Invariants,
+                &item_path,
+                "unique topology flags",
+                value,
+            ));
+        }
+        flags |= flag;
+    }
+    flags
+}
+
+fn validate_topology_consistency(
+    record: &DecodedRecord,
+    base: &str,
+    topology_flags: u16,
+    vertical_connect_group: Option<&str>,
+    connect_group: Option<&str>,
+    blockers: &mut Vec<ContentRuntimeBlocker>,
+) {
+    let has_vertical_flag = topology_flags & BLOCK_TOPOLOGY_VERTICAL_CONNECTED != 0;
+    if has_vertical_flag != vertical_connect_group.is_some() {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            &field_path(base, "verticalConnectGroup"),
+            "vertical-connected flag exactly when a vertical group is present",
+            vertical_connect_group.unwrap_or("missing"),
+        ));
+    }
+    let has_horizontal_flag = topology_flags & BLOCK_TOPOLOGY_HORIZONTAL_CONNECTED != 0;
+    if has_horizontal_flag != connect_group.is_some() {
+        blockers.push(for_record(
+            record,
+            ContentRuntimeBlockerCode::DescriptorMismatch,
+            ContentRuntimeStage::Invariants,
+            &field_path(base, "connectGroup"),
+            "horizontal-connected flag exactly when a connect group is present",
+            connect_group.unwrap_or("missing"),
+        ));
+    }
+}
+
 fn seconds_to_millis(seconds: f64) -> u64 {
     (seconds * 1_000.0).round() as u64
 }
@@ -3556,6 +4411,25 @@ mod tests {
         ]
     }
 
+    fn action_fixture() -> Vec<ContentArtifact> {
+        let item = artifact(
+            ContentDomain::Item,
+            "1",
+            "item-definition",
+            1,
+            r##"{"bucketLiquid":"water","color":"#68a341","food":2,"id":1,"infiniteDurability":true,"maxDurability":99,"maxStack":1,"miningSpeed":1.25,"name":"Survey Pick","placeBlock":1,"tier":2,"toolKind":"pickaxe","useKind":"bucket"}"##,
+        );
+        let mut catalog = artifact(
+            ContentDomain::Item,
+            BLOCK_ACTION_CATALOG_ID,
+            "block-action-catalog",
+            1,
+            r#"{"profiles":[{"hardness":0,"id":0,"preferredTool":"hand","replaceable":true,"requiredTier":0,"solid":false,"topologyFlags":[]},{"collisionHeight":1.25,"connectGroup":"fence","hardness":0.9,"id":1,"item":1,"preferredTool":"pickaxe","replaceable":false,"requiredTier":2,"shape":"fence","solid":true,"topologyFlags":["horizontal-connected"]}],"schema":1}"#,
+        );
+        catalog.unknown_extension_bytes = vec![0, 0x80, 0xff, 9];
+        vec![item, catalog]
+    }
+
     fn installed(artifacts: Vec<ContentArtifact>) -> (ProductionContentManifest, MetadataBlobStore) {
         let bundle = compile_content_bundle("content-runtime-fixture-v1", artifacts).expect("fixture compiles");
         let mut store = MetadataBlobStore::default();
@@ -3648,6 +4522,116 @@ mod tests {
                 .any(|blocker| blocker.code == ContentRuntimeBlockerCode::InvalidJson)
         );
         assert_eq!(registry.registry_hash, original_hash);
+    }
+
+    #[test]
+    fn action_profiles_materialize_exactly_and_preserve_extensions() {
+        let (manifest, store) = installed(action_fixture());
+        let (registry, report) = materialize_content_runtime(&manifest, &store).expect("actions materialize");
+        assert_eq!(report.installed_entries, 2);
+        assert_eq!(registry.items.len(), 1);
+        assert_eq!(registry.block_action_catalogs.len(), 1);
+        assert_eq!(registry.len(), 2);
+
+        let action = &registry.items["1"].action;
+        assert_eq!(action.tool_kind, Some(ContentActionToolKind::Pickaxe));
+        assert_eq!(action.tier, Some(2));
+        assert_eq!(action.mining_speed_millionths, Some(1_250_000));
+        assert_eq!(action.max_durability, Some(99));
+        assert_eq!(action.infinite_durability, Some(true));
+        assert_eq!(action.food, Some(2));
+        assert_eq!(action.use_kind, Some(ContentItemUseKind::Bucket));
+        assert_eq!(action.place_block, Some(1));
+        assert_eq!(action.bucket_liquid, Some(ContentActionLiquidKind::Water));
+
+        let block = registry.block_action(1).expect("block action");
+        assert_eq!(block.hardness_millionths, 900_000);
+        assert_eq!(block.preferred_tool, ContentActionToolKind::Pickaxe);
+        assert_eq!(block.required_tier, 2);
+        assert_eq!(block.mapped_item_code, Some(1));
+        assert_eq!(block.collision_height_millionths, Some(1_250_000));
+        assert_eq!(block.connect_group.as_deref(), Some("fence"));
+        assert_eq!(block.topology_flags, BLOCK_TOPOLOGY_HORIZONTAL_CONNECTED);
+        let catalog = &registry.block_action_catalogs[BLOCK_ACTION_CATALOG_ID];
+        assert_eq!(catalog.core.unknown_extension_bytes, [0, 0x80, 0xff, 9]);
+        assert_eq!(
+            registry
+                .get(ContentDomain::Item, BLOCK_ACTION_CATALOG_ID)
+                .expect("catalog core")
+                .schema,
+            ContentSchema::BlockActionCatalog
+        );
+    }
+
+    #[test]
+    fn action_profile_drift_is_rejected_transactionally() {
+        let (manifest, store) = installed(action_fixture());
+        let mut registry = ContentRuntimeRegistry::default();
+        registry.install(&manifest, &store).expect("initial action install");
+        let original = registry.clone();
+
+        let mut invalid = action_fixture();
+        let catalog = invalid
+            .iter_mut()
+            .find(|artifact| artifact.schema_id == "block-action-catalog")
+            .expect("catalog fixture");
+        catalog.canonical_bytes = String::from_utf8(catalog.canonical_bytes.clone())
+            .expect("fixture UTF-8")
+            .replace("horizontal-connected", "teleporting")
+            .into_bytes();
+        let (bad_manifest, bad_store) = installed(invalid);
+        let blockers = registry
+            .install(&bad_manifest, &bad_store)
+            .expect_err("unknown topology rejected");
+        assert!(blockers.iter().any(|blocker| {
+            blocker.code == ContentRuntimeBlockerCode::InvalidEnum && blocker.path == "$.profiles[1].topologyFlags[0]"
+        }));
+        assert_eq!(registry, original);
+
+        let mut imprecise = action_fixture();
+        let catalog = imprecise
+            .iter_mut()
+            .find(|artifact| artifact.schema_id == "block-action-catalog")
+            .expect("catalog fixture");
+        catalog.canonical_bytes = String::from_utf8(catalog.canonical_bytes.clone())
+            .expect("fixture UTF-8")
+            .replace("\"hardness\":0.9", "\"hardness\":0.0000001")
+            .into_bytes();
+        let (bad_manifest, bad_store) = installed(imprecise);
+        let blockers = materialize_content_runtime(&bad_manifest, &bad_store).expect_err("sub-millionth rejected");
+        assert!(blockers.iter().any(|blocker| {
+            blocker.code == ContentRuntimeBlockerCode::Range && blocker.path == "$.profiles[1].hardness"
+        }));
+
+        let mut duplicate = action_fixture();
+        let catalog = duplicate
+            .iter_mut()
+            .find(|artifact| artifact.schema_id == "block-action-catalog")
+            .expect("catalog fixture");
+        catalog.canonical_bytes = String::from_utf8(catalog.canonical_bytes.clone())
+            .expect("fixture UTF-8")
+            .replace("\"id\":1,\"item\"", "\"id\":0,\"item\"")
+            .into_bytes();
+        let (bad_manifest, bad_store) = installed(duplicate);
+        let blockers = materialize_content_runtime(&bad_manifest, &bad_store).expect_err("duplicate id rejected");
+        assert!(blockers.iter().any(|blocker| {
+            blocker.code == ContentRuntimeBlockerCode::DescriptorMismatch && blocker.path == "$.profiles[1].id"
+        }));
+
+        let mut missing_block = action_fixture();
+        let item = missing_block
+            .iter_mut()
+            .find(|artifact| artifact.schema_id == "item-definition")
+            .expect("item fixture");
+        item.canonical_bytes = String::from_utf8(item.canonical_bytes.clone())
+            .expect("fixture UTF-8")
+            .replace("\"placeBlock\":1", "\"placeBlock\":2")
+            .into_bytes();
+        let (bad_manifest, bad_store) = installed(missing_block);
+        let blockers = materialize_content_runtime(&bad_manifest, &bad_store).expect_err("missing block rejected");
+        assert!(blockers.iter().any(|blocker| {
+            blocker.code == ContentRuntimeBlockerCode::MissingDependency && blocker.path == "$.placeBlock"
+        }));
     }
 
     #[test]

@@ -8,7 +8,8 @@ import { CAPTURE_ORB_RACK_SIZE, CREATURE_HEALER_GEL_CAP, CREATURE_HEALER_GEL_MUL
 import { CREATURE_MOVES, CREATURE_REACTIONS, CREATURE_STATUSES } from "./creature-moves";
 import { CREATURE_PROFILES } from "./creature-profiles";
 import { CREATURE_TYPE_CHART, CREATURE_TYPES } from "./creature-types";
-import { ITEMS, RECIPES, SMELTING } from "./data";
+import { BLOCKS, ITEMS, RECIPES, SMELTING, itemForBlock, type BlockDefinition } from "./data";
+import { isDirectionallyPlacedBlock } from "./block-facing";
 import { DIGITAL_CREATURE_CELL_CAPACITY, DIGITAL_CREATURE_HEAL_SECONDS, DIGITAL_ITEM_CELL_CAPACITY } from "./digital-storage";
 import { COMMERCE_CATALOG, STOCKS, ATLANTIAN_MERCHANT_OFFERS, DWARF_MERCHANT_OFFERS, GOBLIN_MERCHANT_OFFERS, HOBBIT_MERCHANT_OFFERS, SUGARCOURT_MERCHANT_OFFERS, WOOD_ELF_MERCHANT_OFFERS } from "./economy";
 import { FACTIONS } from "./factions";
@@ -34,6 +35,8 @@ export const MAX_RUST_CONTENT_ENTRIES = 32_768;
 export const MAX_RUST_CONTENT_BYTES = 256 * 1024;
 export const MAX_RUST_CONTENT_EXTENSION_BYTES = 64 * 1024;
 export const MAX_RUST_CONTENT_ALIASES = 16;
+export const RUST_BLOCK_ACTION_CATALOG_ID = "block-actions" as const;
+export const RUST_BLOCK_ACTION_CATALOG_SCHEMA = 1 as const;
 
 export const RUST_CONTENT_DOMAINS = Object.freeze([
   "item", "crafting-recipe", "machine-recipe", "machine-profile", "ability-spell", "creature-profile",
@@ -359,8 +362,51 @@ function source(domain: RustContentDomain, id: string, schemaId: string, schemaV
   return { domain, id, schemaId, schemaVersion, contentVersion, value };
 }
 
+function blockActionTopologyFlags(definition: BlockDefinition) {
+  const flags: string[] = [];
+  if (isDirectionallyPlacedBlock(definition.id)) flags.push("directional");
+  if (definition.shape === "door" || definition.shape === "bed") flags.push("paired");
+  if (definition.shape === "torch") flags.push("attached");
+  if (definition.verticalConnectGroup !== undefined) flags.push("vertical-connected");
+  if (definition.connectGroup !== undefined) flags.push("horizontal-connected");
+  if (definition.waterlogged === true) flags.push("waterlogged");
+  if (definition.shape === "aquarium" || definition.shape === "exhibit") flags.push("bounded-network");
+  return flags;
+}
+
+export function blockwildBlockActionCatalogV1() {
+  const profiles = Object.values(BLOCKS)
+    .sort((left, right) => left.id - right.id)
+    .map((definition) => {
+      const mappedItem = itemForBlock(definition.id);
+      return {
+        id: definition.id,
+        hardness: definition.hardness,
+        solid: definition.solid,
+        replaceable: definition.replaceable === true,
+        preferredTool: definition.preferredTool,
+        requiredTier: definition.requiredTier,
+        ...(ITEMS[mappedItem] === undefined ? {} : { item: mappedItem }),
+        ...(definition.liquid === undefined ? {} : { liquid: definition.liquid }),
+        ...(definition.shape === undefined ? {} : { shape: definition.shape }),
+        ...(definition.collisionHeight === undefined ? {} : { collisionHeight: definition.collisionHeight }),
+        ...(definition.verticalConnectGroup === undefined ? {} : { verticalConnectGroup: definition.verticalConnectGroup }),
+        ...(definition.connectGroup === undefined ? {} : { connectGroup: definition.connectGroup }),
+        topologyFlags: blockActionTopologyFlags(definition),
+      };
+    });
+  return { schema: RUST_BLOCK_ACTION_CATALOG_SCHEMA, profiles } as const;
+}
+
 export function blockwildProductionContentSources(): readonly RustContentSourceEntry[] {
   const entries: RustContentSourceEntry[] = [];
+  entries.push(source(
+    "item",
+    RUST_BLOCK_ACTION_CATALOG_ID,
+    "block-action-catalog",
+    RUST_BLOCK_ACTION_CATALOG_SCHEMA,
+    blockwildBlockActionCatalogV1(),
+  ));
   for (const item of Object.values(ITEMS)) entries.push(source("item", String(item.id), "item-definition", 1, item));
   for (const recipe of RECIPES) entries.push(source("crafting-recipe", recipe.id, "crafting-recipe", 1, recipe));
   for (const blueprint of BLUEPRINTS) entries.push(source("crafting-recipe", `blueprint:${blueprint.id}`, "blueprint-definition", BLUEPRINT_SCHEMA, blueprint));
