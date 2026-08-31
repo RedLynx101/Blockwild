@@ -43,7 +43,7 @@ blockwild-render-web = { path = "crates/blockwild-render-web" }
 blockwild-runtime-wire = { path = "crates/blockwild-runtime-wire" }
 wasm-bindgen = "=0.2.127"
 wasm-bindgen-futures = "=0.4.77"
-wgpu = { version = "=30.0.0", default-features = false, features = ["std", "wgsl"] }
+wgpu = { version = "=30.0.1", default-features = false, features = ["std", "wgsl"] }
 pollster = "=0.4.0"
 
 [workspace.lints.rust]
