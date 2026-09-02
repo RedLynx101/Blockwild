@@ -5603,16 +5603,46 @@ export class ChunkWorld {
     this.urgentMeshQueueHead = 0;
   }
 
-  private activeMeshTaskBlocksRequiredImmediateSeam() {
-    const active = this.activeMeshTask;
-    if (!active) return false;
-    const blocker = `${active.key}:${active.section}`;
+  private meshBlocksRequiredImmediateSeam(entry: Readonly<{ key: string; section: number }>) {
+    const blocker = `${entry.key}:${entry.section}`;
     for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
       const key = chunkKey(this.playerChunkX + dx, this.playerChunkZ + dz);
       const chunk = this.chunks.get(key);
       if (!chunk) continue;
       for (const section of this.playerRequiredMeshSections(chunk)) {
         if (this.seamPresentationPending.get(`${key}:${section}`)?.blockers.has(blocker)) return true;
+      }
+    }
+    return false;
+  }
+
+  private activeMeshTaskBlocksRequiredImmediateSeam() {
+    return this.activeMeshTask ? this.meshBlocksRequiredImmediateSeam(this.activeMeshTask) : false;
+  }
+
+  private activeMeshTaskHasRequiredRingProgress() {
+    const active = this.activeMeshTask;
+    if (!active || active.nextLocalX <= 0 || active.nextLocalX >= CHUNK_SIZE) return false;
+    const chunk = this.chunks.get(active.key);
+    if (!chunk?.group.visible || !this.chunkLightPresentationReady(active.key)) return false;
+    return Math.max(Math.abs(chunk.cx - this.playerChunkX), Math.abs(chunk.cz - this.playerChunkZ)) <= 1
+      && this.playerRequiredMeshSections(chunk).includes(active.section)
+      && !chunk.sections.has(active.section)
+      && !this.seamPresentationPending.has(`${active.key}:${active.section}`);
+  }
+
+  private queuedRequiredRingMeshPrecedes(active: Readonly<{ key: string; section: number }>) {
+    // Check only the bounded nine-chunk/two-section correctness set, not the
+    // background queues. A nearer required neighbor must retain preemption.
+    for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
+      const key = chunkKey(this.playerChunkX + dx, this.playerChunkZ + dz);
+      const chunk = this.chunks.get(key);
+      if (!chunk?.group.visible || !this.chunkLightPresentationReady(key)) continue;
+      for (const section of this.playerRequiredMeshSections(chunk)) {
+        const queueKey = `${key}:${section}`;
+        if (chunk.sections.has(section) || this.seamPresentationPending.has(queueKey)
+          || (!this.meshQueued.has(queueKey) && !this.urgentMeshQueued.has(queueKey))) continue;
+        if (this.compareMeshPriority({ key, section }, active) < 0) return true;
       }
     }
     return false;
@@ -5629,6 +5659,13 @@ export class ChunkWorld {
     if (!best || this.compareMeshPriority(best, active) >= 0) return;
     const protectedUrgent = candidates.some((entry) => this.urgentMeshQueued.has(`${entry.key}:${entry.section}`)
       && this.isProtectedUrgentMesh(entry));
+    // Before the ring is drawable, a useful partial required neighbor build
+    // must survive nearer background depth. Occupied-chunk readiness, edits
+    // and required seam dependencies retain their existing precedence.
+    if (!protectedUrgent && this.activeMeshTaskHasRequiredRingProgress()
+      && this.playerChunkStreamingState().playerChunkReady
+      && !this.queuedRequiredRingMeshPrecedes(active)
+      && !candidates.some((entry) => this.meshBlocksRequiredImmediateSeam(entry))) return;
     // Lighting arrivals and schedule refreshes must honor the same useful partial
     // prediction as discretionary dispatch. Nearer background depth must not
     // repeatedly discard its buckets; missing current-ring work still invalidates

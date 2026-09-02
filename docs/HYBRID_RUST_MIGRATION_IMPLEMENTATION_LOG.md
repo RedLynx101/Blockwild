@@ -13,6 +13,47 @@ This is the execution companion to [HYBRID_RUST_ENGINE_MIGRATION_MASTER_PLAN.md]
 
 ## Validated checkpoints
 
+### Preserve required startup mesh progress - 2026-09-02
+
+Real lighting completion previously could discard a partially built, occupied
+section needed by the current 3x3 ring in favor of nearer deep or already-built
+background work. The new guard preserves its existing geometry buckets and
+bounded slice progress while the occupied player chunk is ready. Missing
+player-chunk sections, protected edits, required seam dependencies and runnable
+higher-priority required neighbors retain preemption. The additional priority
+check visits only the nine-chunk correctness ring and at most two required
+sections per chunk; it does not scan the background queues or change budgets.
+
+The new 29-case regression file exercises actual partial geometry and real
+lighting-completion dispatch, including repeated arrivals, priority competition,
+stale work and urgent edits. Initial preservation cases and two review-added
+priority regressions failed before their respective fixes. The focused combined
+matrix passes 145/145, with scoped lint and independent review. The two-file
+code/test snapshot is tree `00d29837361b8d0cedebae6c8aefacb799a9f7e3` in
+extraction 9, archive SHA-256
+`64d6c6953a765563f1b091210fbcdf1e08e4a5105195cb0cee2ad606584eb85a`.
+The isolated snapshot passes 254 world regressions, 2,047 migration tests with
+zero failures and two existing skips, and full TypeScript. Report:
+`work/hybrid-rust-migration/checkpoint-c7-extracted-20260902-9-validation.json`.
+Browser diagnostic 10 subsequently passes both measured lanes and the separate
+skill client: each covers 155 exact generation cases and all five continuous
+420-tick movement traces, with zero readiness failures. All three screenshots
+were manually reviewed. Browser/context/server closure, six-world disposal,
+worker disposal, source/artifact immutability and mutex release pass. Evidence:
+extraction 9's
+`work/hybrid-rust-migration/r3-performance-streaming-admission-20260902-diagnostic-10/`.
+
+Within this single matched pair, initialized accepted-chunk p95 is 212.295 ms
+TypeScript versus 161.755 ms Rust (0.761935x); reset-to-accepted p95 is 212.555
+versus 178.380 ms (0.839218x). All four strata for both metrics pass the 1.05x
+regression guard. Initial drawable latency ratios across POI, ocean horizon,
+ocean flora, cave and biome transition are 0.704964, 0.830344, 0.772514,
+0.742577 and 0.964039; these are single startup latencies, not p95. World-update
+p95 ratios are 0.888272, 0.899856, 0.897989, 0.908156 and 0.971684. This is
+successful one-pair subsystem diagnostic evidence, not the required repeated
+performance acceptance, full-game acceptance, causal attribution to one fix,
+or formal authority promotion. Native exact-state work remains excluded.
+
 ### Predictive generation admission - 2026-09-02
 
 The ordinary Rust generation lane can now use a spare worker for a queued,
