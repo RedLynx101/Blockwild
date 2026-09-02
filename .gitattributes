@@ -1,5 +1,11 @@
 * text=auto
 *.sh text eol=lf
+
+# The Rust artifact source snapshot hashes raw bytes across clean checkouts.
+engine/** text=auto eol=lf
+scripts/build-rust-engine.mjs text eol=lf
+scripts/rust-engine-common.mjs text eol=lf
+
 *.mp3 binary
 *.wav binary
 *.png binary

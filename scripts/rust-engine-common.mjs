@@ -13,7 +13,18 @@ import { fileURLToPath } from "node:url";
 
 export const RUST_ENGINE_ARTIFACT_SCHEMA = 1;
 export const RUST_ENGINE_INDEX_SCHEMA = 1;
+export const RUST_ENGINE_SOURCE_SNAPSHOT_SCHEMA = 1;
 export const RUST_ENGINE_TARGET = "wasm32-unknown-unknown";
+
+const RUST_ENGINE_SOURCE_SNAPSHOT_SCRIPTS = Object.freeze([
+  "scripts/build-rust-engine.mjs",
+  "scripts/rust-engine-common.mjs",
+]);
+const RUST_ENGINE_SOURCE_EXCLUDED_DIRECTORIES = new Set([
+  ".sites-runtime",
+  "target",
+  "work",
+]);
 
 export class RustEngineToolError extends Error {
   constructor(message, details = undefined) {
@@ -201,6 +212,84 @@ export function sha256(buffer) {
 
 export function sha256File(filePath) {
   return sha256(readFileSync(filePath));
+}
+
+export function assertSha256(value, label = "SHA-256 digest") {
+  if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) {
+    throw new RustEngineToolError(`${label} must be a lowercase 64-character SHA-256 digest.`);
+  }
+  return value;
+}
+
+/**
+ * Hashes every checked-in Rust engine input which can affect a browser artifact.
+ * Cargo output and local runtime scratch roots are intentionally excluded. File
+ * paths, content hashes, and byte lengths are framed so neither traversal order
+ * nor ambiguous concatenation can change the identity.
+ */
+export function createRustEngineSourceSnapshot(repositoryRoot) {
+  const root = path.resolve(repositoryRoot);
+  const engineRoot = path.join(root, "engine");
+  if (!existsSync(engineRoot) || !lstatSync(engineRoot).isDirectory()) {
+    throw new RustEngineToolError(`Rust engine source directory is missing: ${engineRoot}`);
+  }
+
+  const sourceFiles = [];
+  const visitEngineDirectory = (directory, relativeDirectory = "") => {
+    const entries = readdirSync(directory, { withFileTypes: true })
+      .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0);
+    for (const entry of entries) {
+      const absolute = path.join(directory, entry.name);
+      const relativeWithinEngine = relativeDirectory
+        ? `${relativeDirectory}/${entry.name}`
+        : entry.name;
+      if (entry.isSymbolicLink()) {
+        throw new RustEngineToolError(`Symlinks are not allowed in the Rust engine source snapshot: ${absolute}`);
+      }
+      if (entry.isDirectory()) {
+        if (!relativeDirectory && RUST_ENGINE_SOURCE_EXCLUDED_DIRECTORIES.has(entry.name)) continue;
+        visitEngineDirectory(absolute, relativeWithinEngine);
+      } else if (entry.isFile()) {
+        sourceFiles.push({
+          absolute,
+          relative: `engine/${relativeWithinEngine}`,
+        });
+      } else {
+        throw new RustEngineToolError(`Unsupported filesystem entry in the Rust engine source snapshot: ${absolute}`);
+      }
+    }
+  };
+  visitEngineDirectory(engineRoot);
+
+  for (const relative of RUST_ENGINE_SOURCE_SNAPSHOT_SCRIPTS) {
+    const absolute = path.join(root, ...relative.split("/"));
+    if (!existsSync(absolute)) {
+      throw new RustEngineToolError(`Rust engine artifact build input is missing: ${absolute}`);
+    }
+    const entry = lstatSync(absolute);
+    if (entry.isSymbolicLink() || !entry.isFile()) {
+      throw new RustEngineToolError(`Rust engine artifact build input must be a regular non-symlink file: ${absolute}`);
+    }
+    sourceFiles.push({ absolute, relative });
+  }
+
+  sourceFiles.sort((left, right) => left.relative < right.relative ? -1 : left.relative > right.relative ? 1 : 0);
+  const hash = createHash("sha256");
+  hash.update(`blockwild-rust-engine-source-v${RUST_ENGINE_SOURCE_SNAPSHOT_SCHEMA}\n`, "utf8");
+  for (const file of sourceFiles) {
+    const contents = readFileSync(file.absolute);
+    hash.update(file.relative, "utf8");
+    hash.update("\0", "utf8");
+    hash.update(sha256(contents), "ascii");
+    hash.update("\0", "utf8");
+    hash.update(String(contents.byteLength), "ascii");
+    hash.update("\n", "utf8");
+  }
+  return Object.freeze({
+    schema: RUST_ENGINE_SOURCE_SNAPSHOT_SCHEMA,
+    digest: hash.digest("hex"),
+    fileCount: sourceFiles.length,
+  });
 }
 
 export function listFilesRecursively(rootDirectory) {
