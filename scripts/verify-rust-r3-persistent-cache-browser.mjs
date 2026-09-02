@@ -3,9 +3,9 @@
  * node --import tsx scripts/verify-rust-r3-persistent-cache-browser.mjs --output work/<fresh-directory>
  *
  * Uses the canonical compatibility artifact, default compiled Rust world,
- * independent production-worker corpus oracle, and two fresh same-origin pages.
- * Retains cold/restore state, screenshots, immutable requests and cleanup proof.
- * Review cold.png + restore.png manually; no authority/performance promotion.
+ * independent production-worker corpus oracle, and three fresh same-origin pages.
+ * Retains cold/restore/edit-halo state, screenshots, requests and cleanup proof.
+ * Review all three screenshots manually; no authority/performance promotion.
  */
 import assert from "node:assert/strict";
 import { existsSync, lstatSync, readFileSync, readdirSync } from "node:fs";
@@ -20,11 +20,14 @@ import {
   runR3WorkerSkillClient, selectR3ProductionWorkerArtifact,
 } from "./verify-rust-generation-production-worker.mjs";
 import { closeR3PerformanceResources, r3PerformanceBuildDefinition } from "./benchmark-r3-generation-browser.mjs";
-import { normalizeWorldGenerationOptions } from "../app/game/world.ts";
-import { decodeR3WorkerExpectedChunk } from "../tests/fixtures/r3-production-worker-contract.ts";
+import { blockIndex, MAX_Y, normalizeWorldGenerationOptions } from "../app/game/world.ts";
+import { BlockId } from "../app/game/data.ts";
+import { createGeneratedChunkV2 } from "../app/game/terrain-generation-contract.ts";
+import { generateChunkWithLegacyOracleV2 } from "../app/game/rust-terrain-generation-legacy-oracle.ts";
+import { decodeR3WorkerExpectedChunk, encodeR3WorkerExpectedBytes, r3WorkerStreams } from "../tests/fixtures/r3-production-worker-contract.ts";
 import { r3PerformanceRequest } from "../tests/fixtures/r3-generation-performance-contract.ts";
 import {
-  assertR3CachePageEvidence, assertR3PersistentCacheEvidence, r3CacheChunkProof,
+  assertR3CachePageEvidence, assertR3PersistentCacheEvidence, assertR3EditHaloEvidence, assertR3CompletePersistentCacheEvidence, r3CacheChunkProof, r3CacheHaloKeys,
   R3_PERSISTENT_CACHE_ARTIFACT, R3_PERSISTENT_CACHE_CASE,
 } from "../tests/fixtures/r3-persistent-cache-contract.ts";
 
@@ -47,6 +50,34 @@ export function r3PersistentCacheKey(entry) {
   return `terrain-v5|g18|${entry.seed}|${JSON.stringify(normalizeWorldGenerationOptions(entry.options))}|${entry.chunk.join(",")}|0.0.0.0.0.0.0.0.0`;
 }
 
+/**
+ * Two real independent generations, additional to (not a replacement for) the certified corpus.
+ * @param {import("../tests/fixtures/r3-persistent-cache-contract.ts").R3CacheManifest} manifest
+ * @returns {Promise<{manifest: import("../tests/fixtures/r3-persistent-cache-contract.ts").R3CacheHaloManifest, bytes: Buffer}>}
+ */
+export async function buildR3EditHaloOracle(manifest) {
+  assert.equal(manifest.entry.id, R3_PERSISTENT_CACHE_CASE); assert(!manifest.entry.edits?.length);
+  const [cx, cz] = manifest.entry.chunk;
+  const index = blockIndex(0, MAX_Y, 8);
+  const base = { id: `${R3_PERSISTENT_CACHE_CASE}-east-neighbor-edit-halo`, ordinal: manifest.entry.ordinal + 1_000,
+    seed: manifest.entry.seed, chunk: [cx + 1, cz], options: manifest.entry.options,
+    coverage: ["additional-real-cache-edit-halo-oracle-not-promotion-corpus"] };
+  const baselineRequest = r3PerformanceRequest(base);
+  const baseline = createGeneratedChunkV2(baselineRequest, generateChunkWithLegacyOracleV2(baselineRequest));
+  assert.equal(baseline.blocks[index], BlockId.Air, "halo witness must be an independently verified non-noop air cell");
+  const edited = { ...base, edits: [[index, BlockId.Stone]] };
+  const request = r3PerformanceRequest(edited);
+  const reference = createGeneratedChunkV2(request, generateChunkWithLegacyOracleV2(request));
+  assert.equal(reference.blocks[index], BlockId.Stone, "independent edited oracle lost the public edit");
+  const bytes = Buffer.from(encodeR3WorkerExpectedBytes(reference));
+  const oracle = await r3CacheChunkProof(reference); const baselineProof = await r3CacheChunkProof(baseline);
+  assert.notEqual(oracle.streams[0].sha256, baselineProof.streams[0].sha256, "halo oracle edit changed no block bytes");
+  return { manifest: { scope: "east-neighbor-edit-namespace-rejection", ...r3CacheHaloKeys(manifest, index, BlockId.Stone),
+    neighbor: { ...edited, streamBytes: r3WorkerStreams(reference).map(stream => stream.byteLength), expectedChunkHash: reference.chunkHash,
+      expectedBytesHash: sha256(bytes) }, baseline: baselineProof, oracle,
+    edit: { x: (cx + 1) * 16, y: MAX_Y, z: cz * 16 + 8, index, previousBlockId: BlockId.Air, blockId: BlockId.Stone } }, bytes };
+}
+
 export function assertR3PersistentCacheBrowserErrors(errors) {
   assert(Array.isArray(errors), "browser error evidence must be an array");
   assert.equal(errors.length, 0, "browser errors were observed, including during owned cleanup");
@@ -61,6 +92,8 @@ export function auditR3PersistentCacheFixture(repositoryRoot = ROOT) {
   assert.match(text, /world\.awaitGenerationRing\(x, z, 0, 5_000\)/u);
   assert.match(text, /state\.phase === "cold"/u);
   assert.match(text, /Reflect\.apply\(nativeGet, this, args\)/u); assert.match(text, /Reflect\.apply\(nativePut, this, args\)/u);
+  assert.match(text, /halo\.editAccepted = world\.setBlock\(edit\.x, edit\.y, edit\.z, edit\.blockId\)/u);
+  assert.match(text, /halo\.recordedEdits = world\.serializeEdits\(\)/u);
   return { fixtureSha256: sha256(Buffer.from(text)), defaultWorld: true, observationOnlyCacheHooks: true,
     injectedCacheOrMarkers: false, naturalEvictionAndNearRestore: true };
 }
@@ -90,7 +123,7 @@ export async function verifyRustR3PersistentCache(argv = process.argv) {
   const audit = auditR3PersistentCacheFixture(); const sourceBefore = browserSnapshot();
   const canonicalBefore = JSON.stringify(validatePublishedArtifacts(path.join(ROOT, "public/engine")));
   const mutex = await acquireManagedBrowserGateMutex(ROOT);
-  let server; let browser; let context; let cold; let restore; let manifest; let success = false; let failure = null;
+  let server; let browser; let context; let cold; let restore; let editHalo; let manifest; let success = false; let failure = null;
   const requests = []; const routes = []; const errors = []; const cleanup = {}; const skill = { ran: false };
   try {
     await mkdir(output, { recursive: true });
@@ -105,8 +138,10 @@ export async function verifyRustR3PersistentCache(argv = process.argv) {
     manifest = { schema: 1, artifactHash: selection.artifact.hash, corpusHash: corpus.manifest.corpusHash, entry,
       cacheKey: r3PersistentCacheKey(entry), oracle: await r3CacheChunkProof(chunk) };
     assert(manifest.oracle.markerCount > 0, "independent target oracle contains no POIs");
+    const haloOracle = await buildR3EditHaloOracle(manifest); manifest.editHalo = haloOracle.manifest;
     await writeFile(path.join(output, "oracle-manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
     const assets = new Map([...selection.assets, ...corpus.expectedBytes,
+      ["/__r3-persistent-cache/edited-neighbor.bin", { bytes: haloOracle.bytes, type: "application/octet-stream" }],
       ["/__r3-persistent-cache/manifest.json", { bytes: Buffer.from(JSON.stringify(manifest)), type: "application/json" }]]);
     const { createServer } = await import("vite"); const envDir = path.join(output, "empty-env"); await mkdir(envDir);
     server = await createServer({
@@ -134,8 +169,8 @@ export async function verifyRustR3PersistentCache(argv = process.argv) {
     const { chromium } = await import(pathToFileURL(playwrightPath).href);
     const browserPath = ["C:/Program Files/Google/Chrome/Application/chrome.exe", "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe"].find(file => existsSync(file));
     browser = await chromium.launch({ headless: true, ...(browserPath ? { executablePath: browserPath } : {}) });
-    // A dedicated fresh context supplies empty IndexedDB. A second NEW page,
-    // not reset/reload of the first world, shares only that context's origin storage.
+    // A dedicated fresh context supplies empty IndexedDB. Each NEW page shares
+    // only origin storage, never a previous world's memory cache or markers.
     context = await browser.newContext({ viewport: { width: 1100, height: 760 }, serviceWorkers: "block" });
     async function pagePhase(phase) {
       const page = await context.newPage();
@@ -150,7 +185,8 @@ export async function verifyRustR3PersistentCache(argv = process.argv) {
         const state = JSON.parse(await page.evaluate(() => window.render_game_to_text()));
         await writeFile(path.join(output, `${phase}.json`), `${JSON.stringify(state, null, 2)}\n`);
         await page.screenshot({ path: path.join(output, `${phase}.png`), fullPage: true });
-        assertR3CachePageEvidence(state, manifest); return state;
+        if (phase === "edit-halo") assertR3EditHaloEvidence(state, manifest); else assertR3CachePageEvidence(state, manifest);
+        return state;
       } catch (error) {
         // Preserve partial state even when startup/restore times out before a
         // terminal fixture status, rather than closing away the diagnostic.
@@ -165,6 +201,8 @@ export async function verifyRustR3PersistentCache(argv = process.argv) {
     cold = await pagePhase("cold");
     assert.equal(context.pages().length, 0, "source page was not closed before fresh-page restore");
     restore = await pagePhase("restore"); assertR3PersistentCacheEvidence(cold, restore, manifest);
+    assert.equal(context.pages().length, 0, "restore page was not closed before fresh edit-halo page");
+    editHalo = await pagePhase("edit-halo"); assertR3CompletePersistentCacheEvidence(cold, restore, editHalo, manifest);
     assertR3PersistentCacheBrowserErrors(errors);
     assert(!routes.some(route => route.status !== 200), "artifact/oracle request escaped the exact immutable allowlist");
     assert(requests.some(url => /^\/app\/game\/terrain-generation-worker\.ts\?/u.test(url) && url.includes("worker_file") && url.includes("type=module")), "actual production generation Worker module was not requested");
@@ -174,7 +212,7 @@ export async function verifyRustR3PersistentCache(argv = process.argv) {
     }
     if (options["skill-review"]) {
       // The skill's virtual-time shim must not supply the lease/cache acceptance
-      // clock. Use it only for the idle UI; both real-rAF phases above are native.
+      // clock. Use it only for the idle UI; all real-rAF phases above are native.
       const directory = path.join(output, "skill-ui-only"); await mkdir(directory);
       const client = path.join(os.homedir(), ".codex/skills/develop-web-game/scripts/web_game_playwright_client.js");
       assert(existsSync(client), "installed develop-web-game client is unavailable"); skill.ran = true; skill.process = {};
@@ -209,15 +247,16 @@ export async function verifyRustR3PersistentCache(argv = process.argv) {
       await writeFile(path.join(output, "cleanup.json"), `${JSON.stringify(cleanup, null, 2)}\n`);
       await writeFile(path.join(output, "summary.json"), `${JSON.stringify({ schema: 1, status: success && !failure ? "passed" : "failed",
         scope: "Unmeasured production persistent-cache acceptance; not performance/full-game/authority promotion", output,
-        liveEditHaloNamespaceRejection: "Not exercised; this lane covers an unedited POI cache round trip only",
+        liveEditHaloNamespaceRejection: editHalo?.status === "passed" && !failure ? "passed-separate-real-east-neighbor-edit-scenario" : "not-accepted",
+        editHaloBoundary: "Old-vs-new cache namespace lookup/admission only; target immutable bytes may match. Not stale-inflight-response or R4/R8 authority acceptance.",
         artifactHash: selection.artifact.hash, sourceSnapshot: selection.sourceSnapshot, browserSource: sourceBefore, audit,
-        manifest, cold, restore, skill, cleanup, error: failure ? String(failure) : null,
-        screenshotReview: "cold.png and restore.png require manual visual review; file existence is not visual acceptance" }, null, 2)}\n`);
+        manifest, cold, restore, editHalo, skill, cleanup, error: failure ? String(failure) : null,
+        screenshotReview: "cold.png, restore.png and edit-halo.png require manual visual review; file existence is not visual acceptance" }, null, 2)}\n`);
     }
   }
   if (failure) throw failure;
   process.stdout.write(`${JSON.stringify({ status: "passed", output, artifactHash: selection.artifact.hash, markerCount: manifest.oracle.markerCount }, null, 2)}\n`);
-  return { output, cold, restore, manifest, cleanup };
+  return { output, cold, restore, editHalo, manifest, cleanup };
 }
 
 if (isDirectInvocation(import.meta.url)) {

@@ -7,6 +7,7 @@ import {
 import {
   assertR3GenerationPerformanceEvidence, assertR3PerformanceReadiness, assertR3PerformanceTelemetry,
   advanceR3PerformanceClock, createR3PerformanceClock, r3PerformanceStartPoint,
+  settleR3PerformanceStartupBaseline, r3PerformanceSkillTraceSummary,
   r3PerformanceRequest, r3PerformanceTraceHash, r3PerformanceTracePoints, R3_PERFORMANCE_POLICY_V2, R3_PERFORMANCE_TRACE_V2,
   type R3PerformanceConfig, type R3PerformanceFrame, type R3PerformanceLandscape, type R3PerformancePoint,
   type R3PerformanceProfile, type R3PerformanceReadiness, type R3PerformanceRow, type R3PerformanceState,
@@ -24,6 +25,7 @@ const canvas = document.querySelector<HTMLCanvasElement>("#evidence")!;
 const context = canvas.getContext("2d")!;
 const runButton = document.querySelector<HTMLButtonElement>("#run")!;
 let running: Promise<void> | null = null;
+let finishedSkillTraces: ReturnType<typeof r3PerformanceSkillTraceSummary>[] | null = null;
 const disposalChecks: boolean[] = [];
 const liveWorlds = new Set<ChunkWorld>();
 // Keep the same independent oracle payloads resident throughout every streaming trace.
@@ -206,7 +208,8 @@ async function streamingTrace(landscape: R3PerformanceLandscape, profile: R3Perf
     const startPoint = r3PerformanceStartPoint(landscape);
     // Continuously requested observer pulses distinguish asynchronous admission latency
     // from actual main-thread stalls; waiting to request the next frame would not.
-    let previousTimestamp = await nextFrame(); const initialRafTimestamp = previousTimestamp;
+    let previousTimestamp = await settleR3PerformanceStartupBaseline(nextFrame);
+    const initialRafTimestamp = previousTimestamp;
     const startupRafPulses: R3PerformanceTrace["startupRafPulses"] = [];
     let pulsePrevious = initialRafTimestamp;
     const pulse = (timestamp: number) => {
@@ -299,6 +302,8 @@ async function run() {
     phase(`Failed · ${state.error}`);
   } finally {
     for (const world of [...liveWorlds]) disposeWorld(world);
+    // Diagnostics only: derive from retained samples after every timed operation.
+    finishedSkillTraces = state.traces.map(r3PerformanceSkillTraceSummary);
     draw();
   }
 }
@@ -312,7 +317,7 @@ target.render_game_to_text = () => JSON.stringify({ schema: state.schema, status
   profile: state.profile, artifactHash: state.artifactHash, corpusHash: state.corpusHash,
   policy: state.policy, traceHash: state.traceHash,
   completedCases: state.rows.length, warmup: Boolean(state.warmup),
-  traces: state.traces.map(trace => ({ id: trace.landscape.id, frames: trace.frames.length,
+  traces: finishedSkillTraces ?? state.traces.map(trace => ({ id: trace.landscape.id, frames: trace.frames.length,
     movementTicks: trace.frames.at(-1)?.simulationTickAfter ?? 0, finalPositionUpdate: trace.frames.at(-1)?.finalPositionUpdate ?? false,
     readinessFailures: trace.readinessFailures })),
   coordinates: "x/z world blocks; y vertical; 420 fixed movement ticks accumulated from real rAF time; updates precede physics",

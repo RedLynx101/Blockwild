@@ -13,7 +13,127 @@ This is the execution companion to [HYBRID_RUST_ENGINE_MIGRATION_MASTER_PLAN.md]
 
 ## Validated checkpoints
 
+### Validated hash fast path and diagnostic 8 - 2026-09-02
+
+The canonical byte hasher now uses four unsigned 32-bit words for the same two
+modulo-2^64 lanes. Exact carry arithmetic replaces the per-byte BigInt products;
+all public writers, scalar coercions, raw-versus-bulk high-lane distinction,
+little-endian output, schema constants and seven validation boundaries remain.
+The independent old BigInt helper was frozen from checkpoint `3775d22` before
+editing. Ten new differential tests, an 89-test relevant matrix including all
+155 canonical Wasm cases, TypeScript, lint and two independent reviews pass.
+The final full 170-file Rust/renderer/R3 matrix passes 1,806 tests with zero
+failures and two existing skips; a separate full TypeScript check also passes.
+Retained output: `work/hybrid-rust-migration/r3-followup-20260902-matrix.log`.
+
+The actual production-worker browser rerun also passes 465 exact comparisons,
+4,650 streams, 741 POI rows and all six lifecycle checks, with all five workers
+terminated. Its screenshot was manually reviewed. Source/artifact, process,
+server and mutex cleanup pass. Evidence:
+`work/hybrid-rust-migration/browser/r3-production-worker-c7bfb66c-20260902-limb-1/`.
+
+The full-game follow-up at
+`work/hybrid-rust-migration/browser/terrain-edit-c7bfb66c-20260902-limb-1/` passes
+all 12 checks. Trusted input removes Sunstep Grass at `(4,43,-3)`; Save & Quit,
+full reload and Continue preserve the exact Air edit and canonical edit SHA-256
+`bf1440d65e21624215279e72bc27b0b2d2cd94d6074388ed77faede401415f2b`.
+All seven screenshots were manually reviewed and all error/cleanup gates pass.
+The post-reload title menu is legible, but its terrain backdrop is sparse; the
+pre-optimization reference has the same gap (an entirely empty backdrop in that
+capture). This is a retained full-scene visual closure item, not a newly verified
+complete title-world render. The edit/reload gate proves its stated menu,
+current-ring and edit-persistence boundaries only.
+
+Diagnostic 8 passes both measured 155-case/five-trace lanes with zero readiness
+failures. In this single pair, initialized accepted-chunk p95 is 222.930 ms
+TypeScript versus 207.385 ms Rust (0.930x); streaming update p95 is 3.5-13.2%
+lower across the five landscapes. Initial drawable ratios are
+0.895/0.904/0.854/1.075/1.040. These results remain diagnostic: named-terrain
+initialized p95 regresses 1.103x, reset-to-accepted p95 regresses 1.425x, and
+the separate installed game-development client fails readiness 81/24/48/37/65
+times. All five first failures occur at callback 123 / movement tick 121: the
+leading chunks are present and lit, but required local sections are not built.
+The post-run bounded failure projection now preserves that direct evidence
+without adding measured-loop work. It has 88 passing focused tests.
+
+All three diagnostic screenshots were manually reviewed and source/artifact
+and mutex guards pass. Overall performance is not accepted; five-pair acceptance
+is deferred until the meshing delay and cold-start regressions are repaired.
+Evidence: `work/hybrid-rust-migration/r3-performance-c7bfb66c-20260902-diagnostic-8/`.
+
+### Live edit-halo cache rejection - 2026-09-02
+
+The extended real-browser cache gate passes all three fresh same-origin pages at
+`work/hybrid-rust-migration/r3-persistent-cache/c7bfb66c-20260902-edit-halo-1/`.
+The original cold-generation/eviction and persistent-restore assertions remain
+unchanged. In the third phase, ordinary `setBlock` records the independently
+verified Air-to-Stone edit at east-neighbor cell index 49024. The target's halo
+slot changes to `1p5m1sk`; production reads the new namespace and misses before
+any target generation or world update, while two audit reads prove the old
+persisted record remains present and unchanged.
+
+The target and edited neighbor then generate once with their exact namespaces
+and edit payload. Both full pre-update outputs match independent Node oracles;
+all immutable streams, three target POIs and the edited block survive normal
+drawable readiness. Natural 15-chunk travel unloads the target after its actual
+lease expires, and post-disposal readback proves the replacement was committed
+under the changed namespace. Other near-ring chunks legitimately produced three
+persistent hits; target-specific reads prove the required miss without falsifying
+global counters. Target immutable bytes may equal the old record: namespace
+exclusion, not fabricated byte inequality, is the acceptance condition.
+
+All 79 verifier tests, TypeScript, lint and independent review pass. Cold,
+restore, edit-halo and skill-idle screenshots were manually reviewed. Native,
+browser-source and canonical artifact guards, empty browser-error evidence, and
+all world/worker/observer/transaction/connection/browser/server/mutex cleanup
+checks pass. This closes the live edit-halo cache prerequisite, not R4/R8
+authority, stale-inflight-response handling, performance or full R3 promotion.
+
+### Startup backpressure and diagnostic 7 - 2026-09-02
+
+The post-checkpoint Rust scheduler now defers only new ordinary generation
+submissions outside the actual current 3x3 until its occupied local sections
+are lit and meshed. Completed responses, pending jobs and explicit distant
+residency requests remain serviceable; TypeScript rollback and all work budgets
+are unchanged. Nine targeted regressions, the 237-test broader suite, TypeScript,
+lint and independent review pass. This change is not yet a performance acceptance.
+
+Startup timing now settles two strictly advancing rAF callbacks before resetting
+the world and starting its observer. This removes a stale pre-corpus timestamp
+without hiding any actual reset stall. The explicit policy marker prevents older
+measurements from being silently combined; 84 clock/runner/verifier tests pass.
+Serialized reset-to-drawable remains a subsystem timing, not whole-game startup.
+
+Diagnostic 7 passes all 155 exact cases and all five strict movement traces in
+each measured lane, but the separate installed game-development client reports
+1/0/17/15/0 readiness failures. The overall diagnostic therefore fails. All three
+screenshots were manually reviewed; measured browser errors are empty, both
+lanes dispose all six worlds and their workers, and browser/server/mutex and
+source/artifact cleanup pass. Evidence is retained at
+`work/hybrid-rust-migration/r3-performance-c7bfb66c-20260902-diagnostic-7/`.
+
+Rust initial drawable latency is 1.195-1.347 seconds, lower than diagnostic 6
+across runs, but four of five within-pair landscape comparisons still exceed
+the 5% regression floor. Complete-corpus initialized accepted-chunk p95 is
+242.920 ms TypeScript versus 278.830 ms Rust (1.148x); reset-to-accepted is
+243.115 versus 396.120 ms (1.629x). These are single-pair diagnostics, not an
+accepted repeated speedup. The next implementation work optimizes the existing
+byte hasher without removing validation and retains bounded first-failure
+readiness details from the separate client's existing trace records.
+
 ### Cumulative checkpoint extraction repairs - 2026-09-02
+
+Closed as local commit `3775d22f0bf4780e555b752f137b30ddf041c37b`, exact tree
+`6fedc8a071a16bdc0f2e6d4ecf5396a3aaa9b1e0`, with 422 reviewed paths. Fresh
+extraction 4 passes native source/publication checks, 1,739 tests with zero
+failures and two existing skips (169 discovered files), and TypeScript. The
+retained archive SHA-256 is
+`8433eb8616d0a7788a4a8cc315355853d7ad16afdddec37c306c3bc751471285`.
+The third extraction had one final candidate-dependent CLI test failure; that
+test now creates its existing complete isolated fixture instead of relying on
+an ignored candidate in the actual repository. All earlier failures remain
+retained. Ongoing startup and cache work is outside this commit; no push,
+deployment, formal milestone or performance acceptance is claimed.
 
 The first extracted staged tree exposed published-artifact line-ending drift:
 staged blobs and generated working files match byte-for-byte, but Git archive

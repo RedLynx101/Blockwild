@@ -6002,6 +6002,13 @@ export class ChunkWorld {
       }
       if (this.terrainGenerationPipeline.authorityUnavailable
         || this.terrainGenerationPipeline.availableSlots <= 0) return false;
+      const ordinaryNext = preferredKey ? undefined : this.generationQueue.at(-1);
+      if (ordinaryNext && Number.isFinite(this.playerChunkX) && Number.isFinite(this.playerChunkZ)
+        && Math.max(Math.abs(ordinaryNext.cx - this.playerChunkX), Math.abs(ordinaryNext.cz - this.playerChunkZ)) > 1
+        && !this.immediateRingDrawable()) return false;
+      // Finish the actual local lighting/required-section boundary before new
+      // background terrain adds more seam work. Completed results above and
+      // explicit residency requests remain admitted, including larger startup rings.
       if (!preferredKey && this.terrainGenerationPipeline.availableSlots <= 1
         && (this.generationQueue.at(-1)?.distance ?? Number.POSITIVE_INFINITY) > 1) return false;
       const currentKey = chunkKey(this.playerChunkX, this.playerChunkZ);
@@ -11801,6 +11808,21 @@ export class ChunkWorld {
 
   private playerChunkStreamingState() {
     return this.chunkStreamingState(chunkKey(this.playerChunkX, this.playerChunkZ));
+  }
+
+  private immediateRingDrawable() {
+    const lowestSection = Math.max(0, this.playerSection - 1);
+    for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
+      const key = chunkKey(this.playerChunkX + dx, this.playerChunkZ + dz);
+      const chunk = this.chunks.get(key);
+      if (!chunk || !this.chunkLightPresentationReady(key)) return false;
+      // Match ringCompleteness's occupied-section boundary without allocating
+      // section arrays or diagnostic snapshots on every admission attempt.
+      for (let section = Math.min(SECTION_COUNT - 1, this.playerSection); section >= lowestSection; section -= 1) {
+        if (chunk.sectionBlockCounts[section] > 0 && !chunk.sections.has(section)) return false;
+      }
+    }
+    return true;
   }
 
   private immediateRingWorkState() {

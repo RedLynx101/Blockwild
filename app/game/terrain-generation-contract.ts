@@ -238,19 +238,37 @@ const FNV_64_PRIME = BigInt("1099511628211");
 const HIGH_LANE_SALT = BigInt("11562461410679940143");
 const HIGH_LANE_PRIME = FNV_64_PRIME ^ BigInt("315");
 const BYTE_MASK = BigInt("255");
+const HASH_WORD_BASE = 0x1_0000_0000;
+const HASH_WORD_MASK = BigInt("4294967295");
+const LOW_WORD_MULTIPLIER = Number(FNV_64_PRIME & HASH_WORD_MASK);
+const HIGH_WORD_MULTIPLIER = Number(HIGH_LANE_PRIME & HASH_WORD_MASK);
 
 export class CanonicalGenerationHasher {
-  private low = FNV_64_OFFSET;
-  private high = FNV_64_OFFSET ^ HIGH_LANE_SALT;
+  private lowLo = Number(FNV_64_OFFSET & HASH_WORD_MASK);
+  private lowHi = Number(FNV_64_OFFSET >> BigInt(32));
+  private highLo = Number((FNV_64_OFFSET ^ HIGH_LANE_SALT) & HASH_WORD_MASK);
+  private highHi = Number((FNV_64_OFFSET ^ HIGH_LANE_SALT) >> BigInt(32));
 
   constructor(domain: string) { this.writeString(domain); }
 
-  private wrap(value: bigint) { return BigInt.asUintN(64, value); }
+  private writeByte(byte: number, raw: boolean) {
+    const low = (this.lowLo ^ byte) >>> 0;
+    const high = (this.highLo ^ ((byte << 1) | (raw ? 1 : 0))) >>> 0;
+    // Both primes are 2^40 + c (435/136). The low-word product is below
+    // 2^41, so its carry is exact in a JS number. Only the low 32 bits of
+    // hi*c and lo*2^8 survive in the high word modulo 2^64.
+    const lowProduct = low * LOW_WORD_MULTIPLIER;
+    const highProduct = high * HIGH_WORD_MULTIPLIER;
+    this.lowHi = (Math.imul(this.lowHi, LOW_WORD_MULTIPLIER)
+      + Math.floor(lowProduct / HASH_WORD_BASE) + (low << 8)) >>> 0;
+    this.highHi = (Math.imul(this.highHi, HIGH_WORD_MULTIPLIER)
+      + Math.floor(highProduct / HASH_WORD_BASE) + (high << 8)) >>> 0;
+    this.lowLo = lowProduct >>> 0;
+    this.highLo = highProduct >>> 0;
+  }
 
   private writeRawByte(byte: number) {
-    const value = BigInt(byte);
-    this.low = this.wrap((this.low ^ value) * FNV_64_PRIME);
-    this.high = this.wrap((this.high ^ ((value << BigInt(1)) | BigInt(1))) * HIGH_LANE_PRIME);
+    this.writeByte(byte, true);
   }
 
   writeU16(value: number) {
@@ -278,24 +296,18 @@ export class CanonicalGenerationHasher {
 
   writeBytes(bytes: Uint8Array) {
     this.writeU64(bytes.byteLength);
-    for (const byte of bytes) {
-      const value = BigInt(byte);
-      this.low = this.wrap((this.low ^ value) * FNV_64_PRIME);
-      this.high = this.wrap((this.high ^ (value << BigInt(1))) * HIGH_LANE_PRIME);
-    }
+    for (const byte of bytes) this.writeByte(byte, false);
   }
 
   writeString(value: string) { this.writeBytes(new TextEncoder().encode(value)); }
 
   finish() {
     const bytes = new Uint8Array(16);
-    for (const [offset, lane] of [[0, this.low], [8, this.high]] as const) {
-      let remaining = lane;
-      for (let index = 0; index < 8; index += 1) {
-        bytes[offset + index] = Number(remaining & BYTE_MASK);
-        remaining >>= BigInt(8);
-      }
-    }
+    const view = new DataView(bytes.buffer);
+    view.setUint32(0, this.lowLo, true);
+    view.setUint32(4, this.lowHi, true);
+    view.setUint32(8, this.highLo, true);
+    view.setUint32(12, this.highHi, true);
     return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
 }

@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   assertR3GenerationPerformanceEvidence, assertR3GenerationPerformanceSkillSummary, assertR3PerformanceReadiness,
   advanceR3PerformanceClock, createR3PerformanceClock, r3PerformanceStartPoint,
+  r3PerformanceFirstReadinessFailure, r3PerformanceSkillTraceSummary,
   r3PerformanceRequest, r3PerformanceTraceHash, r3PerformanceTracePoints, R3_PERFORMANCE_POLICY_V2, R3_PERFORMANCE_TRACE_V2,
   type R3PerformanceFrame, type R3PerformanceLandscape, type R3PerformancePoint, type R3PerformanceProfile,
   type R3PerformanceReadiness, type R3PerformanceRow, type R3PerformanceState, type R3PerformanceStreamingFrame, type R3PerformanceTelemetry,
@@ -191,15 +192,85 @@ test("compact skill summary retains provenance, complete correctness coverage, a
   const state = evidence();
   const summary = { schema: 2, status: "passed", error: null, profile: state.profile, artifactHash: state.artifactHash,
     corpusHash: state.corpusHash, traceHash: state.traceHash, policy: state.policy, completedCases: 155, warmup: true,
-    traces: state.traces.map(trace => ({ id: trace.landscape.id, frames: trace.frames.length,
-      movementTicks: trace.frames.at(-1)!.simulationTickAfter, finalPositionUpdate: trace.frames.at(-1)!.finalPositionUpdate,
-      readinessFailures: trace.readinessFailures })), cleanup: state.cleanup };
+    traces: state.traces.map(r3PerformanceSkillTraceSummary), cleanup: state.cleanup };
   assert.doesNotThrow(() => assertR3GenerationPerformanceSkillSummary(summary, expectation()));
   assert.throws(() => assertR3GenerationPerformanceSkillSummary({ ...summary, warmup: false }, expectation()), /warmup/);
   assert.throws(() => assertR3GenerationPerformanceSkillSummary({ ...summary, completedCases: 154 }, expectation()), /corpus/);
   assert.throws(() => assertR3GenerationPerformanceSkillSummary({ ...summary, profile: "typescript-rollback" }, expectation()), /profile/);
   summary.traces[0].readinessFailures = 1;
   assert.throws(() => assertR3GenerationPerformanceSkillSummary(summary, expectation()), /readiness/);
+});
+
+test("first readiness failure comes from the strict predicate and actual retained callback, not the claimed count", () => {
+  const trace = evidence().traces[0];
+  const first = trace.frames[7]; const later = trace.frames[19];
+  (first.readiness.playerTerrainPresentation.chunks[0].requiredSections[0].presentations.opaque as { sourceVisible: boolean }).sourceVisible = false;
+  later.readiness.playerChunkReady = false;
+  assert.equal(trace.readinessFailures, 0, "synthetic stale counter must not hide failed retained evidence");
+  const failure = r3PerformanceFirstReadinessFailure(trace)!;
+  assert.equal(failure.frameIndex, 7);
+  assert.equal(failure.frame.callbackOrdinal, first.callbackOrdinal);
+  assert.equal(failure.frame.simulationTick, first.simulationTick);
+  assert.equal(failure.frame.simulationTickAfter, first.simulationTickAfter);
+  assert.equal(failure.frame.rafTimestamp, first.rafTimestamp);
+  assert.deepEqual(failure.frame.point, first.point);
+  assert.match(failure.reason, /visible presentation/);
+  assert.equal(failure.previousFrame?.callbackOrdinal, trace.frames[6].callbackOrdinal);
+  assert.equal(failure.readiness.playerTerrainPresentation.chunks[0].requiredSections[0].presentations.opaque.sourceVisible, false);
+});
+
+test("first readiness failure is null for all-ready traces and has no invented preceding frame", () => {
+  const trace = evidence().traces[0];
+  assert.equal(r3PerformanceFirstReadinessFailure(trace), null);
+  assert.equal(r3PerformanceSkillTraceSummary(trace).firstReadinessFailure, null);
+  trace.frames[0].readiness.playerChunkReady = false;
+  assert.equal(r3PerformanceFirstReadinessFailure(trace)!.previousFrame, null);
+});
+
+test("first readiness diagnostic is bounded, detached, and preserves direct built-section evidence without mutation", () => {
+  const trace = evidence().traces[0]; const sample = trace.frames[2];
+  sample.readiness.immediateRing = { desired: 9, ready: 8, ratio: 8 / 9 };
+  sample.readiness.occupancy[0].sections[0].built = false;
+  const chunks = sample.readiness.playerTerrainPresentation.chunks as unknown as Array<{ key: string; requiredSections: unknown[] }>;
+  chunks[0].key = "x".repeat(10_000);
+  chunks[0].requiredSections.push(...Array(30).fill(chunks[0].requiredSections[0]));
+  chunks.push(...Array(30).fill(chunks[0]));
+  Object.assign(sample, { unrelatedLargePayload: new Uint8Array(100_000) });
+  Object.assign(sample.telemetry, { unrelatedLargePayload: new Uint8Array(100_000) });
+  const before = structuredClone(trace);
+  const failure = r3PerformanceFirstReadinessFailure(trace)!;
+  assert.equal(failure.readiness.playerTerrainPresentation.chunks.length, 9);
+  assert.equal(failure.readiness.playerTerrainPresentation.omittedChunks, 30);
+  assert.equal(failure.readiness.playerTerrainPresentation.chunks[0].key?.length, 128);
+  assert.equal(failure.readiness.playerTerrainPresentation.chunks[0].requiredSections.length, 2);
+  assert.equal(failure.readiness.playerTerrainPresentation.chunks[0].omittedRequiredSections, 30);
+  assert.equal(failure.readiness.occupancy[0].sections[0].built, false);
+  assert.equal(failure.frame.queues.meshSections, sample.telemetry.meshSectionsQueued);
+  assert.equal(failure.frame.generationWorker.epoch, sample.telemetry.generationWorker.epoch);
+  assert(JSON.stringify(failure).length < 20_000, "one bounded diagnostic must not embed a full trace or terrain buffers");
+  assert(!JSON.stringify(failure).includes("unrelatedLargePayload"));
+  assert.deepEqual(trace, before);
+  failure.frame.point.x += 100;
+  failure.readiness.occupancy[0].sections[0].built = true;
+  assert.deepEqual(trace, before, "mutating a projected diagnostic must not mutate retained source evidence");
+});
+
+test("skill failure diagnostics cannot turn failed readiness into passing evidence", () => {
+  const state = evidence(); state.traces[0].frames[7].readiness.playerChunkReady = false;
+  const summary = { schema: 2, status: "passed", error: null, profile: state.profile, artifactHash: state.artifactHash,
+    corpusHash: state.corpusHash, traceHash: state.traceHash, policy: state.policy, completedCases: 155, warmup: true,
+    traces: state.traces.map(r3PerformanceSkillTraceSummary), cleanup: state.cleanup };
+  assert.equal(summary.traces[0].readinessFailures, 0, "the diagnostic must not rewrite the recorded failure count");
+  assert(summary.traces[0].firstReadinessFailure);
+  assert.throws(() => assertR3GenerationPerformanceSkillSummary(summary, expectation()), /first readiness failure/);
+  assert.throws(() => assertR3GenerationPerformanceEvidence(state, expectation()), /not ready/);
+  assert.throws(() => assertR3GenerationPerformanceSkillSummary({ ...summary, status: "failed" }, expectation()), /did not pass/);
+  summary.traces[0].firstReadinessFailure = null;
+  summary.traces[0].readinessFailures = 1;
+  assert.throws(() => assertR3GenerationPerformanceSkillSummary(summary, expectation()), /readiness/);
+  summary.traces[0].readinessFailures = 0;
+  delete (summary.traces[0] as Partial<typeof summary.traces[0]>).firstReadinessFailure;
+  assert.throws(() => assertR3GenerationPerformanceSkillSummary(summary, expectation()), /first readiness failure/);
 });
 
 test("browser fixture uses default authority, real frame API, explicit start, and copied pre-seam light", () => {
@@ -211,6 +282,14 @@ test("browser fixture uses default authority, real frame API, explicit start, an
   assert.match(source, /light: chunk\.light\.slice\(\)/); assert.match(source, /terrainGenerationChunksByteEqualV2\(actual, expected\)/);
   assert.match(source, /startR3Performance = \(\) => running \?\?= run\(\)/);
   assert.match(source, /setResourceTimingBufferSize\(10_000\)/);
+  const measuredFrames = source.slice(source.indexOf("function frameSample("), source.indexOf("async function run()"));
+  assert.doesNotMatch(measuredFrames, /r3PerformanceSkillTraceSummary|r3PerformanceFirstReadinessFailure/,
+    "failure diagnostics must not add observer work to measured callbacks");
+  const summaryProjection = source.indexOf("finishedSkillTraces = state.traces.map(r3PerformanceSkillTraceSummary)");
+  assert(summaryProjection > source.indexOf("for (const world of [...liveWorlds]) disposeWorld(world)"),
+    "bounded failure projection must follow the run's final world cleanup");
+  assert.match(source, /traces: finishedSkillTraces \?\? state\.traces\.map/,
+    "the skill hook must reuse completed diagnostics instead of rescanning frames");
   const html = readFileSync(new URL("./fixtures/r3-generation-performance.html", import.meta.url), "utf8");
   assert.match(html, /id="run"/); assert.match(html, /href="data:,"/);
 });

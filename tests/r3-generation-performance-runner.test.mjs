@@ -19,6 +19,19 @@ function validRuns(pairs = 1) {
   } }));
 }
 
+test("the browser fixture settles its startup pulse baseline before measured reset", () => {
+  const source = readFileSync(new URL("./fixtures/r3-generation-performance.ts", import.meta.url), "utf8");
+  const start = source.indexOf("async function streamingTrace(");
+  const end = source.indexOf("async function run()", start);
+  assert(start >= 0 && end > start);
+  const trace = source.slice(start, end);
+  const settled = trace.indexOf("await settleR3PerformanceStartupBaseline(nextFrame)");
+  const observer = trace.indexOf("pulseRequest = requestAnimationFrame(pulse)");
+  const reset = trace.indexOf("const resetStart = performance.now(); world.reset(");
+  assert(settled >= 0 && observer > settled && reset > observer,
+    "settling must precede the continuous observer and every measured reset operation");
+});
+
 test("R3 performance preserves balanced complete pairs and labels short runs diagnostic", () => {
   assert.deepEqual(r3PerformanceSchedule(1).map(lane => lane.profile), ["typescript-rollback", "rust-primary"]);
   const schedule = r3PerformanceSchedule(5);

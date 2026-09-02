@@ -3,12 +3,39 @@ import test from "node:test";
 import {
   advanceR3PerformanceClock, assertR3PerformanceClockReplay, assertR3PerformanceStreamingClock,
   createR3PerformanceClock, r3PerformanceStartPoint, r3PerformanceTracePoints, R3_PERFORMANCE_TRACE_V2,
+  settleR3PerformanceStartupBaseline,
   type R3PerformanceLandscape, type R3PerformanceStreamingFrame,
 } from "./fixtures/r3-generation-performance-contract.ts";
 
 const landscape: R3PerformanceLandscape = { id: "synthetic-clock-only", seed: "clock", chunk: [-3, 4], focus: "clock",
   camera: { position: [-40, 70, 72], lookAt: [-40, 50, 72], fov: 60 } };
 const baseline = 1000;
+
+test("startup settles a second distinct callback before any measured reset work", async () => {
+  const events: string[] = [];
+  const timestamps = [5367, 26000];
+  const settled = await settleR3PerformanceStartupBaseline(async () => {
+    events.push("frame"); return timestamps.shift()!;
+  });
+  events.push("reset");
+  assert.deepEqual(events, ["frame", "frame", "reset"]);
+  assert.equal(settled, 26000, "the stale pre-corpus frame cannot be the reset baseline");
+  assert.equal(27100 - settled, 1100, "a subsequent real synchronous reset stall remains visible");
+});
+
+for (const [label, timestamps] of [
+  ["equal callbacks", [10, 10]], ["reversed callbacks", [10, 9]],
+  ["invalid first callback", [NaN, 20]], ["invalid second callback", [10, Infinity]],
+  ["negative callback", [-1, 10]],
+] as const) test(`startup baseline rejects ${label}`, async () => {
+  let index = 0;
+  await assert.rejects(settleR3PerformanceStartupBaseline(async () => timestamps[index++]), /R3 generation performance/);
+});
+
+test("startup baseline propagates frame-provider failure without beginning a measurement", async () => {
+  const failure = new Error("rAF provider closed");
+  await assert.rejects(settleR3PerformanceStartupBaseline(async () => { throw failure; }), error => error === failure);
+});
 
 /** Clock-only records: these do not claim measured work, readiness, or browser execution. */
 function replay(hz: number, delayAt = -1) {

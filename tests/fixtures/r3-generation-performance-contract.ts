@@ -36,6 +36,7 @@ export const R3_PERFORMANCE_POLICY_V2 = {
   reverseScope: "resident-chunk-backtracking-not-eviction-or-persistent-rehydration",
   runtimeReadyBoundary: "generation-and-terrain-workers-ready-plus-cold-cache-guard",
   traceStartup: "reset-initializeAround-awaitGenerationRing-real-raf-drawable",
+  startupRafBaseline: "second-distinct-callback-before-reset",
 } as const;
 
 export function r3PerformanceRequest(entry: R3WorkerCase) {
@@ -81,6 +82,19 @@ export type R3PerformanceClockSample = {
 export function createR3PerformanceClock(previousTimestamp: number): R3PerformanceClock {
   duration(previousTimestamp, "clock baseline");
   return { previousTimestamp, callbackOrdinal: 0, simulationTick: 0, accumulatorSeconds: 0 };
+}
+
+/** A first callback may retain a timestamp from before the synchronous corpus.
+ * Settle before reset, so pre-measurement work is excluded but all reset stalls
+ * remain in the continuously requested startup observer pulses.
+ */
+export async function settleR3PerformanceStartupBaseline(nextFrame: () => Promise<number>) {
+  const firstTimestamp = await nextFrame();
+  duration(firstTimestamp, "startup settling callback");
+  const baselineTimestamp = await nextFrame();
+  duration(baselineTimestamp, "startup frame baseline");
+  invariant(baselineTimestamp > firstTimestamp, "startup frame baseline did not advance");
+  return baselineTimestamp;
 }
 
 /** Mirrors VoxelEngine.animate's dt clamp, accumulator cap and fixed-step loop. */
@@ -272,6 +286,82 @@ export function assertR3PerformanceReadiness(value: R3PerformanceReadiness) {
   invariant(presentation.ready === presentation.chunks.filter(chunk => chunk.ready).length, "drawable aggregate count mismatch");
 }
 
+function diagnosticText(value: unknown) { return typeof value === "string" ? value.slice(0, 128) : null; }
+function diagnosticRing(value: R3PerformanceReadiness["immediateRing"] | undefined) {
+  return { desired: value?.desired ?? null, ready: value?.ready ?? null, ratio: value?.ratio ?? null };
+}
+function diagnosticFrame(frame: R3PerformanceStreamingFrame) {
+  const worker = frame.telemetry.generationWorker; const terrain = frame.telemetry.terrainWorker;
+  return {
+    callbackOrdinal: frame.callbackOrdinal, simulationTick: frame.simulationTick, simulationTickAfter: frame.simulationTickAfter,
+    rafTimestamp: frame.rafTimestamp, rafIntervalMilliseconds: frame.rafIntervalMilliseconds,
+    updateMilliseconds: frame.updateMilliseconds,
+    point: { ordinal: frame.point.ordinal, phase: diagnosticText(frame.point.phase), x: frame.point.x, y: frame.point.y,
+      z: frame.point.z, velocityX: frame.point.velocityX, velocityZ: frame.point.velocityZ },
+    playerChunk: diagnosticText(frame.readiness?.playerChunk), playerSection: frame.readiness?.playerSection ?? null,
+    playerChunkReady: frame.readiness?.playerChunkReady ?? null, playerChunkStage: diagnosticText(frame.readiness?.playerChunkStage),
+    immediateRing: diagnosticRing(frame.readiness?.immediateRing),
+    queues: { generation: frame.telemetry.generationQueued, lighting: frame.telemetry.lightingQueued,
+      meshSections: frame.telemetry.meshSectionsQueued, residentChunks: frame.telemetry.residentChunks },
+    throughput: { generation: frame.telemetry.throughput.generation, lighting: frame.telemetry.throughput.lighting,
+      meshing: frame.telemetry.throughput.meshing },
+    generationWorker: { mode: diagnosticText(worker.mode), state: diagnosticText(worker.state), epoch: worker.epoch,
+      workers: worker.workers, ready: worker.ready, busy: worker.busy, submitted: worker.submitted, completed: worker.completed,
+      failed: worker.failed, rejected: worker.rejected, stale: worker.stale, canceled: worker.canceled, restarts: worker.restarts,
+      lastError: diagnosticText(worker.lastError?.message) },
+    terrainWorker: { supported: terrain.supported, ready: terrain.ready, pending: terrain.pending,
+      submitted: terrain.submitted, completed: terrain.completed, failed: terrain.failed, restarts: terrain.restarts,
+      lastError: diagnosticText(terrain.lastError) },
+  };
+}
+function diagnosticReadiness(value: R3PerformanceReadiness) {
+  const presentation = value?.playerTerrainPresentation; const chunks = presentation?.chunks ?? [];
+  const occupancy = value?.occupancy ?? [];
+  const layer = (item: R3PerformanceReadiness["playerTerrainPresentation"]["chunks"][number]["requiredSections"][number]["presentations"]["opaque"] | undefined) => ({
+    required: item?.required ?? null, mode: diagnosticText(item?.mode), source: item?.source ?? null,
+    sourceVisible: item?.sourceVisible ?? null, combined: item?.combined ?? null, combinedVisible: item?.combinedVisible ?? null,
+  });
+  return {
+    playerTerrainPresentation: { schema: presentation?.schema ?? null, epoch: presentation?.epoch ?? null,
+      centerKey: diagnosticText(presentation?.centerKey), desired: presentation?.desired ?? null, ready: presentation?.ready ?? null,
+      omittedChunks: Math.max(0, chunks.length - 9),
+      chunks: chunks.slice(0, 9).map(chunk => ({ key: diagnosticText(chunk.key), offset: { x: chunk.offset.x, z: chunk.offset.z },
+        present: chunk.present, visible: chunk.visible, lightReady: chunk.lightReady, ready: chunk.ready,
+        omittedRequiredSections: Math.max(0, chunk.requiredSections.length - 2),
+        requiredSections: chunk.requiredSections.slice(0, 2).map(section => ({ section: section.section, ready: section.ready,
+          requiredLayers: section.requiredLayers.slice(0, 2).map(diagnosticText),
+          omittedRequiredLayers: Math.max(0, section.requiredLayers.length - 2),
+          presentations: { opaque: layer(section.presentations?.opaque), cutout: layer(section.presentations?.cutout) },
+        })),
+      })),
+    },
+    omittedOccupancy: Math.max(0, occupancy.length - 9),
+    occupancy: occupancy.slice(0, 9).map(chunk => ({ key: diagnosticText(chunk.key), omittedSections: Math.max(0, chunk.sections.length - 2),
+      sections: chunk.sections.slice(0, 2).map(section => ({ section: section.section, blockCount: section.blockCount, built: section.built })),
+    })),
+  };
+}
+
+/** Post-run projection only: use the unchanged predicate, not recorded aggregate failure counts. */
+export function r3PerformanceFirstReadinessFailure(trace: Pick<R3PerformanceTrace, "frames">) {
+  for (const [frameIndex, frame] of trace.frames.entries()) {
+    let reason: string;
+    try { assertR3PerformanceReadiness(frame.readiness); continue; }
+    catch (error) { reason = error instanceof Error ? error.message : String(error); }
+    return { schema: 1 as const, frameIndex, reason: reason.slice(0, 256), frame: diagnosticFrame(frame),
+      readiness: diagnosticReadiness(frame.readiness), previousFrame: frameIndex > 0 ? diagnosticFrame(trace.frames[frameIndex - 1]) : null };
+  }
+  return null;
+}
+
+/** No buffers/full history escape; failure details are calculated once after all measured work. */
+export function r3PerformanceSkillTraceSummary(trace: R3PerformanceTrace) {
+  return { id: trace.landscape.id, frames: trace.frames.length,
+    movementTicks: trace.frames.at(-1)?.simulationTickAfter ?? 0,
+    finalPositionUpdate: trace.frames.at(-1)?.finalPositionUpdate ?? false,
+    readinessFailures: trace.readinessFailures, firstReadinessFailure: r3PerformanceFirstReadinessFailure(trace) };
+}
+
 function assertRow(row: R3PerformanceRow, entry: R3WorkerCase, profile: R3PerformanceProfile) {
   invariant(row && row.id === entry.id && row.ordinal === entry.ordinal && row.profile === profile, "service case/profile mismatch");
   invariant(row.resetCount === 1 && row.accepted === true && row.exactBytes === true, "service reset, acceptance, or exact-byte proof missing");
@@ -370,7 +460,7 @@ export function assertR3GenerationPerformanceSkillSummary(value: unknown, expect
 }) {
   const state = value as Omit<R3PerformanceState, "rows" | "traces" | "warmup"> & {
     completedCases: number; warmup: boolean;
-    traces: { id: string; frames: number; movementTicks: number; finalPositionUpdate: boolean; readinessFailures: number }[];
+    traces: ReturnType<typeof r3PerformanceSkillTraceSummary>[];
   };
   invariant(state?.schema === 2 && state.status === "passed" && state.error === null, "skill correctness run did not pass");
   invariant(state.profile === expected.profile && state.artifactHash === expected.manifest.artifactHash
@@ -384,6 +474,7 @@ export function assertR3GenerationPerformanceSkillSummary(value: unknown, expect
     invariant(trace.id === expected.landscapes[index].id && trace.frames >= 106
       && trace.movementTicks === R3_PERFORMANCE_TRACE_V2.totalMovementTicks && trace.finalPositionUpdate === true
       && trace.readinessFailures === 0, "skill landscape/tick/readiness evidence incomplete");
+    invariant(trace.firstReadinessFailure === null, "skill first readiness failure must be explicitly absent in a passing run");
   });
   equal(state.cleanup, { worldsCreated: 6, worldsDisposed: 6, workersDisposed: true }, "skill cleanup incomplete");
 }

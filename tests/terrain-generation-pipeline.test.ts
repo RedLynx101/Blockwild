@@ -616,6 +616,143 @@ test("preferred Rust residency bypasses presentation debt after the immediate ri
   world.dispose();
 });
 
+const startupBackpressureWorld = (context: test.TestContext) => {
+  const workers: ControlledWorker[] = [];
+  const pipeline = new TerrainGenerationPipeline(2, 0, {
+    workerFactory: () => { const worker = new ControlledWorker(); workers.push(worker); return worker; },
+    authoritySelection: rustAuthority,
+  });
+  const world = new ChunkWorld({ terrainGenerationAuthorityMode: "rust" });
+  context.after(() => world.dispose());
+  world.terrainGenerationPipeline.dispose();
+  world.terrainGenerationPipeline = pipeline;
+  world.reset("RUST-STARTUP-BACKPRESSURE", undefined, { structures: false });
+  workers.slice(-2).forEach(worker => worker.ready());
+  world.scheduleAround(0, 0, true, 10);
+  const complete = (key: string) => {
+    const worker = workers.findLast(candidate => candidate.requests.at(-1)?.key === key);
+    assert.ok(worker, `a real controlled worker must own ${key}`);
+    worker.complete();
+  };
+  for (let cx = -1; cx <= 1; cx += 1) for (let cz = -1; cz <= 1; cz += 1) {
+    const key = `${cx},${cz}`;
+    assert.equal(world.processGenerationSlice(key), true);
+    complete(key);
+    assert.equal(world.processGenerationSlice(key), true);
+  }
+  const internals = world as unknown as { processLightReconciliation: () => boolean };
+  const reconcile = () => {
+    for (let guard = 0; world.lightReconciliationQueued.size; guard += 1) {
+      assert.ok(guard < 512, "the installed ring must finish its real bounded seam-light tasks");
+      assert.equal(internals.processLightReconciliation(), true);
+    }
+  };
+  const queueOnly = (cx: number, cz: number, distance = Math.max(Math.abs(cx), Math.abs(cz))) => {
+    const key = `${cx},${cz}`;
+    world.generationQueue = [{ cx, cz, distance }];
+    world.generationQueued = new Set([key]);
+    world.generationEnqueuedAt = new Map([[key, performance.now()]]);
+  };
+  const missingRequiredSection = () => {
+    reconcile();
+    const chunk = world.chunks.get("1,0")!;
+    chunk.blocks[(10 - MIN_Y) * 16 * 16] = 3;
+    chunk.sectionBlockCounts[world.playerSection] = 1;
+    assert.equal(world.streamingDiagnostics().immediateRing.ready, 8);
+    return chunk;
+  };
+  return { world, workers, complete, reconcile, queueOnly, missingRequiredSection };
+};
+
+test("startup backpressure holds ordinary far work below the debt limit until all nine chunks are drawable", context => {
+  const { world, workers, queueOnly, missingRequiredSection } = startupBackpressureWorld(context);
+  queueOnly(2, 0);
+  const queued = world.generationQueue[0]; const enqueuedAt = world.generationEnqueuedAt.get("2,0");
+  const submitted = workers.reduce((count, worker) => count + worker.requests.length, 0);
+  const budgets = [world.generationWorkPerFrame, world.meshWorkPerFrame, world.streamingFrameBudgetMilliseconds];
+  assert.equal(world.lightReconciliationQueued.size, 9, "debt is below the old threshold of 32");
+  assert.equal(world.processGenerationSlice(), false, "new far work must wait for local lighting");
+  assert.equal(world.generationQueue[0], queued, "deferred admission must not dequeue or recreate the request");
+  assert.equal(world.generationEnqueuedAt.get("2,0"), enqueuedAt);
+  assert.equal(workers.reduce((count, worker) => count + worker.requests.length, 0), submitted);
+
+  const chunk = missingRequiredSection();
+  assert.equal(world.lightReconciliationQueued.size, 0);
+  assert.equal(world.processGenerationSlice(), false, "light-ready is not drawable without the occupied section");
+  world.rebuildSection(chunk, world.playerSection);
+  assert.equal(world.streamingDiagnostics().immediateRing.ready, 9);
+  assert.equal(world.processGenerationSlice(), true, "ordinary far admission resumes without a latch or refresh");
+  assert.deepEqual(budgets, [world.generationWorkPerFrame, world.meshWorkPerFrame, world.streamingFrameBudgetMilliseconds]);
+});
+
+for (const [cx, cz, distance] of [[2, 0, 0], [-2, -1, 1], [1, 2, 0]] as const) {
+  test(`startup backpressure uses actual coordinates for far request ${cx},${cz}, not cached distance ${distance}`, context => {
+    const { world, queueOnly } = startupBackpressureWorld(context);
+    queueOnly(cx, cz, distance);
+    assert.equal(world.processGenerationSlice(), false);
+    assert.equal(world.generationQueue.length, 1);
+    assert.equal(world.pendingWorkerGeneration.size, 0);
+  });
+}
+
+test("startup backpressure permits an ordinary diagonal immediate-ring request", context => {
+  const { world, queueOnly } = startupBackpressureWorld(context);
+  world.unloadChunk("1,1");
+  queueOnly(1, 1, 2);
+  assert.equal(world.processGenerationSlice(), true, "Chebyshev radius one includes a diagonal with a larger sort distance");
+  assert.equal(world.pendingWorkerGeneration.has("1,1"), true);
+});
+
+test("startup backpressure permits explicit far residency at eight of nine drawable chunks", context => {
+  const { world, queueOnly, missingRequiredSection } = startupBackpressureWorld(context);
+  missingRequiredSection(); queueOnly(2, 0);
+  assert.equal(world.processGenerationSlice("2,0"), true);
+  assert.equal(world.pendingWorkerGeneration.has("2,0"), true);
+});
+
+test("startup backpressure retains pending far work and installs its authoritative completion", context => {
+  const { world, workers, complete, queueOnly } = startupBackpressureWorld(context);
+  queueOnly(2, 0); assert.equal(world.processGenerationSlice("2,0"), true);
+  queueOnly(3, 0);
+  assert.equal(world.processGenerationSlice(), false);
+  assert.equal(world.pendingWorkerGeneration.has("2,0"), true);
+  assert.equal(world.terrainGenerationPipeline.diagnostics().canceled, 0);
+  assert.equal(workers.slice(-2).every(worker => !worker.terminated), true);
+  complete("2,0");
+  assert.equal(world.processGenerationSlice(), true, "completion installation must precede new-work backpressure");
+  assert.equal(world.chunks.has("2,0"), true);
+  assert.equal(world.pendingWorkerGeneration.has("2,0"), false);
+  assert.equal(world.generationQueue[0].cx, 3);
+});
+
+test("startup backpressure adds no reset state and old pending results remain invalidated", context => {
+  const { world, workers, queueOnly } = startupBackpressureWorld(context);
+  queueOnly(2, 0); assert.equal(world.processGenerationSlice("2,0"), true);
+  const oldWorkers = workers.slice(-2); const old = oldWorkers.find(worker => worker.requests.at(-1)?.key === "2,0")!;
+  world.reset("RUST-STARTUP-BACKPRESSURE-NEXT", undefined, { structures: false });
+  old.complete();
+  assert.equal(oldWorkers.every(worker => worker.terminated), true);
+  assert.equal(world.chunks.size, 0);
+  assert.equal(world.pendingWorkerGeneration.size, 0);
+  workers.slice(-2).forEach(worker => worker.ready());
+  world.scheduleAround(0, 0, true, 10);
+  queueOnly(2, 0);
+  assert.equal(world.processGenerationSlice("2,0"), true, "explicit readiness works immediately in the replacement epoch");
+  assert.equal(world.terrainGenerationPipeline.diagnostics().stale, 0);
+});
+
+test("startup backpressure does not restrict the explicit TypeScript rollback generation path", context => {
+  const world = new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
+  context.after(() => world.dispose());
+  world.reset("TS-STARTUP-BACKPRESSURE", undefined, { structures: false });
+  world.scheduleAround(0, 0, true, 10);
+  world.generationQueue = [{ cx: 2, cz: 0, distance: 2 }];
+  world.generationQueued = new Set(["2,0"]);
+  assert.equal(world.processGenerationSlice(), true);
+  assert.equal(world.activeGenerationTask?.key, "2,0");
+  assert.equal(world.terrainGenerationPipeline.diagnostics().submitted, 0);
+});
+
 test("an edit arriving during Rust generation invalidates the result and immediately requeues the new namespace", () => {
   const workers: ControlledWorker[] = [];
   const pipeline = new TerrainGenerationPipeline(1, 1, {
