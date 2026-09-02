@@ -8,6 +8,7 @@ import {
 } from "../app/game/world.ts";
 
 const ownership = (world: ChunkWorld) => (world as unknown as { pendingEditMeshes: Set<string> }).pendingEditMeshes;
+const activeMeshIdentity = (world: ChunkWorld) => [world.activeMeshTask?.key, world.activeMeshTask?.section];
 function occupy(chunk: Chunk, section: number) {
   chunk.blocks[section * SECTION_HEIGHT * CHUNK_SIZE * CHUNK_SIZE] = BlockId.Stone;
   chunk.sectionBlockCounts[section] = 1;
@@ -57,6 +58,112 @@ function prediction(context: TestContext, meshCost = 10, targetZ = 0) {
 function edit(world: ChunkWorld, chunk: Chunk, section = 3) {
   // An actual edit admission path, deliberately away from vertical/chunk boundaries.
   world.refreshEditedBlock(chunk.cx, chunk.cz, 8, MIN_Y + section * SECTION_HEIGHT + 8, 8, false);
+}
+
+function completeArrivalLighting(world: ChunkWorld, cx = 4, cz = 0) {
+  const arrival = addChunk(world, cx, cz); arrival.sections.clear();
+  const lighting = world as unknown as {
+    queueLightReconciliation(chunk: Chunk): void;
+    processLightReconciliation(preferredKey?: string): boolean;
+  };
+  const completed = world.streamingDiagnostics().throughput.lighting;
+  // Exercise the real bounded light completion -> prepareGeneratedChunk ->
+  // queueChunkMeshesAndSeams -> preemptMeshForPlayer path, not a direct preempt call.
+  lighting.queueLightReconciliation(arrival);
+  for (let guard = 0; world.lightReconciliationQueued.has(arrival.key); guard += 1) {
+    assert.ok(guard < 512, "the arriving chunk must finish real seam-light reconciliation");
+    assert.equal(lighting.processLightReconciliation(arrival.key), true);
+  }
+  assert.equal(world.streamingDiagnostics().throughput.lighting, completed + 1);
+  assert.ok(world.meshQueued.has(`${arrival.key}:6`) || world.seamPresentationPending.has(`${arrival.key}:6`),
+    "the completion must reach real mesh/seam admission");
+}
+
+for (const backgroundKind of ["seam", "ordinary"] as const) {
+  test(`real lighting arrivals preserve and finish useful partial prediction ahead of nearer deep ${backgroundKind} work`, context => {
+    const { world, target, background, step } = prediction(context);
+    if (backgroundKind === "ordinary") {
+      world.cancelQueuedMesh(background.key, 3); world.queueMesh(background.key, 3);
+    }
+    const budgets = [world.generationWorkPerFrame, world.meshWorkPerFrame, world.streamingFrameBudgetMilliseconds];
+    step(); const active = world.activeMeshTask;
+    assert.ok(active); assert.equal(active.nextLocalX, 1);
+    for (let arrival = 0; arrival < 3; arrival += 1) {
+      completeArrivalLighting(world, 4, arrival - 1);
+      assert.ok(world.activeMeshTask === active, "ordinary current-chunk depth must not discard predictive buckets");
+      const before: number = active.nextLocalX; const report = step();
+      assert.equal(world.activeMeshTask, active); assert.equal(active.nextLocalX, before + 1);
+      assert.equal(report.meshSlices, 1);
+    }
+    for (let attempt = 0; attempt < CHUNK_SIZE && !target.sections.has(5); attempt += 1) step();
+    assert.equal(target.sections.has(5), true, "repeated arrivals must not restart the same local section forever");
+    assert.equal((backgroundKind === "seam" ? world.urgentMeshQueued : world.meshQueued).has(`${background.key}:3`), true);
+    assert.deepEqual([world.generationWorkPerFrame, world.meshWorkPerFrame, world.streamingFrameBudgetMilliseconds], budgets);
+  });
+}
+
+test("real lighting completion preserves a useful active predictive seam dependency", context => {
+  const { world, target, step } = prediction(context);
+  world.cancelQueuedMesh(target.key, 5);
+  const blocker = addChunk(world, 3, 0); occupy(blocker, 5); blocker.sections.set(5, {});
+  world.queueMesh(blocker.key, 5, true); world.seamMeshRebuilds.add(`${blocker.key}:5`);
+  world.seamPresentationPending.set(`${target.key}:5`, { key: target.key, section: 5, urgent: false,
+    blockers: new Set([`${blocker.key}:5`]) });
+  step(); const active = world.activeMeshTask;
+  assert.equal(active?.key, blocker.key);
+  completeArrivalLighting(world, 5, 0);
+  assert.ok(world.activeMeshTask === active, "lighting completion must preserve the active dependency");
+  step(); assert.equal(world.activeMeshTask?.nextLocalX, 2);
+  for (let attempt = 0; attempt < CHUNK_SIZE * 2 && !target.sections.has(5); attempt += 1) step();
+  assert.equal(target.sections.has(5), true);
+});
+
+for (const urgent of ["edit", "coalesced-edit", "unknown"] as const) {
+  test(`real lighting completion still preempts prediction for protected urgent ${urgent}`, context => {
+    const { world, background, target, step } = prediction(context);
+    step(); assert.equal(world.activeMeshTask?.key, target.key);
+    if (urgent !== "coalesced-edit") world.seamMeshRebuilds.delete(`${background.key}:3`);
+    if (urgent !== "unknown") edit(world, background);
+    completeArrivalLighting(world);
+    assert.equal(world.activeMeshTask, null, "the urgent current-chunk work must retain preemption");
+    assert.equal(world.meshQueued.has(`${target.key}:5`), true);
+    step(); assert.deepEqual(activeMeshIdentity(world), [background.key, 3]);
+  });
+}
+
+test("real lighting completion does not hide a protected urgent edit behind the best-ranked seam", context => {
+  const { world, background, target, step } = prediction(context);
+  step(); assert.equal(world.activeMeshTask?.key, target.key);
+  occupy(background, 2); background.sections.set(2, {}); edit(world, background, 2);
+  assert.equal(ownership(world).has(`${background.key}:2`), true);
+  completeArrivalLighting(world);
+  assert.equal(world.activeMeshTask, null, "a lower-ranked protected urgent candidate still permits preemption");
+  assert.equal(world.meshQueued.has(`${target.key}:5`), true);
+  step(); assert.deepEqual(activeMeshIdentity(world), [background.key, 2]);
+});
+
+for (const currentKey of ["0,0", "1,0"]) {
+  test(`real lighting completion does not preserve prediction over missing current-ring ${currentKey}`, context => {
+    const { world, target, step } = prediction(context);
+    step(); assert.equal(world.activeMeshTask?.key, target.key);
+    const missing = world.chunks.get(currentKey)!; missing.sections.delete(6); world.queueMesh(missing.key, 6, true);
+    completeArrivalLighting(world);
+    assert.equal(world.activeMeshTask, null);
+    step(); assert.deepEqual(activeMeshIdentity(world), [missing.key, 6]);
+  });
+}
+
+for (const obsolete of ["stopped", "reversed", "already-built"] as const) {
+  test(`real lighting completion does not preserve ${obsolete} predictive work`, context => {
+    const { world, target, step } = prediction(context);
+    step(); assert.equal(world.activeMeshTask?.key, target.key);
+    if (obsolete === "stopped") world.streamingLookaheadChunkX = 0;
+    if (obsolete === "reversed") world.streamingLookaheadChunkX = -1;
+    if (obsolete === "already-built") target.sections.set(5, {});
+    completeArrivalLighting(world);
+    assert.equal(world.activeMeshTask, null);
+    assert.equal(world.meshQueued.has(`${target.key}:5`), true);
+  });
 }
 
 test("an existing background turn builds the predicted missing local section before nearer deep seam work", context => {

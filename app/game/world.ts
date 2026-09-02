@@ -5627,6 +5627,13 @@ export class ChunkWorld {
         && (this.urgentMeshQueued.has(`${entry.key}:${entry.section}`) || this.meshQueued.has(`${entry.key}:${entry.section}`)));
     const best = candidates.sort((left, right) => this.compareMeshPriority(left, right))[0];
     if (!best || this.compareMeshPriority(best, active) >= 0) return;
+    const protectedUrgent = candidates.some((entry) => this.urgentMeshQueued.has(`${entry.key}:${entry.section}`)
+      && this.isProtectedUrgentMesh(entry));
+    // Lighting arrivals and schedule refreshes must honor the same useful partial
+    // prediction as discretionary dispatch. Nearer background depth must not
+    // repeatedly discard its buckets; missing current-ring work still invalidates
+    // the predictor, and explicit/unknown urgent work retains preemption.
+    if (!protectedUrgent && this.predictedRequiredMeshTarget() === active) return;
     this.activeMeshTask = null;
     this.queueMesh(active.key, active.section, active.urgent || this.seamMeshRebuilds.has(`${active.key}:${active.section}`));
   }
@@ -6363,17 +6370,18 @@ export class ChunkWorld {
     return candidates.sort((left, right) => this.compareMeshPriority(left, right))[0] ?? null;
   }
 
+  private isProtectedUrgentMesh(entry: Readonly<{ key: string; section: number }>) {
+    const queueKey = `${entry.key}:${entry.section}`;
+    return this.pendingEditMeshes.has(queueKey) || !this.seamMeshRebuilds.has(queueKey);
+  }
+
   /** Prediction only spends the existing discretionary mesh turn, never a correctness reserve. */
   private processBackgroundMesh() {
     const target = this.predictedRequiredMeshTarget();
     if (!target) return this.processMesh();
-    const protectedUrgent = (entry: Readonly<{ key: string; section: number }>) => {
-      const queueKey = `${entry.key}:${entry.section}`;
-      return this.pendingEditMeshes.has(queueKey) || !this.seamMeshRebuilds.has(queueKey);
-    };
     const active = this.activeMeshTask;
     if (active && (this.activeMeshTaskBlocksRequiredImmediateSeam()
-      || ((active.urgent || this.urgentMeshQueued.has(`${active.key}:${active.section}`)) && protectedUrgent(active)))) {
+      || ((active.urgent || this.urgentMeshQueued.has(`${active.key}:${active.section}`)) && this.isProtectedUrgentMesh(active)))) {
       return this.processMesh();
     }
     // Unknown urgent causes remain conservative. Only identified generation-seam
@@ -6381,7 +6389,7 @@ export class ChunkWorld {
     let urgent: { key: string; section: number } | undefined;
     for (let index = this.urgentMeshQueueHead; index < this.urgentMeshQueue.length; index += 1) {
       const entry = this.urgentMeshQueue[index];
-      if (!this.urgentMeshQueued.has(`${entry.key}:${entry.section}`) || !protectedUrgent(entry)
+      if (!this.urgentMeshQueued.has(`${entry.key}:${entry.section}`) || !this.isProtectedUrgentMesh(entry)
         || !this.hasRunnableQueuedMeshForKey(entry.key, entry.section)) continue;
       if (!urgent || this.compareMeshPriority(entry, urgent) < 0) urgent = entry;
     }
