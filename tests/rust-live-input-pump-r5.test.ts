@@ -1,5 +1,17 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import {
+  compareCanonicalUtf8R10,
+  decodeRustDomainBundleR10,
+  type RustDomainValueR10,
+  type RustDomainValueTypeR10,
+} from "../app/game/rust-authoritative-extraction-r10.ts";
+import { encodeRustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-codec-r6.ts";
+import type {
+  RustEntityExtractionR6V3,
+  RustEntityExtractionRecordR6V3,
+} from "../app/game/rust-entity-authority-contract-r6.ts";
 import {
   RUST_RUNTIME_INPUT_BUTTON_V1,
   RUST_RUNTIME_INPUT_FLAG_V1,
@@ -14,7 +26,13 @@ import {
 import { sealRustIntegratedRuntimeSemanticActionReceiptV2 } from "../app/game/rust-integrated-runtime-codec.ts";
 import type { RustIntegratedPlayerRuntimeContinuityV1 } from "../app/game/rust-integrated-runtime-player-status.ts";
 import {
+  planRustLivePlayerRespawnV1,
+  type RustIntegratedPlayerRespawnV1,
+  type RustLivePlayerRespawnPlanV1,
+} from "../app/game/rust-integrated-runtime-player-respawn.ts";
+import {
   RUST_LIVE_INPUT_STEP_BUDGET_US_R5,
+  RustLiveInputPumpErrorR5,
   RustLiveInputPumpR5,
   quantizeRustLiveInputAxisR5,
   quantizeRustLiveInputPitchR5,
@@ -22,8 +40,16 @@ import {
   type RustLiveInputIntentR5,
   type RustLiveInputPumpServiceR5,
 } from "../app/game/rust-live-input-pump-r5.ts";
+import type { RustLivePlayerDeathRespawnR10, RustLivePlayerViewR10 } from "../app/game/rust-live-player-view-r10.ts";
+import { TypeScriptCanonicalHasher } from "../app/game/rust-kernel-shadow.ts";
 
 const GENERATION = 5;
+const PLAYER_VIEW_BWX0 = Uint8Array.from(Buffer.from(readFileSync(
+  new URL("./fixtures/rust-engine/r10-authoritative-extraction/bound-world-view-bwx0-v1.hex", import.meta.url),
+  "utf8",
+).trim(), "hex"));
+const ZERO_HASH_BYTES = new Uint8Array(16);
+const textEncoder = new TextEncoder();
 const ACTIONS = Object.freeze([
   [RUST_RUNTIME_INPUT_BUTTON_V1.primaryAttack, "primary-attack"],
   [RUST_RUNTIME_INPUT_BUTTON_V1.secondaryUse, "secondary-use"],
@@ -35,11 +61,199 @@ const ACTIONS = Object.freeze([
 
 function hash(value: number) { return value.toString(16).padStart(32, "0").slice(-32); }
 
-function identity(tick = 0, simulation = 0, state = 1): RustIntegratedRuntimeIdentityV1 {
+class RespawnFixtureWriter {
+  readonly bytes: number[] = [];
+  raw(value: Uint8Array | readonly number[]) { this.bytes.push(...value); return this; }
+  u8(value: number) { this.bytes.push(value); return this; }
+  u16(value: number) { this.bytes.push(value & 0xff, value >>> 8 & 0xff); return this; }
+  u32(value: number) {
+    this.bytes.push(value & 0xff, value >>> 8 & 0xff, value >>> 16 & 0xff, value >>> 24 & 0xff);
+    return this;
+  }
+  u64(value: bigint | number) {
+    let remaining = BigInt(value);
+    for (let index = 0; index < 8; index += 1) {
+      this.bytes.push(Number(remaining & BigInt(0xff)));
+      remaining >>= BigInt(8);
+    }
+    return this;
+  }
+  f64(value: number) {
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setFloat64(0, value, true);
+    return this.raw(bytes);
+  }
+  string(value: string) {
+    const bytes = textEncoder.encode(value);
+    return this.u32(bytes.byteLength).raw(bytes);
+  }
+  finish() { return Uint8Array.from(this.bytes); }
+}
+
+type RespawnFixtureRow = Readonly<{
+  kind: number;
+  key: string;
+  fields: Map<string, RustDomainValueR10>;
+  types: Map<string, RustDomainValueTypeR10>;
+}>;
+
+function respawnFixtureValue(value: RustDomainValueR10, type: RustDomainValueTypeR10) {
+  const writer = new RespawnFixtureWriter();
+  if (type === "bool") return writer.u8(0).u8(value === true ? 1 : 0).finish();
+  if (type === "u64") return writer.u8(1).u64(value as bigint).finish();
+  if (type === "i64") return writer.u8(2).u64(BigInt.asUintN(64, value as bigint)).finish();
+  if (type === "f64") return writer.u8(3).f64(value as number).finish();
+  if (type === "string") return writer.u8(4).string(value as string).finish();
+  if (type === "hash") return writer.u8(5).raw(value as Uint8Array).finish();
+  const bytes = value as Uint8Array;
+  return writer.u8(6).u32(bytes.byteLength).raw(bytes).finish();
+}
+
+function respawnFixtureRow(row: RespawnFixtureRow) {
+  const encoded = [...row.fields]
+    .sort(([left], [right]) => compareCanonicalUtf8R10(left, right))
+    .map(([name, value]) => {
+      const type = row.types.get(name);
+      assert.notEqual(type, undefined, `respawn fixture field '${name}' must retain its wire type`);
+      return [name, respawnFixtureValue(value, type!)] as const;
+    });
+  const revisionHash = new TypeScriptCanonicalHasher("blockwild.r10.domain-row-revision.v1")
+    .writeU16(row.kind).writeString(row.key).writeU16(encoded.length);
+  for (const [name, value] of encoded) revisionHash.writeString(name).writeBytes(value);
+  const bytes = revisionHash.finish();
+  const revision = new DataView(bytes.buffer, bytes.byteOffset, 8).getBigUint64(0, true);
+  const writer = new RespawnFixtureWriter().u16(row.kind).string(row.key).u64(revision).u16(encoded.length);
+  for (const [name, value] of encoded) writer.string(name).raw(value);
+  return writer.finish();
+}
+
+function setRespawnFixtureField(
+  row: RespawnFixtureRow,
+  name: string,
+  type: RustDomainValueTypeR10,
+  value: RustDomainValueR10,
+) {
+  row.fields.set(name, value);
+  row.types.set(name, type);
+}
+
+function bytesFromHash(value: string) {
+  return Uint8Array.from({ length: 16 }, (_, index) => Number.parseInt(value.slice(index * 2, index * 2 + 2), 16));
+}
+
+function emptyAudioExtraction(authorityTick: number) {
+  const bytes = new Uint8Array(4 + 2 + 8 + 4 + 4 + 4);
+  bytes.set(textEncoder.encode("BWAU"), 0);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(4, 2, true);
+  view.setBigUint64(6, BigInt(authorityTick), true);
+  return bytes;
+}
+
+function freshDeadRespawnExtraction(
+  current: RustIntegratedRuntimeIdentityV1,
+  extractionRevision: number,
+  cursors: Readonly<{
+    entityRevision: bigint;
+    gameplaySequence: bigint;
+    gameplayCombatRevision: bigint;
+    combatantRevision: bigint;
+  }>,
+): RustIntegratedRuntimeExtractionV1 {
+  const decoded = decodeRustDomainBundleR10(PLAYER_VIEW_BWX0);
+  const rowsByDomain: RespawnFixtureRow[][] = decoded.views.map((domain) => domain.rows.map((row) => ({
+    kind: row.kind,
+    key: row.key,
+    fields: new Map(row.fields.map(([name, value]) => [
+      name,
+      value instanceof Uint8Array ? Uint8Array.from(value) : value,
+    ])),
+    types: new Map(row.fields.map(([name], index) => [name, row.fieldTypes![index]!])),
+  })));
+  const playerRows = rowsByDomain[decoded.views.findIndex((view) => view.domain === 2)]!;
+  const combatRows = rowsByDomain[decoded.views.findIndex((view) => view.domain === 5)]!;
+  const runtime = playerRows.find((row) => row.kind === 1 && row.key === "player:extraction")!;
+  const binding = playerRows.find((row) => row.kind === 2)!;
+  const combat = combatRows.find((row) => row.kind === 1 && row.key === "combatant:player:extraction")!;
+  setRespawnFixtureField(runtime, "gameplaySequence", "u64", cursors.gameplaySequence);
+  setRespawnFixtureField(runtime, "gameplayCombatRevision", "u64", cursors.gameplayCombatRevision);
+  setRespawnFixtureField(runtime, "deathSequence.present", "bool", true);
+  setRespawnFixtureField(runtime, "deathSequence.value", "u64", BigInt(1));
+  setRespawnFixtureField(runtime, "lastRespawnSequence.present", "bool", false);
+  runtime.fields.delete("lastRespawnSequence.value");
+  runtime.types.delete("lastRespawnSequence.value");
+  setRespawnFixtureField(runtime, "queuedInputsEmpty", "bool", true);
+  setRespawnFixtureField(runtime, "pendingContextCommandsEmpty", "bool", true);
+  setRespawnFixtureField(runtime, "pendingMovementResultEmpty", "bool", true);
+  setRespawnFixtureField(runtime, "miningStateEmpty", "bool", true);
+  setRespawnFixtureField(runtime, "latestDeathRespawn.present", "bool", false);
+  setRespawnFixtureField(runtime, "lastInputSequence", "u64", BigInt(2));
+  setRespawnFixtureField(runtime, "buttons", "u64", BigInt(0));
+  setRespawnFixtureField(runtime, "crouching", "bool", false);
+  setRespawnFixtureField(binding, "entityRevision", "u64", cursors.entityRevision);
+  setRespawnFixtureField(combat, "combatantRevision", "u64", cursors.combatantRevision);
+  setRespawnFixtureField(combat, "health", "u64", BigInt(0));
+  setRespawnFixtureField(combat, "alive", "bool", false);
+
+  const hud = new RespawnFixtureWriter().raw(textEncoder.encode("BWX0")).u16(1)
+    .u64(extractionRevision).u64(current.tick).raw(bytesFromHash(current.stateHash))
+    .raw(decoded.contentManifestHash).u8(decoded.contentReady ? 1 : 0).u16(decoded.views.length);
+  decoded.views.forEach((domain, index) => {
+    const payloadWriter = new RespawnFixtureWriter();
+    for (const row of rowsByDomain[index]!) payloadWriter.raw(respawnFixtureRow(row));
+    const payload = payloadWriter.finish();
+    const payloadHash = new TypeScriptCanonicalHasher("blockwild.r10.domain-view-payload.v1")
+      .writeBytes(payload).finish();
+    const statusCode = domain.status === "complete" ? 0 : domain.status === "partial" ? 1 : 2;
+    hud.u8(domain.domain).u16(1).u8(statusCode).u64(domain.revision)
+      .u32(domain.total).u32(domain.selected).u32(domain.omitted).u32(domain.nextCursor)
+      .u16(domain.blockers.length);
+    for (const blocker of domain.blockers) hud.string(blocker);
+    hud.u32(payload.byteLength).raw(payloadHash).raw(payload);
+  });
+
+  const playerRecord: RustEntityExtractionRecordR6V3 = Object.freeze({
+    entityId: BigInt("4294967297"), residency: "hot", class: "player", simulationTier: "hero",
+    protection: BigInt(0), entityRevision: cursors.entityRevision, externalEntityId: "player:extraction",
+    specimenId: "player:extraction", kindKey: "player", variantKey: null,
+    name: "Extraction Player", modelKey: "player-standing", modelRevision: 0, modelHash: ZERO_HASH_BYTES,
+    position: Object.freeze({ x: 8, y: 64, z: 8 }), yaw: 0,
+    velocity: Object.freeze({ x: 0, y: 0, z: 0 }), health: 0, maximumHealth: 20,
+    tamed: false, ageTicks: BigInt(current.tick), movementMode: "ground", grounded: true, submerged: false,
+    lastDamageTick: BigInt(current.tick),
+    action: Object.freeze({ key: "idle", phase: 0, startedTick: BigInt(0), endsTick: BigInt(0), target: null }),
+    equipment: Object.freeze([]),
+    mount: Object.freeze({ parentMount: null, occupiedSeat: null, acceptsRiders: false, saddleKey: null, seats: Object.freeze([]) }),
+    research: Object.freeze([]),
+  });
+  const entities: RustEntityExtractionR6V3 = Object.freeze({
+    schema: 3,
+    extractionRevision: BigInt(extractionRevision),
+    authorityTick: BigInt(current.tick),
+    contentManifestHash: ZERO_HASH_BYTES,
+    contentReady: false,
+    total: 1,
+    selected: 1,
+    omitted: 0,
+    records: Object.freeze([playerRecord]),
+  });
+  return Object.freeze({
+    identity: current,
+    extractionRevision,
+    render: encodeRustEntityExtractionR6V3(entities),
+    hud: hud.finish(),
+    audio: emptyAudioExtraction(current.tick),
+    platformRequests: new Uint8Array(),
+    diagnostics: new Uint8Array(),
+    extractionHash: hash(extractionRevision + 500),
+  });
+}
+
+function identity(tick = 0, simulation = 0, state = 1, network = 1): RustIntegratedRuntimeIdentityV1 {
   return Object.freeze({
     universeId: "universe-input-pump-test",
     locationId: "location-input-pump-test",
-    revision: Object.freeze({ epoch: 1, world: 1, entities: 1, gameplay: 1, persistence: 1, network: 1, simulation }),
+    revision: Object.freeze({ epoch: 1, world: 1, entities: 1, gameplay: 1, persistence: 1, network, simulation }),
     tick,
     stateHash: hash(state),
   });
@@ -113,6 +327,7 @@ class FakeRuntime implements RustLiveInputPumpServiceR5 {
   invalidInputsApplied: number | null = null;
   delayStep: (() => Promise<void>) | null = null;
   delayExtract: (() => Promise<void>) | null = null;
+  extractionFactory: ((afterRevision: number) => RustIntegratedRuntimeExtractionV1) | null = null;
 
   constructor(input: Readonly<{
     tick?: number;
@@ -190,6 +405,7 @@ class FakeRuntime implements RustLiveInputPumpServiceR5 {
         this.current.tick + fixedSteps,
         this.current.revision.simulation + fixedSteps,
         this.current.tick + fixedSteps + this.submitted.length + 10,
+        this.current.revision.network,
       );
       return Object.freeze({
         type: "runtime-step-result-v1" as const,
@@ -266,6 +482,7 @@ class FakeRuntime implements RustLiveInputPumpServiceR5 {
     try {
       if (this.delayExtract) await this.delayExtract();
       if (this.throwExtract) throw this.throwExtract;
+      if (this.extractionFactory) return this.extractionFactory(afterRevision);
       const changed = this.extractionRevision > afterRevision;
       return Object.freeze({
         identity: this.current,
@@ -357,6 +574,37 @@ test("rapid press-release-repress is preserved as acknowledged 1,0,1 frames", as
   await live.stop();
 });
 
+test("diagnostics retain the last validated native action receipt across no-action inputs", async () => {
+  let now = 1;
+  const runtime = new FakeRuntime();
+  const live = pump(runtime, continuity(), () => now);
+  live.sample(GENERATION, withAction(intent({ selectedSlot: 4 }), "secondaryUse", true));
+  assert.equal((await live.advance(GENERATION)).step?.inputsApplied, 0);
+  now = 50_001;
+  assert.equal((await live.advance(GENERATION)).step?.inputsApplied, 1);
+
+  const receipt = live.diagnostics().lastActionReceipt;
+  assert.deepEqual(receipt, {
+    sequence: 1,
+    inputSequence: 1,
+    tick: 1,
+    kind: "secondary-use",
+    outcome: "no-target",
+    selectedSlot: 4,
+    authoritativeFlags: 0,
+    targetEntityId: BigInt(0),
+    effectHash: hash(3),
+  });
+  assert.equal(Object.isFrozen(receipt), true);
+
+  live.sample(GENERATION, withAction(intent({ selectedSlot: 4 }), "secondaryUse", false));
+  now = 100_001;
+  assert.equal((await live.advance(GENERATION)).step?.inputsApplied, 1);
+  assert.equal(live.diagnostics().lastActionReceipt, receipt,
+    "an acknowledged no-action input must not erase the last semantic outcome");
+  await live.stop();
+});
+
 test("held controls coalesce while an action edge remains native-pending", async () => {
   let now = 1;
   const runtime = new FakeRuntime();
@@ -392,6 +640,78 @@ test("generation mismatches reject before I/O and stopped awaits discard stale c
   await stopping;
   assert.equal(runtime.calls.includes("extract"), false);
   assert.equal(live.diagnostics().discardedContinuations, 1);
+});
+
+test("an exact external network successor preserves a pending native input and contiguous authority", async () => {
+  let now = 1;
+  const runtime = new FakeRuntime();
+  const live = pump(runtime, continuity(), () => now);
+  live.sample(GENERATION, intent({ moveX: 1, moveZ: 0 }));
+  const pending = await live.advance(GENERATION);
+  assert.equal(pending.step?.fixedSteps, 0);
+  assert.equal(live.diagnostics().nativeInputPending, true);
+
+  runtime.current = identity(0, 0, 22, 4);
+  assert.equal(await live.adoptExternalNetworkSuccessor(GENERATION), true);
+  assert.equal(await live.adoptExternalNetworkSuccessor(GENERATION), false,
+    "an unchanged integrated identity must remain idempotent");
+  assert.equal(live.diagnostics().lastNetworkRevision, 4);
+  assert.equal(live.diagnostics().networkIdentityAdoptions, 1);
+
+  now = 100_001;
+  const moved = await live.advance(GENERATION);
+  assert.equal(moved.step?.inputsApplied, 1);
+  assert.equal(runtime.submitted.length, 1, "network adoption must not resubmit the pending input");
+  assert.equal(live.diagnostics().nextInputSequence, 2);
+  assert.equal(live.diagnostics().lastAuthorityTick, 2);
+  assert.equal(live.diagnostics().lastAppliedMoveX, 32_767);
+  assert.equal(live.diagnostics().lastAppliedMoveZ, 0);
+  live.sample(GENERATION, intent({ moveX: 0, moveZ: 0 }));
+  now = 150_001;
+  await live.advance(GENERATION);
+  assert.equal(live.diagnostics().lastAppliedMoveX, 0);
+  assert.equal(live.diagnostics().lastAppliedMoveZ, 0,
+    "diagnostics must distinguish the exact applied movement frame from its release frame");
+  assert.equal(live.state, "ready");
+  await live.stop();
+});
+
+test("external network adoption rejects every non-network drift, regression, and hash contradiction", async () => {
+  const cases: ReadonlyArray<readonly [string, (
+    before: RustIntegratedRuntimeIdentityV1,
+  ) => RustIntegratedRuntimeIdentityV1]> = [
+    ["universe", (before) => Object.freeze({ ...before, universeId: "other-universe", stateHash: hash(2) })],
+    ["location", (before) => Object.freeze({ ...before, locationId: "other-location", stateHash: hash(2) })],
+    ["tick", (before) => Object.freeze({ ...before, tick: 1, stateHash: hash(2) })],
+    ...(["epoch", "world", "entities", "gameplay", "persistence", "simulation"] as const).map((axis) => [
+      axis,
+      (before: RustIntegratedRuntimeIdentityV1) => Object.freeze({
+        ...before,
+        revision: Object.freeze({ ...before.revision, [axis]: before.revision[axis] + 1, network: 3 }),
+        stateHash: hash(2),
+      }),
+    ] as const),
+    ["network regression", (before) => Object.freeze({
+      ...before,
+      revision: Object.freeze({ ...before.revision, network: 1 }),
+      stateHash: hash(2),
+    })],
+    ["same network with changed hash", (before) => Object.freeze({ ...before, stateHash: hash(2) })],
+    ["advanced network with unchanged hash", (before) => Object.freeze({
+      ...before,
+      revision: Object.freeze({ ...before.revision, network: 3 }),
+    })],
+  ];
+
+  for (const [label, mutate] of cases) {
+    const runtime = new FakeRuntime();
+    runtime.current = identity(0, 0, 1, 2);
+    const live = pump(runtime);
+    runtime.current = mutate(runtime.current);
+    await assert.rejects(live.adoptExternalNetworkSuccessor(GENERATION), /non-network axis/u, label);
+    await live.drain();
+    assert.equal(live.state, "failed", label);
+  }
 });
 
 test("rejections from stale step and extraction awaits are discarded during stop", async () => {
@@ -447,7 +767,7 @@ test("step failures and invalid applied counts are terminal with no fallback", a
 
 test("restored sequence, clock, selected slot, and flags seed the next exact frame", async () => {
   const restoredFrame = Object.freeze({
-    sequence: BigInt(41), targetTick: BigInt(70), moveX: 0, moveZ: 0, lookYaw: 0, lookPitch: 0,
+    sequence: BigInt(41), targetTick: BigInt(70), moveX: 123, moveZ: -456, lookYaw: 0, lookPitch: 0,
     buttons: RUST_RUNTIME_INPUT_BUTTON_V1.primaryAttack, selectedSlot: 4, flags: RUST_RUNTIME_INPUT_FLAG_V1.creative,
   });
   const value = continuity({
@@ -463,6 +783,8 @@ test("restored sequence, clock, selected slot, and flags seed the next exact fra
     lastApplied: Object.freeze({ ...restoredFrame, sequence: 41, targetTick: 70 }),
   });
   const live = pump(runtime, value, () => 9_000);
+  assert.equal(live.diagnostics().lastAppliedMoveX, 123);
+  assert.equal(live.diagnostics().lastAppliedMoveZ, -456);
   live.sample(GENERATION, intent({ selectedSlot: 4, actions: Object.freeze({ ...intent().actions, primaryAttack: true }) }));
   await live.advance(GENERATION);
   const frame = runtime.submitted[0];
@@ -473,6 +795,116 @@ test("restored sequence, clock, selected slot, and flags seed the next exact fra
   assert.equal(frame.flags, RUST_RUNTIME_INPUT_FLAG_V1.creative);
   assert.equal(live.diagnostics().nextActionSequence, 10, "restored held edge does not emit a second action");
   await live.stop();
+});
+
+test("default epoch clock clears a restored page-relative lead and applies pending input after a realistic increment", async (t) => {
+  const originalPerformance = Object.getOwnPropertyDescriptor(globalThis, "performance");
+  const timeOriginMilliseconds = 1_700_000_000_000;
+  let elapsedMilliseconds = 1;
+  Object.defineProperty(globalThis, "performance", {
+    configurable: true,
+    value: Object.freeze({
+      timeOrigin: timeOriginMilliseconds,
+      now: () => elapsedMilliseconds,
+    }) as Performance,
+  });
+  t.after(() => {
+    if (originalPerformance) Object.defineProperty(globalThis, "performance", originalPerformance);
+    else Reflect.deleteProperty(globalThis, "performance");
+  });
+
+  const restoredMonotonicTimeUs = timeOriginMilliseconds * 1_000;
+  assert.ok(restoredMonotonicTimeUs > elapsedMilliseconds * 1_000,
+    "fixture must reproduce a restored clock ahead of fresh page-relative performance.now");
+  const runtime = new FakeRuntime({ lastMonotonicTimeUs: restoredMonotonicTimeUs });
+  const live = new RustLiveInputPumpR5({
+    service: runtime,
+    status: status(continuity({ lastMonotonicTimeUs: BigInt(restoredMonotonicTimeUs) })),
+    worldGeneration: GENERATION,
+  });
+  live.sample(GENERATION, intent());
+
+  const first = await live.advance(GENERATION);
+  assert.equal(first.step?.inputsApplied, 0);
+  assert.equal(live.diagnostics().nativeInputPending, true);
+  assert.equal(runtime.stepArguments[0].monotonicTimeUs, restoredMonotonicTimeUs + 1_000);
+
+  elapsedMilliseconds += 50;
+  const second = await live.advance(GENERATION);
+  assert.equal(runtime.stepArguments[1].monotonicTimeUs, restoredMonotonicTimeUs + 51_000);
+  assert.equal(second.step?.inputsApplied, 1,
+    "one realistic 50 ms increment must advance a fixed step instead of crawling one microsecond per call");
+  assert.equal(runtime.submitted.length, 1, "the pending input remains single-custody across both advances");
+  assert.equal(live.diagnostics().nativeInputPending, false);
+  assert.equal(live.diagnostics().appliedInputs, 1);
+  await live.stop();
+});
+
+test("default epoch clock rejects unsafe Performance values and falls back to Date.now", async (t) => {
+  const originalPerformance = Object.getOwnPropertyDescriptor(globalThis, "performance");
+  const originalDateNow = Date.now;
+  let dateMilliseconds = 1_700_000_100_000;
+  Object.defineProperty(globalThis, "performance", {
+    configurable: true,
+    value: Object.freeze({ timeOrigin: Number.POSITIVE_INFINITY, now: () => Number.NaN }) as Performance,
+  });
+  Date.now = () => dateMilliseconds;
+  t.after(() => {
+    Date.now = originalDateNow;
+    if (originalPerformance) Object.defineProperty(globalThis, "performance", originalPerformance);
+    else Reflect.deleteProperty(globalThis, "performance");
+  });
+
+  const restoredMonotonicTimeUs = dateMilliseconds * 1_000 - 1_000;
+  const runtime = new FakeRuntime({ lastMonotonicTimeUs: restoredMonotonicTimeUs });
+  const live = new RustLiveInputPumpR5({
+    service: runtime,
+    status: status(continuity({ lastMonotonicTimeUs: BigInt(restoredMonotonicTimeUs) })),
+    worldGeneration: GENERATION,
+  });
+  live.sample(GENERATION, intent());
+  assert.equal((await live.advance(GENERATION)).step?.inputsApplied, 0);
+  assert.equal(runtime.stepArguments[0].monotonicTimeUs, dateMilliseconds * 1_000);
+  dateMilliseconds += 50;
+  assert.equal((await live.advance(GENERATION)).step?.inputsApplied, 1);
+  await live.stop();
+});
+
+test("default epoch clock fails closed when Performance and Date.now are both unusable", async (t) => {
+  const originalPerformance = Object.getOwnPropertyDescriptor(globalThis, "performance");
+  const originalDateNow = Date.now;
+  Object.defineProperty(globalThis, "performance", {
+    configurable: true,
+    value: Object.freeze({
+      timeOrigin: Number.MAX_SAFE_INTEGER,
+      now: () => Number.MAX_SAFE_INTEGER,
+    }) as Performance,
+  });
+  Date.now = () => Number.NaN;
+  t.after(() => {
+    Date.now = originalDateNow;
+    if (originalPerformance) Object.defineProperty(globalThis, "performance", originalPerformance);
+    else Reflect.deleteProperty(globalThis, "performance");
+  });
+
+  const runtime = new FakeRuntime({ lastMonotonicTimeUs: 9_000 });
+  const live = new RustLiveInputPumpR5({
+    service: runtime,
+    status: status(continuity({ lastMonotonicTimeUs: BigInt(9_000) })),
+    worldGeneration: GENERATION,
+  });
+  live.sample(GENERATION, intent());
+  await assert.rejects(live.advance(GENERATION), (error: unknown) => {
+    assert.ok(error instanceof RustLiveInputPumpErrorR5);
+    assert.equal(error.code, "monotonic-clock-unavailable");
+    assert.match(error.message, /cannot provide one exact safe microsecond timestamp/u);
+    return true;
+  });
+  await live.drain();
+  assert.equal(live.state, "failed");
+  assert.equal(live.diagnostics().lastError,
+    "browser epoch clocks cannot provide one exact safe microsecond timestamp");
+  assert.equal(runtime.calls.length, 0, "invalid clocks must fail before any native fixed-step I/O");
 });
 
 test("authoritative action flags feed later frames and step/extract remain serialized", async () => {
@@ -658,4 +1090,344 @@ test("stop clears queued semantic intent before any native call", async () => {
     })),
     /is stopped/u,
   );
+});
+
+function respawnIntent(expected: RustIntegratedRuntimeIdentityV1): RustIntegratedPlayerRespawnV1 {
+  return Object.freeze({
+    expected,
+    externalEntityId: "player:test",
+    actorId: "actor:test",
+    playerId: BigInt(1),
+    entityId: BigInt("4294967297"),
+    expectedEntityRevision: BigInt(1),
+    expectedGameplaySequence: BigInt(3),
+    expectedGameplayCombatRevision: BigInt(1),
+    expectedCombatantRevision: BigInt(1),
+    expectedDeathSequence: BigInt(1),
+    expectedMaxHealth: 20_000,
+    respawnPosition: Object.freeze({ xMilli: 8_000, yMilli: 64_000, zMilli: 8_000 }),
+    keepInventory: false,
+  });
+}
+
+test("serialized respawn rebinds every BWD7 CAS cursor from one post-neutral extraction before persistence", async () => {
+  const applied = Object.freeze({
+    sequence: BigInt(1), targetTick: BigInt(0), moveX: 12_345, moveZ: -7_654,
+    lookYaw: 11, lookPitch: -22, buttons: RUST_RUNTIME_INPUT_BUTTON_V1.sprint,
+    selectedSlot: 0, flags: 0,
+  });
+  const continuityValue = continuity({
+    lastMonotonicTimeUs: BigInt(1),
+    lastInputSequence: BigInt(1),
+    nextInputSequence: BigInt(2),
+    lastAppliedInput: applied,
+  });
+  const runtime = new FakeRuntime({
+    lastMonotonicTimeUs: 1,
+    lastApplied: Object.freeze({ ...applied, sequence: 1, targetTick: 0 }),
+  });
+  const freshCursors = Object.freeze({
+    entityRevision: BigInt(7),
+    gameplaySequence: BigInt(11),
+    gameplayCombatRevision: BigInt(4),
+    combatantRevision: BigInt(3),
+  });
+  const baseStep = runtime.step.bind(runtime);
+  runtime.step = async (...args) => {
+    const result = await baseStep(...args);
+    if (result.inputsApplied !== 1) return result;
+    const successor = Object.freeze({
+      ...result.identity,
+      revision: Object.freeze({
+        ...result.identity.revision,
+        entities: result.identity.revision.entities + 1,
+        gameplay: result.identity.revision.gameplay + 1,
+      }),
+      stateHash: hash(901),
+    });
+    runtime.current = successor;
+    return Object.freeze({ ...result, identity: successor });
+  };
+  let freshExtractions = 0;
+  runtime.extractionFactory = (afterRevision) => {
+    freshExtractions += 1;
+    assert.equal(afterRevision, 0, "post-neutral rebind must use the pump's committed extraction cursor");
+    return freshDeadRespawnExtraction(runtime.identity(), runtime.extractionRevision, freshCursors);
+  };
+  (runtime as FakeRuntime & { command: NonNullable<RustLiveInputPumpServiceR5["command"]> }).command = async () => {
+    throw new Error("respawn orchestration test replaces the private dispatch seam");
+  };
+  const baseStatus = status(continuityValue);
+  const live = new RustLiveInputPumpR5({
+    service: runtime,
+    status: Object.freeze({
+      ...baseStatus,
+      worldViewBinding: Object.freeze({
+        ...baseStatus.worldViewBinding!,
+        playerId: BigInt("12884901895"),
+        actorId: "player:extraction",
+        inventoryContainer: Object.freeze({
+          kind: "player" as const,
+          id: "player:extraction",
+          ownerId: "player:extraction",
+        }),
+        equipmentContainer: Object.freeze({
+          kind: "equipment" as const,
+          id: "player:extraction:equipment",
+          ownerId: "player:extraction",
+        }),
+      }),
+    }),
+    worldGeneration: GENERATION,
+    externalEntityId: "player:extraction",
+    initialNativeDeathRespawnCursor: 0,
+    nowUs: () => 1,
+  });
+  let dispatched: RustLivePlayerRespawnPlanV1 | null = null;
+  let retained: RustLivePlayerRespawnPlanV1 | null = null;
+  const dispatchOwner = live as unknown as {
+    dispatchPlayerRespawnPlan(
+      worldGeneration: number,
+      lifecycle: number,
+      plan: RustLivePlayerRespawnPlanV1,
+    ): Promise<unknown>;
+  };
+  dispatchOwner.dispatchPlayerRespawnPlan = async (_worldGeneration, _lifecycle, plan) => {
+    dispatched = plan;
+    return Object.freeze({ discarded: false, plan });
+  };
+
+  const staleIntent = Object.freeze({
+    ...respawnIntent(runtime.identity()),
+    externalEntityId: "player:extraction",
+    actorId: "player:extraction",
+    playerId: BigInt("12884901895"),
+    expectedCombatantRevision: BigInt(0),
+  });
+  const result = await live.respawnPlayer(GENERATION, staleIntent, {
+    beforeDispatch: async (plan) => { retained = plan; },
+  });
+  assert.equal((result as { discarded: boolean }).discarded, false);
+  assert.equal(dispatched, retained, "the persisted plan must be the exact object dispatched after neutralization");
+  assert.equal(freshExtractions, 1, "a new non-neutral respawn must take exactly one fresh extraction");
+  assert.deepEqual(runtime.calls, ["step", "extract"], "neutralization and its exact rebind extraction remain serialized");
+  assert.equal(runtime.submitted.length, 1);
+  assert.deepEqual(runtime.submitted[0], {
+    sequence: 2,
+    targetTick: 1,
+    moveX: 0,
+    moveZ: 0,
+    lookYaw: 11,
+    lookPitch: -22,
+    buttons: 0,
+    selectedSlot: 0,
+    flags: 0,
+  });
+  assert.equal(dispatched!.batch.expected.tick, 1);
+  assert.equal(dispatched!.batch.expected.revision.simulation, 1);
+  assert.equal(dispatched!.batch.expected.revision.entities, 2);
+  assert.equal(dispatched!.batch.expected.revision.gameplay, 2);
+  assert.equal(dispatched!.request.expected, dispatched!.batch.expected);
+  assert.equal(dispatched!.request.expectedEntityRevision, freshCursors.entityRevision);
+  assert.equal(dispatched!.request.expectedGameplaySequence, freshCursors.gameplaySequence);
+  assert.equal(dispatched!.request.expectedGameplayCombatRevision, freshCursors.gameplayCombatRevision);
+  assert.equal(dispatched!.request.expectedCombatantRevision, freshCursors.combatantRevision);
+  assert.notEqual(dispatched!.request.expectedEntityRevision, staleIntent.expectedEntityRevision);
+  assert.notEqual(dispatched!.request.expectedGameplaySequence, staleIntent.expectedGameplaySequence);
+  assert.notEqual(dispatched!.request.expectedGameplayCombatRevision, staleIntent.expectedGameplayCombatRevision);
+  assert.notEqual(dispatched!.request.expectedCombatantRevision, staleIntent.expectedCombatantRevision);
+  assert.equal(live.diagnostics().nextInputSequence, 3);
+  assert.equal(live.diagnostics().lastExtractionRevision, runtime.extractionRevision);
+  assert.equal(live.diagnostics().lastAppliedMoveX, 0);
+  assert.equal(live.diagnostics().lastAppliedMoveZ, 0);
+  assert.equal(live.diagnostics().lastAppliedButtons, 0);
+
+  const canonical = planRustLivePlayerRespawnV1(dispatched!.batch.expected, dispatched!.request);
+  assert.deepEqual(dispatched!.batch.operations[0]!.payload, canonical.batch.operations[0]!.payload);
+  let retried: RustLivePlayerRespawnPlanV1 | null = null;
+  dispatchOwner.dispatchPlayerRespawnPlan = async (_worldGeneration, _lifecycle, plan) => {
+    retried = plan;
+    return Object.freeze({ discarded: false, plan });
+  };
+  await live.retryPlayerRespawn(GENERATION, dispatched!);
+  assert.deepEqual(retried!.batch.operations[0]!.payload, dispatched!.batch.operations[0]!.payload,
+    "retained retry must rehydrate the exact same BWD7 bytes");
+  assert.equal(retried!.batch.commandHash, dispatched!.batch.commandHash);
+  assert.equal(freshExtractions, 1, "retained retry must not neutralize or rebind its durable bytes");
+  await live.stop();
+});
+
+test("death-respawn cursor holds one exact full parent until an idempotent acknowledgement", async () => {
+  const runtime = new FakeRuntime();
+  const live = new RustLiveInputPumpR5({
+    service: runtime,
+    status: status(continuity()),
+    worldGeneration: GENERATION,
+    externalEntityId: "player:test",
+    initialNativeDeathRespawnCursor: 0,
+  });
+  const parent: RustLivePlayerDeathRespawnR10 = Object.freeze({
+    respawnSequence: BigInt(1),
+    receiptHash: "12".repeat(16),
+    generatedDropCount: 0,
+    playerId: BigInt(1),
+    entityId: BigInt("4294967297"),
+    deathSequence: BigInt(1),
+    inventoryContainer: "container-key-v1/01",
+    inventoryBeforeRevision: BigInt(1),
+    inventoryAfterRevision: BigInt(1),
+    equipmentContainer: "container-key-v1/02",
+    equipmentBeforeRevision: BigInt(0),
+    equipmentAfterRevision: BigInt(0),
+    custodyAfterHash: "34".repeat(16),
+    drops: Object.freeze([]),
+  });
+  const observer = live as unknown as {
+    observeDeathRespawnAfterExtraction(
+      worldGeneration: number,
+      identityValue: RustIntegratedRuntimeIdentityV1,
+      player: Pick<RustLivePlayerViewR10, "respawnAuthoritySchema" | "latestDeathRespawn">,
+    ): unknown;
+  };
+  const delivery = observer.observeDeathRespawnAfterExtraction(
+    GENERATION,
+    runtime.identity(),
+    Object.freeze({ respawnAuthoritySchema: 1, latestDeathRespawn: parent }),
+  ) as Parameters<RustLiveInputPumpR5["acknowledgeDeathRespawn"]>[1];
+  assert.equal(delivery.cursorBefore, 0);
+  assert.equal(delivery.cursorAfter, 1);
+  assert.equal(delivery.parent, parent, "the full decoded parent remains intact for projection/checkpoint");
+  assert.equal(live.diagnostics().pendingDeathRespawnReceiptHash, parent.receiptHash);
+  assert.equal(live.acknowledgeDeathRespawn(GENERATION, delivery), true);
+  assert.equal(live.diagnostics().deathRespawnCursor, 1);
+  assert.equal(live.diagnostics().pendingDeathRespawnSequence, null);
+  assert.equal(live.acknowledgeDeathRespawn(GENERATION, delivery), false,
+    "a byte-identical acknowledgement is idempotent");
+  await live.stop();
+});
+
+test("legacy death-respawn cursor seeds to native latest without replay, then delivers the exact successor", async () => {
+  const runtime = new FakeRuntime();
+  const live = new RustLiveInputPumpR5({
+    service: runtime,
+    status: status(continuity()),
+    worldGeneration: GENERATION,
+    externalEntityId: "player:test",
+    initialNativeDeathRespawnCursor: null,
+  });
+  const parent = (sequence: number): RustLivePlayerDeathRespawnR10 => Object.freeze({
+    respawnSequence: BigInt(sequence),
+    receiptHash: sequence.toString(16).padStart(2, "0").repeat(16),
+    generatedDropCount: 0,
+    playerId: BigInt(1),
+    entityId: BigInt("4294967297"),
+    deathSequence: BigInt(sequence),
+    inventoryContainer: "container-key-v1/01",
+    inventoryBeforeRevision: BigInt(1),
+    inventoryAfterRevision: BigInt(1),
+    equipmentContainer: "container-key-v1/02",
+    equipmentBeforeRevision: BigInt(0),
+    equipmentAfterRevision: BigInt(0),
+    custodyAfterHash: "34".repeat(16),
+    drops: Object.freeze([]),
+  });
+  const observer = live as unknown as {
+    observeDeathRespawnAfterExtraction(
+      worldGeneration: number,
+      identityValue: RustIntegratedRuntimeIdentityV1,
+      player: Pick<RustLivePlayerViewR10, "respawnAuthoritySchema" | "latestDeathRespawn">,
+    ): unknown;
+  };
+  const first = observer.observeDeathRespawnAfterExtraction(
+    GENERATION,
+    runtime.identity(),
+    Object.freeze({ respawnAuthoritySchema: 1, latestDeathRespawn: parent(5) }),
+  );
+  assert.equal(first, null);
+  assert.equal(live.diagnostics().deathRespawnLegacySeedPending, false);
+  assert.equal(live.diagnostics().deathRespawnCursor, 5);
+  assert.equal(live.diagnostics().pendingDeathRespawnSequence, null);
+
+  const next = observer.observeDeathRespawnAfterExtraction(
+    GENERATION,
+    runtime.identity(),
+    Object.freeze({ respawnAuthoritySchema: 1, latestDeathRespawn: parent(6) }),
+  ) as Parameters<RustLiveInputPumpR5["acknowledgeDeathRespawn"]>[1];
+  assert.equal(next.cursorBefore, 5);
+  assert.equal(next.cursorAfter, 6);
+  assert.equal(next.parent.deathSequence, BigInt(6));
+  assert.equal(live.acknowledgeDeathRespawn(GENERATION, next), true);
+  assert.equal(live.diagnostics().deathRespawnCursor, 6);
+  await live.stop();
+});
+
+test("false-policy respawn rejects an unseeded legacy cursor before neutral input or command I/O", async () => {
+  const runtime = new FakeRuntime();
+  const live = new RustLiveInputPumpR5({
+    service: runtime,
+    status: status(continuity()),
+    worldGeneration: GENERATION,
+    externalEntityId: "player:test",
+    initialNativeDeathRespawnCursor: null,
+  });
+  await assert.rejects(
+    live.respawnPlayer(GENERATION, respawnIntent(runtime.identity())),
+    /requires a seeded durable parent cursor/u,
+  );
+  await live.drain();
+  assert.equal(live.state, "failed");
+  assert.deepEqual(runtime.calls, []);
+});
+
+test("respawn requires the native command service before neutralizing retained movement", async () => {
+  const applied = Object.freeze({
+    sequence: BigInt(1), targetTick: BigInt(0), moveX: 1, moveZ: 0,
+    lookYaw: 0, lookPitch: 0, buttons: 0, selectedSlot: 0, flags: 0,
+  });
+  const runtime = new FakeRuntime({
+    lastMonotonicTimeUs: 1,
+    lastApplied: Object.freeze({ ...applied, sequence: 1, targetTick: 0 }),
+  });
+  const live = new RustLiveInputPumpR5({
+    service: runtime,
+    status: status(continuity({
+      lastMonotonicTimeUs: BigInt(1),
+      lastInputSequence: BigInt(1),
+      nextInputSequence: BigInt(2),
+      lastAppliedInput: applied,
+    })),
+    worldGeneration: GENERATION,
+    externalEntityId: "player:test",
+    initialNativeDeathRespawnCursor: 0,
+  });
+  await assert.rejects(
+    live.respawnPlayer(GENERATION, respawnIntent(runtime.identity())),
+    /does not expose integrated player respawn commands/u,
+  );
+  await live.drain();
+  assert.equal(live.state, "failed");
+  assert.deepEqual(runtime.calls, []);
+  assert.deepEqual(runtime.submitted, []);
+});
+
+test("respawn rejects a latched pre-death action edge before command I/O", async () => {
+  const runtime = new FakeRuntime();
+  (runtime as FakeRuntime & { command: NonNullable<RustLiveInputPumpServiceR5["command"]> }).command = async () => {
+    throw new Error("pending action precondition must reject before native command I/O");
+  };
+  const live = new RustLiveInputPumpR5({
+    service: runtime,
+    status: status(continuity()),
+    worldGeneration: GENERATION,
+    externalEntityId: "player:test",
+    initialNativeDeathRespawnCursor: 0,
+  });
+  live.sample(GENERATION, withAction(intent({ moveZ: 0 }), "primaryAttack", true));
+  await assert.rejects(
+    live.respawnPlayer(GENERATION, respawnIntent(runtime.identity())),
+    /cannot cross pending input, action, or context-command custody/u,
+  );
+  await live.drain();
+  assert.equal(live.state, "failed");
+  assert.deepEqual(runtime.calls, []);
 });

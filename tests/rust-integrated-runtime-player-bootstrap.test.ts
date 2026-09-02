@@ -11,6 +11,7 @@ import type {
   RustIntegratedRuntimeCommandReceiptV1,
   RustIntegratedRuntimeIdentityV1,
 } from "../app/game/rust-integrated-runtime-contract.ts";
+import { rustIntegratedRuntimeDomainWireFamilyV1 } from "../app/game/rust-integrated-runtime-domain-schema.generated.ts";
 import {
   decodeRustIntegratedEntityCompatibilityImportV1,
   encodeRustIntegratedEntityCompatibilityImportV1,
@@ -62,6 +63,7 @@ import type { RustEntityCompatibilityRecordR6 } from "../app/game/rust-entity-au
 
 const ZERO_HASH = "00000000000000000000000000000000";
 const ENTITY_ID = BigInt("18446744069414584321");
+const ENTITY_EVENT_RECEIPT_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("entity-receipt-v1");
 const FIXTURE = JSON.parse(readFileSync(
   new URL("./fixtures/rust-engine/integrated-runtime-v1/player-bootstrap-v1.json", import.meta.url),
   "utf8",
@@ -345,7 +347,7 @@ class FakeBootstrapService implements RustIntegratedPlayerBootstrapServiceV1 {
         return createRustIntegratedRuntimeDomainOperationV1({
           domain: "entities",
           typeId: RUST_INTEGRATED_ENTITY_EVENT_RECEIPT_TYPE_V1,
-          schema: 1,
+          schema: ENTITY_EVENT_RECEIPT_SCHEMA_V1.operationSchema,
           payload: encodeRustIntegratedEntityEventBatchReceiptV1({
             schema: 1,
             sequence: request.sequence,

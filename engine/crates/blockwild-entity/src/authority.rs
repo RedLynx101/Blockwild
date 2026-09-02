@@ -931,6 +931,7 @@ impl EntityAuthority {
                 components.vitals.health = value.health;
                 components.vitals.maximum_health = value.maximum_health;
                 components.locomotion.velocity = value.velocity;
+                components.synchronize_compatibility_physics(value);
                 components.social.group_id = value.social_group_id.clone();
                 components.equipment = value
                     .equipment

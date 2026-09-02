@@ -43,7 +43,13 @@ test("each activated world switches epoch before creating one composer and one t
 test("the input pump is the sole extraction producer and composer submission stays serialized", async () => {
   const engine = await gameSource("engine.ts");
   const poll = method(engine, "  private scheduleRustLiveInputExtractionPresentationR10(", "\n  private rustRendererShellSnapshotR11");
-  assert.match(poll, /if \(this\.rustRenderExtractionPoll\) return/u);
+  const guard = poll.slice(0, poll.indexOf("    const { generation, host, pump, extraction } = pending;"));
+  assert.match(guard, /if \(this\.rustTerrainLocatorCommitLocked/u);
+  assert.match(guard, /\|\| this\.rustNativeDropPickupPendingFinalize/u);
+  assert.match(guard, /\|\| this\.rustNativePlayerDeathRespawnPendingFinalize/u);
+  assert.match(guard, /\|\| this\.rustRenderExtractionPoll\) return/u);
+  assert.ok(poll.indexOf("this.rustRenderExtractionPoll) return")
+    < poll.indexOf("const operation = (async () => {"));
   assert.match(poll, /simulationTick:\s*BigInt\(extraction\.identity\.tick\)/u);
   assert.match(poll, /runtime\.submitRuntimeExtraction\(generation, extraction/u);
   assert.match(poll, /this\.trackRustAuthorityOperation\(operation\)/u);
@@ -72,13 +78,15 @@ test("world transition, quit, and shutdown drain work then dispose the composer 
   const engine = await gameSource("engine.ts");
   const transition = method(engine, "  private async prepareRustWorldTransition", "\n  private async activateRustWorldRuntime");
   assert.ok(transition.indexOf("await this.drainRustAuthorityOperations()")
-    < transition.indexOf("await this.disposeRustLiveRendererR10()"));
+    < transition.indexOf("await attemptTeardown(() => this.disposeRustLiveRendererR10())"));
+  assert.ok(transition.indexOf("await attemptTeardown(() => this.disposeRustLiveRendererR10())")
+    < transition.indexOf("await attemptTeardown(() => this.shutdownBoundNativePersistence())"));
 
   const quit = method(engine, "  async quitToTitleAsync()", "\n  /** @deprecated UI callers");
   assert.ok(quit.indexOf("await this.drainRustAuthorityOperations()")
-    < quit.indexOf("await this.disposeRustLiveRendererR10()"));
-  assert.ok(quit.indexOf("await this.disposeRustLiveRendererR10()")
-    < quit.indexOf("await this.rustRuntimeManager.shutdown()"));
+    < quit.indexOf('await attemptCleanup("renderer disposal", () => this.disposeRustLiveRendererR10())'));
+  assert.ok(quit.indexOf('await attemptCleanup("renderer disposal", () => this.disposeRustLiveRendererR10())')
+    < quit.indexOf('await attemptCleanup("runtime manager shutdown", () => this.rustRuntimeManager.shutdown())'));
 
   const shutdown = method(engine, "  async shutdown()", "\n  /** Compatibility teardown");
   assert.ok(shutdown.indexOf("await this.drainRustAuthorityOperations()")

@@ -531,6 +531,8 @@ fn is_replaceable(block: u16) -> bool {
                 | Block::SUNPETAL
                 | Block::MOON_ORCHID
                 | Block::DESERT_SHRUB
+                | Block::SALTBRUSH
+                | Block::COAST_ASTER
                 | Block::MOONBERRY_BUSH_RIPE
                 | Block::SUNBERRY_BUSH_RIPE
                 | Block::SAKURA_BLOOM
@@ -585,6 +587,8 @@ fn is_generated_growth(block: u16) -> bool {
                 | Block::MOON_ORCHID
                 | Block::CLOUDBELL
                 | Block::DESERT_SHRUB
+                | Block::SALTBRUSH
+                | Block::COAST_ASTER
                 | Block::SAKURA_BLOOM
                 | Block::DREAMBLOSSOM
                 | Block::RAINVEIL_FERN
@@ -1910,6 +1914,14 @@ pub(crate) fn generate_surface_features(
             let roll = hash2(x, z, seed ^ 0x4444_4444);
             let plant = if column.biome == BiomeId::Desert {
                 if roll > 0.99775 { Some(Block::CACTUS) } else { None }
+            } else if column.biome == BiomeId::Beach {
+                if roll > 0.986 {
+                    Some(Block::COAST_ASTER)
+                } else if roll > 0.965 {
+                    Some(Block::SALTBRUSH)
+                } else {
+                    None
+                }
             } else if column.biome == BiomeId::Volcanic {
                 if roll > 0.991 {
                     Some(Block::RED_FLOWER)

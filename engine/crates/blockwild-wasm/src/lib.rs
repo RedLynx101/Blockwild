@@ -54,6 +54,37 @@ pub fn blockwild_schema_version() -> u32 {
     SCHEMA_VERSION as u32
 }
 
+/// Validate one complete BWRM V1 envelope against a caller-retained root and
+/// return its canonical bytes. Empty output is the fail-closed result for a
+/// malformed envelope, wrong root, or non-canonical encoding.
+#[wasm_bindgen]
+#[must_use]
+pub fn blockwild_rich_save_migration_roundtrip_v1(envelope_bytes: &[u8], expected_root: &[u8]) -> Vec<u8> {
+    let Ok(expected_root) = <[u8; 16]>::try_from(expected_root) else {
+        return Vec::new();
+    };
+    let expectation = blockwild_persistence::RichSaveMigrationEnvelopeExpectationV1 {
+        envelope_root: Some(blockwild_types::CanonicalHash(expected_root)),
+        ..Default::default()
+    };
+    let Ok(envelope) =
+        blockwild_persistence::decode_rich_save_migration_envelope_v1_with_expectation(envelope_bytes, &expectation)
+    else {
+        return Vec::new();
+    };
+    blockwild_persistence::encode_rich_save_migration_envelope_v1(&envelope).unwrap_or_default()
+}
+
+/// Return the validated BWRM V1 canonical root as 16 raw bytes. Empty output
+/// means validation failed; this does not persist or adopt the envelope.
+#[wasm_bindgen]
+#[must_use]
+pub fn blockwild_rich_save_migration_root_v1(envelope_bytes: &[u8]) -> Vec<u8> {
+    blockwild_persistence::decode_rich_save_migration_envelope_v1(envelope_bytes)
+        .map(|envelope| envelope.envelope_root.as_bytes().to_vec())
+        .unwrap_or_default()
+}
+
 /// Generate one complete generator-v18 chunk through the coarse BWR2 packet
 /// contract. Malformed or unsupported requests fail closed as an empty result;
 /// the browser bridge rejects that before any authoritative installation.
@@ -63,11 +94,30 @@ pub fn blockwild_generate_chunk_v2(request: &[u8]) -> Vec<u8> {
     blockwild_generation::generate_packet_v2(request).unwrap_or_default()
 }
 
+/// Independently selects the nearest eligible settlement and its canonical
+/// public arrival through the bounded Rust planner query contract.
+#[wasm_bindgen]
+#[must_use]
+pub fn blockwild_query_settlements_v1(request: &[u8]) -> Vec<u8> {
+    blockwild_generation::query_settlements_packet_v1(request).unwrap_or_default()
+}
+
+#[wasm_bindgen]
+pub fn blockwild_query_dragon_lair_v1(request: &[u8]) -> Vec<u8> {
+    blockwild_generation::query_dragon_lair_packet_v1(request).unwrap_or_default()
+}
+
 /// Checked-in exact-parity certificate for the fail-closed R3 corpus.
 #[wasm_bindgen]
 #[must_use]
 pub fn blockwild_generation_parity_certificate_v2() -> Vec<u8> {
     blockwild_generation::parity_certificate_json_v2().into_bytes()
+}
+
+#[wasm_bindgen]
+#[must_use]
+pub fn blockwild_locator_parity_certificate_v1() -> Vec<u8> {
+    blockwild_generation::locator_parity_certificate_json_v1().into_bytes()
 }
 
 #[wasm_bindgen]
@@ -433,8 +483,16 @@ mod tests {
             .validate(&request)
             .unwrap();
         let certificate = String::from_utf8(blockwild_generation_parity_certificate_v2()).unwrap();
-        assert!(certificate.contains("\"corpusCases\":131"));
+        assert!(certificate.contains("\"corpusCases\":155"));
+        assert!(certificate.contains("\"corpusHash\":\"5d4e6b1445b00f3430164d1a8093d8dc\""));
         assert!(certificate.contains("\"byteEqual\":true"));
         assert!(blockwild_generate_chunk_v2(b"malformed").is_empty());
+    }
+
+    #[test]
+    fn rich_save_migration_facade_fails_closed_before_native_adoption() {
+        assert!(blockwild_rich_save_migration_root_v1(b"malformed").is_empty());
+        assert!(blockwild_rich_save_migration_roundtrip_v1(b"malformed", &[0; 16]).is_empty());
+        assert!(blockwild_rich_save_migration_roundtrip_v1(b"malformed", &[0; 15]).is_empty());
     }
 }

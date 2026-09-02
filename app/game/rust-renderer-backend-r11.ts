@@ -4,7 +4,12 @@ import type {
   RustRenderSceneComposerR10,
   RustRenderSceneComposerOptionsR10,
 } from "./rust-render-scene-composer-r10.ts";
-import { RustRendererServiceR11, supportsRustRendererWorkerR11, type RustRendererArtifactR11 } from "./rust-renderer-service-r11.ts";
+import {
+  RustRendererServiceR11,
+  supportsRustRendererWorkerR11,
+  type RustRendererArtifactR11,
+  type RustRendererDiagnosticsListenerR11,
+} from "./rust-renderer-service-r11.ts";
 
 export type RendererBackendR11 = Readonly<{
   kind: "rust-webgpu";
@@ -15,7 +20,8 @@ export type RendererBackendR11 = Readonly<{
   resize(width: number, height: number): void;
   requestRecovery(reason?: string): void;
   switchEpoch(epoch: bigint): void;
-  restartSurface?(canvas: OffscreenCanvas, width: number, height: number): void;
+  restartSurface?(canvas: OffscreenCanvas, width: number, height: number): Promise<void>;
+  subscribe?(listener: RustRendererDiagnosticsListenerR11): () => void;
   dispose(): void;
   diagnostics(): ReturnType<RustRendererServiceR11["snapshot"]>;
 }>;
@@ -55,7 +61,11 @@ export function createRustRendererBackendR11(options: Readonly<{
     resize: (width: number, height: number) => service.resize(width, height),
     requestRecovery: (reason?: string) => service.requestRecovery(reason),
     switchEpoch: (epoch: bigint) => service.switchEpoch(epoch),
-    restartSurface: (canvas: OffscreenCanvas, width: number, height: number) => service.restartSurface(canvas, width, height),
+    restartSurface: async (canvas: OffscreenCanvas, width: number, height: number) => {
+      service.restartSurface(canvas, width, height);
+      await service.ready();
+    },
+    subscribe: (listener: RustRendererDiagnosticsListenerR11) => service.subscribe(listener),
     dispose: () => service.stop(),
     diagnostics: () => service.snapshot(),
   });

@@ -80,6 +80,23 @@ fn main() {
         hit.applied_speed, hit.velocity.x, hit.velocity.y, hit.velocity.z, hit.grounded
     );
 
+    let swim_input = SwimInput {
+        jump_held: true,
+        moving_forward: true,
+        crouching: false,
+        sprinting: true,
+    };
+    let shore_environment = SwimEnvironment {
+        submersion: 0.68,
+        head_submerged: false,
+        horizontal_collision: true,
+        shore_ledge_height: Some(1.0),
+        surface_gap: Some(0.72),
+        surface_clearance: Some(0.1),
+        entered_from_air: false,
+    };
+    let swim_dt = 1.0 / 60.0;
+    let swim_rules = SwimRules::default();
     let swim = step_swimming(
         SwimmerState {
             velocity_y: 0.0,
@@ -90,28 +107,53 @@ fn main() {
             surface_breach_seconds: 0.0,
             surface_stroke_cooldown_seconds: 0.0,
             surface_bob_active: false,
+            shore_exit_ready: true,
         },
-        SwimInput {
-            jump_held: true,
-            moving_forward: true,
-            crouching: false,
-            sprinting: true,
-        },
-        SwimEnvironment {
-            submersion: 0.68,
-            head_submerged: false,
-            horizontal_collision: true,
-            shore_ledge_height: Some(1.0),
-            surface_gap: Some(0.72),
-            surface_clearance: Some(0.1),
-            entered_from_air: false,
-        },
-        1.0 / 60.0,
-        SwimRules::default(),
+        swim_input,
+        shore_environment,
+        swim_dt,
+        swim_rules,
     );
     println!(
-        "{{\"scenario\":\"shore-exit\",\"velocityY\":{:.12},\"shoreBoosted\":{},\"oxygen\":{:.12}}}",
-        swim.state.velocity_y, swim.shore_boosted, swim.state.oxygen_seconds
+        "{{\"scenario\":\"shore-exit\",\"velocityY\":{:.12},\"shoreBoosted\":{},\"oxygen\":{:.12},\"drowningAccumulator\":{:.12},\"entryMomentumSpeed\":{:.12},\"surfaceBreachReady\":{},\"shoreExitReady\":{},\"surfaceBreachSeconds\":{:.12},\"surfaceStrokeCooldownSeconds\":{:.12},\"surfaceBobActive\":{},\"damage\":{:.12},\"horizontalSpeedScale\":{:.12}}}",
+        swim.state.velocity_y,
+        swim.shore_boosted,
+        swim.state.oxygen_seconds,
+        swim.state.drowning_accumulator,
+        swim.state.entry_momentum_speed,
+        swim.state.surface_breach_ready,
+        swim.state.shore_exit_ready,
+        swim.state.surface_breach_seconds,
+        swim.state.surface_stroke_cooldown_seconds,
+        swim.state.surface_bob_active,
+        swim.damage,
+        swim.horizontal_speed_scale
+    );
+    let sustained = step_swimming(
+        swim.state,
+        swim_input,
+        SwimEnvironment {
+            horizontal_collision: false,
+            shore_ledge_height: None,
+            ..shore_environment
+        },
+        swim_dt,
+        swim_rules,
+    );
+    println!(
+        "{{\"scenario\":\"shore-exit-sustain\",\"velocityY\":{:.12},\"shoreBoosted\":{},\"oxygen\":{:.12},\"drowningAccumulator\":{:.12},\"entryMomentumSpeed\":{:.12},\"surfaceBreachReady\":{},\"shoreExitReady\":{},\"surfaceBreachSeconds\":{:.12},\"surfaceStrokeCooldownSeconds\":{:.12},\"surfaceBobActive\":{},\"damage\":{:.12},\"horizontalSpeedScale\":{:.12}}}",
+        sustained.state.velocity_y,
+        sustained.shore_boosted,
+        sustained.state.oxygen_seconds,
+        sustained.state.drowning_accumulator,
+        sustained.state.entry_momentum_speed,
+        sustained.state.surface_breach_ready,
+        sustained.state.shore_exit_ready,
+        sustained.state.surface_breach_seconds,
+        sustained.state.surface_stroke_cooldown_seconds,
+        sustained.state.surface_bob_active,
+        sustained.damage,
+        sustained.horizontal_speed_scale
     );
 
     let current_boat = SailboatKinematicsV1 {

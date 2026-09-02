@@ -10,11 +10,13 @@ mod checkpoint;
 mod contract;
 mod dispatcher;
 mod journal;
+mod legacy_descriptor;
 mod migration;
 mod paged_recovery;
 mod platform_ops;
 mod portable;
 mod repair;
+mod rich_migration;
 mod save_set;
 mod wire;
 
@@ -24,11 +26,13 @@ pub use checkpoint::*;
 pub use contract::*;
 pub use dispatcher::*;
 pub use journal::*;
+pub use legacy_descriptor::*;
 pub use migration::*;
 pub use paged_recovery::*;
 pub use platform_ops::*;
 pub use portable::*;
 pub use repair::*;
+pub use rich_migration::*;
 pub use save_set::*;
 pub use wire::*;
 

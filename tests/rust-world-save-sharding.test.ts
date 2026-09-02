@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { WorldSave } from "../app/game/engine.ts";
-import { persistenceRecordKeyV1 } from "../app/game/persistence-journal-contract.ts";
+import { persistencePayloadHashV1, persistenceRecordKeyV1 } from "../app/game/persistence-journal-contract.ts";
 import {
   checkpointWorldSaveShardsV1,
+  decodeCanonicalWorldSaveValueV1,
   encodeCanonicalWorldSaveValueV1,
   planWorldSaveJournalV1,
   restoreWorldSaveV1,
@@ -48,13 +49,31 @@ function save(overrides: Record<string, unknown> = {}): WorldSave {
 }
 
 test("world saves shard by deterministic domain and restore losslessly", () => {
-  const source = save({ optionalUndefined: undefined, negativeZero: -0 });
+  const source = save({
+    optionalUndefined: undefined,
+    negativeZero: -0,
+    rustNativePlayerDeathRespawnProjection: {
+      schema: 1,
+      cursor: 4,
+      lastReceiptHash: "1".repeat(32),
+    },
+    rustNativePlayerRespawnPlan: {
+      schema: 1,
+      requestPayloadHex: "42574437",
+      requestPayloadHash: "2".repeat(32),
+      commandHash: "3".repeat(32),
+    },
+  });
   const set = shardWorldSaveV1("world-a", source);
   assert.deepEqual(canonical(restoreWorldSaveV1(set)), canonical(source));
   assert.ok(set.shards.some((entry) => entry.address.kind === "chunk-edits"));
   assert.ok(set.shards.some((entry) => entry.address.kind === "machine"));
   assert.ok(set.shards.some((entry) => entry.address.kind === "entity"));
   assert.ok(set.shards.some((entry) => entry.address.recordId === "manifest"));
+  for (const property of ["rustNativePlayerDeathRespawnProjection", "rustNativePlayerRespawnPlan"]) {
+    const manifestProperty = set.manifest.properties.find((entry) => entry.property === property);
+    assert.equal(manifestProperty?.kind, "player", `${property} must checkpoint in player custody`);
+  }
   assert.equal(new Set(set.shards.map((entry) => persistenceRecordKeyV1(entry.address))).size, set.shards.length);
 });
 
@@ -64,6 +83,27 @@ test("shard hashes ignore object insertion order but preserve array order", () =
   assert.equal(first.setHash, second.setHash);
   const reversed = shardWorldSaveV1("world-a", save({ creatures: [...(save().creatures ?? [])].reverse() }));
   assert.notEqual(first.setHash, reversed.setHash);
+});
+
+test("canonical bytes preserve own prototype-named keys without collisions", () => {
+  const first = JSON.parse('{"nested":{"__proto__":{"marker":"first"},"constructor":{"safe":1},"prototype":"kept"}}') as Record<string, unknown>;
+  const second = JSON.parse('{"nested":{"__proto__":{"marker":"second"},"constructor":{"safe":1},"prototype":"kept"}}') as Record<string, unknown>;
+  const firstBytes = encodeCanonicalWorldSaveValueV1(first);
+  const secondBytes = encodeCanonicalWorldSaveValueV1(second);
+
+  assert.notDeepEqual(firstBytes, secondBytes);
+  assert.notEqual(persistencePayloadHashV1(firstBytes), persistencePayloadHashV1(secondBytes));
+  assert.equal(decoder.decode(firstBytes), '{"nested":{"__proto__":{"marker":"first"},"constructor":{"safe":1},"prototype":"kept"}}');
+
+  const roundTrip = decodeCanonicalWorldSaveValueV1(firstBytes) as { nested: Record<string, unknown> };
+  assert.equal(Object.hasOwn(roundTrip.nested, "__proto__"), true);
+  assert.deepEqual(roundTrip, first);
+  assert.equal(({} as { marker?: string }).marker, undefined, "canonicalization must not mutate Object.prototype");
+
+  const topLevel = JSON.parse('{"__proto__":{"nested":{"__proto__":"kept"}},"constructor":"also-kept","prototype":3}') as WorldSave;
+  const restored = restoreWorldSaveV1(shardWorldSaveV1("prototype-keys", topLevel)) as unknown as Record<string, unknown>;
+  assert.equal(Object.hasOwn(restored, "__proto__"), true);
+  assert.deepEqual(restored, topLevel, "shard restoration must use the same safe own-property semantics");
 });
 
 test("journal planning writes only dirty shards and preserves stable creature records", () => {

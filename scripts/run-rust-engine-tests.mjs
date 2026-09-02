@@ -2,35 +2,35 @@ import { readdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { isDirectInvocation } from "./rust-engine-common.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const testsDirectory = resolve(repositoryRoot, "tests");
-const rustTests = readdirSync(testsDirectory, { withFileTypes: true })
-  .filter((entry) => entry.isFile() && (
-    /^rust-.+\.test\.(?:mjs|ts)$/.test(entry.name)
-    || /^renderer-.+\.test\.(?:mjs|ts)$/.test(entry.name)
-  ))
-  .map((entry) => `tests/${entry.name}`)
-  .sort((left, right) => left.localeCompare(right, "en"));
 
-if (rustTests.length === 0) {
-  throw new Error("No Rust engine or renderer tests were discovered under tests/.");
+/** Pure selection keeps discovery testable without launching the complete suite. */
+export function selectRustEngineTestFiles(entries) {
+  return entries
+    .filter((entry) => entry.isFile() && /^(?:rust|renderer|r3)-.+\.test\.(?:mjs|ts)$/u.test(entry.name))
+    .map((entry) => `tests/${entry.name}`)
+    .sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
 }
 
-console.log(`Running ${rustTests.length} Rust engine and renderer test files.`);
-const result = spawnSync(
-  process.execPath,
-  ["--import", "tsx", "--test", ...rustTests],
-  {
-    cwd: repositoryRoot,
+export function runRustEngineTests({
+  root = repositoryRoot,
+  entries = readdirSync(resolve(root, "tests"), { withFileTypes: true }),
+  spawn = spawnSync,
+  log = console.log,
+} = {}) {
+  const rustTests = selectRustEngineTestFiles(entries);
+  if (rustTests.length === 0) throw new Error("No Rust engine, renderer, or R3 tests were discovered under tests/.");
+  log(`Running ${rustTests.length} Rust engine, renderer, and R3 test files.`);
+  const result = spawn(process.execPath, ["--import", "tsx", "--test", ...rustTests], {
+    cwd: root,
     env: process.env,
     stdio: "inherit",
     windowsHide: true,
-  },
-);
-
-if (result.error) {
-  throw result.error;
+  });
+  if (result.error) throw result.error;
+  return result.status ?? 1;
 }
 
-process.exit(result.status ?? 1);
+if (isDirectInvocation(import.meta.url)) process.exit(runRustEngineTests());

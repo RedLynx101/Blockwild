@@ -7,6 +7,7 @@ use wasm_bindgen::prelude::*;
 pub struct WasmRenderSurfaceV2 {
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
+    canvas: web_sys::OffscreenCanvas,
     config: wgpu::SurfaceConfiguration,
     surface_view_format: wgpu::TextureFormat,
     renderer: WgpuSceneRendererV2,
@@ -26,9 +27,11 @@ pub async fn create_blockwild_renderer(
     if width == 0 || height == 0 {
         return Err(JsValue::from_str("renderer dimensions must be nonzero"));
     }
+    canvas.set_width(width);
+    canvas.set_height(height);
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let surface = instance
-        .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas))
+        .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(canvas.clone()))
         .map_err(js_error)?;
     let (
         config,
@@ -43,6 +46,7 @@ pub async fn create_blockwild_renderer(
     Ok(WasmRenderSurfaceV2 {
         instance,
         surface,
+        canvas,
         config,
         surface_view_format,
         renderer,
@@ -110,12 +114,19 @@ impl WasmRenderSurfaceV2 {
         }
         self.config.width = width;
         self.config.height = height;
+        // The DOM node is no longer mutable after transfer. Resize the owned
+        // OffscreenCanvas alongside the wgpu surface so CSS resize, fullscreen,
+        // and DPR changes cannot leave a stretched or stale backing buffer.
+        self.canvas.set_width(width);
+        self.canvas.set_height(height);
         self.renderer.resize(width, height).map_err(js_error)?;
         self.surface.configure(&self.surface_device, &self.config);
         Ok(())
     }
 
     pub async fn recover(&mut self) -> Result<String, JsValue> {
+        self.canvas.set_width(self.config.width);
+        self.canvas.set_height(self.config.height);
         let (
             config,
             surface_view_format,

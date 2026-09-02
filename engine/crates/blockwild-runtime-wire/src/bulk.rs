@@ -5,7 +5,10 @@
 //! checksummed attachment, avoiding an additional browser structured-clone
 //! copy and making ownership/backpressure explicit.
 
-use crate::{RuntimeIdentityV1, RuntimeRevisionV1, WireError, WireHash, wire_checksum_v1};
+use crate::{
+    PERSISTENCE_STATUS_RECEIPT_TYPE_V1, PERSISTENCE_STATUS_TYPE_V1, RuntimeIdentityV1, RuntimeRevisionV1, WireError,
+    WireHash, wire_checksum_v1,
+};
 
 pub const RUNTIME_BULK_WIRE_V1: u16 = 1;
 pub const RUNTIME_BULK_SCHEMA_V2: u16 = 2;
@@ -22,6 +25,7 @@ pub const PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1: &str =
     "blockwild.persistence.compatibility-hydration-chunk.r8.v1";
 pub const RUNTIME_BULK_SAVE_CHUNK_BYTES_V1: usize = 4 * 1024 * 1024;
 pub const RUNTIME_BULK_MAX_SAVE_CHUNKS_V1: u32 = 64;
+pub const RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1: usize = 4 * 1024;
 
 const REQUEST_MAGIC: [u8; 4] = *b"BWRB";
 const RESPONSE_MAGIC: [u8; 4] = *b"BWRC";
@@ -96,6 +100,13 @@ pub enum RuntimeBulkRequestV1 {
         expected: RuntimeBulkStateV1,
         stage_id: String,
     },
+    PersistenceStatus {
+        request_id: u32,
+        client_epoch: u32,
+        expected: RuntimeBulkStateV1,
+        type_id: String,
+        payload: Vec<u8>,
+    },
 }
 
 impl RuntimeBulkRequestV1 {
@@ -108,7 +119,8 @@ impl RuntimeBulkRequestV1 {
             | Self::FinalizeSave { request_id, .. }
             | Self::HydrateRecovery { request_id, .. }
             | Self::ReadHydratedCompatibility { request_id, .. }
-            | Self::CancelSaveStage { request_id, .. } => *request_id,
+            | Self::CancelSaveStage { request_id, .. }
+            | Self::PersistenceStatus { request_id, .. } => *request_id,
         }
     }
 
@@ -121,7 +133,8 @@ impl RuntimeBulkRequestV1 {
             | Self::FinalizeSave { client_epoch, .. }
             | Self::HydrateRecovery { client_epoch, .. }
             | Self::ReadHydratedCompatibility { client_epoch, .. }
-            | Self::CancelSaveStage { client_epoch, .. } => *client_epoch,
+            | Self::CancelSaveStage { client_epoch, .. }
+            | Self::PersistenceStatus { client_epoch, .. } => *client_epoch,
         }
     }
 
@@ -134,7 +147,8 @@ impl RuntimeBulkRequestV1 {
             | Self::FinalizeSave { expected, .. }
             | Self::HydrateRecovery { expected, .. }
             | Self::ReadHydratedCompatibility { expected, .. }
-            | Self::CancelSaveStage { expected, .. } => expected,
+            | Self::CancelSaveStage { expected, .. }
+            | Self::PersistenceStatus { expected, .. } => expected,
         }
     }
 }
@@ -148,6 +162,10 @@ pub enum RuntimeBulkSaveStageStateV1 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+// This is a short-lived decoded wire value. Keeping every response payload
+// inline avoids a heap-shape distinction in the canonical codec and the
+// migration attestation never enters a retained hot-path queue.
+#[allow(clippy::large_enum_variant)]
 pub enum RuntimeBulkResponseV1 {
     Empty {
         request_id: u32,
@@ -197,6 +215,7 @@ pub enum RuntimeBulkResponseV1 {
         chunk_count: u32,
         total_bytes: u64,
         compatibility_hash: WireHash,
+        legacy_migration: Option<RuntimeLegacyMigrationAttestationWireV1>,
     },
     Data {
         request_id: u32,
@@ -209,6 +228,14 @@ pub enum RuntimeBulkResponseV1 {
         chunk_count: u32,
         payload: Vec<u8>,
     },
+    PersistenceStatus {
+        request_id: u32,
+        client_epoch: u32,
+        worker_epoch: u32,
+        current: RuntimeBulkStateV1,
+        type_id: String,
+        payload: Vec<u8>,
+    },
     Error {
         request_id: u32,
         client_epoch: u32,
@@ -217,6 +244,37 @@ pub enum RuntimeBulkResponseV1 {
         message: String,
         current: Option<RuntimeBulkStateV1>,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeLegacyMigrationAttestationWireV1 {
+    pub migration_id: String,
+    pub created_at: u64,
+    pub source_key: String,
+    pub source_format: String,
+    pub source_byte_length: u64,
+    pub source_hash: WireHash,
+    pub projection_hash: WireHash,
+    pub projection_edit_count: u64,
+    pub projection_facing_count: u64,
+    pub native_world_semantic_hash: WireHash,
+    pub native_world_edit_count: u64,
+    pub native_world_facing_count: u64,
+    pub world_id: String,
+    pub universe_id: String,
+    pub location_id: String,
+    pub world_seed: String,
+    pub generator_hash: WireHash,
+    pub content_hash: WireHash,
+    pub terrain_content_hash: WireHash,
+    pub generation_options_hash: WireHash,
+    pub backup_byte_length: u64,
+    pub backup_hash: WireHash,
+    pub backup_chunks: u32,
+    pub native_record_set_hash: WireHash,
+    pub descriptor_hash: WireHash,
+    pub save_set_hash: WireHash,
+    pub manifest_hash: WireHash,
 }
 
 impl RuntimeBulkResponseV1 {
@@ -229,6 +287,7 @@ impl RuntimeBulkResponseV1 {
             | Self::SaveProgress { request_id, .. }
             | Self::Hydration { request_id, .. }
             | Self::Data { request_id, .. }
+            | Self::PersistenceStatus { request_id, .. }
             | Self::Error { request_id, .. } => *request_id,
         }
     }
@@ -242,6 +301,7 @@ impl RuntimeBulkResponseV1 {
             | Self::SaveProgress { client_epoch, .. }
             | Self::Hydration { client_epoch, .. }
             | Self::Data { client_epoch, .. }
+            | Self::PersistenceStatus { client_epoch, .. }
             | Self::Error { client_epoch, .. } => *client_epoch,
         }
     }
@@ -255,6 +315,7 @@ impl RuntimeBulkResponseV1 {
             | Self::SaveProgress { worker_epoch, .. }
             | Self::Hydration { worker_epoch, .. }
             | Self::Data { worker_epoch, .. }
+            | Self::PersistenceStatus { worker_epoch, .. }
             | Self::Error { worker_epoch, .. } => *worker_epoch,
         }
     }
@@ -307,6 +368,15 @@ impl Writer {
         }
         self.u16(value.len() as u16);
         self.bytes.extend_from_slice(value.as_bytes());
+        Ok(())
+    }
+
+    fn bytes(&mut self, value: &[u8], maximum: usize) -> Result<(), WireError> {
+        if value.is_empty() || value.len() > maximum || value.len() > u16::MAX as usize {
+            return Err(WireError::new("bytes", "bulk inline payload exceeds its byte budget"));
+        }
+        self.u16(value.len() as u16);
+        self.bytes.extend_from_slice(value);
         Ok(())
     }
 
@@ -398,6 +468,14 @@ impl<'a> Reader<'a> {
             return Err(WireError::new("type-id", format!("bulk type must be {expected}")));
         }
         Ok(value.to_owned())
+    }
+
+    fn bytes(&mut self, maximum: usize) -> Result<Vec<u8>, WireError> {
+        let length = usize::from(self.u16()?);
+        if length == 0 || length > maximum {
+            return Err(WireError::new("bytes", "bulk inline payload exceeds its byte budget"));
+        }
+        Ok(self.take(length)?.to_vec())
     }
 
     fn state(&mut self) -> Result<RuntimeBulkStateV1, WireError> {
@@ -608,6 +686,17 @@ pub fn encode_bulk_request_v1(value: &RuntimeBulkRequestV1) -> Result<RuntimeBul
             writer.string(stage_id, None, 180)?;
             (7, Vec::new())
         }
+        RuntimeBulkRequestV1::PersistenceStatus {
+            expected,
+            type_id,
+            payload,
+            ..
+        } => {
+            writer.state(expected)?;
+            writer.string(type_id, Some(PERSISTENCE_STATUS_TYPE_V1), 160)?;
+            writer.bytes(payload, RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1)?;
+            (9, Vec::new())
+        }
     };
     encode_control(
         REQUEST_MAGIC,
@@ -740,6 +829,21 @@ pub fn decode_bulk_request_v1(control: &[u8], attachment: &[u8]) -> Result<Runti
                 stage_id: reader.string(None, 180)?,
             }
         }
+        9 => {
+            if !attachment.is_empty() {
+                return Err(WireError::new(
+                    "attachment",
+                    "bulk persistence status cannot carry an attachment",
+                ));
+            }
+            RuntimeBulkRequestV1::PersistenceStatus {
+                request_id: envelope.request_id,
+                client_epoch: envelope.client_epoch,
+                expected,
+                type_id: reader.string(Some(PERSISTENCE_STATUS_TYPE_V1), 160)?,
+                payload: reader.bytes(RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1)?,
+            }
+        }
         _ => return Err(WireError::new("operation", "bulk request operation is unknown")),
     };
     reader.finish()?;
@@ -817,6 +921,7 @@ pub fn encode_bulk_response_v1(value: &RuntimeBulkResponseV1) -> Result<RuntimeB
             chunk_count,
             total_bytes,
             compatibility_hash,
+            legacy_migration,
             ..
         } => {
             writer.state(current)?;
@@ -825,6 +930,36 @@ pub fn encode_bulk_response_v1(value: &RuntimeBulkResponseV1) -> Result<RuntimeB
             writer.u32(*chunk_count);
             writer.u64(*total_bytes)?;
             writer.hash(*compatibility_hash);
+            writer.u8(u8::from(legacy_migration.is_some()));
+            if let Some(value) = legacy_migration {
+                writer.string(&value.migration_id, None, 180)?;
+                writer.u64(value.created_at)?;
+                writer.string(&value.source_key, None, 512)?;
+                writer.string(&value.source_format, None, 128)?;
+                writer.u64(value.source_byte_length)?;
+                writer.hash(value.source_hash);
+                writer.hash(value.projection_hash);
+                writer.u64(value.projection_edit_count)?;
+                writer.u64(value.projection_facing_count)?;
+                writer.hash(value.native_world_semantic_hash);
+                writer.u64(value.native_world_edit_count)?;
+                writer.u64(value.native_world_facing_count)?;
+                writer.string(&value.world_id, None, 180)?;
+                writer.string(&value.universe_id, None, 64)?;
+                writer.string(&value.location_id, None, 128)?;
+                writer.string(&value.world_seed, None, 512)?;
+                writer.hash(value.generator_hash);
+                writer.hash(value.content_hash);
+                writer.hash(value.terrain_content_hash);
+                writer.hash(value.generation_options_hash);
+                writer.u64(value.backup_byte_length)?;
+                writer.hash(value.backup_hash);
+                writer.u32(value.backup_chunks);
+                writer.hash(value.native_record_set_hash);
+                writer.hash(value.descriptor_hash);
+                writer.hash(value.save_set_hash);
+                writer.hash(value.manifest_hash);
+            }
             (5, 0, Vec::new())
         }
         RuntimeBulkResponseV1::Data {
@@ -851,6 +986,17 @@ pub fn encode_bulk_response_v1(value: &RuntimeBulkResponseV1) -> Result<RuntimeB
             writer.u32(*chunk_index);
             writer.u32(*chunk_count);
             (6, 0, payload.clone())
+        }
+        RuntimeBulkResponseV1::PersistenceStatus {
+            current,
+            type_id,
+            payload,
+            ..
+        } => {
+            writer.state(current)?;
+            writer.string(type_id, Some(PERSISTENCE_STATUS_RECEIPT_TYPE_V1), 160)?;
+            writer.bytes(payload, RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1)?;
+            (7, 0, Vec::new())
         }
         RuntimeBulkResponseV1::Error {
             code, message, current, ..
@@ -960,16 +1106,61 @@ pub fn decode_bulk_response_v1(control: &[u8], attachment: &[u8]) -> Result<Runt
                     "bulk hydration receipt cannot carry an attachment",
                 ));
             }
+            let current = reader.state()?;
+            let recovery_id = reader.string(None, 256)?;
+            let native_domains = reader.u16()?;
+            let chunk_count = reader.u32()?;
+            let total_bytes = reader.u64()?;
+            let compatibility_hash = reader.hash()?;
+            let legacy_migration = match reader.u8()? {
+                0 => None,
+                1 => Some(RuntimeLegacyMigrationAttestationWireV1 {
+                    migration_id: reader.string(None, 180)?,
+                    created_at: reader.u64()?,
+                    source_key: reader.string(None, 512)?,
+                    source_format: reader.string(None, 128)?,
+                    source_byte_length: reader.u64()?,
+                    source_hash: reader.hash()?,
+                    projection_hash: reader.hash()?,
+                    projection_edit_count: reader.u64()?,
+                    projection_facing_count: reader.u64()?,
+                    native_world_semantic_hash: reader.hash()?,
+                    native_world_edit_count: reader.u64()?,
+                    native_world_facing_count: reader.u64()?,
+                    world_id: reader.string(None, 180)?,
+                    universe_id: reader.string(None, 64)?,
+                    location_id: reader.string(None, 128)?,
+                    world_seed: reader.string(None, 512)?,
+                    generator_hash: reader.hash()?,
+                    content_hash: reader.hash()?,
+                    terrain_content_hash: reader.hash()?,
+                    generation_options_hash: reader.hash()?,
+                    backup_byte_length: reader.u64()?,
+                    backup_hash: reader.hash()?,
+                    backup_chunks: reader.u32()?,
+                    native_record_set_hash: reader.hash()?,
+                    descriptor_hash: reader.hash()?,
+                    save_set_hash: reader.hash()?,
+                    manifest_hash: reader.hash()?,
+                }),
+                _ => {
+                    return Err(WireError::new(
+                        "hydration-migration",
+                        "bulk hydration migration flag is invalid",
+                    ));
+                }
+            };
             RuntimeBulkResponseV1::Hydration {
                 request_id: envelope.request_id,
                 client_epoch: envelope.client_epoch,
                 worker_epoch: envelope.worker_epoch,
-                current: reader.state()?,
-                recovery_id: reader.string(None, 256)?,
-                native_domains: reader.u16()?,
-                chunk_count: reader.u32()?,
-                total_bytes: reader.u64()?,
-                compatibility_hash: reader.hash()?,
+                current,
+                recovery_id,
+                native_domains,
+                chunk_count,
+                total_bytes,
+                compatibility_hash,
+                legacy_migration,
             }
         }
         6 => {
@@ -998,6 +1189,22 @@ pub fn decode_bulk_response_v1(control: &[u8], attachment: &[u8]) -> Result<Runt
                 chunk_index,
                 chunk_count,
                 payload: envelope.attachment.to_vec(),
+            }
+        }
+        7 => {
+            if !attachment.is_empty() {
+                return Err(WireError::new(
+                    "attachment",
+                    "bulk persistence status response cannot carry an attachment",
+                ));
+            }
+            RuntimeBulkResponseV1::PersistenceStatus {
+                request_id: envelope.request_id,
+                client_epoch: envelope.client_epoch,
+                worker_epoch: envelope.worker_epoch,
+                current: reader.state()?,
+                type_id: reader.string(Some(PERSISTENCE_STATUS_RECEIPT_TYPE_V1), 160)?,
+                payload: reader.bytes(RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1)?,
             }
         }
         255 => {
@@ -1143,6 +1350,32 @@ mod tests {
                 .code,
             "checksum"
         );
+    }
+
+    #[test]
+    fn persistence_status_is_an_inline_append_only_identity_neutral_bulk_operation() {
+        let request = RuntimeBulkRequestV1::PersistenceStatus {
+            request_id: 41,
+            client_epoch: 2,
+            expected: state(),
+            type_id: PERSISTENCE_STATUS_TYPE_V1.into(),
+            payload: b"BWS8\x01\0\x01\0".to_vec(),
+        };
+        let encoded = encode_bulk_request_v1(&request).unwrap();
+        assert!(encoded.attachment.is_empty());
+        assert_eq!(decode_bulk_request_v1(&encoded.control, &[]).unwrap(), request);
+
+        let response = RuntimeBulkResponseV1::PersistenceStatus {
+            request_id: 41,
+            client_epoch: 2,
+            worker_epoch: 3,
+            current: state(),
+            type_id: PERSISTENCE_STATUS_RECEIPT_TYPE_V1.into(),
+            payload: b"BWT8\x01\0\x01\0".to_vec(),
+        };
+        let encoded = encode_bulk_response_v1(&response).unwrap();
+        assert!(encoded.attachment.is_empty());
+        assert_eq!(decode_bulk_response_v1(&encoded.control, &[]).unwrap(), response);
     }
 
     #[test]

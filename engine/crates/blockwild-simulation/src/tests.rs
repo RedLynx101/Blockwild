@@ -7,6 +7,147 @@ fn reseal_world(window: &mut WorldReadWindowV1, identity: &mut SimulationJobIden
     identity.source_snapshot_hash = window.snapshot_hash;
 }
 
+fn set_test_block(window: &mut WorldReadWindowV1, position: CellPos, block: u16) {
+    let index = window.index(position).expect("test cell is inside the read window");
+    window.blocks[index] = block;
+}
+
+fn set_test_water(window: &mut WorldReadWindowV1, position: CellPos) {
+    let index = window.index(position).expect("test liquid is inside the read window");
+    window.liquid_kind[index] = LiquidKindV1::Water as u8;
+    window.liquid_level[index] = 0;
+    window.flags[index] = WORLD_CELL_LIQUID_SOURCE;
+}
+
+fn shoreline_physics_fixture(bank_top_y: i32, unknown_clearance: bool) -> PhysicsStepInputV1 {
+    let mut input = fixture::canonical_fixture().physics;
+    let size = [9, 10, 9];
+    let count = size.iter().map(|value| *value as usize).product();
+    input.window = WorldReadWindowV1 {
+        address: input.window.address.clone(),
+        origin: CellPos::new(-4, -1, -4),
+        size,
+        identity: input.window.identity.clone(),
+        loaded_mask: vec![1; count],
+        boundary: vec![0; count],
+        blocks: vec![0; count],
+        facing: vec![0; count],
+        liquid_kind: vec![0; count],
+        liquid_level: vec![0; count],
+        flags: vec![0; count],
+        snapshot_hash: CanonicalHash::default(),
+    };
+    for z in -4..=4 {
+        for x in -4..=4 {
+            set_test_block(&mut input.window, CellPos::new(x, 0, z), 1);
+        }
+    }
+    for z in 0..=3 {
+        for x in -1..=1 {
+            for y in 1..=2 {
+                set_test_water(&mut input.window, CellPos::new(x, y, z));
+            }
+        }
+    }
+    for z in -3..=-1 {
+        for x in -1..=1 {
+            for y in 1..=bank_top_y {
+                set_test_block(&mut input.window, CellPos::new(x, y, z), 2);
+            }
+        }
+    }
+    if unknown_clearance {
+        let index = input
+            .window
+            .index(CellPos::new(0, bank_top_y + 1, -1))
+            .expect("unknown ledge clearance is inside the read window");
+        input.window.loaded_mask[index] = 0;
+    }
+    reseal_world(&mut input.window, &mut input.identity);
+    input.body.position = Vec3::new(0.0, 0.89, -0.19);
+    input.body.velocity = Vec3::default();
+    input.body.grounded = false;
+    input.body.swim_shore_exit_ready = true;
+    input.controls = PhysicsControlsV1 {
+        flags: PHYSICS_CONTROL_JUMP,
+        forward: 1.0,
+        strafe: 0.0,
+        yaw: 0.0,
+        desired_speed: 5.2,
+    };
+    input.fixed_delta_micros = 50_000;
+    input.seal()
+}
+
+#[derive(Debug)]
+struct ShorelinePhysicsTrace {
+    result: PhysicsStepResultV1,
+    shore_exits: usize,
+    liquid_exits: usize,
+    liquid_reentries: usize,
+    fall_damage_events: usize,
+    touched_unknown: bool,
+    reached_dry_ground_beyond_ledge: bool,
+}
+
+fn advance_shoreline_fixture(mut input: PhysicsStepInputV1, maximum_steps: usize) -> ShorelinePhysicsTrace {
+    let mut shore_exits = 0;
+    let mut liquid_exits = 0;
+    let mut liquid_reentries = 0;
+    let mut fall_damage_events = 0;
+    let mut touched_unknown = false;
+    let mut observed_liquid_exit = false;
+    let mut reached_dry_ground_beyond_ledge = false;
+    let mut result = None;
+    for _ in 0..maximum_steps {
+        let step = step_physics(&input).expect("valid shoreline physics step");
+        shore_exits += step
+            .events
+            .iter()
+            .filter(|event| event.kind == PhysicsEventKindV1::ShoreExit)
+            .count();
+        let step_liquid_exits = step
+            .events
+            .iter()
+            .filter(|event| event.kind == PhysicsEventKindV1::LiquidExit)
+            .count();
+        liquid_exits += step_liquid_exits;
+        observed_liquid_exit |= step_liquid_exits > 0;
+        if observed_liquid_exit {
+            liquid_reentries += step
+                .events
+                .iter()
+                .filter(|event| event.kind == PhysicsEventKindV1::LiquidEnter)
+                .count();
+        }
+        fall_damage_events += step
+            .events
+            .iter()
+            .filter(|event| event.kind == PhysicsEventKindV1::FallDamage)
+            .count();
+        touched_unknown |= step.contact_flags & PHYSICS_CONTACT_UNKNOWN_BOUNDARY != 0;
+        reached_dry_ground_beyond_ledge |= step.contact_flags & PHYSICS_CONTACT_IN_LIQUID == 0
+            && step.body.grounded
+            && step.body.position.y >= 3.49
+            && step.body.position.z < -0.5;
+        input.body = step.body.clone();
+        result = Some(step);
+        if reached_dry_ground_beyond_ledge {
+            break;
+        }
+        input = input.seal();
+    }
+    ShorelinePhysicsTrace {
+        result: result.expect("shoreline trace runs at least one step"),
+        shore_exits,
+        liquid_exits,
+        liquid_reentries,
+        fall_damage_events,
+        touched_unknown,
+        reached_dry_ground_beyond_ledge,
+    }
+}
+
 #[test]
 fn world_window_uses_x_fastest_z_then_y_and_unknown_is_solid() {
     let fixture = fixture::canonical_fixture();
@@ -29,6 +170,32 @@ fn swept_axis_never_tunnels_and_unknown_boundary_fails_closed() {
     let boundary = sweep_body_axis(window, Vec3::new(8.5, 0.51, 8.5), 0.3, 1.8, 0, 8.0, 0.14);
     assert!(boundary.blocked);
     assert!(boundary.unknown_boundary);
+}
+
+#[test]
+fn body_collision_reports_unknown_regardless_of_solid_scan_order() {
+    let mut input = fixture::canonical_fixture().physics;
+    let position = Vec3::new(0.0, 0.51, 0.0);
+    for (solid_x, unknown_x) in [(-1, 1), (1, -1)] {
+        let mut window = input.window.clone();
+        for block in &mut window.blocks {
+            *block = 0;
+        }
+        window.loaded_mask.fill(1);
+        set_test_block(&mut window, CellPos::new(solid_x, 1, 0), 1);
+        let unknown_index = window
+            .index(CellPos::new(unknown_x, 1, 0))
+            .expect("mixed solid/unknown collision cell is inside the read window");
+        window.loaded_mask[unknown_index] = 0;
+        reseal_world(&mut window, &mut input.identity);
+
+        let (blocked, unknown_boundary) = collides_body(&window, position, 0.6, 1.8);
+        assert!(blocked, "solid cell must keep the capsule blocked");
+        assert!(
+            unknown_boundary,
+            "unknown cell must be reported even when a solid cell is encountered first"
+        );
+    }
 }
 
 #[test]
@@ -74,6 +241,7 @@ fn exact_swim_port_drains_oxygen_and_batches_drowning_damage() {
         surface_breach_seconds: 0.0,
         surface_stroke_cooldown_seconds: 0.0,
         surface_bob_active: false,
+        shore_exit_ready: true,
     };
     let step = step_swimming(
         state,
@@ -104,6 +272,7 @@ fn swim_entry_momentum_and_surface_bob_remain_bounded() {
             surface_breach_seconds: 0.0,
             surface_stroke_cooldown_seconds: 0.0,
             surface_bob_active: false,
+            shore_exit_ready: true,
         },
         SwimInput::default(),
         SwimEnvironment {
@@ -127,6 +296,7 @@ fn swim_entry_momentum_and_surface_bob_remain_bounded() {
             surface_breach_seconds: 0.0,
             surface_stroke_cooldown_seconds: 0.0,
             surface_bob_active: false,
+            shore_exit_ready: true,
         },
         SwimInput {
             jump_held: true,
@@ -143,6 +313,388 @@ fn swim_entry_momentum_and_surface_bob_remain_bounded() {
     assert!(bob.state.surface_bob_active);
     assert!(bob.state.velocity_y <= rules.surface_bob_velocity);
     assert!(bob.state.velocity_y > 0.0);
+}
+
+#[test]
+fn held_shore_exit_survives_contact_oscillation_and_only_rearms_after_release() {
+    let rules = SwimRules::default();
+    let input = SwimInput {
+        jump_held: true,
+        moving_forward: true,
+        ..SwimInput::default()
+    };
+    let shore = SwimEnvironment {
+        submersion: 0.75,
+        head_submerged: false,
+        horizontal_collision: true,
+        shore_ledge_height: Some(1.0),
+        surface_gap: Some(0.3),
+        surface_clearance: Some(0.1),
+        ..SwimEnvironment::default()
+    };
+    let mut state = SwimmerState {
+        velocity_y: -0.4,
+        oxygen_seconds: rules.max_oxygen_seconds,
+        drowning_accumulator: 0.0,
+        entry_momentum_speed: 0.0,
+        surface_breach_ready: true,
+        surface_breach_seconds: 0.0,
+        surface_stroke_cooldown_seconds: 0.0,
+        surface_bob_active: false,
+        shore_exit_ready: true,
+    };
+    let mut boosts = 0;
+    let dt = 1.0 / 60.0;
+
+    for index in 0..60 {
+        // Reproduce the live shoreline oscillation: collision/head/surface
+        // readings can alternate while the same jump press remains held.
+        let environment = match index % 4 {
+            0 => shore,
+            1 => SwimEnvironment {
+                horizontal_collision: false,
+                head_submerged: true,
+                surface_clearance: None,
+                ..shore
+            },
+            2 => SwimEnvironment {
+                horizontal_collision: true,
+                head_submerged: true,
+                surface_clearance: Some(-0.2),
+                ..shore
+            },
+            _ => SwimEnvironment {
+                horizontal_collision: false,
+                head_submerged: false,
+                surface_clearance: Some(0.8),
+                ..shore
+            },
+        };
+        let step = step_swimming(state, input, environment, dt, rules);
+        boosts += usize::from(step.shore_boosted);
+        state = step.state;
+    }
+
+    assert_eq!(boosts, 1, "held shore contact must emit exactly one boost cue");
+    assert!(
+        state.velocity_y < rules.shore_exit_velocity,
+        "bounded mantle must stop pinning vertical velocity: {state:?}"
+    );
+    assert!(!state.shore_exit_ready);
+
+    let recontact = step_swimming(state, input, shore, dt, rules);
+    assert!(!recontact.shore_boosted, "contact separation must not re-arm held jump");
+    assert!(!recontact.state.shore_exit_ready);
+
+    let released = step_swimming(
+        recontact.state,
+        SwimInput {
+            jump_held: false,
+            moving_forward: true,
+            ..SwimInput::default()
+        },
+        shore,
+        dt,
+        rules,
+    );
+    assert!(released.state.surface_breach_ready);
+    assert!(released.state.shore_exit_ready);
+    let repressed = step_swimming(released.state, input, shore, dt, rules);
+    assert!(
+        repressed.shore_boosted,
+        "release and re-press must start a new shore attempt"
+    );
+
+    assert!(!repressed.state.shore_exit_ready);
+}
+
+#[test]
+fn shore_mantle_sustain_is_bounded_and_release_semantics_remain_one_shot() {
+    let rules = SwimRules::default();
+    let shore = SwimEnvironment {
+        submersion: 0.6,
+        head_submerged: false,
+        horizontal_collision: true,
+        shore_ledge_height: Some(1.0),
+        surface_gap: Some(0.0),
+        surface_clearance: Some(0.1),
+        ..SwimEnvironment::default()
+    };
+    let held = SwimInput {
+        jump_held: true,
+        moving_forward: true,
+        ..SwimInput::default()
+    };
+    let initial = SwimmerState {
+        velocity_y: 0.0,
+        oxygen_seconds: rules.max_oxygen_seconds,
+        drowning_accumulator: 0.0,
+        entry_momentum_speed: 0.0,
+        surface_breach_ready: true,
+        surface_breach_seconds: 0.0,
+        surface_stroke_cooldown_seconds: 0.0,
+        surface_bob_active: false,
+        shore_exit_ready: true,
+    };
+    let qualified = step_swimming(initial, held, shore, 0.05, rules);
+    assert!(qualified.shore_boosted);
+    assert!(!qualified.state.shore_exit_ready);
+    assert_eq!(qualified.state.surface_breach_seconds, SHORE_MANTLE_SUSTAIN_SECONDS);
+    assert_eq!(qualified.state.surface_stroke_cooldown_seconds, 0.0);
+    assert!(!qualified.state.surface_bob_active);
+
+    let sustained = step_swimming(qualified.state, held, shore, 0.05, rules);
+    assert!(!sustained.shore_boosted);
+    assert_eq!(sustained.state.velocity_y, rules.shore_exit_velocity);
+    assert!((sustained.state.surface_breach_seconds - 0.15).abs() <= 1.0e-12);
+
+    let dry = step_swimming(sustained.state, held, SwimEnvironment::default(), 0.05, rules);
+    assert_eq!(dry.state.surface_breach_seconds, 0.0);
+    assert_eq!(dry.state.surface_stroke_cooldown_seconds, 0.0);
+    assert!(!dry.state.surface_bob_active);
+    assert!(!dry.state.shore_exit_ready);
+
+    let forward_released = step_swimming(
+        sustained.state,
+        SwimInput {
+            jump_held: true,
+            moving_forward: false,
+            ..SwimInput::default()
+        },
+        shore,
+        0.05,
+        rules,
+    );
+    assert!(!forward_released.shore_boosted);
+    assert_eq!(forward_released.state.surface_breach_seconds, 0.0);
+    assert!(!forward_released.state.shore_exit_ready);
+
+    let same_press = step_swimming(forward_released.state, held, shore, 0.05, rules);
+    assert!(!same_press.shore_boosted);
+    assert_eq!(same_press.state.surface_breach_seconds, 0.0);
+    assert!(!same_press.state.shore_exit_ready);
+
+    let jump_released = step_swimming(
+        same_press.state,
+        SwimInput {
+            jump_held: false,
+            moving_forward: true,
+            ..SwimInput::default()
+        },
+        shore,
+        0.05,
+        rules,
+    );
+    assert!(jump_released.state.shore_exit_ready);
+    assert_eq!(jump_released.state.surface_breach_seconds, 0.0);
+    assert!(step_swimming(jump_released.state, held, shore, 0.05, rules).shore_boosted);
+}
+
+#[test]
+fn one_block_shore_exit_is_single_and_reaches_dry_ground_under_held_input() {
+    let input = shoreline_physics_fixture(3, false);
+    let trace = advance_shoreline_fixture(input.clone(), 120);
+    assert_eq!(
+        trace.shore_exits, 1,
+        "one held shore attempt must emit exactly one exit cue"
+    );
+    assert_eq!(trace.liquid_exits, 1, "the mantle must leave liquid exactly once");
+    assert_eq!(
+        trace.liquid_reentries, 0,
+        "the accepted mantle must not fall back into liquid"
+    );
+    assert_eq!(trace.fall_damage_events, 0);
+    assert!(!trace.touched_unknown);
+    assert!(
+        trace.reached_dry_ground_beyond_ledge,
+        "the accepted one-block-above-water ledge must be physically traversed: {trace:?}"
+    );
+    assert_eq!(trace.result.body.swim_surface_breach_seconds, 0.0);
+    assert_eq!(trace.result.body.swim_stroke_cooldown_seconds, 0.0);
+    assert!(!trace.result.body.swim_surface_bob_active);
+    assert!(!trace.result.body.swim_shore_exit_ready);
+
+    let mut neutral = input;
+    neutral.body = trace.result.body;
+    neutral.controls = PhysicsControlsV1::default();
+    for _ in 0..12 {
+        neutral = neutral.seal();
+        let settled = step_physics(&neutral).expect("neutral post-mantle step");
+        assert_eq!(settled.contact_flags & PHYSICS_CONTACT_IN_LIQUID, 0);
+        assert_eq!(settled.contact_flags & PHYSICS_CONTACT_UNKNOWN_BOUNDARY, 0);
+        assert!(settled.events.iter().all(|event| {
+            !matches!(
+                event.kind,
+                PhysicsEventKindV1::ShoreExit | PhysicsEventKindV1::LiquidEnter | PhysicsEventKindV1::FallDamage
+            )
+        }));
+        neutral.body = settled.body;
+    }
+    assert!(neutral.body.grounded);
+    assert!(neutral.body.position.y >= 3.49);
+    assert!(neutral.body.swim_shore_exit_ready);
+}
+
+#[test]
+fn tall_underwater_wall_is_not_a_shore_ledge() {
+    let trace = advance_shoreline_fixture(shoreline_physics_fixture(4, false), 80);
+    assert_eq!(
+        trace.shore_exits, 0,
+        "a two-block-above-water cliff must never emit a shore-exit cue"
+    );
+    assert!(!trace.reached_dry_ground_beyond_ledge);
+    assert!(
+        trace.result.body.position.z > -0.5,
+        "the solid cliff must remain authoritative"
+    );
+}
+
+#[test]
+fn unknown_elevated_clearance_fails_closed_for_shore_exit() {
+    let trace = advance_shoreline_fixture(shoreline_physics_fixture(3, true), 80);
+    assert_eq!(
+        trace.shore_exits, 0,
+        "unknown target headroom must not qualify as a ledge"
+    );
+    assert!(!trace.reached_dry_ground_beyond_ledge);
+    assert!(
+        trace.result.body.position.z > -0.5,
+        "unknown clearance must keep the body blocked"
+    );
+}
+
+#[test]
+fn deep_or_head_submerged_contact_cannot_start_a_shore_exit() {
+    let mut input = shoreline_physics_fixture(4, false);
+    for z in 0..=3 {
+        for x in -1..=1 {
+            set_test_water(&mut input.window, CellPos::new(x, 3, z));
+        }
+    }
+    reseal_world(&mut input.window, &mut input.identity);
+    input.body.position.y = 0.51;
+    input = input.seal();
+    let result = step_physics(&input).expect("deep forward bank contact");
+    assert_ne!(result.contact_flags & PHYSICS_CONTACT_IN_LIQUID, 0);
+    assert_ne!(result.contact_flags & PHYSICS_CONTACT_HEAD_SUBMERGED, 0);
+    assert!(
+        result
+            .events
+            .iter()
+            .all(|event| event.kind != PhysicsEventKindV1::ShoreExit)
+    );
+}
+
+#[test]
+fn dry_forward_wall_cannot_start_a_shore_exit() {
+    let mut input = shoreline_physics_fixture(3, false);
+    input.window.liquid_kind.fill(LiquidKindV1::None as u8);
+    input.window.liquid_level.fill(0);
+    input.window.flags.fill(0);
+    reseal_world(&mut input.window, &mut input.identity);
+    input = input.seal();
+    let result = step_physics(&input).expect("dry forward wall contact");
+    assert_eq!(result.contact_flags & PHYSICS_CONTACT_IN_LIQUID, 0);
+    assert!(
+        result
+            .events
+            .iter()
+            .all(|event| event.kind != PhysicsEventKindV1::ShoreExit)
+    );
+}
+
+#[test]
+fn liquid_entry_clears_air_fall_distance_without_masking_later_dry_falls() {
+    let mut entering = fixture::canonical_fixture().physics;
+    entering.body.position = Vec3::new(3.0, 2.0, 3.0);
+    entering.body.velocity = Vec3::new(0.0, -10.0, 0.0);
+    entering.body.grounded = false;
+    entering.body.fall_distance = 6.6;
+    entering.controls = PhysicsControlsV1::default();
+    entering.gravity.gravity = 0.0;
+    entering.gravity.air_drag = 0.0;
+    entering.gravity.ground_acceleration = 0.0;
+    entering.gravity.air_acceleration = 0.0;
+    entering.fixed_delta_micros = 100_000;
+    entering = entering.seal();
+    let entered = step_physics(&entering).expect("air-to-liquid step");
+    assert_ne!(entered.contact_flags & PHYSICS_CONTACT_IN_LIQUID, 0);
+    assert_eq!(entered.body.fall_distance, 0.0);
+    assert!(
+        entered
+            .events
+            .iter()
+            .any(|event| event.kind == PhysicsEventKindV1::LiquidEnter)
+    );
+    assert!(
+        entered
+            .events
+            .iter()
+            .all(|event| !matches!(event.kind, PhysicsEventKindV1::Land | PhysicsEventKindV1::FallDamage))
+    );
+
+    let mut occupying = fixture::canonical_fixture().physics;
+    occupying.body.position = Vec3::new(3.0, 0.51, 3.0);
+    occupying.body.velocity = Vec3::new(0.0, -1.0, 0.0);
+    occupying.body.grounded = false;
+    occupying.body.fall_distance = 6.6;
+    occupying.controls = PhysicsControlsV1::default();
+    occupying = occupying.seal();
+    let occupied = step_physics(&occupying).expect("stale fall distance while occupying liquid");
+    assert_ne!(occupied.contact_flags & PHYSICS_CONTACT_IN_LIQUID, 0);
+    assert_eq!(occupied.body.fall_distance, 0.0);
+    assert!(
+        occupied
+            .events
+            .iter()
+            .all(|event| !matches!(event.kind, PhysicsEventKindV1::Land | PhysicsEventKindV1::FallDamage))
+    );
+
+    let mut shore_landing = fixture::canonical_fixture().physics;
+    shore_landing.body = entered.body;
+    shore_landing.body.position = Vec3::new(0.0, 0.51, 1.0);
+    shore_landing.body.velocity = Vec3::new(0.0, -1.0, 0.0);
+    shore_landing.body.grounded = false;
+    shore_landing.controls = PhysicsControlsV1::default();
+    shore_landing.swimming.enabled = false;
+    shore_landing = shore_landing.seal();
+    let landed = step_physics(&shore_landing).expect("dry shore landing after liquid entry");
+    assert!(landed.body.grounded);
+    assert_eq!(landed.body.fall_distance, 0.0);
+    assert!(landed.events.iter().any(|event| event.kind == PhysicsEventKindV1::Land));
+    assert!(
+        landed
+            .events
+            .iter()
+            .all(|event| event.kind != PhysicsEventKindV1::FallDamage)
+    );
+
+    let mut dry_fall = fixture::canonical_fixture().physics;
+    dry_fall.body.position = Vec3::new(0.0, 0.51, 1.0);
+    dry_fall.body.velocity = Vec3::new(0.0, -1.0, 0.0);
+    dry_fall.body.grounded = false;
+    dry_fall.body.fall_distance = 6.6;
+    dry_fall.controls = PhysicsControlsV1::default();
+    dry_fall.swimming.enabled = false;
+    dry_fall = dry_fall.seal();
+    let dry_landing = step_physics(&dry_fall).expect("genuine dry landing");
+    assert!(
+        dry_landing
+            .events
+            .iter()
+            .any(|event| { event.kind == PhysicsEventKindV1::FallDamage && (event.amount - 3.0).abs() < f64::EPSILON })
+    );
+}
+
+#[test]
+fn dry_jump_release_rearms_consumed_shore_exit_latch() {
+    let mut input = fixture::canonical_fixture().physics;
+    input.body.swim_shore_exit_ready = false;
+    input.body.position = Vec3::new(0.0, 0.51, 1.0);
+    input.controls = PhysicsControlsV1::default();
+    input = input.seal();
+    let result = step_physics(&input).expect("dry released-jump step");
+    assert!(result.body.swim_shore_exit_ready);
 }
 
 #[test]

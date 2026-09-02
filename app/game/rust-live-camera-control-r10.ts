@@ -19,9 +19,13 @@ import {
   type RustIntegratedRuntimeCommandReceiptV1,
   type RustIntegratedRuntimeIdentityV1,
 } from "./rust-integrated-runtime-contract.ts";
+import { rustIntegratedRuntimeDomainWireFamilyV1 } from "./rust-integrated-runtime-domain-schema.generated.ts";
 import type { RustLiveCameraViewR10 } from "./rust-live-camera-view-r10.ts";
 
 export const RUST_LIVE_CAMERA_COMMAND_ACTOR_R10 = "platform:camera";
+
+const CONFIG_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("simulation-camera-config-v1");
+const RECEIPT_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("simulation-camera-config-receipt-v1");
 
 export type RustLiveCameraConfigIntentR10 = Readonly<{
   mode: RustIntegratedCameraModeR10;
@@ -123,7 +127,7 @@ export function planRustLiveCameraConfigR10(
   const operation = createRustIntegratedRuntimeDomainOperationV1({
     domain: "simulation",
     typeId: RUST_INTEGRATED_CAMERA_CONFIG_TYPE_V1,
-    schema: 1,
+    schema: CONFIG_SCHEMA.operationSchema,
     payload,
   });
   const key = `camera-config:${operation.payloadHash}`;
@@ -194,7 +198,7 @@ export function validateRustLiveCameraConfigReceiptR10(
   const operation = receipt.domainReceipts[0];
   if (operation.domain !== "simulation"
     || operation.typeId !== RUST_INTEGRATED_CAMERA_CONFIG_RECEIPT_TYPE_V1
-    || operation.schema !== 1
+    || operation.schema !== RECEIPT_SCHEMA.operationSchema
     || operation.payloadHash !== rustIntegratedRuntimeWireChecksumV1(operation.payload)) {
     fail("camera-command-receipt", "accepted camera command returned the wrong domain receipt");
   }

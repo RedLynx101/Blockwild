@@ -206,7 +206,7 @@ function playerRecord(): RustEntityExtractionRecordR6V3 {
     name: "Extraction Player", modelKey: "player-standing", modelRevision: 0, modelHash: ZERO,
     position: Object.freeze({ x: 8, y: 64, z: 8 }), yaw: 0,
     velocity: Object.freeze({ x: 0, y: 0, z: 0 }), health: 20, maximumHealth: 20,
-    tamed: false, ageTicks: BigInt(0), movementMode: "ground", grounded: false, submerged: false,
+    tamed: false, ageTicks: BigInt(0), movementMode: "ground", grounded: true, submerged: false,
     lastDamageTick: BigInt(0),
     action: Object.freeze({ key: "idle", phase: 0, startedTick: BigInt(0), endsTick: BigInt(0), target: null }),
     equipment: Object.freeze([]),

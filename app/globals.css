@@ -183,6 +183,31 @@ input:focus-visible {
   text-shadow: 2px 2px 0 #111, -1px -1px 0 rgba(0, 0, 0, 0.45);
 }
 
+.worldgen-rollback-badge {
+  position: absolute;
+  /* Gameplay HUD disclosure stays above the world, but modal menus must cover
+     it so the badge cannot obscure pause/settings headings and controls. */
+  z-index: 9;
+  top: max(72px, calc(env(safe-area-inset-top) + 58px));
+  left: 50%;
+  display: grid;
+  gap: 2px;
+  min-width: 230px;
+  padding: 7px 11px 8px;
+  border: 2px solid #e1ad52;
+  background: rgba(35, 17, 11, .9);
+  box-shadow: 3px 3px 0 rgba(0, 0, 0, .5);
+  color: #f5d599;
+  font-size: 7px;
+  letter-spacing: .09em;
+  pointer-events: none;
+  text-align: center;
+  text-shadow: 1px 1px 0 #000;
+  transform: translateX(-50%);
+}
+
+.worldgen-rollback-badge strong { color: #fff0bf; font-size: 9px; }
+
 .world-readout {
   position: absolute;
   top: max(18px, env(safe-area-inset-top));
@@ -737,6 +762,7 @@ input:focus-visible {
 
 .game-version-badge { padding: 7px 9px; }
 .game-version-badge b { color: #f4d66e; }
+.game-version-badge em { color: #f0b866; font-style: normal; }
 
 .title-screen-actions { display: flex; gap: 7px; pointer-events: auto; }
 

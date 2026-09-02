@@ -14,6 +14,7 @@ import {
 } from "../app/game/rust-world-authority-bridge-r4.ts";
 import { RustWorldAuthorityServiceR4V1 } from "../app/game/rust-world-authority-service-r4.ts";
 import { currentRustWorldBlockCatalogR4V1 } from "../app/game/rust-world-authority-runtime-r4.ts";
+import { resolveRustEngineTestDefaultArtifact } from "./helpers/rust-engine-test-artifact.ts";
 
 type WasmAuthorityModule = Readonly<{
   default(input: { module_or_path: Uint8Array }): Promise<unknown>;
@@ -24,28 +25,26 @@ type WasmAuthorityModule = Readonly<{
 
 async function loadPublishedAuthorityWasm() {
   const root = resolve(import.meta.dirname, "..");
-  const index = JSON.parse(await readFile(resolve(root, "public/engine/manifest.json"), "utf8"));
-  const hash = index.artifacts[index.defaultVariant].hash as string;
-  const directory = resolve(root, "public/engine", hash);
-  const module = await import(`${pathToFileURL(resolve(directory, "engine.js")).href}?r4=${Date.now()}`) as WasmAuthorityModule;
-  await module.default({ module_or_path: new Uint8Array(await readFile(resolve(directory, "engine_bg.wasm"))) });
-  return { module, hash };
+  const { artifactDirectory, hash } = await resolveRustEngineTestDefaultArtifact(root);
+  const wasmModule = await import(`${pathToFileURL(resolve(artifactDirectory, "engine.js")).href}?r4=${Date.now()}`) as WasmAuthorityModule;
+  await wasmModule.default({ module_or_path: new Uint8Array(await readFile(resolve(artifactDirectory, "engine_bg.wasm"))) });
+  return { wasmModule, hash };
 }
 
 class DirectWasmTransport implements RustWorldAuthorityTransportR4V1 {
   private handle: number | null = null;
-  constructor(private readonly module: WasmAuthorityModule) {}
+  constructor(private readonly wasmModule: WasmAuthorityModule) {}
   async request(request: RustWorldAuthorityRequestR4V1) {
     const encoded = encodeRustWorldAuthorityRequestR4V1(request);
     if (request.type === "authority-init-r4-v1") {
-      const decoded = decodeRustWorldAuthorityResponseR4V1(request, this.module.blockwild_world_authority_create_r4(encoded));
+      const decoded = decodeRustWorldAuthorityResponseR4V1(request, this.wasmModule.blockwild_world_authority_create_r4(encoded));
       this.handle = decoded.handle ?? null;
       return decoded.response;
     }
     assert.notEqual(this.handle, null);
     const bytes = request.type === "authority-dispose-r4-v1"
-      ? this.module.blockwild_world_authority_destroy_r4(this.handle!, encoded)
-      : this.module.blockwild_world_authority_request_r4(this.handle!, encoded);
+      ? this.wasmModule.blockwild_world_authority_destroy_r4(this.handle!, encoded)
+      : this.wasmModule.blockwild_world_authority_request_r4(this.handle!, encoded);
     const response = decodeRustWorldAuthorityResponseR4V1(request, bytes).response;
     if (request.type === "authority-dispose-r4-v1") this.handle = null;
     return response;
@@ -53,8 +52,8 @@ class DirectWasmTransport implements RustWorldAuthorityTransportR4V1 {
 }
 
 test("published R4 Wasm owns all 12 sections, auxiliaries, reads, edits, saves, eviction, and location lifecycle", async () => {
-  const { module, hash } = await loadPublishedAuthorityWasm();
-  const service = new RustWorldAuthorityServiceR4V1(new DirectWasmTransport(module));
+  const { wasmModule, hash } = await loadPublishedAuthorityWasm();
+  const service = new RustWorldAuthorityServiceR4V1(new DirectWasmTransport(wasmModule));
   const address = { universeId: "1", locationId: "r4-published-test" } as const;
   const ready = await service.initialize(address, currentRustWorldBlockCatalogR4V1());
   assert.equal(ready.revision.epoch, 1, `artifact ${hash}`);

@@ -195,7 +195,7 @@ function record(overrides: Partial<RustEntityExtractionRecordR6V3> = {}): RustEn
     tamed: false,
     ageTicks: BigInt(0),
     movementMode: "ground",
-    grounded: false,
+    grounded: true,
     submerged: false,
     lastDamageTick: BigInt(0),
     action: Object.freeze({ key: "idle", phase: 0, startedTick: BigInt(0), endsTick: BigInt(0), target: null }),

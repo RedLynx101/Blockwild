@@ -54,7 +54,17 @@ import {
 } from "./rust-integrated-runtime-identity";
 import { encodeRustIntegratedPlayerBindingV1 } from "./rust-integrated-runtime-player";
 import { encodeRustIntegratedEntityCompatibilityImportV1 } from "./rust-integrated-runtime-entities";
+import { rustIntegratedRuntimeDomainWireFamilyV1 } from "./rust-integrated-runtime-domain-schema.generated";
 import { PLAYER_RENDER_MODEL_ID_V1 } from "./rust-player-render-profile";
+
+const BOOTSTRAP_STATUS_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("player-bootstrap-status-v1");
+const BOOTSTRAP_STATUS_RECEIPT_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1(
+  "player-bootstrap-status-receipt-v1",
+);
+const COMBAT_STATUS_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("player-combat-bootstrap-status-v1");
+const COMBAT_STATUS_RECEIPT_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1(
+  "player-combat-bootstrap-status-receipt-v1",
+);
 
 const COMPATIBILITY_INVENTORY_SLOTS_V1 = 36;
 const PLAYER_HOTBAR_SLOTS_V1 = 9;
@@ -604,7 +614,7 @@ export async function queryRustPlayerBootstrapIdentityStatusV1(
   const operation = createRustIntegratedRuntimeDomainOperationV1({
     domain: "simulation",
     typeId: RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
-    schema: 1,
+    schema: BOOTSTRAP_STATUS_SCHEMA_V1.operationSchema,
     payload,
   });
   const combatPayload = encodeRustIntegratedPlayerCombatBootstrapStatusQueryV1({
@@ -615,7 +625,7 @@ export async function queryRustPlayerBootstrapIdentityStatusV1(
   const combatOperation = createRustIntegratedRuntimeDomainOperationV1({
     domain: "simulation",
     typeId: RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
-    schema: 1,
+    schema: COMBAT_STATUS_SCHEMA_V1.operationSchema,
     payload: combatPayload,
   });
   const keySource = [
@@ -655,12 +665,12 @@ export async function queryRustPlayerBootstrapIdentityStatusV1(
     || !response
     || response.domain !== "simulation"
     || response.typeId !== RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1
-    || response.schema !== 1
+    || response.schema !== BOOTSTRAP_STATUS_RECEIPT_SCHEMA_V1.operationSchema
     || response.payloadHash !== rustIntegratedRuntimeWireChecksumV1(response.payload)
     || !combatResponse
     || combatResponse.domain !== "simulation"
     || combatResponse.typeId !== RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1
-    || combatResponse.schema !== 1
+    || combatResponse.schema !== COMBAT_STATUS_RECEIPT_SCHEMA_V1.operationSchema
     || combatResponse.payloadHash !== rustIntegratedRuntimeWireChecksumV1(combatResponse.payload)) {
     fail("identity-status-mutated", "BWS5/BWS7 status read mutated identity or returned an invalid receipt");
   }

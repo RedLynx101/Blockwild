@@ -1,16 +1,19 @@
 use blockwild_types::{CanonicalHash, CanonicalHasher, WORLD_HEIGHT};
 use std::fmt;
 
+use crate::option_json::{CANONICAL_NPC_FACTION_IDS, WorldOptionsShape, parse_world_options_json};
+
 pub const PROTOCOL_VERSION: u16 = 2;
 pub const REQUEST_SCHEMA_VERSION: u16 = 2;
 pub const RESULT_SCHEMA_VERSION: u16 = 2;
 pub const GENERATOR_VERSION: u16 = 18;
+pub const TERRAIN_GENERATION_PROMOTION_CORPUS_CASES_V2: u32 = 155;
+pub const TERRAIN_GENERATION_PROMOTION_CORPUS_HASH_V2: &str = "5d4e6b1445b00f3430164d1a8093d8dc";
 pub const CHUNK_SIZE: usize = 16;
 pub const COLUMN_COUNT: usize = CHUNK_SIZE * CHUNK_SIZE;
 pub const CELL_COUNT: usize = COLUMN_COUNT * WORLD_HEIGHT as usize;
 pub const SECTION_HEIGHT: usize = 16;
 pub const SECTION_COUNT: usize = WORLD_HEIGHT as usize / SECTION_HEIGHT;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GenerationProfile {
     LegacyV14,
@@ -42,14 +45,7 @@ impl Default for GenerationOptions {
             resource_abundance: 1.0,
             structures: true,
             settlement_density: 1.0,
-            enabled_factions: vec![
-                "hobbits".into(),
-                "goblins".into(),
-                "atlantians".into(),
-                "sugarcourt".into(),
-                "wood-elves".into(),
-                "dwarves".into(),
-            ],
+            enabled_factions: CANONICAL_NPC_FACTION_IDS.into_iter().map(str::to_owned).collect(),
             settlement_pattern: "heartlands-v2".into(),
             settlement_clustering: "regional".into(),
             road_coverage: "regional".into(),
@@ -65,9 +61,13 @@ impl GenerationOptions {
         self.cave_frequency = round_hundredth(self.cave_frequency.clamp(0.0, 3.0));
         self.biome_scale = round_hundredth(self.biome_scale.clamp(0.25, 4.0));
         self.resource_abundance = round_hundredth(self.resource_abundance.clamp(0.25, 4.0));
-        self.settlement_density = round_hundredth(self.settlement_density.clamp(0.0, 3.0));
-        self.enabled_factions.sort();
-        self.enabled_factions.dedup();
+        self.settlement_density = round_hundredth(self.settlement_density.clamp(0.0, 2.0));
+        let requested_factions = std::mem::take(&mut self.enabled_factions);
+        self.enabled_factions = CANONICAL_NPC_FACTION_IDS
+            .into_iter()
+            .filter(|faction| requested_factions.iter().any(|value| value == faction))
+            .map(str::to_owned)
+            .collect();
         self
     }
 }
@@ -178,6 +178,8 @@ impl Block {
     pub const LIMESTONE: u16 = 97;
     pub const MOON_SLATE: u16 = 98;
     pub const SUNBAKED_CLAY: u16 = 99;
+    pub const SALTBRUSH: u16 = 100;
+    pub const COAST_ASTER: u16 = 101;
     pub const JUNGLE_GRASS: u16 = 102;
     pub const JUNGLE_LOG: u16 = 103;
     pub const JUNGLE_LEAVES: u16 = 104;
@@ -358,6 +360,7 @@ impl GenerateChunkRequestV2 {
                 "hash fields must be 32 lowercase hexadecimal characters".into(),
             ));
         }
+        parse_flat_options(&self.generation_options_json)?;
         let mut previous = None;
         for &(index, _) in &self.edits {
             if index as usize >= CELL_COUNT || previous.is_some_and(|value| index <= value) {
@@ -552,13 +555,13 @@ pub struct ParityCertificate {
 
 impl ParityCertificate {
     #[must_use]
-    pub fn promotes(&self, request: &GenerateChunkRequestV2, minimum_cases: u32) -> bool {
+    pub fn promotes(&self, request: &GenerateChunkRequestV2) -> bool {
         self.generator_version == GENERATOR_VERSION
             && self.byte_equal
-            && self.corpus_cases >= minimum_cases
+            && self.corpus_cases == TERRAIN_GENERATION_PROMOTION_CORPUS_CASES_V2
+            && self.corpus_hash == TERRAIN_GENERATION_PROMOTION_CORPUS_HASH_V2
             && self.generator_hash == request.generator_hash
             && self.content_hash == request.content_hash
-            && valid_hash(&self.corpus_hash)
     }
 }
 
@@ -585,84 +588,35 @@ impl fmt::Display for GenerationError {
 
 impl std::error::Error for GenerationError {}
 
-#[must_use]
-pub fn parse_flat_options(canonical_json: &str) -> GenerationOptions {
-    let profile = if canonical_json.contains("\"profile\":\"legacy-v14\"") {
-        GenerationProfile::LegacyV14
-    } else {
-        GenerationProfile::WorldBelowV15
+pub fn parse_flat_options(canonical_json: &str) -> Result<GenerationOptions, GenerationError> {
+    let parsed = parse_world_options_json(canonical_json, WorldOptionsShape::GenerationPatch)
+        .map_err(|error| GenerationError::InvalidRequest(error.to_string()))?;
+    let profile = match parsed.profile {
+        Some("legacy-v14") => GenerationProfile::LegacyV14,
+        Some("world-below-v15") | None => GenerationProfile::WorldBelowV15,
+        Some(_) => unreachable!("world option parser admits only known profiles"),
     };
-    let number = |key: &str, fallback: f64| -> f64 {
-        let needle = format!("\"{key}\":");
-        canonical_json
-            .find(&needle)
-            .and_then(|at| {
-                let tail = &canonical_json[at + needle.len()..];
-                let end = tail
-                    .find(|character: char| !character.is_ascii_digit() && character != '.' && character != '-')
-                    .unwrap_or(tail.len());
-                tail[..end].parse().ok()
-            })
-            .unwrap_or(fallback)
-    };
-    let string = |key: &str| -> Option<String> {
-        let needle = format!("\"{key}\":\"");
-        canonical_json.find(&needle).and_then(|at| {
-            let tail = &canonical_json[at + needle.len()..];
-            tail.find('"').map(|end| tail[..end].to_owned())
-        })
-    };
-    let enabled_factions = {
-        let needle = "\"enabledFactions\":[";
-        canonical_json.find(needle).map_or_else(
-            || GenerationOptions::default().enabled_factions,
-            |at| {
-                let tail = &canonical_json[at + needle.len()..];
-                let body = tail.find(']').map_or("", |end| &tail[..end]);
-                [
-                    "hobbits",
-                    "goblins",
-                    "atlantians",
-                    "sugarcourt",
-                    "wood-elves",
-                    "dwarves",
-                ]
-                .into_iter()
-                .filter(|faction| body.split(',').any(|entry| entry.trim_matches('"') == *faction))
-                .map(str::to_owned)
-                .collect()
-            },
-        )
-    };
-    let settlement_pattern = string("settlementPattern").unwrap_or_else(|| {
-        if profile == GenerationProfile::LegacyV14 {
-            "legacy-scattered-v1".into()
-        } else {
-            "heartlands-v2".into()
-        }
-    });
-    GenerationOptions {
+    let legacy = profile == GenerationProfile::LegacyV14;
+    Ok(GenerationOptions {
         profile,
-        cave_frequency: number("caveFrequency", 1.0),
-        biome_scale: number(
-            "biomeScale",
-            if profile == GenerationProfile::LegacyV14 {
-                1.0
-            } else {
-                1.35
-            },
+        cave_frequency: parsed.cave_frequency.unwrap_or(1.0),
+        biome_scale: parsed.biome_scale.unwrap_or(if legacy { 1.0 } else { 1.35 }),
+        resource_abundance: parsed.resource_abundance.unwrap_or(1.0),
+        structures: parsed.structures.unwrap_or(true),
+        settlement_density: parsed.settlement_density.unwrap_or(1.0),
+        enabled_factions: parsed.enabled_factions.map_or_else(
+            || CANONICAL_NPC_FACTION_IDS.into_iter().map(str::to_owned).collect(),
+            |values| values.into_iter().map(str::to_owned).collect(),
         ),
-        resource_abundance: number("resourceAbundance", 1.0),
-        structures: !canonical_json.contains("\"structures\":false"),
-        settlement_density: number("settlementDensity", 1.0),
-        enabled_factions,
-        settlement_pattern,
-        settlement_clustering: string("settlementClustering").unwrap_or_else(|| "regional".into()),
-        road_coverage: string("roadCoverage").unwrap_or_else(|| "regional".into()),
-        large_town_frequency: string("largeTownFrequency").unwrap_or_else(|| "balanced".into()),
+        settlement_pattern: parsed
+            .settlement_pattern
+            .unwrap_or(if legacy { "legacy-scattered-v1" } else { "heartlands-v2" })
+            .into(),
+        settlement_clustering: parsed.settlement_clustering.unwrap_or("regional").into(),
+        road_coverage: parsed.road_coverage.unwrap_or("regional").into(),
+        large_town_frequency: parsed.large_town_frequency.unwrap_or("balanced").into(),
         canonical_json: canonical_json.into(),
-    }
-    .normalized()
+    })
 }
 
 #[cfg(test)]
@@ -675,26 +629,112 @@ mod tests {
             cave_frequency: 99.0,
             biome_scale: -2.0,
             resource_abundance: 1.237,
+            settlement_density: 99.0,
+            enabled_factions: vec![
+                "dwarves".into(),
+                "unknown".into(),
+                "hobbits".into(),
+                "dwarves".into(),
+                "goblins".into(),
+            ],
             ..Default::default()
         }
         .normalized();
         assert_eq!(options.cave_frequency, 3.0);
         assert_eq!(options.biome_scale, 0.25);
         assert_eq!(options.resource_abundance, 1.24);
+        assert_eq!(options.settlement_density, 2.0);
+        assert_eq!(options.enabled_factions, vec!["hobbits", "goblins", "dwarves"]);
     }
 
     #[test]
-    fn parity_requires_exact_identity_and_large_corpus() {
+    fn generation_patches_preserve_conditional_defaults_and_explicit_values() {
+        let modern = parse_flat_options("{}").unwrap();
+        assert_eq!(modern.profile, GenerationProfile::WorldBelowV15);
+        assert_eq!(modern.biome_scale, 1.35);
+        assert_eq!(modern.settlement_pattern, "heartlands-v2");
+        assert_eq!(modern.enabled_factions.len(), 6);
+
+        let legacy = parse_flat_options(r#"{"profile":"legacy-v14"}"#).unwrap();
+        assert_eq!(legacy.profile, GenerationProfile::LegacyV14);
+        assert_eq!(legacy.biome_scale, 1.0);
+        assert_eq!(legacy.settlement_pattern, "legacy-scattered-v1");
+
+        let explicit = parse_flat_options(
+            r#"{"enabledFactions":[],"origin":{"mode":"wilderness"},"profile":"legacy-v14","settlementPattern":"heartlands-v2"}"#,
+        )
+        .unwrap();
+        assert_eq!(explicit.profile, GenerationProfile::LegacyV14);
+        assert_eq!(explicit.biome_scale, 1.0);
+        assert_eq!(explicit.settlement_pattern, "heartlands-v2");
+        assert!(explicit.enabled_factions.is_empty());
+    }
+
+    #[test]
+    fn hash_valid_nested_generation_spoofs_are_invalid_requests() {
+        let mut request = crate::service::fixture_request("nested-spoof", 0, 0, 1);
+        request.generation_options_json = r#"{"origin":{"profile":"legacy-v14"}}"#.into();
+        request.request_hash = request.canonical_hash().to_hex();
+        assert_eq!(request.canonical_hash().to_hex(), request.request_hash);
+        assert!(matches!(
+            request.validate(),
+            Err(GenerationError::InvalidRequest(message)) if message.contains("origin")
+        ));
+    }
+
+    #[test]
+    fn parity_requires_the_exact_promoted_certificate() {
         let request = crate::service::fixture_request("parity", -8, 7, 1);
         let certificate = ParityCertificate {
             generator_version: GENERATOR_VERSION,
             generator_hash: request.generator_hash.clone(),
             content_hash: request.content_hash.clone(),
-            corpus_hash: "0123456789abcdef0123456789abcdef".into(),
-            corpus_cases: 4096,
+            corpus_hash: TERRAIN_GENERATION_PROMOTION_CORPUS_HASH_V2.into(),
+            corpus_cases: TERRAIN_GENERATION_PROMOTION_CORPUS_CASES_V2,
             byte_equal: true,
         };
-        assert!(certificate.promotes(&request, 4096));
-        assert!(!certificate.promotes(&request, 4097));
+        assert!(certificate.promotes(&request));
+        assert!(
+            !ParityCertificate {
+                corpus_cases: 154,
+                ..certificate.clone()
+            }
+            .promotes(&request)
+        );
+        assert!(
+            !ParityCertificate {
+                corpus_cases: 156,
+                ..certificate.clone()
+            }
+            .promotes(&request)
+        );
+        assert!(
+            !ParityCertificate {
+                corpus_hash: "0".repeat(32),
+                ..certificate.clone()
+            }
+            .promotes(&request)
+        );
+        assert!(
+            !ParityCertificate {
+                corpus_hash: "4d4e6b1445b00f3430164d1a8093d8dc".into(),
+                ..certificate.clone()
+            }
+            .promotes(&request)
+        );
+        assert!(
+            !ParityCertificate {
+                generator_hash: "f".repeat(32),
+                ..certificate.clone()
+            }
+            .promotes(&request)
+        );
+        assert!(
+            !ParityCertificate {
+                byte_equal: false,
+                ..certificate
+            }
+            .promotes(&request)
+        );
     }
 }

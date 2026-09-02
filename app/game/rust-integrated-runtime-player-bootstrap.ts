@@ -60,6 +60,8 @@ import type {
   RustEntityCompatibilityRecordR6,
   RustEntityResidencyR6,
 } from "./rust-entity-authority-contract-r6";
+import { rustIntegratedRuntimeDomainWireFamilyV1 } from "./rust-integrated-runtime-domain-schema.generated";
+import { decodeRustIntegratedPlayerFinalBindReceiptV1 } from "./rust-integrated-runtime-player-final-bind";
 
 export type {
   RustIntegratedContainerKeyV1,
@@ -71,12 +73,31 @@ export type {
   RustIntegratedPlayerRuntimeContinuityV1,
 } from "./rust-integrated-runtime-player-status";
 
-export const RUST_INTEGRATED_PLAYER_FINAL_BIND_TYPE_V3 = "blockwild.simulation.player-bind.r5.v3";
-export const RUST_INTEGRATED_PLAYER_FINAL_BIND_RECEIPT_TYPE_V3 = "blockwild.simulation.player-bind-final-receipt.r5.v3";
-const BWF7_ACK_MAGIC = Uint8Array.of(0x42, 0x57, 0x46, 0x37);
-const BWF7_ACK_BYTES = 38;
-export const RUST_INTEGRATED_PLAYER_COMBAT_BIND_TYPE_V4 = "blockwild.simulation.player-bind.r5.v4";
-export const RUST_INTEGRATED_PLAYER_COMBAT_BIND_RECEIPT_TYPE_V4 = "blockwild.simulation.player-bind-final-receipt.r5.v4";
+const FINAL_BIND_SCHEMA_V3 = rustIntegratedRuntimeDomainWireFamilyV1("simulation-player-bind-v3");
+const FINAL_BIND_RECEIPT_SCHEMA_V3 = rustIntegratedRuntimeDomainWireFamilyV1(
+  "simulation-player-bind-final-receipt-v3",
+);
+const COMBAT_BIND_SCHEMA_V4 = rustIntegratedRuntimeDomainWireFamilyV1("simulation-player-bind-v4");
+const COMBAT_BIND_RECEIPT_SCHEMA_V4 = rustIntegratedRuntimeDomainWireFamilyV1(
+  "simulation-player-bind-final-receipt-v4",
+);
+const BOOTSTRAP_STATUS_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("player-bootstrap-status-v1");
+const BOOTSTRAP_STATUS_RECEIPT_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1(
+  "player-bootstrap-status-receipt-v1",
+);
+const COMBAT_STATUS_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("player-combat-bootstrap-status-v1");
+const COMBAT_STATUS_RECEIPT_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1(
+  "player-combat-bootstrap-status-receipt-v1",
+);
+const ENTITY_COMPATIBILITY_IMPORT_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1(
+  "entity-compatibility-import-v1",
+);
+
+export const RUST_INTEGRATED_PLAYER_FINAL_BIND_TYPE_V3 = FINAL_BIND_SCHEMA_V3.typeId;
+export const RUST_INTEGRATED_PLAYER_FINAL_BIND_RECEIPT_TYPE_V3 = FINAL_BIND_RECEIPT_SCHEMA_V3.typeId;
+export const RUST_INTEGRATED_PLAYER_COMBAT_BIND_TYPE_V4 = COMBAT_BIND_SCHEMA_V4.typeId;
+export const RUST_INTEGRATED_PLAYER_COMBAT_BIND_RECEIPT_TYPE_V4 = COMBAT_BIND_RECEIPT_SCHEMA_V4.typeId;
+
 const PLAYER_BACK_SLOT_V1 = 7;
 const U64_MAX = (BigInt(1) << BigInt(64)) - BigInt(1);
 const textEncoder = new TextEncoder();
@@ -183,11 +204,6 @@ function fail(code: string, message: string): never {
 
 function bytesEqual(left: Uint8Array, right: Uint8Array) {
   return left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index]);
-}
-
-function hexBytes(value: string, label: string) {
-  if (!/^[0-9a-f]{32}$/u.test(value)) fail("bootstrap-hash", `${label} is not an exact native hash`);
-  return Uint8Array.from(value.match(/.{2}/gu) ?? [], (pair) => Number.parseInt(pair, 16));
 }
 
 function visibleId(value: string, label: string, maximumBytes = 160) {
@@ -311,7 +327,7 @@ function bindingOperation(binding: RustIntegratedPlayerBindingV1) {
   return createRustIntegratedRuntimeDomainOperationV1({
     domain: "simulation",
     typeId: RUST_INTEGRATED_PLAYER_COMBAT_BIND_TYPE_V4,
-    schema: 4,
+    schema: COMBAT_BIND_SCHEMA_V4.operationSchema,
     payload: encodeRustIntegratedPlayerBindingV1(binding),
   });
 }
@@ -468,7 +484,7 @@ export function planRustIntegratedPlayerBootstrapV1(
       createRustIntegratedRuntimeDomainOperationV1({
         domain: "entities",
         typeId: RUST_INTEGRATED_ENTITY_COMPATIBILITY_IMPORT_TYPE_V1,
-        schema: 1,
+        schema: ENTITY_COMPATIBILITY_IMPORT_SCHEMA_V1.operationSchema,
         payload: encodeRustIntegratedEntityCompatibilityImportV1(entityImport),
       }),
       bindingOperation(desired.binding),
@@ -571,16 +587,16 @@ function validateBindReceipt(
   if (!operation
     || operation.domain !== "simulation"
     || operation.typeId !== RUST_INTEGRATED_PLAYER_COMBAT_BIND_RECEIPT_TYPE_V4
-    || operation.schema !== 4
-    || operation.payloadHash !== rustIntegratedRuntimeWireChecksumV1(operation.payload)
-    || operation.payload.byteLength !== BWF7_ACK_BYTES
-    || !BWF7_ACK_MAGIC.every((byte, index) => operation.payload[index] === byte)) {
+    || operation.schema !== COMBAT_BIND_RECEIPT_SCHEMA_V4.operationSchema
+    || operation.payloadHash !== rustIntegratedRuntimeWireChecksumV1(operation.payload)) {
     fail("bootstrap-receipt", "BWF7 returned the wrong ordered native receipt");
   }
-  const view = new DataView(operation.payload.buffer, operation.payload.byteOffset, operation.payload.byteLength);
-  if (view.getUint16(4, true) !== 1
-    || !bytesEqual(operation.payload.subarray(6, 22), hexBytes(request.payloadHash, "BWF7 request payload hash"))
-    || !bytesEqual(operation.payload.subarray(22, 38), hexBytes(receipt.after.stateHash, "BWF7 terminal state hash"))) {
+  try {
+    decodeRustIntegratedPlayerFinalBindReceiptV1(4, operation.payload, {
+      requestPayloadHash: request.payloadHash,
+      terminalStateHash: receipt.after.stateHash,
+    });
+  } catch {
     fail("bootstrap-receipt", "BWF7 acknowledgement does not attest the request and terminal runtime state");
   }
 }
@@ -697,7 +713,7 @@ export async function queryRustIntegratedPlayerBootstrapObservationV1(
   const operation = createRustIntegratedRuntimeDomainOperationV1({
     domain: "simulation",
     typeId: RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
-    schema: 1,
+    schema: BOOTSTRAP_STATUS_SCHEMA_V1.operationSchema,
     payload,
   });
   const combatPayload = encodeRustIntegratedPlayerCombatBootstrapStatusQueryV1({
@@ -708,7 +724,7 @@ export async function queryRustIntegratedPlayerBootstrapObservationV1(
   const combatOperation = createRustIntegratedRuntimeDomainOperationV1({
     domain: "simulation",
     typeId: RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
-    schema: 1,
+    schema: COMBAT_STATUS_SCHEMA_V1.operationSchema,
     payload: combatPayload,
   });
   const batch = batchFor(expected, intent.commandActorId, Object.freeze([operation, combatOperation]));
@@ -727,10 +743,11 @@ export async function queryRustIntegratedPlayerBootstrapObservationV1(
     || !rustIntegratedRuntimeIdentityEqualsV1(service.identity(), expected)
     || !response || response.domain !== "simulation"
     || response.typeId !== RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1
-    || response.schema !== 1 || response.payloadHash !== rustIntegratedRuntimeWireChecksumV1(response.payload)
+    || response.schema !== BOOTSTRAP_STATUS_RECEIPT_SCHEMA_V1.operationSchema
+    || response.payloadHash !== rustIntegratedRuntimeWireChecksumV1(response.payload)
     || !combatResponse || combatResponse.domain !== "simulation"
     || combatResponse.typeId !== RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1
-    || combatResponse.schema !== 1
+    || combatResponse.schema !== COMBAT_STATUS_RECEIPT_SCHEMA_V1.operationSchema
     || combatResponse.payloadHash !== rustIntegratedRuntimeWireChecksumV1(combatResponse.payload)) {
     fail("bootstrap-status-receipt", "BWS5/BWS7 returned a mutating or incorrectly typed receipt");
   }

@@ -4,23 +4,37 @@ import test from "node:test";
 
 async function source(name: string) { return readFile(new URL(`../app/game/${name}`, import.meta.url), "utf8"); }
 
-test("normal path gives Three and wgpu shadow distinct canvases", async () => {
+test("normal path reserves distinct Three input, WGPU primary, and WGPU shadow canvases", async () => {
   const voxelGame = await source("VoxelGame.tsx");
   assert.match(voxelGame, /new VoxelEngine\(canvas,/u);
-  assert.match(voxelGame, /canvas:\s*rendererShadowCanvas,/u);
-  assert.match(voxelGame, /canvasRole:\s*"shadow"/u);
+  assert.match(voxelGame, /canvas:\s*rendererRequest === "wgpu" \? rendererPrimaryCanvas : rendererShadowCanvas,/u);
+  assert.match(voxelGame, /canvasRole:\s*rendererRequest === "wgpu" \? "primary" : "shadow"/u);
+  assert.match(voxelGame, /key=\{`renderer-wgpu-primary-\$\{rendererPrimarySurfaceKey\}`\}/u);
+  assert.match(voxelGame, /data-renderer-canvas-role="three-input"/u);
+  assert.match(voxelGame, /data-renderer-canvas-role="wgpu-primary"/u);
   assert.match(voxelGame, /<canvas ref=\{rendererShadowCanvasRef\} hidden aria-hidden="true"/u);
   assert.doesNotMatch(voxelGame, /new VoxelEngine\(rendererShadowCanvas/u);
-  assert.doesNotMatch(voxelGame, /canvas:\s*canvas,\s*canvasRole:\s*"shadow"/u);
+  assert.doesNotMatch(voxelGame, /new VoxelEngine\(rendererPrimaryCanvas/u);
 });
 
 test("shipping runtime keeps wgpu primary policy closed and shadow opt-in explicit", async () => {
   const voxelGame = await source("VoxelGame.tsx");
-  assert.match(voxelGame, /allowWgpuShadow:\s*rendererRequest === "wgpu-shadow"/u);
+  assert.match(
+    voxelGame,
+    /allowWgpuShadow:\s*rendererRequest === "wgpu-shadow"\s*&& rustLivePlayerAuthoritySelection\.mode === "experimental-r5"/u,
+  );
   assert.match(voxelGame, /allowWgpuPrimary:\s*false/u);
   assert.match(voxelGame, /promotionGates:\s*CLOSED_RENDERER_PROMOTION_GATES_R11/u);
+  assert.match(voxelGame, /rustRenderSink:\s*rendererCutover\.needsExtraction \? rendererCutover : undefined/u);
+  assert.match(voxelGame, /rustRenderEpoch:\s*rendererCutover\.needsExtraction \? rendererEpoch : undefined/u);
   assert.match(voxelGame, /render_renderer_cutover_to_text/u);
   assert.match(voxelGame, /request_renderer_recovery/u);
+  assert.match(voxelGame, /rendererCanvasLifecycle\.prepareReplacement\(request\.reason\)[\s\S]*?setRendererPrimarySurfaceKey/u);
+  assert.match(
+    voxelGame,
+    /rendererCanvasLifecycle\.dispose\(\);\s*void engine\.shutdown\(\)\.catch\(\(\) => undefined\)\.finally\(\(\) => rendererCutover\.stop\(\)\)/u,
+    "normal teardown drains engine shutdown before stopping the renderer cutover",
+  );
 });
 
 test("avatar previews lazy-load Three behind a deterministic no-WebGL fallback", async () => {

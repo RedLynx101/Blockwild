@@ -97,6 +97,7 @@ type RegionIntent = Readonly<{
 
 const clamp = (value: number, minimum: number, maximum: number) => Math.max(minimum, Math.min(maximum, value));
 const floorDiv = (value: number, divisor: number) => Math.floor(value / divisor);
+const compareCanonicalSettlementId = (left: string, right: string) => left < right ? -1 : left > right ? 1 : 0;
 
 export function normalizeSettlementOriginSearchRadius(value: unknown) {
   return Math.floor(clamp(
@@ -443,22 +444,38 @@ export class SettlementIndex {
     return accepted;
   }
 
-  queryNearest(seed: string, optionsValue: Partial<SettlementPlacementOptions>, query: SettlementQuery, sample: SettlementTerrainSampler) {
-    return this.queryNearestMany(seed, optionsValue, { ...query, limit: 1 }, sample)[0] ?? null;
+  queryNearest(
+    seed: string,
+    optionsValue: Partial<SettlementPlacementOptions>,
+    query: SettlementQuery,
+    sample: SettlementTerrainSampler,
+    acceptCandidate?: (candidate: SettlementCandidate) => boolean,
+  ) {
+    return this.queryNearestMany(seed, optionsValue, { ...query, limit: 1 }, sample, acceptCandidate)[0] ?? null;
   }
 
-  queryNearestMany(seed: string, optionsValue: Partial<SettlementPlacementOptions>, query: SettlementQuery, sample: SettlementTerrainSampler) {
+  queryNearestMany(
+    seed: string,
+    optionsValue: Partial<SettlementPlacementOptions>,
+    query: SettlementQuery,
+    sample: SettlementTerrainSampler,
+    acceptCandidate?: (candidate: SettlementCandidate) => boolean,
+  ) {
     const options = normalizeSettlementPlacementOptions(optionsValue);
     if (!options.structures || !options.enabledFactions.length || options.settlementDensity <= 0) return Object.freeze([]) as readonly SettlementIndexResult[];
-    const originRegionX = floorDiv(query.origin.x, SETTLEMENT_REGION_BLOCKS);
-    const originRegionZ = floorDiv(query.origin.z, SETTLEMENT_REGION_BLOCKS);
+    // Locator transport uses integer milliblocks so Rust and the compatibility
+    // oracle share exact fractional-player distance and tie semantics.
+    const originXMillis = Math.round(query.origin.x * 1_000);
+    const originZMillis = Math.round(query.origin.z * 1_000);
+    const originRegionX = floorDiv(originXMillis, SETTLEMENT_REGION_BLOCKS * 1_000);
+    const originRegionZ = floorDiv(originZMillis, SETTLEMENT_REGION_BLOCKS * 1_000);
     const limit = clamp(Math.floor(query.limit ?? 1), 1, 32);
     const maxRadius = clamp(Math.floor(query.maxRegionRadius ?? 24), 0, 96);
     const factions = query.factionIds ? new Set(query.factionIds) : null;
     const sizes = query.sizes ? new Set(query.sizes) : null;
     const environments = query.environments ? new Set(query.environments) : null;
     const excluded = query.excludeIds instanceof Set ? query.excludeIds : new Set(query.excludeIds ?? []);
-    const results = new Map<string, SettlementIndexResult>();
+    const results = new Map<string, SettlementIndexResult & { distanceSquaredMillis: bigint }>();
     for (let radius = 0; radius <= maxRadius; radius += 1) {
       for (let dx = -radius; dx <= radius; dx += 1) for (let dz = -radius; dz <= radius; dz += 1) {
         if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
@@ -466,24 +483,36 @@ export class SettlementIndex {
         const regionZ = originRegionZ + dz;
         const candidate = this.candidateForRegion(seed, options, regionX, regionZ, sample);
         if (!candidate || excluded.has(candidate.id) || factions && !factions.has(candidate.factionId)
-          || sizes && !sizes.has(candidate.size) || environments && !environments.has(candidate.environment ?? "surface")) continue;
+          || sizes && !sizes.has(candidate.size) || environments && !environments.has(candidate.environment ?? "surface")
+          || acceptCandidate && !acceptCandidate(candidate)) continue;
         const province = this.province(seed, options, floorDiv(regionX, 8), floorDiv(regionZ, 8), sample);
+        const deltaXMillis = BigInt(candidate.center.x) * BigInt(1_000) - BigInt(originXMillis);
+        const deltaZMillis = BigInt(candidate.center.z) * BigInt(1_000) - BigInt(originZMillis);
         results.set(candidate.id, Object.freeze({
           candidate,
-          distanceBlocks: Math.hypot(candidate.center.x - query.origin.x, candidate.center.z - query.origin.z),
+          distanceBlocks: Math.sqrt(Number(deltaXMillis * deltaXMillis + deltaZMillis * deltaZMillis)) / 1_000,
+          distanceSquaredMillis: deltaXMillis * deltaXMillis + deltaZMillis * deltaZMillis,
           provinceId: province.id,
           provinceClass: province.classification,
           roadNodeId: options.roadCoverage !== "none" && candidate.environment === "surface" ? `road:${candidate.id}` : null,
         }));
       }
-      const ordered = [...results.values()].sort((left, right) => left.distanceBlocks - right.distanceBlocks || left.candidate.id.localeCompare(right.candidate.id));
+      const ordered = [...results.values()].sort((left, right) => left.distanceSquaredMillis < right.distanceSquaredMillis ? -1
+        : left.distanceSquaredMillis > right.distanceSquaredMillis ? 1 : compareCanonicalSettlementId(left.candidate.id, right.candidate.id));
       if (ordered.length >= limit) {
-        const farthest = ordered[limit - 1].distanceBlocks;
-        const nextShellMinimum = Math.max(0, radius * SETTLEMENT_REGION_BLOCKS - SETTLEMENT_REGION_BLOCKS * Math.SQRT2);
-        if (nextShellMinimum > farthest + SETTLEMENT_REGION_BLOCKS * Math.SQRT2) return Object.freeze(ordered.slice(0, limit));
+        // ceil(512_000 * sqrt(2)); shared with Rust. Squared integer
+        // comparison avoids platform float drift at an early-exit boundary.
+        const regionDiagonalMillisCeil = BigInt(724_078);
+        const futureMinimumMillis = BigInt(radius * SETTLEMENT_REGION_BLOCKS * 1_000)
+          - regionDiagonalMillisCeil * BigInt(2);
+        if (futureMinimumMillis > BigInt(0)
+          && futureMinimumMillis * futureMinimumMillis > ordered[limit - 1].distanceSquaredMillis) {
+          return Object.freeze(ordered.slice(0, limit));
+        }
       }
     }
-    return Object.freeze([...results.values()].sort((left, right) => left.distanceBlocks - right.distanceBlocks || left.candidate.id.localeCompare(right.candidate.id)).slice(0, limit));
+    return Object.freeze([...results.values()].sort((left, right) => left.distanceSquaredMillis < right.distanceSquaredMillis ? -1
+      : left.distanceSquaredMillis > right.distanceSquaredMillis ? 1 : compareCanonicalSettlementId(left.candidate.id, right.candidate.id)).slice(0, limit));
   }
 
   settlementsInProvince(seed: string, optionsValue: Partial<SettlementPlacementOptions>, provinceX: number, provinceZ: number, sample: SettlementTerrainSampler) {

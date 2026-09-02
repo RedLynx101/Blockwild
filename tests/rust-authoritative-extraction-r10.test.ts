@@ -109,9 +109,12 @@ test("R10 promotion remains blocked until content is installed and attested", ()
 test("Rust-produced bound-player BWX0 decodes end to end in TypeScript", () => {
   const decoded = decodeRustDomainBundleR10(Uint8Array.from(Buffer.from(BOUND_WORLD_VIEW_BWX0, "hex")));
   assert.equal(decoded.views.length, 8);
+  const player = decoded.views[1].rows.find((row) => row.kind === 1);
   const binding = decoded.views[1].rows.find((row) => row.kind === 2);
-  assert.ok(binding);
+  assert.ok(player && binding);
+  const playerFields = new Map(player.fields);
   const fields = new Map(binding.fields);
+  assert.equal(playerFields.get("grounded"), true);
   assert.equal(fields.get("playerId"), BigInt("12884901895"));
   assert.match(String(fields.get("inventoryContainer")), /^container-key-v1\/[0-9a-f]+$/u);
   assert.match(String(fields.get("equipmentContainer")), /^container-key-v1\/[0-9a-f]+$/u);
@@ -134,6 +137,7 @@ test("Rust-produced view-aware camera BWX0 is complete and identity joined", () 
   const fields = new Map(camera.fields);
   assert.equal(decoded.views[1].status, "complete");
   assert.deepEqual(decoded.views[1].blockers, []);
+  assert.equal(playerFields.get("grounded"), true);
   assert.equal(fields.size, 36);
   assert.equal(fields.get("externalEntityId"), player.key);
   assert.equal(fields.get("externalEntityId"), fields.get("actorId"));

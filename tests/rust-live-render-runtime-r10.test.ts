@@ -44,6 +44,8 @@ const CONTENT = requireBlockwildProductionContent();
 const CONTENT_HASH = CONTENT.manifest.manifestHash;
 const PLAYER_ARTIFACT = CONTENT.artifacts.find((artifact) =>
   artifact.domain === "creature-profile" && artifact.id === PLAYER_RENDER_PROFILE_ID_V1)!;
+const PRESENTATION_ARTIFACT = CONTENT.artifacts.find((artifact) =>
+  artifact.domain === "machine-profile" && artifact.id === "render-presentations")!;
 const IDENTITY_ROTATION = Object.freeze([0, 0, 0, 1] as const);
 const CAMERA_VIEW = Object.freeze({ viewportWidth: 1_280, viewportHeight: 720, viewRevision: 11 });
 const GOLDEN_BWX0 = Uint8Array.from(Buffer.from(readFileSync(
@@ -363,12 +365,29 @@ test("live runtime submits an exact same-envelope held model to the composed ren
       extraction(1, 0, Item.StonePickaxe),
       context(),
     ), true);
-    const held = runtime.metadata(GENERATION).entity.entries[0]?.equipment[0];
+    const metadata = runtime.metadata(GENERATION);
+    const held = metadata.entity.entries[0]?.equipment[0];
     assert.equal(held?.slotKey, "world-view-held-right-hand");
     assert.equal(held?.itemKey, String(Item.StonePickaxe));
     assert.equal(held?.instanceIds.length, 5);
-    assert.equal(runtime.diagnostics().presentation?.heldAttachments, 1);
-    assert.deepEqual(runtime.diagnostics().presentation?.heldBlockers, []);
+    const diagnostics = runtime.diagnostics();
+    assert.equal(diagnostics.presentation?.heldAttachments, 1);
+    assert.deepEqual(diagnostics.presentation?.heldBlockers, []);
+    assert.equal(diagnostics.presentationCoverage?.coverageHash, diagnostics.presentation?.coverageHash);
+    assert.deepEqual(diagnostics.presentationCoverage?.families.map((family) => family.family), [
+      "celestial", "dropped-item", "held-item", "machine", "particle", "projectile",
+      "sky", "summon", "vehicle", "weather", "world-prop",
+    ]);
+    const exactHeld = metadata.presentation.frame?.bindings.find((binding) => binding.role === "held-item");
+    assert.equal(exactHeld?.role, "held-item");
+    assert.equal(exactHeld?.binding.profileId, "held:stone-pickaxe");
+    assert.equal(exactHeld?.binding.modelId, "held-pickaxe");
+    assert.equal(exactHeld?.binding.presentationCatalog.contentHashHex, PRESENTATION_ARTIFACT.blobHash);
+    assert.deepEqual(exactHeld?.instanceIds, held?.instanceIds);
+    assert.equal(metadata.presentation.promotion.ready, false);
+    assert.ok(metadata.presentation.promotion.blockers.includes(
+      "dropped-item-r6-model-binding-runtime",
+    ));
   } finally {
     await runtime.dispose();
   }

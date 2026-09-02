@@ -11,7 +11,7 @@ const MAX_PROXY_TRIANGLES = 180_000;
 
 export type BasicWorldRendererStats = Readonly<{
   enabled: boolean;
-  reason: "active" | "inactive" | "feature-gated";
+  reason: "active" | "inactive" | "feature-gated" | "rust-authority-no-legacy-fallback";
   supported: boolean;
   active: boolean;
   pausedForFramePressure: boolean;
@@ -115,6 +115,7 @@ export class BasicWorldRenderer {
   private disposed = false;
   private caveBlend = 0;
   private wasFramePressurePaused = false;
+  private rustAuthorityFallbackRejected = false;
   private counters = {
     submitted: 0,
     completed: 0,
@@ -236,6 +237,7 @@ export class BasicWorldRenderer {
   update(input: BasicWorldRendererInput) {
     if (this.disposed) return;
     const active = input.enabled && input.basicDistance > input.fullDistance;
+    this.rustAuthorityFallbackRejected = false;
     this.group.visible = active;
     this.caveBlend = input.caveBlend;
     this.applyVisibility();
@@ -266,6 +268,14 @@ export class BasicWorldRenderer {
     }
     if (key === this.installedKey || key === this.pendingKey || this.completedResult || input.framePressure || input.now - this.lastRequestAt < REQUEST_INTERVAL_MS) return;
 
+    // This compatibility renderer is a legacy TypeScript visual proxy. It is
+    // never submitted, even to its worker, from a required-Rust world.
+    if (input.world.terrainGenerationAuthority.mode === "rust") {
+      this.rustAuthorityFallbackRejected = true;
+      this.counters.failed += 1;
+      return;
+    }
+
     const request: BasicWorldGeometryRequest = {
       seed: input.world.seed,
       centerChunkX,
@@ -292,8 +302,7 @@ export class BasicWorldRenderer {
       return;
     }
 
-    // Browser environments without module workers keep a bounded fallback.
-    // It is skipped under frame pressure and never runs in agent mode.
+    // Explicit TS rollback may keep the bounded compatibility fallback.
     this.counters.submitted += 1;
     try {
       this.install(key, buildBasicWorldGeometry(request, (x, z) => input.world.sampleColumn(x, z)));
@@ -306,7 +315,9 @@ export class BasicWorldRenderer {
     const now = typeof performance === "undefined" ? Date.now() : performance.now();
     return Object.freeze({
       enabled: true,
-      reason: this.group.visible ? "active" : "inactive",
+      reason: this.rustAuthorityFallbackRejected
+        ? "rust-authority-no-legacy-fallback"
+        : this.group.visible ? "active" : "inactive",
       supported: this.worker !== null || typeof document !== "undefined",
       active: this.group.visible,
       pausedForFramePressure: this.group.visible && framePressure,

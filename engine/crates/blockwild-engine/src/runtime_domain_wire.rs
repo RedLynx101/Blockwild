@@ -6,7 +6,76 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use blockwild_authority::WorldAuthorityRevisionV1;
+use crate::runtime_domain_schema_generated::{
+    BASIC_DIRT_ACTION_PROJECTION_RECEIPT_V1_INNER_SCHEMA, BASIC_DIRT_ACTION_PROJECTION_RECEIPT_V1_MAGIC,
+    BASIC_DIRT_ACTION_PROJECTION_RECEIPT_V1_TYPE_ID, BASIC_DIRT_ACTION_RECEIPT_V1_INNER_SCHEMA,
+    BASIC_DIRT_ACTION_RECEIPT_V1_MAGIC, BASIC_DIRT_ACTION_RECEIPT_V1_TYPE_ID, CONTENT_INSTALL_PAGE_V1_INNER_SCHEMA,
+    CONTENT_INSTALL_PAGE_V1_MAGIC, CONTENT_INSTALL_PAGE_V1_TYPE_ID, CONTENT_INSTALL_RECEIPT_V1_INNER_SCHEMA,
+    CONTENT_INSTALL_RECEIPT_V1_MAGIC, CONTENT_INSTALL_RECEIPT_V1_TYPE_ID,
+    CONTEXT_COMMAND_CONTINUITY_RECEIPT_V2_INNER_SCHEMA, CONTEXT_COMMAND_CONTINUITY_RECEIPT_V2_MAGIC,
+    CONTEXT_COMMAND_CONTINUITY_RECEIPT_V2_TYPE_ID, CONTEXT_COMMAND_CONTINUITY_V2_INNER_SCHEMA,
+    CONTEXT_COMMAND_CONTINUITY_V2_MAGIC, CONTEXT_COMMAND_CONTINUITY_V2_TYPE_ID,
+    ENTITY_AUTHORITY_EXPORT_V1_INNER_SCHEMA, ENTITY_AUTHORITY_EXPORT_V1_MAGIC, ENTITY_AUTHORITY_EXPORT_V1_TYPE_ID,
+    ENTITY_AUTHORITY_IMPORT_RECEIPT_V1_INNER_SCHEMA, ENTITY_AUTHORITY_IMPORT_RECEIPT_V1_MAGIC,
+    ENTITY_AUTHORITY_IMPORT_RECEIPT_V1_TYPE_ID, ENTITY_AUTHORITY_IMPORT_V2_INNER_SCHEMA,
+    ENTITY_AUTHORITY_IMPORT_V2_MAGIC, ENTITY_AUTHORITY_IMPORT_V2_TYPE_ID, ENTITY_AUTHORITY_SNAPSHOT_V2_TYPE_ID,
+    ENTITY_COMMAND_V1_INNER_SCHEMA, ENTITY_COMMAND_V1_MAGIC, ENTITY_COMPATIBILITY_EXPORT_V1_INNER_SCHEMA,
+    ENTITY_COMPATIBILITY_EXPORT_V1_MAGIC, ENTITY_COMPATIBILITY_EXPORT_V1_TYPE_ID,
+    ENTITY_COMPATIBILITY_IMPORT_V1_INNER_SCHEMA, ENTITY_COMPATIBILITY_IMPORT_V1_MAGIC,
+    ENTITY_COMPATIBILITY_IMPORT_V1_TYPE_ID, ENTITY_COMPATIBILITY_RECORD_V1_TYPE_ID, ENTITY_RECEIPT_V1_INNER_SCHEMA,
+    ENTITY_RECEIPT_V1_MAGIC, GAMEPLAY_ACTOR_GRANT_V1_INNER_SCHEMA, GAMEPLAY_ACTOR_GRANT_V1_MAGIC,
+    GAMEPLAY_COMMAND_V1_INNER_SCHEMA, GAMEPLAY_COMMAND_V1_MAGIC, GAMEPLAY_RECEIPT_V1_INNER_SCHEMA,
+    GAMEPLAY_RECEIPT_V1_MAGIC, INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1,
+    NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V1_INNER_SCHEMA, NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V1_MAGIC,
+    NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V1_TYPE_ID, NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V2_INNER_SCHEMA,
+    NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V2_MAGIC, NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V2_TYPE_ID,
+    NATIVE_BLOCK_EDIT_RECEIPT_V1_INNER_SCHEMA, NATIVE_BLOCK_EDIT_RECEIPT_V1_MAGIC,
+    NATIVE_BLOCK_EDIT_RECEIPT_V1_TYPE_ID, NATIVE_BLOCK_EDIT_RECEIPT_V2_INNER_SCHEMA,
+    NATIVE_BLOCK_EDIT_RECEIPT_V2_MAGIC, NATIVE_BLOCK_EDIT_RECEIPT_V2_TYPE_ID,
+    NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_V1_INNER_SCHEMA, NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_V1_MAGIC,
+    NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_V1_TYPE_ID, NATIVE_DROP_PICKUP_RECEIPT_V1_INNER_SCHEMA,
+    NATIVE_DROP_PICKUP_RECEIPT_V1_MAGIC, NATIVE_DROP_PICKUP_RECEIPT_V1_TYPE_ID,
+    NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_V1_INNER_SCHEMA, NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_V1_MAGIC,
+    NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_V1_TYPE_ID, NATIVE_PLAYER_DROP_RECEIPT_V1_INNER_SCHEMA,
+    NATIVE_PLAYER_DROP_RECEIPT_V1_MAGIC, NATIVE_PLAYER_DROP_RECEIPT_V1_TYPE_ID, NETWORK_AGENT_GRANT_V1_INNER_SCHEMA,
+    NETWORK_AGENT_GRANT_V1_MAGIC, NETWORK_COMMAND_RELEASE_V1_INNER_SCHEMA, NETWORK_COMMAND_RELEASE_V1_MAGIC,
+    NETWORK_DELTA_BUILD_V1_INNER_SCHEMA, NETWORK_DELTA_BUILD_V1_MAGIC, NETWORK_PEER_GRANT_V1_INNER_SCHEMA,
+    NETWORK_PEER_GRANT_V1_MAGIC, NETWORK_PEER_RELEASE_V1_INNER_SCHEMA, NETWORK_PEER_RELEASE_V1_MAGIC,
+    NETWORK_RECONNECT_V1_INNER_SCHEMA, NETWORK_RECONNECT_V1_MAGIC, NETWORK_REPLICATION_UPSERT_V1_INNER_SCHEMA,
+    NETWORK_REPLICATION_UPSERT_V1_MAGIC, PERSISTENCE_DISPATCH_RECEIPT_V1_INNER_SCHEMA,
+    PERSISTENCE_DISPATCH_RECEIPT_V1_MAGIC, PERSISTENCE_DISPATCH_V1_INNER_SCHEMA, PERSISTENCE_DISPATCH_V1_MAGIC,
+    PLAYER_BOOTSTRAP_STATUS_RECEIPT_V1_INNER_SCHEMA, PLAYER_BOOTSTRAP_STATUS_RECEIPT_V1_MAGIC,
+    PLAYER_BOOTSTRAP_STATUS_RECEIPT_V1_TYPE_ID, PLAYER_BOOTSTRAP_STATUS_V1_INNER_SCHEMA,
+    PLAYER_BOOTSTRAP_STATUS_V1_MAGIC, PLAYER_BOOTSTRAP_STATUS_V1_TYPE_ID,
+    PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_V1_INNER_SCHEMA, PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_V1_MAGIC,
+    PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_V1_TYPE_ID, PLAYER_COMBAT_BOOTSTRAP_STATUS_V1_INNER_SCHEMA,
+    PLAYER_COMBAT_BOOTSTRAP_STATUS_V1_MAGIC, PLAYER_COMBAT_BOOTSTRAP_STATUS_V1_TYPE_ID,
+    PLAYER_CREATIVE_SLOT_SET_RECEIPT_V1_INNER_SCHEMA, PLAYER_CREATIVE_SLOT_SET_RECEIPT_V1_MAGIC,
+    PLAYER_CREATIVE_SLOT_SET_RECEIPT_V1_TYPE_ID, PLAYER_CREATIVE_SLOT_SET_V1_INNER_SCHEMA,
+    PLAYER_CREATIVE_SLOT_SET_V1_MAGIC, PLAYER_CREATIVE_SLOT_SET_V1_TYPE_ID,
+    PLAYER_GAME_MODE_SET_RECEIPT_V1_INNER_SCHEMA, PLAYER_GAME_MODE_SET_RECEIPT_V1_MAGIC,
+    PLAYER_GAME_MODE_SET_RECEIPT_V1_TYPE_ID, PLAYER_GAME_MODE_SET_V1_INNER_SCHEMA, PLAYER_GAME_MODE_SET_V1_MAGIC,
+    PLAYER_GAME_MODE_SET_V1_TYPE_ID, PLAYER_INVENTORY_IMPORT_RECEIPT_V1_INNER_SCHEMA,
+    PLAYER_INVENTORY_IMPORT_RECEIPT_V1_MAGIC, PLAYER_INVENTORY_IMPORT_RECEIPT_V1_TYPE_ID,
+    PLAYER_INVENTORY_IMPORT_V1_INNER_SCHEMA, PLAYER_INVENTORY_IMPORT_V1_MAGIC, PLAYER_INVENTORY_IMPORT_V1_TYPE_ID,
+    PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_V1_INNER_SCHEMA, PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_V1_MAGIC,
+    PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_V1_TYPE_ID, PLAYER_LOCATOR_ITEM_CONSUME_V1_INNER_SCHEMA,
+    PLAYER_LOCATOR_ITEM_CONSUME_V1_MAGIC, PLAYER_LOCATOR_ITEM_CONSUME_V1_TYPE_ID,
+    PLAYER_RESPAWN_RECEIPT_V1_INNER_SCHEMA, PLAYER_RESPAWN_RECEIPT_V1_MAGIC, PLAYER_RESPAWN_RECEIPT_V1_TYPE_ID,
+    PLAYER_RESPAWN_V1_INNER_SCHEMA, PLAYER_RESPAWN_V1_MAGIC, PLAYER_RESPAWN_V1_TYPE_ID,
+    SIMULATION_CAMERA_CONFIG_RECEIPT_V1_INNER_SCHEMA, SIMULATION_CAMERA_CONFIG_RECEIPT_V1_MAGIC,
+    SIMULATION_CAMERA_CONFIG_RECEIPT_V1_TYPE_ID, SIMULATION_CAMERA_CONFIG_V1_INNER_SCHEMA,
+    SIMULATION_CAMERA_CONFIG_V1_MAGIC, SIMULATION_CAMERA_CONFIG_V1_TYPE_ID,
+    SIMULATION_PLAYER_BIND_FINAL_RECEIPT_V3_TYPE_ID, SIMULATION_PLAYER_BIND_FINAL_RECEIPT_V4_TYPE_ID,
+    SIMULATION_PLAYER_BIND_RECEIPT_V2_INNER_SCHEMA, SIMULATION_PLAYER_BIND_RECEIPT_V2_MAGIC,
+    SIMULATION_PLAYER_BIND_V2_INNER_SCHEMA, SIMULATION_PLAYER_BIND_V2_MAGIC, SIMULATION_PLAYER_BIND_V3_INNER_SCHEMA,
+    SIMULATION_PLAYER_BIND_V3_MAGIC, SIMULATION_PLAYER_BIND_V3_TYPE_ID, SIMULATION_PLAYER_BIND_V4_INNER_SCHEMA,
+    SIMULATION_PLAYER_BIND_V4_MAGIC, SIMULATION_PLAYER_BIND_V4_TYPE_ID,
+};
+
+use blockwild_authority::{
+    DirtySubsystemSeedV1, WorldAddressV1 as AuthorityWorldAddressV1, WorldAuthorityRevisionV1, WorldSectionAddressV1,
+};
 use blockwild_entity::{
     DespawnReason, DormantEntitySummary, EntityAuthority, EntityClass, EntityCommand, EntityCommandBatch,
     EntityCompatibilityRecord, EntityComponents, EntityEventBatch, EntityEventKind, EntityResidency, ProtectionState,
@@ -14,20 +83,25 @@ use blockwild_entity::{
     encode_compatibility_record, encode_entity_authority_snapshot,
 };
 use blockwild_gameplay::{
-    ALL_CONTENT_DOMAINS, AcceptedReceipt, ActivityLease, ActorGrant, ActorRole, ApplyBlockActionV1, AuthorityIdentity,
-    BattleAction, BlockActionLootCellV1, CardforgeCommand, CombatCommand, CombatVitalUnits, ContainerKind,
-    ContentArtifact, ContentDomain, ContentDomainDigest, CraftCommand, CreateDropCustodyCommand,
-    CreateGeneratedDropCustodyV1, CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3, FurnaceAdvanceCommand,
-    GAMEPLAY_COMMAND_ADVANCE_SCHEDULE_TAG_V1, GameplayActor, GameplayBatch, GameplayCommand, GameplayEvent,
-    GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1, GeneratedDropProvenanceV1,
-    INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG, INVENTORY_COMMAND_CREATE_GENERATED_DROP_CUSTODY_V1_TAG,
-    INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG, Ingredient, InventoryCommand, ItemInstanceMetadataV1,
-    MAX_ITEM_INSTANCE_METADATA_BYTES_V1, MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1, MachineCommand,
-    MachineOperation, OpaquePayload, PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1, PacifyMethod, PlayerInventoryBindingV1,
-    PrintingKey, ProgressionAction, ProgressionCommand, Rejection, RejectionCode, RemoveEmptyDropCustodyCommand,
-    ResourceDelta, ResourceEndpoint, ResourceKey, ResourceKind, Scope, SlotRef, StatDelta, TransferCommand, WorldKey,
+    ALL_CONTENT_DOMAINS, AcceptedReceipt, ActivityLease, ActorGrant, ApplyBlockActionV1, AuthorityIdentity,
+    BattleAction, BlockActionLootCellV1, CardforgeCommand, CombatCommand, CombatVitalUnits, ConsumeInventoryUnitV1,
+    ContentDomainDigest, CraftCommand, CreateDropCustodyCommand, CreateGeneratedDropCustodyV1,
+    CreatePlayerCustodyCommand, Domain, ExpectedStack, FixedVec3, FixedWorldVec3V1, FurnaceAdvanceCommand,
+    GAMEPLAY_COMMAND_ADVANCE_SCHEDULE_TAG_V1, GameplayEvent, GameplayReceipt, GameplayRevision,
+    GameplayScheduleAdvanceV1, GeneratedDropProvenanceV1, INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG,
+    INVENTORY_COMMAND_CONSUME_UNIT_V1_TAG, INVENTORY_COMMAND_CREATE_GENERATED_DROP_CUSTODY_V1_TAG,
+    INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG, INVENTORY_COMMAND_SET_CREATIVE_SLOT_V1_TAG, Ingredient,
+    ItemInstanceMetadataV1, MAX_ITEM_INSTANCE_METADATA_BYTES_V1, MAX_ITEM_INSTANCE_METADATA_EXTENSION_BYTES_V1,
+    MachineCommand, MachineOperation, OpaquePayload, PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1, PacifyMethod,
+    PlayerInventoryBindingV1, PrintingKey, ProgressionAction, ProgressionCommand, Rejection, RejectionCode,
+    RemoveEmptyDropCustodyCommand, ResourceDelta, ResourceEndpoint, ResourceKey, ResourceKind, RotationMicroturnsV1,
+    Scope, StatDelta, WorldKey, WorldViewRevisionV1,
 };
-pub use blockwild_gameplay::{ContainerKey, ImportPlayerInventoryV1, ItemStack};
+pub use blockwild_gameplay::{
+    ActorRole, ContainerKey, ContainerKind, ContentArtifact, ContentDomain, GameplayActor, GameplayBatch,
+    GameplayCommand, ImportPlayerInventoryV1, InventoryCommand, ItemStack, PlayerDeathCustodyLaneV1, SlotRef,
+    TransferCommand, compile_content_bundle,
+};
 use blockwild_network::{
     AgentCapabilityGrantV1, AgentCapabilityV1, AgentLifecycleStatusV1, InterestDeltaBuildSourceV1,
     NetworkAuthorityIdentityV1, NetworkAuthorityRevisionV1, NetworkCapabilityV1, NetworkDeltaRecordKindV1,
@@ -35,7 +109,8 @@ use blockwild_network::{
     NetworkPeerRoleV1, ReplicationScopeV1, ScopedDeltaRecordV1, WorldAddressV1 as NetworkWorldAddressV1,
 };
 use blockwild_runtime_wire::{
-    MAX_DOMAIN_PAYLOAD_BYTES, MAX_SAFE_U64, RuntimeInputFrameV1, WireError, wire_checksum_v1,
+    MAX_DOMAIN_PAYLOAD_BYTES, MAX_SAFE_U64, RUNTIME_INPUT_FLAG_CREATIVE_V1, RUNTIME_INPUT_FLAG_FLYING_V1,
+    RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_INPUT_FLAG_MOUNTED_V1, RuntimeInputFrameV1, WireError, wire_checksum_v1,
 };
 use blockwild_simulation::{
     CameraModeV1, CameraPoseInputV1, CameraProfileV1, Vec3 as SimulationVec3, derive_camera_pose_v1,
@@ -44,89 +119,86 @@ use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, LocationId, Play
 
 use crate::{
     INTEGRATED_RUNTIME_MAX_TERRAIN_RECONCILE_EVICTED_CHUNKS_V2, INTEGRATED_RUNTIME_MAX_TERRAIN_RESIDENCY_CHUNKS_V1,
-    IntegratedRuntimeIdentityV2, IntegratedRuntimeRevisionV2, IntegratedTerrainChunkCoordinateV1,
+    IntegratedRuntimeBasicDirtActionContentBindingV1, IntegratedRuntimeBasicDirtActionKindV1,
+    IntegratedRuntimeBasicDirtActionReceiptV1, IntegratedRuntimeIdentityV2,
+    IntegratedRuntimeNativeBlockEditActionKindV1, IntegratedRuntimeNativeBlockEditContentBindingV1,
+    IntegratedRuntimeNativeBlockEditDirtyEvidenceV1, IntegratedRuntimeNativeBlockEditGeneratedDropV1,
+    IntegratedRuntimeNativeBlockEditInventoryDeltaV1, IntegratedRuntimeNativeBlockEditReceiptV1,
+    IntegratedRuntimeNativeDropPickupAuthorityEvidenceV1, IntegratedRuntimeNativeDropPickupOriginV1,
+    IntegratedRuntimeNativeDropPickupReceiptV1, IntegratedRuntimeNativeDropPickupSlotDeltaV1,
+    IntegratedRuntimeNativeDropPickupSourceV1, IntegratedRuntimeNativePlayerDropContentBindingV1,
+    IntegratedRuntimeNativePlayerDropInventoryDeltaV1, IntegratedRuntimeNativePlayerDropReceiptV1,
+    IntegratedRuntimeNativePlayerDropSpawnV1, IntegratedRuntimeRevisionV2, IntegratedTerrainChunkCoordinateV1,
     IntegratedTerrainResidencyBatchV1, IntegratedTerrainResidencyChunkReceiptV1, IntegratedTerrainResidencyReceiptV1,
     IntegratedTerrainResidencyReconcileBatchV2, IntegratedTerrainResidencyReconcileReceiptV2,
-    IntegratedTerrainResidencyStatusV1, validate_canonical_generation_options_json_v1,
+    IntegratedTerrainResidencyStatusV1, dirty_subsystem_from_tag_v1, dirty_subsystem_tag_v1,
+    validate_canonical_generation_options_json_v1,
 };
 
-const DOMAIN_PROTOCOL_V1: u16 = 1;
+const DOMAIN_PROTOCOL_V1: u16 = INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1;
 const DOMAIN_SCHEMA_V1: u16 = 1;
 const DOMAIN_HEADER_BYTES: usize = 28;
 const MAX_COLLECTION: usize = 65_536;
 const MAX_MAP_ENTRIES: usize = 4_096;
 const MAX_STRING_BYTES: usize = 16 * 1024;
-const ENTITY_COMMAND_MAGIC: [u8; 4] = *b"BWE6";
-const ENTITY_RECEIPT_MAGIC: [u8; 4] = *b"BWA6";
-const GAMEPLAY_COMMAND_MAGIC: [u8; 4] = *b"BWG7";
-const GAMEPLAY_RECEIPT_MAGIC: [u8; 4] = *b"BWA7";
-const GAMEPLAY_GRANT_MAGIC: [u8; 4] = *b"BWK7";
-const NETWORK_PEER_GRANT_MAGIC: [u8; 4] = *b"BWP9";
-const NETWORK_AGENT_GRANT_MAGIC: [u8; 4] = *b"BWJ9";
-const NETWORK_REPLICATION_MAGIC: [u8; 4] = *b"BWI9";
-const NETWORK_DELTA_BUILD_MAGIC: [u8; 4] = *b"BWD9";
-const NETWORK_RECONNECT_MAGIC: [u8; 4] = *b"BWC9";
-const NETWORK_PEER_RELEASE_MAGIC: [u8; 4] = *b"BWL9";
-const NETWORK_COMMAND_RELEASE_MAGIC: [u8; 4] = *b"BWM9";
-// BWB6 is the first binding packet that carries Rust-owned actor/player and
-// creative eligibility.  Never decode the older BWB5 layout as this shape.
-const PLAYER_BINDING_MAGIC: [u8; 4] = *b"BWB6";
-const PERSISTENCE_DISPATCH_MAGIC: [u8; 4] = *b"BWD8";
-const PERSISTENCE_DISPATCH_RECEIPT_MAGIC: [u8; 4] = *b"BWA8";
-const CONTENT_INSTALL_PAGE_MAGIC: [u8; 4] = *b"BWC7";
-const CONTENT_INSTALL_RECEIPT_MAGIC: [u8; 4] = *b"BWT7";
-const ENTITY_AUTHORITY_EXPORT_MAGIC: [u8; 4] = *b"BWQ6";
-const ENTITY_AUTHORITY_IMPORT_MAGIC: [u8; 4] = *b"BWI6";
-const ENTITY_AUTHORITY_IMPORT_RECEIPT_MAGIC: [u8; 4] = *b"BWU6";
-const ENTITY_COMPATIBILITY_EXPORT_MAGIC: [u8; 4] = *b"BWQ5";
-const ENTITY_COMPATIBILITY_IMPORT_MAGIC: [u8; 4] = *b"BWI5";
+const PERSISTENCE_STATUS_MAGIC: [u8; 4] = *b"BWS8";
+const PERSISTENCE_STATUS_RECEIPT_MAGIC: [u8; 4] = *b"BWT8";
 const TERRAIN_RESIDENCY_BATCH_MAGIC: [u8; 4] = *b"BWT4";
 const TERRAIN_RESIDENCY_RECEIPT_MAGIC: [u8; 4] = *b"BWU4";
 const TERRAIN_RESIDENCY_RECONCILE_BATCH_MAGIC: [u8; 4] = *b"BWT5";
 const TERRAIN_RESIDENCY_RECONCILE_RECEIPT_MAGIC: [u8; 4] = *b"BWU5";
-const PLAYER_BOOTSTRAP_STATUS_QUERY_MAGIC: [u8; 4] = *b"BWS5";
-const PLAYER_BOOTSTRAP_STATUS_RECEIPT_MAGIC: [u8; 4] = *b"BWO5";
-const PLAYER_COMBAT_BOOTSTRAP_STATUS_QUERY_MAGIC_V1: [u8; 4] = *b"BWS7";
-const PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_MAGIC_V1: [u8; 4] = *b"BWO7";
-const CONTEXT_COMMAND_CONTINUITY_QUERY_MAGIC_V2: [u8; 4] = *b"BWS6";
-const CONTEXT_COMMAND_CONTINUITY_RECEIPT_MAGIC_V2: [u8; 4] = *b"BWO6";
-const PLAYER_INVENTORY_IMPORT_MAGIC: [u8; 4] = *b"BWP7";
-const PLAYER_INVENTORY_IMPORT_RECEIPT_MAGIC: [u8; 4] = *b"BWI7";
-const CAMERA_CONFIG_MAGIC: [u8; 4] = *b"BWC5";
-const CAMERA_CONFIG_RECEIPT_MAGIC: [u8; 4] = *b"BWR5";
+// BWZ7/BWY7 are reserved for the additive generic single-cell native block
+// edit query/receipt lane. They intentionally do not alias BWQ7/BWR7, whose
+// deployed byte shape remains Basic Dirt-only compatibility evidence.
 
-pub const CONTENT_INSTALL_PAGE_TYPE_V1: &str = "blockwild.gameplay.content-install-page.v1";
-pub const CONTENT_INSTALL_RECEIPT_TYPE_V1: &str = "blockwild.gameplay.content-install-receipt.v1";
+pub const CONTENT_INSTALL_PAGE_TYPE_V1: &str = CONTENT_INSTALL_PAGE_V1_TYPE_ID;
+pub const CONTENT_INSTALL_RECEIPT_TYPE_V1: &str = CONTENT_INSTALL_RECEIPT_V1_TYPE_ID;
 pub const CONTENT_INSTALL_MAX_PAGES_V1: usize = 128;
 pub const CONTENT_INSTALL_MAX_ARTIFACTS_PER_PAGE_V1: usize = 1_024;
-pub const ENTITY_AUTHORITY_EXPORT_TYPE_V1: &str = "blockwild.entities.authority-export.r6.v1";
-pub const ENTITY_AUTHORITY_SNAPSHOT_TYPE_V2: &str = "blockwild.entities.authority-snapshot.r6.v2";
-pub const ENTITY_AUTHORITY_IMPORT_TYPE_V2: &str = "blockwild.entities.authority-import.r6.v2";
-pub const ENTITY_AUTHORITY_IMPORT_RECEIPT_TYPE_V1: &str = "blockwild.entities.authority-import-receipt.r6.v1";
-pub const ENTITY_COMPATIBILITY_EXPORT_TYPE_V1: &str = "blockwild.entities.compatibility-export.r6.v1";
-pub const ENTITY_COMPATIBILITY_RECORD_TYPE_V1: &str = "blockwild.entities.compatibility-record.r6.v1";
-pub const ENTITY_COMPATIBILITY_IMPORT_TYPE_V1: &str = "blockwild.entities.compatibility-import.r6.v1";
+pub const ENTITY_AUTHORITY_EXPORT_TYPE_V1: &str = ENTITY_AUTHORITY_EXPORT_V1_TYPE_ID;
+pub const ENTITY_AUTHORITY_SNAPSHOT_TYPE_V2: &str = ENTITY_AUTHORITY_SNAPSHOT_V2_TYPE_ID;
+pub const ENTITY_AUTHORITY_IMPORT_TYPE_V2: &str = ENTITY_AUTHORITY_IMPORT_V2_TYPE_ID;
+pub const ENTITY_AUTHORITY_IMPORT_RECEIPT_TYPE_V1: &str = ENTITY_AUTHORITY_IMPORT_RECEIPT_V1_TYPE_ID;
+pub const ENTITY_COMPATIBILITY_EXPORT_TYPE_V1: &str = ENTITY_COMPATIBILITY_EXPORT_V1_TYPE_ID;
+pub const ENTITY_COMPATIBILITY_RECORD_TYPE_V1: &str = ENTITY_COMPATIBILITY_RECORD_V1_TYPE_ID;
+pub const ENTITY_COMPATIBILITY_IMPORT_TYPE_V1: &str = ENTITY_COMPATIBILITY_IMPORT_V1_TYPE_ID;
 pub const TERRAIN_RESIDENCY_BATCH_TYPE_V1: &str = "blockwild.world.terrain-residency.ensure.r4.v1";
 pub const TERRAIN_RESIDENCY_RECEIPT_TYPE_V1: &str = "blockwild.world.terrain-residency-receipt.r4.v1";
 pub const TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2: &str = "blockwild.world.terrain-residency-reconcile.r4.v2";
 pub const TERRAIN_RESIDENCY_RECONCILE_RECEIPT_TYPE_V2: &str =
     "blockwild.world.terrain-residency-reconcile-receipt.r4.v2";
-pub const PLAYER_BOOTSTRAP_STATUS_TYPE_V1: &str = "blockwild.simulation.player-bootstrap-status.r5.v1";
-pub const PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1: &str = "blockwild.simulation.player-bootstrap-status-receipt.r5.v1";
-pub const PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1: &str = "blockwild.simulation.player-combat-bootstrap-status.r7.v1";
-pub const PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1: &str =
-    "blockwild.simulation.player-combat-bootstrap-status-receipt.r7.v1";
-pub const CONTEXT_COMMAND_CONTINUITY_TYPE_V2: &str = "blockwild.simulation.context-command-continuity.r5.v2";
-pub const CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2: &str =
-    "blockwild.simulation.context-command-continuity-receipt.r5.v2";
-pub const PLAYER_INVENTORY_IMPORT_TYPE_V1: &str = "blockwild.gameplay.player-inventory-import.r7.v1";
-pub const PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1: &str = "blockwild.gameplay.player-inventory-import-receipt.r7.v1";
-pub const SIMULATION_PLAYER_BIND_TYPE_V3: &str = "blockwild.simulation.player-bind.r5.v3";
-pub const SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3: &str = "blockwild.simulation.player-bind-final-receipt.r5.v3";
-pub const SIMULATION_PLAYER_BIND_TYPE_V4: &str = "blockwild.simulation.player-bind.r5.v4";
-pub const SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V4: &str = "blockwild.simulation.player-bind-final-receipt.r5.v4";
-pub const SIMULATION_CAMERA_CONFIG_TYPE_V1: &str = "blockwild.simulation.camera-config.r5.v1";
-pub const SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1: &str = "blockwild.simulation.camera-config-receipt.r5.v1";
+pub const PLAYER_BOOTSTRAP_STATUS_TYPE_V1: &str = PLAYER_BOOTSTRAP_STATUS_V1_TYPE_ID;
+pub const PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1: &str = PLAYER_BOOTSTRAP_STATUS_RECEIPT_V1_TYPE_ID;
+pub const PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1: &str = PLAYER_COMBAT_BOOTSTRAP_STATUS_V1_TYPE_ID;
+pub const PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1: &str = PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_V1_TYPE_ID;
+pub const CONTEXT_COMMAND_CONTINUITY_TYPE_V2: &str = CONTEXT_COMMAND_CONTINUITY_V2_TYPE_ID;
+pub const CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2: &str = CONTEXT_COMMAND_CONTINUITY_RECEIPT_V2_TYPE_ID;
+pub const BASIC_DIRT_ACTION_RECEIPT_TYPE_V1: &str = BASIC_DIRT_ACTION_RECEIPT_V1_TYPE_ID;
+pub const BASIC_DIRT_ACTION_PROJECTION_RECEIPT_TYPE_V1: &str = BASIC_DIRT_ACTION_PROJECTION_RECEIPT_V1_TYPE_ID;
+pub const NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V1: &str = NATIVE_BLOCK_EDIT_RECEIPT_V1_TYPE_ID;
+pub const NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V1: &str = NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V1_TYPE_ID;
+pub const NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V2: &str = NATIVE_BLOCK_EDIT_RECEIPT_V2_TYPE_ID;
+pub const NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V2: &str = NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V2_TYPE_ID;
+pub const NATIVE_DROP_PICKUP_RECEIPT_TYPE_V1: &str = NATIVE_DROP_PICKUP_RECEIPT_V1_TYPE_ID;
+pub const NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_TYPE_V1: &str = NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_V1_TYPE_ID;
+pub const NATIVE_PLAYER_DROP_RECEIPT_TYPE_V1: &str = NATIVE_PLAYER_DROP_RECEIPT_V1_TYPE_ID;
+pub const NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_TYPE_V1: &str = NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_V1_TYPE_ID;
+pub const PLAYER_INVENTORY_IMPORT_TYPE_V1: &str = PLAYER_INVENTORY_IMPORT_V1_TYPE_ID;
+pub const PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1: &str = PLAYER_INVENTORY_IMPORT_RECEIPT_V1_TYPE_ID;
+pub const PLAYER_LOCATOR_ITEM_CONSUME_TYPE_V1: &str = PLAYER_LOCATOR_ITEM_CONSUME_V1_TYPE_ID;
+pub const PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_TYPE_V1: &str = PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_V1_TYPE_ID;
+pub const PLAYER_CREATIVE_SLOT_SET_TYPE_V1: &str = PLAYER_CREATIVE_SLOT_SET_V1_TYPE_ID;
+pub const PLAYER_CREATIVE_SLOT_SET_RECEIPT_TYPE_V1: &str = PLAYER_CREATIVE_SLOT_SET_RECEIPT_V1_TYPE_ID;
+pub const PLAYER_GAME_MODE_SET_TYPE_V1: &str = PLAYER_GAME_MODE_SET_V1_TYPE_ID;
+pub const PLAYER_GAME_MODE_SET_RECEIPT_TYPE_V1: &str = PLAYER_GAME_MODE_SET_RECEIPT_V1_TYPE_ID;
+pub const PLAYER_RESPAWN_TYPE_V1: &str = PLAYER_RESPAWN_V1_TYPE_ID;
+pub const PLAYER_RESPAWN_RECEIPT_TYPE_V1: &str = PLAYER_RESPAWN_RECEIPT_V1_TYPE_ID;
+pub const SIMULATION_PLAYER_BIND_TYPE_V3: &str = SIMULATION_PLAYER_BIND_V3_TYPE_ID;
+pub const SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3: &str = SIMULATION_PLAYER_BIND_FINAL_RECEIPT_V3_TYPE_ID;
+pub const SIMULATION_PLAYER_BIND_TYPE_V4: &str = SIMULATION_PLAYER_BIND_V4_TYPE_ID;
+pub const SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V4: &str = SIMULATION_PLAYER_BIND_FINAL_RECEIPT_V4_TYPE_ID;
+pub const SIMULATION_CAMERA_CONFIG_TYPE_V1: &str = SIMULATION_CAMERA_CONFIG_V1_TYPE_ID;
+pub const SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1: &str = SIMULATION_CAMERA_CONFIG_RECEIPT_V1_TYPE_ID;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RuntimeCameraConfigWireV1 {
@@ -300,6 +372,142 @@ pub struct RuntimeContextCommandContinuityReceiptWireV2 {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeBasicDirtActionReceiptQueryWireV1 {
+    pub expected: IntegratedRuntimeIdentityV2,
+    pub after_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeBasicDirtGeneratedDropProjectionWireV1 {
+    pub provenance: GeneratedDropProvenanceV1,
+    pub entity_id: EntityId,
+    pub stack: ItemStack,
+    pub position: FixedWorldVec3V1,
+    pub velocity_milli_per_second: FixedWorldVec3V1,
+    pub rotation: RotationMicroturnsV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeBasicDirtActionProjectionWireV1 {
+    pub schema_version: u16,
+    pub sequence: u64,
+    pub origin_input_sequence: u64,
+    pub completion_tick: u64,
+    pub action: IntegratedRuntimeBasicDirtActionKindV1,
+    pub position: blockwild_authority::CellPositionV1,
+    pub prior_block_id: u16,
+    pub replacement_block_id: u16,
+    pub before_world_revision: WorldAuthorityRevisionV1,
+    pub after_world_revision: WorldAuthorityRevisionV1,
+    pub before_world_hash: CanonicalHash,
+    pub after_world_hash: CanonicalHash,
+    pub creative_mode: bool,
+    pub inventory: crate::IntegratedRuntimeBasicDirtInventoryDeltaV1,
+    pub generated_drops: Vec<RuntimeBasicDirtGeneratedDropProjectionWireV1>,
+    pub content: IntegratedRuntimeBasicDirtActionContentBindingV1,
+    pub receipt_hash: CanonicalHash,
+}
+
+impl RuntimeBasicDirtActionProjectionWireV1 {
+    #[must_use]
+    pub fn native_receipt_v1(&self) -> IntegratedRuntimeBasicDirtActionReceiptV1 {
+        IntegratedRuntimeBasicDirtActionReceiptV1 {
+            schema_version: self.schema_version,
+            sequence: self.sequence,
+            origin_input_sequence: self.origin_input_sequence,
+            completion_tick: self.completion_tick,
+            action: self.action,
+            position: self.position,
+            prior_block_id: self.prior_block_id,
+            replacement_block_id: self.replacement_block_id,
+            before_world_revision: self.before_world_revision,
+            after_world_revision: self.after_world_revision,
+            before_world_hash: self.before_world_hash,
+            after_world_hash: self.after_world_hash,
+            creative_mode: self.creative_mode,
+            inventory: self.inventory.clone(),
+            generated_drops: self
+                .generated_drops
+                .iter()
+                .map(|drop| crate::IntegratedRuntimeGeneratedDropReceiptV1 {
+                    provenance: drop.provenance.clone(),
+                    entity_id: drop.entity_id,
+                })
+                .collect(),
+            content: self.content.clone(),
+            receipt_hash: self.receipt_hash,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeBasicDirtActionProjectionReceiptWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub identity: IntegratedRuntimeIdentityV2,
+    pub cursor_after: u64,
+    pub receipt: Option<RuntimeBasicDirtActionProjectionWireV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeNativeBlockEditReceiptQueryWireV1 {
+    pub expected: IntegratedRuntimeIdentityV2,
+    pub after_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeNativeBlockEditProjectionReceiptWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub identity: IntegratedRuntimeIdentityV2,
+    pub cursor_after: u64,
+    pub receipt: Option<IntegratedRuntimeNativeBlockEditReceiptV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeNativeBlockEditReceiptQueryWireV2 {
+    pub expected: IntegratedRuntimeIdentityV2,
+    pub after_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeNativeBlockEditProjectionReceiptWireV2 {
+    pub request_payload_hash: CanonicalHash,
+    pub identity: IntegratedRuntimeIdentityV2,
+    pub cursor_after: u64,
+    pub receipt: Option<IntegratedRuntimeNativeBlockEditReceiptV1>,
+    /// `None` is an explicit restored-V13 compatibility gap. A V14 no-op has
+    /// `Some` evidence whose three dirty collections are empty.
+    pub dirty_evidence: Option<IntegratedRuntimeNativeBlockEditDirtyEvidenceV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeNativeDropPickupReceiptQueryWireV1 {
+    pub expected: IntegratedRuntimeIdentityV2,
+    pub after_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeNativeDropPickupProjectionReceiptWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub identity: IntegratedRuntimeIdentityV2,
+    pub cursor_after: u64,
+    pub receipt: Option<IntegratedRuntimeNativeDropPickupReceiptV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeNativePlayerDropReceiptQueryWireV1 {
+    pub expected: IntegratedRuntimeIdentityV2,
+    pub after_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeNativePlayerDropProjectionReceiptWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub identity: IntegratedRuntimeIdentityV2,
+    pub cursor_after: u64,
+    pub receipt: Option<IntegratedRuntimeNativePlayerDropReceiptV1>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlayerInventoryImportWireV1 {
     pub import: ImportPlayerInventoryV1,
     pub selected_slot: u16,
@@ -314,6 +522,154 @@ pub struct PlayerInventoryImportReceiptWireV1 {
     pub inventory_revision: u64,
     pub selected_slot: u16,
     pub inventory_result_hash: CanonicalHash,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PlayerLocatorItemPurposeV1 {
+    SettlementChart,
+    DragonLairCharter,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerLocatorItemConsumeWireV1 {
+    pub inventory: ContainerKey,
+    pub selected_slot: u16,
+    pub expected_inventory_revision: u64,
+    pub expected_stack: ItemStack,
+    pub purpose: PlayerLocatorItemPurposeV1,
+    pub locator_result_hash: CanonicalHash,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerLocatorItemConsumeReceiptWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub purpose: PlayerLocatorItemPurposeV1,
+    pub locator_result_hash: CanonicalHash,
+    pub before: AuthorityIdentity,
+    pub after: AuthorityIdentity,
+    pub accepted_receipt_hash: CanonicalHash,
+    pub inventory: ContainerKey,
+    pub selected_slot: u16,
+    pub previous_inventory_revision: u64,
+    pub resulting_inventory_revision: u64,
+    pub consumed_stack: ItemStack,
+    pub remaining_stack: Option<ItemStack>,
+    pub inventory_result_hash: CanonicalHash,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerCreativeSlotSetWireV1 {
+    pub inventory: ContainerKey,
+    pub selected_slot: u16,
+    pub expected_inventory_revision: u64,
+    pub expected_stack: Option<ItemStack>,
+    pub replacement_stack: ItemStack,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerCreativeSlotSetReceiptWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub before: AuthorityIdentity,
+    pub after: AuthorityIdentity,
+    pub accepted_receipt_hash: CanonicalHash,
+    pub inventory: ContainerKey,
+    pub selected_slot: u16,
+    pub previous_inventory_revision: u64,
+    pub resulting_inventory_revision: u64,
+    pub prior_stack: Option<ItemStack>,
+    pub replacement_stack: ItemStack,
+    pub inventory_result_hash: CanonicalHash,
+    pub receipt_hash: CanonicalHash,
+}
+
+/// Exact simulation-authority compare-and-set used when a saved world's mode
+/// is changed outside the live input loop. The three identity fields bind the
+/// request to one native player; the expected mode and flags make stale browser
+/// documents fail before any state changes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerGameModeSetWireV1 {
+    pub external_entity_id: String,
+    pub actor_id: String,
+    pub player_id: PlayerId,
+    pub expected_creative_mode: bool,
+    pub expected_flags: u8,
+    pub requested_creative_mode: bool,
+}
+
+/// Sealed proof that exactly one outer simulation revision changed while all
+/// other integrated authority lanes and the runtime tick stayed fixed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerGameModeSetReceiptWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub before: IntegratedRuntimeIdentityV2,
+    pub after: IntegratedRuntimeIdentityV2,
+    pub external_entity_id: String,
+    pub actor_id: String,
+    pub player_id: PlayerId,
+    pub prior_creative_mode: bool,
+    pub prior_flags: u8,
+    pub resulting_creative_mode: bool,
+    pub resulting_flags: u8,
+    pub receipt_hash: CanonicalHash,
+}
+
+/// Exact cross-domain compare-and-set for one dead native player. The outer
+/// integrated identity closes over every authority lane, while the explicit
+/// entity/combat cursors make the R6/R7 dead state independently auditable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerRespawnWireV1 {
+    pub expected: IntegratedRuntimeIdentityV2,
+    pub external_entity_id: String,
+    pub actor_id: String,
+    pub player_id: PlayerId,
+    pub entity_id: EntityId,
+    pub expected_entity_revision: u64,
+    pub expected_gameplay_sequence: u64,
+    pub expected_gameplay_combat_revision: u64,
+    pub expected_combatant_revision: u64,
+    pub expected_death_sequence: u64,
+    pub expected_max_health: u32,
+    pub respawn_position: FixedWorldVec3V1,
+    pub keep_inventory: bool,
+}
+
+/// Canonical proof of the atomic R5 body, R6 entity/vitals, and R7 combatant
+/// restoration. Inventory/equipment hashes and revisions attest the selected
+/// policy without requiring the browser to trust an implicit default.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PlayerRespawnReceiptWireV1 {
+    pub request_payload_hash: CanonicalHash,
+    pub before: IntegratedRuntimeIdentityV2,
+    pub after: IntegratedRuntimeIdentityV2,
+    pub external_entity_id: String,
+    pub actor_id: String,
+    pub player_id: PlayerId,
+    pub entity_id: EntityId,
+    pub death_sequence: u64,
+    pub prior_entity_revision: u64,
+    pub resulting_entity_revision: u64,
+    pub prior_gameplay_sequence: u64,
+    pub resulting_gameplay_sequence: u64,
+    pub prior_gameplay_combat_revision: u64,
+    pub resulting_gameplay_combat_revision: u64,
+    pub prior_combatant_revision: u64,
+    pub resulting_combatant_revision: u64,
+    pub maximum_health: u32,
+    pub prior_health: u32,
+    pub resulting_health: u32,
+    pub prior_alive: bool,
+    pub resulting_alive: bool,
+    pub respawn_position: FixedWorldVec3V1,
+    pub resulting_oxygen_seconds: f64,
+    pub keep_inventory: bool,
+    pub inventory_before_revision: u64,
+    pub inventory_after_revision: u64,
+    pub equipment_before_revision: u64,
+    pub equipment_after_revision: u64,
+    pub custody_before_hash: CanonicalHash,
+    pub custody_after_hash: CanonicalHash,
+    pub generated_drop_count: u32,
+    pub receipt_hash: CanonicalHash,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -423,6 +779,29 @@ pub struct RuntimePersistenceDispatchReceiptWireV1 {
     pub closed: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePersistenceTerminalCheckpointWireV1 {
+    pub checkpoint_id: String,
+    pub checkpoint_hash: CanonicalHash,
+    pub journal_sequence: u64,
+    pub record_count: u32,
+    pub save_set_hash: CanonicalHash,
+    pub manifest_hash: CanonicalHash,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimePersistenceStatusReceiptWireV1 {
+    pub persistence_revision: u64,
+    pub pending: u32,
+    pub queued_bytes: u64,
+    pub dispatcher_state_hash: CanonicalHash,
+    pub authority_state_hash: CanonicalHash,
+    pub closed: bool,
+    /// Present only when save-stage, dispatcher, retry, prepared-commit, and
+    /// dirty-record custody are all terminal at this exact durable checkpoint.
+    pub terminal_checkpoint: Option<RuntimePersistenceTerminalCheckpointWireV1>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RuntimePlayerBindingWireV1 {
     pub external_entity_id: String,
@@ -478,6 +857,28 @@ impl RuntimePlayerBindingWireV1 {
     }
 }
 
+fn runtime_player_binding_wire_v1() -> ([u8; 4], u16) {
+    // Bind v2/v3/v4 deliberately share one BWB6 inner payload. Keep that
+    // compatibility assumption coupled to the generated registry rather than
+    // silently duplicating either layer of the contract here.
+    debug_assert_eq!(SIMULATION_PLAYER_BIND_V2_MAGIC, SIMULATION_PLAYER_BIND_V3_MAGIC);
+    debug_assert_eq!(SIMULATION_PLAYER_BIND_V2_MAGIC, SIMULATION_PLAYER_BIND_V4_MAGIC);
+    debug_assert_eq!(SIMULATION_PLAYER_BIND_V2_MAGIC, SIMULATION_PLAYER_BIND_RECEIPT_V2_MAGIC);
+    debug_assert_eq!(
+        SIMULATION_PLAYER_BIND_V2_INNER_SCHEMA,
+        SIMULATION_PLAYER_BIND_V3_INNER_SCHEMA
+    );
+    debug_assert_eq!(
+        SIMULATION_PLAYER_BIND_V2_INNER_SCHEMA,
+        SIMULATION_PLAYER_BIND_V4_INNER_SCHEMA
+    );
+    debug_assert_eq!(
+        SIMULATION_PLAYER_BIND_V2_INNER_SCHEMA,
+        SIMULATION_PLAYER_BIND_RECEIPT_V2_INNER_SCHEMA
+    );
+    (SIMULATION_PLAYER_BIND_V2_MAGIC, SIMULATION_PLAYER_BIND_V2_INNER_SCHEMA)
+}
+
 pub fn encode_runtime_player_binding_v1(value: &RuntimePlayerBindingWireV1) -> Result<Vec<u8>, WireError> {
     value.validate()?;
     let mut writer = Writer::default();
@@ -493,11 +894,13 @@ pub fn encode_runtime_player_binding_v1(value: &RuntimePlayerBindingWireV1) -> R
     writer.f64(value.sprint_speed);
     writer.f64(value.creative_flight_speed);
     writer.f64(value.maximum_oxygen_seconds);
-    wrap(PLAYER_BINDING_MAGIC, writer.finish())
+    let (magic, schema) = runtime_player_binding_wire_v1();
+    wrap_schema(magic, schema, writer.finish())
 }
 
 pub fn decode_runtime_player_binding_v1(bytes: &[u8]) -> Result<RuntimePlayerBindingWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(PLAYER_BINDING_MAGIC, bytes)?);
+    let (magic, schema) = runtime_player_binding_wire_v1();
+    let mut reader = Reader::new(unwrap_schema(magic, schema, bytes)?);
     let value = RuntimePlayerBindingWireV1 {
         external_entity_id: reader.string()?,
         actor_id: reader.string()?,
@@ -633,11 +1036,19 @@ pub fn encode_runtime_camera_config_v1(value: &RuntimeCameraConfigWireV1) -> Res
     writer.u64(value.expected_camera_revision);
     writer.u8(camera_mode_tag_v1(value.mode));
     write_camera_profile_v1(&mut writer, value.profile);
-    wrap(CAMERA_CONFIG_MAGIC, writer.finish())
+    wrap_schema(
+        SIMULATION_CAMERA_CONFIG_V1_MAGIC,
+        SIMULATION_CAMERA_CONFIG_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_runtime_camera_config_v1(bytes: &[u8]) -> Result<RuntimeCameraConfigWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(CAMERA_CONFIG_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        SIMULATION_CAMERA_CONFIG_V1_MAGIC,
+        SIMULATION_CAMERA_CONFIG_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let expected_camera_revision = reader.u64()?;
     if expected_camera_revision > MAX_SAFE_U64 {
         return Err(WireError::new(
@@ -687,11 +1098,19 @@ pub fn encode_runtime_camera_config_receipt_v1(value: &RuntimeCameraConfigReceip
     writer.u8(camera_mode_tag_v1(value.mode));
     write_camera_profile_v1(&mut writer, value.profile);
     writer.hash(value.camera_state_hash);
-    wrap(CAMERA_CONFIG_RECEIPT_MAGIC, writer.finish())
+    wrap_schema(
+        SIMULATION_CAMERA_CONFIG_RECEIPT_V1_MAGIC,
+        SIMULATION_CAMERA_CONFIG_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_runtime_camera_config_receipt_v1(bytes: &[u8]) -> Result<RuntimeCameraConfigReceiptWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(CAMERA_CONFIG_RECEIPT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        SIMULATION_CAMERA_CONFIG_RECEIPT_V1_MAGIC,
+        SIMULATION_CAMERA_CONFIG_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = RuntimeCameraConfigReceiptWireV1 {
         request_payload_hash: reader.hash()?,
         previous_camera_revision: reader.u64()?,
@@ -711,11 +1130,19 @@ pub fn encode_player_bootstrap_status_query_v1(value: &PlayerBootstrapStatusQuer
     writer.string(&value.external_entity_id)?;
     writer.string(&value.actor_id)?;
     writer.u64(value.player_id.packed());
-    wrap(PLAYER_BOOTSTRAP_STATUS_QUERY_MAGIC, writer.finish())
+    wrap_schema(
+        PLAYER_BOOTSTRAP_STATUS_V1_MAGIC,
+        PLAYER_BOOTSTRAP_STATUS_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_player_bootstrap_status_query_v1(bytes: &[u8]) -> Result<PlayerBootstrapStatusQueryWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(PLAYER_BOOTSTRAP_STATUS_QUERY_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_BOOTSTRAP_STATUS_V1_MAGIC,
+        PLAYER_BOOTSTRAP_STATUS_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = PlayerBootstrapStatusQueryWireV1 {
         external_entity_id: reader.string()?,
         actor_id: reader.string()?,
@@ -739,7 +1166,61 @@ fn validate_player_bootstrap_target(value: &PlayerBootstrapStatusQueryWireV1) ->
     Ok(())
 }
 
+fn validate_player_bootstrap_status_v1(value: &PlayerBootstrapStatusWireV1) -> Result<(), WireError> {
+    let successor = |previous: Option<u64>| previous.map_or(Some(1), |sequence| sequence.checked_add(1));
+    if value.next_input_sequence != successor(value.last_input_sequence)
+        || value.next_action_sequence != successor(value.last_action_sequence)
+        || value.last_action_sequence == Some(0)
+    {
+        return Err(WireError::new(
+            "player-bootstrap-cursor",
+            "player status continuation is discontinuous",
+        ));
+    }
+    if value.authoritative_flags & !RUNTIME_INPUT_FLAG_MASK_V1 != 0
+        || value.last_applied_input.is_some_and(|input| input.selected_slot >= 9)
+    {
+        return Err(WireError::new(
+            "player-bootstrap-input",
+            "player status input flags or slot are invalid",
+        ));
+    }
+    let applied_sequence = value.last_applied_input.map(|input| input.sequence);
+    if (value.queued_inputs_empty && applied_sequence != value.last_input_sequence)
+        || (!value.queued_inputs_empty
+            && applied_sequence
+                .is_some_and(|applied| value.last_input_sequence.is_none_or(|accepted| applied > accepted)))
+    {
+        return Err(WireError::new(
+            "player-bootstrap-cursor",
+            "last applied input contradicts the accepted input cursor",
+        ));
+    }
+    if value
+        .entity
+        .as_ref()
+        .is_some_and(|entity| entity.entity_id.packed() == 0)
+        || value
+            .runtime_player
+            .as_ref()
+            .is_some_and(|player| player.entity_id.packed() == 0)
+        || value.world_view_binding.as_ref().is_some_and(|binding| {
+            binding.player_id.packed() == 0
+                || binding.entity_id.packed() == 0
+                || binding.selected_slot >= 9
+                || binding.back_slot.is_some_and(|slot| slot >= 8)
+        })
+    {
+        return Err(WireError::new(
+            "player-bootstrap-binding",
+            "player status binding identity or slot geometry is invalid",
+        ));
+    }
+    Ok(())
+}
+
 pub fn encode_player_bootstrap_status_v1(value: &PlayerBootstrapStatusWireV1) -> Result<Vec<u8>, WireError> {
+    validate_player_bootstrap_status_v1(value)?;
     let mut writer = Writer::default();
     writer.hash(value.request_payload_hash);
     writer.u64(value.world_authority_revision.epoch);
@@ -786,11 +1267,19 @@ pub fn encode_player_bootstrap_status_v1(value: &PlayerBootstrapStatusWireV1) ->
     if let Some(custody) = &value.custody {
         write_player_bootstrap_custody(&mut writer, custody)?;
     }
-    wrap(PLAYER_BOOTSTRAP_STATUS_RECEIPT_MAGIC, writer.finish())
+    wrap_schema(
+        PLAYER_BOOTSTRAP_STATUS_RECEIPT_V1_MAGIC,
+        PLAYER_BOOTSTRAP_STATUS_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_player_bootstrap_status_v1(bytes: &[u8]) -> Result<PlayerBootstrapStatusWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(PLAYER_BOOTSTRAP_STATUS_RECEIPT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_BOOTSTRAP_STATUS_RECEIPT_V1_MAGIC,
+        PLAYER_BOOTSTRAP_STATUS_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let request_payload_hash = reader.hash()?;
     let world_authority_revision = WorldAuthorityRevisionV1 {
         epoch: reader.u64()?,
@@ -850,7 +1339,7 @@ pub fn decode_player_bootstrap_status_v1(bytes: &[u8]) -> Result<PlayerBootstrap
         None
     };
     reader.finish()?;
-    Ok(PlayerBootstrapStatusWireV1 {
+    let value = PlayerBootstrapStatusWireV1 {
         request_payload_hash,
         world_authority_revision,
         entity_authority_revision,
@@ -868,7 +1357,9 @@ pub fn decode_player_bootstrap_status_v1(bytes: &[u8]) -> Result<PlayerBootstrap
         runtime_player,
         world_view_binding,
         custody,
-    })
+    };
+    validate_player_bootstrap_status_v1(&value)?;
+    Ok(value)
 }
 
 pub fn encode_player_combat_bootstrap_status_query_v1(
@@ -879,13 +1370,21 @@ pub fn encode_player_combat_bootstrap_status_query_v1(
     writer.string(&value.external_entity_id)?;
     writer.string(&value.actor_id)?;
     writer.u64(value.player_id.packed());
-    wrap(PLAYER_COMBAT_BOOTSTRAP_STATUS_QUERY_MAGIC_V1, writer.finish())
+    wrap_schema(
+        PLAYER_COMBAT_BOOTSTRAP_STATUS_V1_MAGIC,
+        PLAYER_COMBAT_BOOTSTRAP_STATUS_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_player_combat_bootstrap_status_query_v1(
     bytes: &[u8],
 ) -> Result<PlayerBootstrapStatusQueryWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(PLAYER_COMBAT_BOOTSTRAP_STATUS_QUERY_MAGIC_V1, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_COMBAT_BOOTSTRAP_STATUS_V1_MAGIC,
+        PLAYER_COMBAT_BOOTSTRAP_STATUS_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = PlayerBootstrapStatusQueryWireV1 {
         external_entity_id: reader.string()?,
         actor_id: reader.string()?,
@@ -926,11 +1425,19 @@ pub fn encode_player_combat_bootstrap_status_v1(
         writer.flag(combatant.alive);
         writer.flag(combatant.cross_domain_parity);
     }
-    wrap(PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_MAGIC_V1, writer.finish())
+    wrap_schema(
+        PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_V1_MAGIC,
+        PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_player_combat_bootstrap_status_v1(bytes: &[u8]) -> Result<PlayerCombatBootstrapStatusWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_MAGIC_V1, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_V1_MAGIC,
+        PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let request_payload_hash = reader.hash()?;
     let entity_authority_revision = reader.u64()?;
     let gameplay_sequence = reader.u64()?;
@@ -1133,13 +1640,21 @@ pub fn encode_runtime_context_command_continuity_query_v2(
 ) -> Result<Vec<u8>, WireError> {
     let mut writer = Writer::default();
     write_integrated_runtime_identity_v2(&mut writer, &value.expected)?;
-    wrap_schema(CONTEXT_COMMAND_CONTINUITY_QUERY_MAGIC_V2, 2, writer.finish())
+    wrap_schema(
+        CONTEXT_COMMAND_CONTINUITY_V2_MAGIC,
+        CONTEXT_COMMAND_CONTINUITY_V2_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_runtime_context_command_continuity_query_v2(
     bytes: &[u8],
 ) -> Result<RuntimeContextCommandContinuityQueryWireV2, WireError> {
-    let mut reader = Reader::new(unwrap_schema(CONTEXT_COMMAND_CONTINUITY_QUERY_MAGIC_V2, 2, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        CONTEXT_COMMAND_CONTINUITY_V2_MAGIC,
+        CONTEXT_COMMAND_CONTINUITY_V2_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = RuntimeContextCommandContinuityQueryWireV2 {
         expected: read_integrated_runtime_identity_v2(&mut reader)?,
     };
@@ -1169,13 +1684,21 @@ pub fn encode_runtime_context_command_continuity_receipt_v2(
     writer.option_u64(value.last_sequence);
     writer.option_u64(value.next_sequence);
     writer.flag(value.queued_commands_empty);
-    wrap_schema(CONTEXT_COMMAND_CONTINUITY_RECEIPT_MAGIC_V2, 2, writer.finish())
+    wrap_schema(
+        CONTEXT_COMMAND_CONTINUITY_RECEIPT_V2_MAGIC,
+        CONTEXT_COMMAND_CONTINUITY_RECEIPT_V2_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_runtime_context_command_continuity_receipt_v2(
     bytes: &[u8],
 ) -> Result<RuntimeContextCommandContinuityReceiptWireV2, WireError> {
-    let mut reader = Reader::new(unwrap_schema(CONTEXT_COMMAND_CONTINUITY_RECEIPT_MAGIC_V2, 2, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        CONTEXT_COMMAND_CONTINUITY_RECEIPT_V2_MAGIC,
+        CONTEXT_COMMAND_CONTINUITY_RECEIPT_V2_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = RuntimeContextCommandContinuityReceiptWireV2 {
         request_payload_hash: reader.hash()?,
         identity: read_integrated_runtime_identity_v2(&mut reader)?,
@@ -1186,6 +1709,1428 @@ pub fn decode_runtime_context_command_continuity_receipt_v2(
     reader.finish()?;
     encode_runtime_context_command_continuity_receipt_v2(&value)?;
     Ok(value)
+}
+
+pub fn encode_runtime_basic_dirt_action_receipt_query_v1(
+    value: &RuntimeBasicDirtActionReceiptQueryWireV1,
+) -> Result<Vec<u8>, WireError> {
+    if value.after_sequence > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "basic-dirt-action-query-cursor",
+            "basic Dirt action query cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    let mut writer = Writer::default();
+    write_integrated_runtime_identity_v2(&mut writer, &value.expected)?;
+    writer.u64(value.after_sequence);
+    wrap_schema(
+        BASIC_DIRT_ACTION_RECEIPT_V1_MAGIC,
+        BASIC_DIRT_ACTION_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_runtime_basic_dirt_action_receipt_query_v1(
+    bytes: &[u8],
+) -> Result<RuntimeBasicDirtActionReceiptQueryWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        BASIC_DIRT_ACTION_RECEIPT_V1_MAGIC,
+        BASIC_DIRT_ACTION_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let value = RuntimeBasicDirtActionReceiptQueryWireV1 {
+        expected: read_integrated_runtime_identity_v2(&mut reader)?,
+        after_sequence: reader.u64()?,
+    };
+    reader.finish()?;
+    if value.after_sequence > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "basic-dirt-action-query-cursor",
+            "basic Dirt action query cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    Ok(value)
+}
+
+pub fn encode_runtime_basic_dirt_action_projection_receipt_v1(
+    value: &RuntimeBasicDirtActionProjectionReceiptWireV1,
+) -> Result<Vec<u8>, WireError> {
+    validate_runtime_basic_dirt_action_projection_receipt_v1(value)?;
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    write_integrated_runtime_identity_v2(&mut writer, &value.identity)?;
+    writer.u64(value.cursor_after);
+    writer.flag(value.receipt.is_some());
+    if let Some(receipt) = &value.receipt {
+        write_runtime_basic_dirt_action_projection_v1(&mut writer, receipt)?;
+    }
+    wrap_schema(
+        BASIC_DIRT_ACTION_PROJECTION_RECEIPT_V1_MAGIC,
+        BASIC_DIRT_ACTION_PROJECTION_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_runtime_basic_dirt_action_projection_receipt_v1(
+    bytes: &[u8],
+) -> Result<RuntimeBasicDirtActionProjectionReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        BASIC_DIRT_ACTION_PROJECTION_RECEIPT_V1_MAGIC,
+        BASIC_DIRT_ACTION_PROJECTION_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let request_payload_hash = reader.hash()?;
+    let identity = read_integrated_runtime_identity_v2(&mut reader)?;
+    let cursor_after = reader.u64()?;
+    let receipt = if reader.flag()? {
+        Some(read_runtime_basic_dirt_action_projection_v1(&mut reader)?)
+    } else {
+        None
+    };
+    reader.finish()?;
+    let value = RuntimeBasicDirtActionProjectionReceiptWireV1 {
+        request_payload_hash,
+        identity,
+        cursor_after,
+        receipt,
+    };
+    validate_runtime_basic_dirt_action_projection_receipt_v1(&value)?;
+    Ok(value)
+}
+
+fn validate_runtime_basic_dirt_action_projection_receipt_v1(
+    value: &RuntimeBasicDirtActionProjectionReceiptWireV1,
+) -> Result<(), WireError> {
+    if value.cursor_after > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "basic-dirt-action-projection-cursor",
+            "basic Dirt action projection cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    if let Some(receipt) = &value.receipt {
+        if receipt.sequence != value.cursor_after {
+            return Err(WireError::new(
+                "basic-dirt-action-projection-cursor",
+                "basic Dirt action projection cursor does not equal its receipt sequence",
+            ));
+        }
+        receipt
+            .native_receipt_v1()
+            .validate_shape_v1()
+            .map_err(|error| WireError::new("basic-dirt-action-projection-native", error.message))?;
+        for drop in &receipt.generated_drops {
+            validate_runtime_basic_dirt_generated_drop_projection_v1(drop)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_runtime_basic_dirt_generated_drop_projection_v1(
+    value: &RuntimeBasicDirtGeneratedDropProjectionWireV1,
+) -> Result<(), WireError> {
+    value
+        .provenance
+        .validate_v1()
+        .map_err(|error| WireError::new("basic-dirt-action-projection-provenance", error.message))?;
+    if value.entity_id.packed() == 0
+        || value.stack.item_code == 0
+        || value.stack.count == 0
+        || value.stack.count > blockwild_gameplay::MAX_ITEM_STACK
+        || value
+            .stack
+            .durability_millionths
+            .is_some_and(|durability| durability > 1_000_000)
+    {
+        return Err(WireError::new(
+            "basic-dirt-action-projection-drop",
+            "basic Dirt generated-drop projection has invalid identity or stack fields",
+        ));
+    }
+    if [value.position.x_milli, value.position.y_milli, value.position.z_milli]
+        .into_iter()
+        .any(|component| component.unsigned_abs() > blockwild_gameplay::WORLD_VIEW_COORDINATE_LIMIT_MILLI_V1 as u64)
+        || [
+            value.velocity_milli_per_second.x_milli,
+            value.velocity_milli_per_second.y_milli,
+            value.velocity_milli_per_second.z_milli,
+        ]
+        .into_iter()
+        .any(|component| {
+            component.unsigned_abs() > blockwild_gameplay::WORLD_VIEW_VELOCITY_LIMIT_MILLI_PER_SECOND_V1 as u64
+        })
+        || [value.rotation.yaw, value.rotation.pitch, value.rotation.roll]
+            .into_iter()
+            .any(|component| component >= blockwild_gameplay::WORLD_VIEW_FRACTION_SCALE_V1)
+    {
+        return Err(WireError::new(
+            "basic-dirt-action-projection-spatial",
+            "basic Dirt generated-drop projection is outside fixed-point spatial bounds",
+        ));
+    }
+    Ok(())
+}
+
+fn write_runtime_basic_dirt_action_projection_v1(
+    writer: &mut Writer,
+    value: &RuntimeBasicDirtActionProjectionWireV1,
+) -> Result<(), WireError> {
+    writer.u16(value.schema_version);
+    writer.u64(value.sequence);
+    writer.u64(value.origin_input_sequence);
+    writer.u64(value.completion_tick);
+    writer.u8(value.action as u8);
+    writer.i32(value.position.x);
+    writer.i32(value.position.y);
+    writer.i32(value.position.z);
+    writer.u16(value.prior_block_id);
+    writer.u16(value.replacement_block_id);
+    write_world_authority_revision_v1(writer, value.before_world_revision);
+    write_world_authority_revision_v1(writer, value.after_world_revision);
+    writer.hash(value.before_world_hash);
+    writer.hash(value.after_world_hash);
+    writer.flag(value.creative_mode);
+    write_container_key(writer, &value.inventory.container)?;
+    writer.u16(value.inventory.slot);
+    writer.u64(value.inventory.before_revision);
+    writer.u64(value.inventory.after_revision);
+    write_optional_item_stack(writer, &value.inventory.before_stack);
+    write_optional_item_stack(writer, &value.inventory.after_stack);
+    writer.count(
+        value.generated_drops.len(),
+        blockwild_gameplay::MAX_BLOCK_ACTION_GENERATED_DROPS_V1,
+        "basic Dirt generated-drop projection count",
+    )?;
+    for drop in &value.generated_drops {
+        write_generated_drop_provenance_v1(writer, &drop.provenance);
+        writer.u64(drop.entity_id.packed());
+        write_item_stack(writer, &drop.stack);
+        write_fixed_world_vec3_v1(writer, drop.position);
+        write_fixed_world_vec3_v1(writer, drop.velocity_milli_per_second);
+        writer.u32(drop.rotation.yaw);
+        writer.u32(drop.rotation.pitch);
+        writer.u32(drop.rotation.roll);
+    }
+    writer.hash(value.content.manifest_hash);
+    writer.hash(value.content.installed_registry_hash);
+    writer.u16(value.content.catalog_schema_version);
+    writer.u32(value.content.catalog_content_version);
+    writer.hash(value.content.catalog_blob_hash);
+    writer.hash(value.content.action_report_hash);
+    writer.hash(value.content.subset_hash);
+    writer.hash(value.receipt_hash);
+    Ok(())
+}
+
+fn read_runtime_basic_dirt_action_projection_v1(
+    reader: &mut Reader<'_>,
+) -> Result<RuntimeBasicDirtActionProjectionWireV1, WireError> {
+    let schema_version = reader.u16()?;
+    let sequence = reader.u64()?;
+    let origin_input_sequence = reader.u64()?;
+    let completion_tick = reader.u64()?;
+    let action = match reader.u8()? {
+        0 => IntegratedRuntimeBasicDirtActionKindV1::Mine,
+        1 => IntegratedRuntimeBasicDirtActionKindV1::Place,
+        _ => {
+            return Err(WireError::new(
+                "basic-dirt-action-projection-action",
+                "basic Dirt action projection uses an unknown action tag",
+            ));
+        }
+    };
+    let position = blockwild_authority::CellPositionV1 {
+        x: reader.i32()?,
+        y: reader.i32()?,
+        z: reader.i32()?,
+    };
+    let prior_block_id = reader.u16()?;
+    let replacement_block_id = reader.u16()?;
+    let before_world_revision = read_world_authority_revision_v1(reader)?;
+    let after_world_revision = read_world_authority_revision_v1(reader)?;
+    let before_world_hash = reader.hash()?;
+    let after_world_hash = reader.hash()?;
+    let creative_mode = reader.flag()?;
+    let inventory = crate::IntegratedRuntimeBasicDirtInventoryDeltaV1 {
+        container: read_container_key(reader)?,
+        slot: reader.u16()?,
+        before_revision: reader.u64()?,
+        after_revision: reader.u64()?,
+        before_stack: read_optional_item_stack(reader)?,
+        after_stack: read_optional_item_stack(reader)?,
+    };
+    let drop_count = reader.count(
+        blockwild_gameplay::MAX_BLOCK_ACTION_GENERATED_DROPS_V1,
+        "basic Dirt generated-drop projection count",
+    )?;
+    let mut generated_drops = Vec::with_capacity(drop_count);
+    for _ in 0..drop_count {
+        generated_drops.push(RuntimeBasicDirtGeneratedDropProjectionWireV1 {
+            provenance: read_generated_drop_provenance_v1(reader)?,
+            entity_id: entity_id_from_packed(reader.u64()?),
+            stack: read_item_stack(reader)?,
+            position: read_fixed_world_vec3_v1(reader)?,
+            velocity_milli_per_second: read_fixed_world_vec3_v1(reader)?,
+            rotation: RotationMicroturnsV1 {
+                yaw: reader.u32()?,
+                pitch: reader.u32()?,
+                roll: reader.u32()?,
+            },
+        });
+    }
+    Ok(RuntimeBasicDirtActionProjectionWireV1 {
+        schema_version,
+        sequence,
+        origin_input_sequence,
+        completion_tick,
+        action,
+        position,
+        prior_block_id,
+        replacement_block_id,
+        before_world_revision,
+        after_world_revision,
+        before_world_hash,
+        after_world_hash,
+        creative_mode,
+        inventory,
+        generated_drops,
+        content: IntegratedRuntimeBasicDirtActionContentBindingV1 {
+            manifest_hash: reader.hash()?,
+            installed_registry_hash: reader.hash()?,
+            catalog_schema_version: reader.u16()?,
+            catalog_content_version: reader.u32()?,
+            catalog_blob_hash: reader.hash()?,
+            action_report_hash: reader.hash()?,
+            subset_hash: reader.hash()?,
+        },
+        receipt_hash: reader.hash()?,
+    })
+}
+
+pub fn encode_runtime_native_block_edit_receipt_query_v1(
+    value: &RuntimeNativeBlockEditReceiptQueryWireV1,
+) -> Result<Vec<u8>, WireError> {
+    if value.after_sequence > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-block-edit-query-cursor",
+            "native block edit query cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    let mut writer = Writer::default();
+    write_integrated_runtime_identity_v2(&mut writer, &value.expected)?;
+    writer.u64(value.after_sequence);
+    wrap_schema(
+        NATIVE_BLOCK_EDIT_RECEIPT_V1_MAGIC,
+        NATIVE_BLOCK_EDIT_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_runtime_native_block_edit_receipt_query_v1(
+    bytes: &[u8],
+) -> Result<RuntimeNativeBlockEditReceiptQueryWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        NATIVE_BLOCK_EDIT_RECEIPT_V1_MAGIC,
+        NATIVE_BLOCK_EDIT_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let value = RuntimeNativeBlockEditReceiptQueryWireV1 {
+        expected: read_integrated_runtime_identity_v2(&mut reader)?,
+        after_sequence: reader.u64()?,
+    };
+    reader.finish()?;
+    if value.after_sequence > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-block-edit-query-cursor",
+            "native block edit query cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    Ok(value)
+}
+
+pub fn encode_runtime_native_block_edit_projection_receipt_v1(
+    value: &RuntimeNativeBlockEditProjectionReceiptWireV1,
+) -> Result<Vec<u8>, WireError> {
+    validate_runtime_native_block_edit_projection_receipt_v1(value)?;
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    write_integrated_runtime_identity_v2(&mut writer, &value.identity)?;
+    writer.u64(value.cursor_after);
+    writer.flag(value.receipt.is_some());
+    if let Some(receipt) = &value.receipt {
+        write_runtime_native_block_edit_receipt_v1(&mut writer, receipt)?;
+    }
+    wrap_schema(
+        NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V1_MAGIC,
+        NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_runtime_native_block_edit_projection_receipt_v1(
+    bytes: &[u8],
+) -> Result<RuntimeNativeBlockEditProjectionReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V1_MAGIC,
+        NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let request_payload_hash = reader.hash()?;
+    let identity = read_integrated_runtime_identity_v2(&mut reader)?;
+    let cursor_after = reader.u64()?;
+    let receipt = if reader.flag()? {
+        Some(read_runtime_native_block_edit_receipt_v1(&mut reader)?)
+    } else {
+        None
+    };
+    reader.finish()?;
+    let value = RuntimeNativeBlockEditProjectionReceiptWireV1 {
+        request_payload_hash,
+        identity,
+        cursor_after,
+        receipt,
+    };
+    validate_runtime_native_block_edit_projection_receipt_v1(&value)?;
+    Ok(value)
+}
+
+fn validate_runtime_native_block_edit_projection_receipt_v1(
+    value: &RuntimeNativeBlockEditProjectionReceiptWireV1,
+) -> Result<(), WireError> {
+    if value.cursor_after > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-block-edit-projection-cursor",
+            "native block edit projection cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    if let Some(receipt) = &value.receipt {
+        if receipt.sequence != value.cursor_after {
+            return Err(WireError::new(
+                "native-block-edit-projection-cursor",
+                "native block edit projection cursor does not equal its receipt sequence",
+            ));
+        }
+        receipt.validate_shape_v1().map_err(|error| {
+            WireError::new(
+                "native-block-edit-receipt",
+                format!("{}: {}", error.code, error.message),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn write_runtime_native_block_edit_receipt_v1(
+    writer: &mut Writer,
+    receipt: &IntegratedRuntimeNativeBlockEditReceiptV1,
+) -> Result<(), WireError> {
+    receipt.validate_shape_v1().map_err(|error| {
+        WireError::new(
+            "native-block-edit-receipt",
+            format!("{}: {}", error.code, error.message),
+        )
+    })?;
+    writer.u16(receipt.schema_version);
+    writer.u64(receipt.sequence);
+    writer.u64(receipt.origin_input_sequence);
+    writer.u64(receipt.completion_tick);
+    writer.u8(receipt.action as u8);
+    writer.i32(receipt.position.x);
+    writer.i32(receipt.position.y);
+    writer.i32(receipt.position.z);
+    writer.u16(receipt.prior_block_id);
+    writer.u8(receipt.prior_facing);
+    writer.u16(receipt.replacement_block_id);
+    writer.u8(receipt.replacement_facing);
+    write_world_authority_revision_v1(writer, receipt.before_world_revision);
+    write_world_authority_revision_v1(writer, receipt.after_world_revision);
+    writer.hash(receipt.before_world_hash);
+    writer.hash(receipt.after_world_hash);
+    writer.flag(receipt.creative_mode);
+    write_container_key(writer, &receipt.inventory.container)?;
+    writer.u16(receipt.inventory.selected_slot);
+    writer.u64(receipt.inventory.before_revision);
+    writer.u64(receipt.inventory.after_revision);
+    write_optional_item_stack(writer, &receipt.inventory.before_stack);
+    write_optional_item_stack(writer, &receipt.inventory.after_stack);
+    writer.count(
+        receipt.generated_drops.len(),
+        blockwild_gameplay::MAX_BLOCK_ACTION_GENERATED_DROPS_V1,
+        "native block edit generated-drop count",
+    )?;
+    for generated in &receipt.generated_drops {
+        write_generated_drop_provenance_v1(writer, &generated.provenance);
+        writer.u64(generated.entity_id.packed());
+        write_item_stack(writer, &generated.stack);
+        write_fixed_world_vec3_v1(writer, generated.position);
+        write_fixed_world_vec3_v1(writer, generated.velocity_milli_per_second);
+        writer.u32(generated.rotation.yaw);
+        writer.u32(generated.rotation.pitch);
+        writer.u32(generated.rotation.roll);
+    }
+    writer.u16(receipt.content.block_id);
+    writer.hash(receipt.content.manifest_hash);
+    writer.hash(receipt.content.installed_registry_hash);
+    writer.u16(receipt.content.catalog_schema_version);
+    writer.u32(receipt.content.catalog_content_version);
+    writer.hash(receipt.content.catalog_blob_hash);
+    writer.hash(receipt.content.action_report_hash);
+    writer.hash(receipt.content.subset_hash);
+    writer.hash(receipt.receipt_hash);
+    Ok(())
+}
+
+fn read_runtime_native_block_edit_receipt_v1(
+    reader: &mut Reader<'_>,
+) -> Result<IntegratedRuntimeNativeBlockEditReceiptV1, WireError> {
+    let schema_version = reader.u16()?;
+    let sequence = reader.u64()?;
+    let origin_input_sequence = reader.u64()?;
+    let completion_tick = reader.u64()?;
+    let action = match reader.u8()? {
+        0 => IntegratedRuntimeNativeBlockEditActionKindV1::Mine,
+        1 => IntegratedRuntimeNativeBlockEditActionKindV1::Place,
+        _ => {
+            return Err(WireError::new(
+                "native-block-edit-action",
+                "native block edit projection uses an unknown action tag",
+            ));
+        }
+    };
+    let position = blockwild_authority::CellPositionV1 {
+        x: reader.i32()?,
+        y: reader.i32()?,
+        z: reader.i32()?,
+    };
+    let prior_block_id = reader.u16()?;
+    let prior_facing = reader.u8()?;
+    let replacement_block_id = reader.u16()?;
+    let replacement_facing = reader.u8()?;
+    let before_world_revision = read_world_authority_revision_v1(reader)?;
+    let after_world_revision = read_world_authority_revision_v1(reader)?;
+    let before_world_hash = reader.hash()?;
+    let after_world_hash = reader.hash()?;
+    let creative_mode = reader.flag()?;
+    let inventory = IntegratedRuntimeNativeBlockEditInventoryDeltaV1 {
+        container: read_container_key(reader)?,
+        selected_slot: reader.u16()?,
+        before_revision: reader.u64()?,
+        after_revision: reader.u64()?,
+        before_stack: read_optional_item_stack(reader)?,
+        after_stack: read_optional_item_stack(reader)?,
+    };
+    let drop_count = reader.count(
+        blockwild_gameplay::MAX_BLOCK_ACTION_GENERATED_DROPS_V1,
+        "native block edit generated-drop count",
+    )?;
+    let mut generated_drops = Vec::with_capacity(drop_count);
+    for _ in 0..drop_count {
+        generated_drops.push(IntegratedRuntimeNativeBlockEditGeneratedDropV1 {
+            provenance: read_generated_drop_provenance_v1(reader)?,
+            entity_id: entity_id_from_packed(reader.u64()?),
+            stack: read_item_stack(reader)?,
+            position: read_fixed_world_vec3_v1(reader)?,
+            velocity_milli_per_second: read_fixed_world_vec3_v1(reader)?,
+            rotation: RotationMicroturnsV1 {
+                yaw: reader.u32()?,
+                pitch: reader.u32()?,
+                roll: reader.u32()?,
+            },
+        });
+    }
+    let receipt = IntegratedRuntimeNativeBlockEditReceiptV1 {
+        schema_version,
+        sequence,
+        origin_input_sequence,
+        completion_tick,
+        action,
+        position,
+        prior_block_id,
+        prior_facing,
+        replacement_block_id,
+        replacement_facing,
+        before_world_revision,
+        after_world_revision,
+        before_world_hash,
+        after_world_hash,
+        creative_mode,
+        inventory,
+        generated_drops,
+        content: IntegratedRuntimeNativeBlockEditContentBindingV1 {
+            block_id: reader.u16()?,
+            manifest_hash: reader.hash()?,
+            installed_registry_hash: reader.hash()?,
+            catalog_schema_version: reader.u16()?,
+            catalog_content_version: reader.u32()?,
+            catalog_blob_hash: reader.hash()?,
+            action_report_hash: reader.hash()?,
+            subset_hash: reader.hash()?,
+        },
+        receipt_hash: reader.hash()?,
+    };
+    receipt.validate_shape_v1().map_err(|error| {
+        WireError::new(
+            "native-block-edit-receipt",
+            format!("{}: {}", error.code, error.message),
+        )
+    })?;
+    Ok(receipt)
+}
+
+pub fn encode_runtime_native_block_edit_receipt_query_v2(
+    value: &RuntimeNativeBlockEditReceiptQueryWireV2,
+) -> Result<Vec<u8>, WireError> {
+    if value.after_sequence > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-block-edit-v2-query-cursor",
+            "native block edit V2 query cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    let mut writer = Writer::default();
+    write_integrated_runtime_identity_v2(&mut writer, &value.expected)?;
+    writer.u64(value.after_sequence);
+    wrap_schema(
+        NATIVE_BLOCK_EDIT_RECEIPT_V2_MAGIC,
+        NATIVE_BLOCK_EDIT_RECEIPT_V2_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_runtime_native_block_edit_receipt_query_v2(
+    bytes: &[u8],
+) -> Result<RuntimeNativeBlockEditReceiptQueryWireV2, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        NATIVE_BLOCK_EDIT_RECEIPT_V2_MAGIC,
+        NATIVE_BLOCK_EDIT_RECEIPT_V2_INNER_SCHEMA,
+        bytes,
+    )?);
+    let value = RuntimeNativeBlockEditReceiptQueryWireV2 {
+        expected: read_integrated_runtime_identity_v2(&mut reader)?,
+        after_sequence: reader.u64()?,
+    };
+    reader.finish()?;
+    if value.after_sequence > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-block-edit-v2-query-cursor",
+            "native block edit V2 query cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    Ok(value)
+}
+
+pub fn encode_runtime_native_block_edit_projection_receipt_v2(
+    value: &RuntimeNativeBlockEditProjectionReceiptWireV2,
+) -> Result<Vec<u8>, WireError> {
+    validate_runtime_native_block_edit_projection_receipt_v2(value)?;
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    write_integrated_runtime_identity_v2(&mut writer, &value.identity)?;
+    writer.u64(value.cursor_after);
+    writer.flag(value.receipt.is_some());
+    if let Some(receipt) = &value.receipt {
+        write_runtime_native_block_edit_receipt_v1(&mut writer, receipt)?;
+    }
+    writer.flag(value.dirty_evidence.is_some());
+    if let Some(evidence) = &value.dirty_evidence {
+        write_runtime_native_block_edit_dirty_evidence_v1(&mut writer, evidence)?;
+    }
+    wrap_schema(
+        NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V2_MAGIC,
+        NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V2_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_runtime_native_block_edit_projection_receipt_v2(
+    bytes: &[u8],
+) -> Result<RuntimeNativeBlockEditProjectionReceiptWireV2, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V2_MAGIC,
+        NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_V2_INNER_SCHEMA,
+        bytes,
+    )?);
+    let request_payload_hash = reader.hash()?;
+    let identity = read_integrated_runtime_identity_v2(&mut reader)?;
+    let cursor_after = reader.u64()?;
+    let receipt = if reader.flag()? {
+        Some(read_runtime_native_block_edit_receipt_v1(&mut reader)?)
+    } else {
+        None
+    };
+    let dirty_evidence = if reader.flag()? {
+        Some(read_runtime_native_block_edit_dirty_evidence_v1(&mut reader)?)
+    } else {
+        None
+    };
+    reader.finish()?;
+    let value = RuntimeNativeBlockEditProjectionReceiptWireV2 {
+        request_payload_hash,
+        identity,
+        cursor_after,
+        receipt,
+        dirty_evidence,
+    };
+    validate_runtime_native_block_edit_projection_receipt_v2(&value)?;
+    Ok(value)
+}
+
+fn validate_runtime_native_block_edit_projection_receipt_v2(
+    value: &RuntimeNativeBlockEditProjectionReceiptWireV2,
+) -> Result<(), WireError> {
+    if value.cursor_after > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-block-edit-v2-projection-cursor",
+            "native block edit V2 projection cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    match (&value.receipt, &value.dirty_evidence) {
+        (Some(receipt), dirty_evidence) => {
+            if receipt.sequence != value.cursor_after {
+                return Err(WireError::new(
+                    "native-block-edit-v2-projection-cursor",
+                    "native block edit V2 projection cursor does not equal its V1 receipt sequence",
+                ));
+            }
+            receipt.validate_shape_v1().map_err(|error| {
+                WireError::new(
+                    "native-block-edit-v2-receipt",
+                    format!("{}: {}", error.code, error.message),
+                )
+            })?;
+            if let Some(evidence) = dirty_evidence {
+                evidence.validate_shape_v1(receipt).map_err(|error| {
+                    WireError::new(
+                        "native-block-edit-v2-dirty-evidence",
+                        format!("{}: {}", error.code, error.message),
+                    )
+                })?;
+            }
+        }
+        (None, Some(_)) => {
+            return Err(WireError::new(
+                "native-block-edit-v2-dirty-orphan",
+                "native block edit dirty evidence cannot be projected without its complete V1 receipt",
+            ));
+        }
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+fn write_runtime_native_block_edit_dirty_evidence_v1(
+    writer: &mut Writer,
+    evidence: &IntegratedRuntimeNativeBlockEditDirtyEvidenceV1,
+) -> Result<(), WireError> {
+    writer.u16(evidence.schema_version);
+    writer.u64(evidence.sequence);
+    writer.hash(evidence.receipt_hash);
+    writer.count(evidence.sections.len(), 7, "native block edit dirty section count")?;
+    for section in &evidence.sections {
+        writer.string(&section.world.universe_id)?;
+        writer.string(&section.world.location_id)?;
+        writer.i32(section.chunk_x);
+        writer.i32(section.chunk_z);
+        writer.i16(section.section_y);
+    }
+    writer.count(evidence.columns.len(), 1, "native block edit dirty column count")?;
+    for (x, z) in &evidence.columns {
+        writer.i32(*x);
+        writer.i32(*z);
+    }
+    writer.count(
+        evidence.subsystem_seeds.len(),
+        7,
+        "native block edit dirty subsystem seed count",
+    )?;
+    for seed in &evidence.subsystem_seeds {
+        writer.u8(dirty_subsystem_tag_v1(seed.subsystem) as u8);
+        writer.string(&seed.seed)?;
+    }
+    writer.hash(evidence.evidence_hash);
+    Ok(())
+}
+
+fn read_runtime_native_block_edit_dirty_evidence_v1(
+    reader: &mut Reader<'_>,
+) -> Result<IntegratedRuntimeNativeBlockEditDirtyEvidenceV1, WireError> {
+    let schema_version = reader.u16()?;
+    let sequence = reader.u64()?;
+    let receipt_hash = reader.hash()?;
+    let section_count = reader.count(7, "native block edit dirty section count")?;
+    let mut sections = Vec::with_capacity(section_count);
+    for _ in 0..section_count {
+        let world = AuthorityWorldAddressV1::new(reader.string()?, reader.string()?)
+            .map_err(|error| WireError::new(error.code, error.message))?;
+        sections.push(WorldSectionAddressV1 {
+            world,
+            chunk_x: reader.i32()?,
+            chunk_z: reader.i32()?,
+            section_y: reader.i16()?,
+        });
+    }
+    let column_count = reader.count(1, "native block edit dirty column count")?;
+    let mut columns = Vec::with_capacity(column_count);
+    for _ in 0..column_count {
+        columns.push((reader.i32()?, reader.i32()?));
+    }
+    let seed_count = reader.count(7, "native block edit dirty subsystem seed count")?;
+    let mut subsystem_seeds = Vec::with_capacity(seed_count);
+    for _ in 0..seed_count {
+        subsystem_seeds.push(DirtySubsystemSeedV1 {
+            subsystem: dirty_subsystem_from_tag_v1(reader.u8()?)
+                .map_err(|error| WireError::new("native-block-edit-dirty-subsystem-tag", error.message))?,
+            seed: reader.string()?,
+        });
+    }
+    Ok(IntegratedRuntimeNativeBlockEditDirtyEvidenceV1 {
+        schema_version,
+        sequence,
+        receipt_hash,
+        sections,
+        columns,
+        subsystem_seeds,
+        evidence_hash: reader.hash()?,
+    })
+}
+
+pub fn encode_runtime_native_player_drop_receipt_query_v1(
+    value: &RuntimeNativePlayerDropReceiptQueryWireV1,
+) -> Result<Vec<u8>, WireError> {
+    if value.after_sequence > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-player-drop-query-cursor",
+            "native player drop query cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    let mut writer = Writer::default();
+    write_integrated_runtime_identity_v2(&mut writer, &value.expected)?;
+    writer.u64(value.after_sequence);
+    wrap_schema(
+        NATIVE_PLAYER_DROP_RECEIPT_V1_MAGIC,
+        NATIVE_PLAYER_DROP_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_runtime_native_player_drop_receipt_query_v1(
+    bytes: &[u8],
+) -> Result<RuntimeNativePlayerDropReceiptQueryWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        NATIVE_PLAYER_DROP_RECEIPT_V1_MAGIC,
+        NATIVE_PLAYER_DROP_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let value = RuntimeNativePlayerDropReceiptQueryWireV1 {
+        expected: read_integrated_runtime_identity_v2(&mut reader)?,
+        after_sequence: reader.u64()?,
+    };
+    reader.finish()?;
+    if value.after_sequence > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-player-drop-query-cursor",
+            "native player drop query cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    Ok(value)
+}
+
+pub fn encode_runtime_native_player_drop_projection_receipt_v1(
+    value: &RuntimeNativePlayerDropProjectionReceiptWireV1,
+) -> Result<Vec<u8>, WireError> {
+    validate_runtime_native_player_drop_projection_receipt_v1(value)?;
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    write_integrated_runtime_identity_v2(&mut writer, &value.identity)?;
+    writer.u64(value.cursor_after);
+    writer.flag(value.receipt.is_some());
+    if let Some(receipt) = &value.receipt {
+        write_runtime_native_player_drop_receipt_v1(&mut writer, receipt)?;
+    }
+    wrap_schema(
+        NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_V1_MAGIC,
+        NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_runtime_native_player_drop_projection_receipt_v1(
+    bytes: &[u8],
+) -> Result<RuntimeNativePlayerDropProjectionReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_V1_MAGIC,
+        NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let request_payload_hash = reader.hash()?;
+    let identity = read_integrated_runtime_identity_v2(&mut reader)?;
+    let cursor_after = reader.u64()?;
+    let receipt = if reader.flag()? {
+        Some(read_runtime_native_player_drop_receipt_v1(&mut reader)?)
+    } else {
+        None
+    };
+    reader.finish()?;
+    let value = RuntimeNativePlayerDropProjectionReceiptWireV1 {
+        request_payload_hash,
+        identity,
+        cursor_after,
+        receipt,
+    };
+    validate_runtime_native_player_drop_projection_receipt_v1(&value)?;
+    Ok(value)
+}
+
+fn validate_runtime_native_player_drop_projection_receipt_v1(
+    value: &RuntimeNativePlayerDropProjectionReceiptWireV1,
+) -> Result<(), WireError> {
+    if value.cursor_after > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-player-drop-projection-cursor",
+            "native player drop projection cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    if let Some(receipt) = &value.receipt {
+        if receipt.sequence != value.cursor_after {
+            return Err(WireError::new(
+                "native-player-drop-projection-cursor",
+                "native player drop projection cursor does not equal its receipt sequence",
+            ));
+        }
+        receipt
+            .validate_shape_v1()
+            .map_err(|error| WireError::new("native-player-drop-projection-native", error.message))?;
+    }
+    Ok(())
+}
+
+fn write_runtime_native_player_drop_receipt_v1(
+    writer: &mut Writer,
+    receipt: &IntegratedRuntimeNativePlayerDropReceiptV1,
+) -> Result<(), WireError> {
+    writer.u16(receipt.schema_version);
+    writer.u64(receipt.sequence);
+    writer.u64(receipt.origin_input_sequence);
+    writer.u64(receipt.completion_tick);
+    writer.string(&receipt.world.universe)?;
+    writer.string(&receipt.world.location)?;
+    write_world_authority_revision_v1(writer, receipt.world_revision);
+    writer.hash(receipt.world_state_hash);
+    writer.u64(receipt.player_id.packed());
+    writer.u64(receipt.player_entity_id.packed());
+    write_container_key(writer, &receipt.inventory.container)?;
+    writer.u16(receipt.inventory.selected_slot);
+    writer.u64(receipt.inventory.before_revision);
+    writer.u64(receipt.inventory.after_revision);
+    write_optional_item_stack(writer, &receipt.inventory.before_stack);
+    write_optional_item_stack(writer, &receipt.inventory.after_stack);
+    writer.string(&receipt.drop.drop_id)?;
+    writer.u64(receipt.drop.entity_id.packed());
+    write_item_stack(writer, &receipt.drop.stack);
+    write_container_key(writer, &receipt.drop.custody_container)?;
+    writer.u16(receipt.drop.custody_slot);
+    writer.u64(receipt.drop.custody_revision);
+    writer.u64(receipt.drop.spatial_revision);
+    write_fixed_world_vec3_v1(writer, receipt.drop.position);
+    write_fixed_world_vec3_v1(writer, receipt.drop.velocity_milli_per_second);
+    writer.u32(receipt.drop.rotation.yaw);
+    writer.u32(receipt.drop.rotation.pitch);
+    writer.u32(receipt.drop.rotation.roll);
+    writer.u64(receipt.drop.created_tick);
+    writer.option_u64(receipt.drop.expires_tick);
+    writer.flag(receipt.drop.pickup_lock_actor_id.is_some());
+    if let Some(actor_id) = &receipt.drop.pickup_lock_actor_id {
+        writer.string(actor_id)?;
+    }
+    writer.u64(receipt.drop.pickup_unlock_tick);
+    writer.hash(receipt.drop.origin_hash);
+    write_gameplay_revision_v1(writer, receipt.authority.before_gameplay_revision);
+    writer.hash(receipt.authority.before_gameplay_hash);
+    write_gameplay_revision_v1(writer, receipt.authority.after_gameplay_revision);
+    writer.hash(receipt.authority.after_gameplay_hash);
+    writer.u64(receipt.authority.before_entity_revision);
+    writer.hash(receipt.authority.before_entity_hash);
+    writer.u64(receipt.authority.after_entity_revision);
+    writer.hash(receipt.authority.after_entity_hash);
+    write_world_view_revision_v1(writer, receipt.authority.before_world_view_revision);
+    writer.hash(receipt.authority.before_world_view_hash);
+    write_world_view_revision_v1(writer, receipt.authority.after_world_view_revision);
+    writer.hash(receipt.authority.after_world_view_hash);
+    writer.hash(receipt.content.configured_manifest_hash);
+    writer.hash(receipt.content.installed_manifest_hash);
+    writer.hash(receipt.content.installed_registry_hash);
+    writer.hash(receipt.content.item_content_hash);
+    writer.u32(receipt.content.item_content_version);
+    writer.hash(receipt.receipt_hash);
+    Ok(())
+}
+
+fn read_runtime_native_player_drop_receipt_v1(
+    reader: &mut Reader<'_>,
+) -> Result<IntegratedRuntimeNativePlayerDropReceiptV1, WireError> {
+    let schema_version = reader.u16()?;
+    let sequence = reader.u64()?;
+    let origin_input_sequence = reader.u64()?;
+    let completion_tick = reader.u64()?;
+    let world = WorldKey::new(reader.string()?, reader.string()?);
+    let world_revision = read_world_authority_revision_v1(reader)?;
+    let world_state_hash = reader.hash()?;
+    let player_packed = reader.u64()?;
+    let player_entity_packed = reader.u64()?;
+    let inventory = IntegratedRuntimeNativePlayerDropInventoryDeltaV1 {
+        container: read_container_key(reader)?,
+        selected_slot: reader.u16()?,
+        before_revision: reader.u64()?,
+        after_revision: reader.u64()?,
+        before_stack: read_optional_item_stack(reader)?,
+        after_stack: read_optional_item_stack(reader)?,
+    };
+    let drop_id = reader.string()?;
+    let drop_entity_packed = reader.u64()?;
+    let stack = read_item_stack(reader)?;
+    let custody_container = read_container_key(reader)?;
+    let custody_slot = reader.u16()?;
+    let custody_revision = reader.u64()?;
+    let spatial_revision = reader.u64()?;
+    let position = read_fixed_world_vec3_v1(reader)?;
+    let velocity_milli_per_second = read_fixed_world_vec3_v1(reader)?;
+    let rotation = RotationMicroturnsV1 {
+        yaw: reader.u32()?,
+        pitch: reader.u32()?,
+        roll: reader.u32()?,
+    };
+    let created_tick = reader.u64()?;
+    let expires_tick = reader.option_u64()?;
+    let pickup_lock_actor_id = if reader.flag()? { Some(reader.string()?) } else { None };
+    let pickup_unlock_tick = reader.u64()?;
+    let origin_hash = reader.hash()?;
+    let authority = IntegratedRuntimeNativeDropPickupAuthorityEvidenceV1 {
+        before_gameplay_revision: read_gameplay_revision_v1(reader)?,
+        before_gameplay_hash: reader.hash()?,
+        after_gameplay_revision: read_gameplay_revision_v1(reader)?,
+        after_gameplay_hash: reader.hash()?,
+        before_entity_revision: reader.u64()?,
+        before_entity_hash: reader.hash()?,
+        after_entity_revision: reader.u64()?,
+        after_entity_hash: reader.hash()?,
+        before_world_view_revision: read_world_view_revision_v1(reader)?,
+        before_world_view_hash: reader.hash()?,
+        after_world_view_revision: read_world_view_revision_v1(reader)?,
+        after_world_view_hash: reader.hash()?,
+    };
+    let content = IntegratedRuntimeNativePlayerDropContentBindingV1 {
+        configured_manifest_hash: reader.hash()?,
+        installed_manifest_hash: reader.hash()?,
+        installed_registry_hash: reader.hash()?,
+        item_content_hash: reader.hash()?,
+        item_content_version: reader.u32()?,
+    };
+    Ok(IntegratedRuntimeNativePlayerDropReceiptV1 {
+        schema_version,
+        sequence,
+        origin_input_sequence,
+        completion_tick,
+        world,
+        world_revision,
+        world_state_hash,
+        player_id: PlayerId::new(player_packed as u32, (player_packed >> 32) as u32),
+        player_entity_id: entity_id_from_packed(player_entity_packed),
+        inventory,
+        drop: IntegratedRuntimeNativePlayerDropSpawnV1 {
+            drop_id,
+            entity_id: entity_id_from_packed(drop_entity_packed),
+            stack,
+            custody_container,
+            custody_slot,
+            custody_revision,
+            spatial_revision,
+            position,
+            velocity_milli_per_second,
+            rotation,
+            created_tick,
+            expires_tick,
+            pickup_lock_actor_id,
+            pickup_unlock_tick,
+            origin_hash,
+        },
+        authority,
+        content,
+        receipt_hash: reader.hash()?,
+    })
+}
+
+pub fn encode_runtime_native_drop_pickup_receipt_query_v1(
+    value: &RuntimeNativeDropPickupReceiptQueryWireV1,
+) -> Result<Vec<u8>, WireError> {
+    if value.after_sequence > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-drop-pickup-query-cursor",
+            "native drop pickup query cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    let mut writer = Writer::default();
+    write_integrated_runtime_identity_v2(&mut writer, &value.expected)?;
+    writer.u64(value.after_sequence);
+    wrap_schema(
+        NATIVE_DROP_PICKUP_RECEIPT_V1_MAGIC,
+        NATIVE_DROP_PICKUP_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_runtime_native_drop_pickup_receipt_query_v1(
+    bytes: &[u8],
+) -> Result<RuntimeNativeDropPickupReceiptQueryWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        NATIVE_DROP_PICKUP_RECEIPT_V1_MAGIC,
+        NATIVE_DROP_PICKUP_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let value = RuntimeNativeDropPickupReceiptQueryWireV1 {
+        expected: read_integrated_runtime_identity_v2(&mut reader)?,
+        after_sequence: reader.u64()?,
+    };
+    reader.finish()?;
+    if value.after_sequence > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-drop-pickup-query-cursor",
+            "native drop pickup query cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    Ok(value)
+}
+
+pub fn encode_runtime_native_drop_pickup_projection_receipt_v1(
+    value: &RuntimeNativeDropPickupProjectionReceiptWireV1,
+) -> Result<Vec<u8>, WireError> {
+    validate_runtime_native_drop_pickup_projection_receipt_v1(value)?;
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    write_integrated_runtime_identity_v2(&mut writer, &value.identity)?;
+    writer.u64(value.cursor_after);
+    writer.flag(value.receipt.is_some());
+    if let Some(receipt) = &value.receipt {
+        write_runtime_native_drop_pickup_receipt_v1(&mut writer, receipt)?;
+    }
+    wrap_schema(
+        NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_V1_MAGIC,
+        NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_runtime_native_drop_pickup_projection_receipt_v1(
+    bytes: &[u8],
+) -> Result<RuntimeNativeDropPickupProjectionReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_V1_MAGIC,
+        NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let request_payload_hash = reader.hash()?;
+    let identity = read_integrated_runtime_identity_v2(&mut reader)?;
+    let cursor_after = reader.u64()?;
+    let receipt = if reader.flag()? {
+        Some(read_runtime_native_drop_pickup_receipt_v1(&mut reader)?)
+    } else {
+        None
+    };
+    reader.finish()?;
+    let value = RuntimeNativeDropPickupProjectionReceiptWireV1 {
+        request_payload_hash,
+        identity,
+        cursor_after,
+        receipt,
+    };
+    validate_runtime_native_drop_pickup_projection_receipt_v1(&value)?;
+    Ok(value)
+}
+
+fn validate_runtime_native_drop_pickup_projection_receipt_v1(
+    value: &RuntimeNativeDropPickupProjectionReceiptWireV1,
+) -> Result<(), WireError> {
+    if value.cursor_after > MAX_SAFE_U64 {
+        return Err(WireError::new(
+            "native-drop-pickup-projection-cursor",
+            "native drop pickup projection cursor exceeds the JavaScript-safe range",
+        ));
+    }
+    if let Some(receipt) = &value.receipt {
+        if receipt.sequence != value.cursor_after {
+            return Err(WireError::new(
+                "native-drop-pickup-projection-cursor",
+                "native drop pickup projection cursor does not equal its receipt sequence",
+            ));
+        }
+        receipt
+            .validate_shape_v1()
+            .map_err(|error| WireError::new("native-drop-pickup-projection-native", error.message))?;
+    }
+    Ok(())
+}
+
+fn write_runtime_native_drop_pickup_receipt_v1(
+    writer: &mut Writer,
+    value: &IntegratedRuntimeNativeDropPickupReceiptV1,
+) -> Result<(), WireError> {
+    writer.u16(value.schema_version);
+    writer.u64(value.sequence);
+    writer.u64(value.completion_tick);
+    writer.string(&value.world.universe)?;
+    writer.string(&value.world.location)?;
+    write_world_authority_revision_v1(writer, value.world_revision);
+    writer.hash(value.world_state_hash);
+    writer.u64(value.player_id.packed());
+    writer.u64(value.player_entity_id.packed());
+    write_container_key(writer, &value.inventory_container)?;
+    writer.u64(value.inventory_before_revision);
+    writer.u64(value.inventory_after_revision);
+    writer.count(
+        value.affected_slots.len(),
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "native drop pickup affected slots",
+    )?;
+    for delta in &value.affected_slots {
+        writer.u16(delta.slot);
+        write_optional_item_stack(writer, &delta.before_stack);
+        write_optional_item_stack(writer, &delta.after_stack);
+    }
+    writer.string(&value.source.drop_id)?;
+    writer.u64(value.source.entity_id.packed());
+    match &value.source.origin {
+        IntegratedRuntimeNativeDropPickupOriginV1::GeneratedBlockAction(provenance) => {
+            writer.u8(0);
+            write_generated_drop_provenance_v1(writer, provenance);
+        }
+        IntegratedRuntimeNativeDropPickupOriginV1::PlayerDrop {
+            player_drop_sequence,
+            player_drop_receipt_hash,
+        } => {
+            writer.u8(1);
+            writer.u64(*player_drop_sequence);
+            writer.hash(*player_drop_receipt_hash);
+        }
+        IntegratedRuntimeNativeDropPickupOriginV1::PlayerDeathDrop {
+            respawn_sequence,
+            respawn_receipt_hash,
+            source_lane,
+            source_slot,
+        } => {
+            writer.u8(2);
+            writer.u64(*respawn_sequence);
+            writer.hash(*respawn_receipt_hash);
+            writer.u16(match source_lane {
+                PlayerDeathCustodyLaneV1::Inventory => 0,
+                PlayerDeathCustodyLaneV1::Equipment => 1,
+            });
+            writer.u16(*source_slot);
+        }
+    }
+    write_item_stack(writer, &value.source.stack);
+    write_container_key(writer, &value.source.custody_container)?;
+    writer.u16(value.source.custody_slot);
+    writer.u64(value.source.custody_before_revision);
+    writer.u64(value.source.custody_emptied_revision);
+    writer.u64(value.source.spatial_revision);
+    write_fixed_world_vec3_v1(writer, value.source.position);
+    write_fixed_world_vec3_v1(writer, value.source.velocity_milli_per_second);
+    writer.u32(value.source.rotation.yaw);
+    writer.u32(value.source.rotation.pitch);
+    writer.u32(value.source.rotation.roll);
+    write_gameplay_revision_v1(writer, value.authority.before_gameplay_revision);
+    writer.hash(value.authority.before_gameplay_hash);
+    write_gameplay_revision_v1(writer, value.authority.after_gameplay_revision);
+    writer.hash(value.authority.after_gameplay_hash);
+    writer.u64(value.authority.before_entity_revision);
+    writer.hash(value.authority.before_entity_hash);
+    writer.u64(value.authority.after_entity_revision);
+    writer.hash(value.authority.after_entity_hash);
+    write_world_view_revision_v1(writer, value.authority.before_world_view_revision);
+    writer.hash(value.authority.before_world_view_hash);
+    write_world_view_revision_v1(writer, value.authority.after_world_view_revision);
+    writer.hash(value.authority.after_world_view_hash);
+    writer.hash(value.receipt_hash);
+    Ok(())
+}
+
+fn read_runtime_native_drop_pickup_receipt_v1(
+    reader: &mut Reader<'_>,
+) -> Result<IntegratedRuntimeNativeDropPickupReceiptV1, WireError> {
+    let schema_version = reader.u16()?;
+    let sequence = reader.u64()?;
+    let completion_tick = reader.u64()?;
+    let world = WorldKey::new(reader.string()?, reader.string()?);
+    let world_revision = read_world_authority_revision_v1(reader)?;
+    let world_state_hash = reader.hash()?;
+    let player_packed = reader.u64()?;
+    let player_entity_packed = reader.u64()?;
+    let inventory_container = read_container_key(reader)?;
+    let inventory_before_revision = reader.u64()?;
+    let inventory_after_revision = reader.u64()?;
+    let slot_count = reader.count(
+        PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1,
+        "native drop pickup affected slots",
+    )?;
+    let mut affected_slots = Vec::with_capacity(slot_count);
+    for _ in 0..slot_count {
+        affected_slots.push(IntegratedRuntimeNativeDropPickupSlotDeltaV1 {
+            slot: reader.u16()?,
+            before_stack: read_optional_item_stack(reader)?,
+            after_stack: read_optional_item_stack(reader)?,
+        });
+    }
+    let source = IntegratedRuntimeNativeDropPickupSourceV1 {
+        drop_id: reader.string()?,
+        entity_id: entity_id_from_packed(reader.u64()?),
+        origin: match reader.u8()? {
+            0 => IntegratedRuntimeNativeDropPickupOriginV1::GeneratedBlockAction(read_generated_drop_provenance_v1(
+                reader,
+            )?),
+            1 => IntegratedRuntimeNativeDropPickupOriginV1::PlayerDrop {
+                player_drop_sequence: reader.u64()?,
+                player_drop_receipt_hash: reader.hash()?,
+            },
+            2 => IntegratedRuntimeNativeDropPickupOriginV1::PlayerDeathDrop {
+                respawn_sequence: reader.u64()?,
+                respawn_receipt_hash: reader.hash()?,
+                source_lane: match reader.u16()? {
+                    0 => PlayerDeathCustodyLaneV1::Inventory,
+                    1 => PlayerDeathCustodyLaneV1::Equipment,
+                    _ => {
+                        return Err(WireError::new(
+                            "native-drop-pickup-origin-lane",
+                            "native death-drop pickup receipt uses an unknown custody-lane tag",
+                        ));
+                    }
+                },
+                source_slot: reader.u16()?,
+            },
+            _ => {
+                return Err(WireError::new(
+                    "native-drop-pickup-origin",
+                    "native drop pickup receipt uses an unknown origin tag",
+                ));
+            }
+        },
+        stack: read_item_stack(reader)?,
+        custody_container: read_container_key(reader)?,
+        custody_slot: reader.u16()?,
+        custody_before_revision: reader.u64()?,
+        custody_emptied_revision: reader.u64()?,
+        spatial_revision: reader.u64()?,
+        position: read_fixed_world_vec3_v1(reader)?,
+        velocity_milli_per_second: read_fixed_world_vec3_v1(reader)?,
+        rotation: RotationMicroturnsV1 {
+            yaw: reader.u32()?,
+            pitch: reader.u32()?,
+            roll: reader.u32()?,
+        },
+    };
+    let authority = IntegratedRuntimeNativeDropPickupAuthorityEvidenceV1 {
+        before_gameplay_revision: read_gameplay_revision_v1(reader)?,
+        before_gameplay_hash: reader.hash()?,
+        after_gameplay_revision: read_gameplay_revision_v1(reader)?,
+        after_gameplay_hash: reader.hash()?,
+        before_entity_revision: reader.u64()?,
+        before_entity_hash: reader.hash()?,
+        after_entity_revision: reader.u64()?,
+        after_entity_hash: reader.hash()?,
+        before_world_view_revision: read_world_view_revision_v1(reader)?,
+        before_world_view_hash: reader.hash()?,
+        after_world_view_revision: read_world_view_revision_v1(reader)?,
+        after_world_view_hash: reader.hash()?,
+    };
+    Ok(IntegratedRuntimeNativeDropPickupReceiptV1 {
+        schema_version,
+        sequence,
+        completion_tick,
+        world,
+        world_revision,
+        world_state_hash,
+        player_id: PlayerId::new(player_packed as u32, (player_packed >> 32) as u32),
+        player_entity_id: entity_id_from_packed(player_entity_packed),
+        inventory_container,
+        inventory_before_revision,
+        inventory_after_revision,
+        affected_slots,
+        source,
+        authority,
+        receipt_hash: reader.hash()?,
+    })
+}
+
+fn write_gameplay_revision_v1(writer: &mut Writer, value: GameplayRevision) {
+    writer.u32(value.epoch);
+    writer.u64(value.sequence);
+    writer.u64(value.inventory);
+    writer.u64(value.machines);
+    writer.u64(value.combat);
+    writer.u64(value.progression);
+    writer.u64(value.cardforge);
+}
+
+fn read_gameplay_revision_v1(reader: &mut Reader<'_>) -> Result<GameplayRevision, WireError> {
+    Ok(GameplayRevision {
+        epoch: reader.u32()?,
+        sequence: reader.u64()?,
+        inventory: reader.u64()?,
+        machines: reader.u64()?,
+        combat: reader.u64()?,
+        progression: reader.u64()?,
+        cardforge: reader.u64()?,
+    })
+}
+
+fn write_world_view_revision_v1(writer: &mut Writer, value: WorldViewRevisionV1) {
+    writer.u32(value.epoch);
+    writer.u64(value.sequence);
+    writer.u64(value.clock);
+    writer.u64(value.machine_anchors);
+    writer.u64(value.dropped_items);
+    writer.u64(value.player_bindings);
+    writer.u64(value.environment);
+    writer.u64(value.atmosphere_gravity);
+    writer.u64(value.celestial);
+}
+
+fn read_world_view_revision_v1(reader: &mut Reader<'_>) -> Result<WorldViewRevisionV1, WireError> {
+    Ok(WorldViewRevisionV1 {
+        epoch: reader.u32()?,
+        sequence: reader.u64()?,
+        clock: reader.u64()?,
+        machine_anchors: reader.u64()?,
+        dropped_items: reader.u64()?,
+        player_bindings: reader.u64()?,
+        environment: reader.u64()?,
+        atmosphere_gravity: reader.u64()?,
+        celestial: reader.u64()?,
+    })
+}
+
+fn write_world_authority_revision_v1(writer: &mut Writer, value: WorldAuthorityRevisionV1) {
+    writer.u64(value.epoch);
+    writer.u64(value.mutation);
+    writer.u64(value.residency);
+}
+
+fn read_world_authority_revision_v1(reader: &mut Reader<'_>) -> Result<WorldAuthorityRevisionV1, WireError> {
+    Ok(WorldAuthorityRevisionV1 {
+        epoch: reader.u64()?,
+        mutation: reader.u64()?,
+        residency: reader.u64()?,
+    })
+}
+
+fn write_fixed_world_vec3_v1(writer: &mut Writer, value: FixedWorldVec3V1) {
+    writer.i64(value.x_milli);
+    writer.i64(value.y_milli);
+    writer.i64(value.z_milli);
+}
+
+fn read_fixed_world_vec3_v1(reader: &mut Reader<'_>) -> Result<FixedWorldVec3V1, WireError> {
+    Ok(FixedWorldVec3V1 {
+        x_milli: reader.i64()?,
+        y_milli: reader.i64()?,
+        z_milli: reader.i64()?,
+    })
 }
 
 pub fn encode_player_inventory_import_v1(value: &PlayerInventoryImportWireV1) -> Result<Vec<u8>, WireError> {
@@ -1200,11 +3145,19 @@ pub fn encode_player_inventory_import_v1(value: &PlayerInventoryImportWireV1) ->
     writer.u64(value.import.expected_revision);
     writer.u16(value.selected_slot);
     write_player_inventory_import_contents(&mut writer, &value.import)?;
-    wrap(PLAYER_INVENTORY_IMPORT_MAGIC, writer.finish())
+    wrap_schema(
+        PLAYER_INVENTORY_IMPORT_V1_MAGIC,
+        PLAYER_INVENTORY_IMPORT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_player_inventory_import_v1(bytes: &[u8]) -> Result<PlayerInventoryImportWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(PLAYER_INVENTORY_IMPORT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_INVENTORY_IMPORT_V1_MAGIC,
+        PLAYER_INVENTORY_IMPORT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let inventory = read_container_key(&mut reader)?;
     let expected_revision = reader.u64()?;
     let selected_slot = reader.u16()?;
@@ -1230,13 +3183,21 @@ pub fn encode_player_inventory_import_receipt_v1(
     writer.u64(value.inventory_revision);
     writer.u16(value.selected_slot);
     writer.hash(value.inventory_result_hash);
-    wrap(PLAYER_INVENTORY_IMPORT_RECEIPT_MAGIC, writer.finish())
+    wrap_schema(
+        PLAYER_INVENTORY_IMPORT_RECEIPT_V1_MAGIC,
+        PLAYER_INVENTORY_IMPORT_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_player_inventory_import_receipt_v1(
     bytes: &[u8],
 ) -> Result<PlayerInventoryImportReceiptWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(PLAYER_INVENTORY_IMPORT_RECEIPT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_INVENTORY_IMPORT_RECEIPT_V1_MAGIC,
+        PLAYER_INVENTORY_IMPORT_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = PlayerInventoryImportReceiptWireV1 {
         request_payload_hash: reader.hash()?,
         before: read_gameplay_identity(&mut reader)?,
@@ -1248,6 +3209,971 @@ pub fn decode_player_inventory_import_receipt_v1(
     };
     reader.finish()?;
     Ok(value)
+}
+
+pub fn encode_player_locator_item_consume_v1(value: &PlayerLocatorItemConsumeWireV1) -> Result<Vec<u8>, WireError> {
+    validate_player_locator_item_consume_v1(value)?;
+    let mut writer = Writer::default();
+    write_container_key(&mut writer, &value.inventory)?;
+    writer.u16(value.selected_slot);
+    writer.u64(value.expected_inventory_revision);
+    write_item_stack(&mut writer, &value.expected_stack);
+    writer.u8(player_locator_item_purpose_tag_v1(value.purpose));
+    writer.hash(value.locator_result_hash);
+    wrap_schema(
+        PLAYER_LOCATOR_ITEM_CONSUME_V1_MAGIC,
+        PLAYER_LOCATOR_ITEM_CONSUME_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_player_locator_item_consume_v1(bytes: &[u8]) -> Result<PlayerLocatorItemConsumeWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_LOCATOR_ITEM_CONSUME_V1_MAGIC,
+        PLAYER_LOCATOR_ITEM_CONSUME_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let value = PlayerLocatorItemConsumeWireV1 {
+        inventory: read_container_key(&mut reader)?,
+        selected_slot: reader.u16()?,
+        expected_inventory_revision: reader.u64()?,
+        expected_stack: read_item_stack(&mut reader)?,
+        purpose: read_player_locator_item_purpose_v1(&mut reader)?,
+        locator_result_hash: reader.hash()?,
+    };
+    reader.finish()?;
+    validate_player_locator_item_consume_v1(&value)?;
+    Ok(value)
+}
+
+pub fn encode_player_locator_item_consume_receipt_v1(
+    value: &PlayerLocatorItemConsumeReceiptWireV1,
+) -> Result<Vec<u8>, WireError> {
+    validate_player_locator_item_consume_receipt_v1(value)?;
+    let mut writer = Writer::default();
+    writer.hash(value.request_payload_hash);
+    writer.u8(player_locator_item_purpose_tag_v1(value.purpose));
+    writer.hash(value.locator_result_hash);
+    write_gameplay_identity(&mut writer, &value.before)?;
+    write_gameplay_identity(&mut writer, &value.after)?;
+    writer.hash(value.accepted_receipt_hash);
+    write_container_key(&mut writer, &value.inventory)?;
+    writer.u16(value.selected_slot);
+    writer.u64(value.previous_inventory_revision);
+    writer.u64(value.resulting_inventory_revision);
+    write_item_stack(&mut writer, &value.consumed_stack);
+    write_optional_item_stack(&mut writer, &value.remaining_stack);
+    writer.hash(value.inventory_result_hash);
+    wrap_schema(
+        PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_V1_MAGIC,
+        PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_player_locator_item_consume_receipt_v1(
+    bytes: &[u8],
+) -> Result<PlayerLocatorItemConsumeReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_V1_MAGIC,
+        PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let value = PlayerLocatorItemConsumeReceiptWireV1 {
+        request_payload_hash: reader.hash()?,
+        purpose: read_player_locator_item_purpose_v1(&mut reader)?,
+        locator_result_hash: reader.hash()?,
+        before: read_gameplay_identity(&mut reader)?,
+        after: read_gameplay_identity(&mut reader)?,
+        accepted_receipt_hash: reader.hash()?,
+        inventory: read_container_key(&mut reader)?,
+        selected_slot: reader.u16()?,
+        previous_inventory_revision: reader.u64()?,
+        resulting_inventory_revision: reader.u64()?,
+        consumed_stack: read_item_stack(&mut reader)?,
+        remaining_stack: read_optional_item_stack(&mut reader)?,
+        inventory_result_hash: reader.hash()?,
+    };
+    reader.finish()?;
+    validate_player_locator_item_consume_receipt_v1(&value)?;
+    Ok(value)
+}
+
+fn player_locator_item_purpose_tag_v1(value: PlayerLocatorItemPurposeV1) -> u8 {
+    match value {
+        PlayerLocatorItemPurposeV1::SettlementChart => 0,
+        PlayerLocatorItemPurposeV1::DragonLairCharter => 1,
+    }
+}
+
+fn read_player_locator_item_purpose_v1(reader: &mut Reader<'_>) -> Result<PlayerLocatorItemPurposeV1, WireError> {
+    match reader.u8()? {
+        0 => Ok(PlayerLocatorItemPurposeV1::SettlementChart),
+        1 => Ok(PlayerLocatorItemPurposeV1::DragonLairCharter),
+        _ => Err(WireError::new(
+            "player-locator-item-purpose",
+            "player locator item request uses an unknown purpose",
+        )),
+    }
+}
+
+fn validate_player_locator_item_consume_v1(value: &PlayerLocatorItemConsumeWireV1) -> Result<(), WireError> {
+    let mut writer = Writer::default();
+    write_container_key(&mut writer, &value.inventory)?;
+    if value.inventory.kind != ContainerKind::Player || value.inventory.owner_id.is_none() {
+        return Err(WireError::new(
+            "player-locator-item-inventory",
+            "player locator item consumption requires an owned player inventory",
+        ));
+    }
+    if value.selected_slot >= PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1 as u16 {
+        return Err(WireError::new(
+            "player-locator-item-slot",
+            "player locator item selected slot is outside the player inventory",
+        ));
+    }
+    if value.expected_stack.item_code == 0 || value.expected_stack.count == 0 {
+        return Err(WireError::new(
+            "player-locator-item-stack",
+            "player locator item expected stack must be non-empty",
+        ));
+    }
+    value
+        .expected_stack
+        .validate(blockwild_gameplay::MAX_ITEM_STACK)
+        .map_err(|error| WireError::new("player-locator-item-stack", error.message))?;
+    if value.locator_result_hash == CanonicalHash::default() {
+        return Err(WireError::new(
+            "player-locator-item-result",
+            "player locator item result hash must be non-zero",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_player_locator_item_consume_receipt_v1(
+    value: &PlayerLocatorItemConsumeReceiptWireV1,
+) -> Result<(), WireError> {
+    let expected_revision = value
+        .previous_inventory_revision
+        .checked_add(1)
+        .ok_or_else(|| WireError::new("player-locator-item-revision", "previous inventory revision overflow"))?;
+    if value.resulting_inventory_revision != expected_revision {
+        return Err(WireError::new(
+            "player-locator-item-revision",
+            "player locator item receipt must advance inventory revision exactly once",
+        ));
+    }
+    let mut expected_stack = value.consumed_stack.clone();
+    if let Some(remaining) = &value.remaining_stack {
+        if !remaining.compatible_with(&value.consumed_stack) || remaining.count == 0 {
+            return Err(WireError::new(
+                "player-locator-item-remaining-stack",
+                "player locator item receipt remaining stack is not a non-empty compatible stack",
+            ));
+        }
+        expected_stack.count = remaining
+            .count
+            .checked_add(1)
+            .ok_or_else(|| WireError::new("player-locator-item-stack", "expected stack count overflow"))?;
+    }
+    let request = PlayerLocatorItemConsumeWireV1 {
+        inventory: value.inventory.clone(),
+        selected_slot: value.selected_slot,
+        expected_inventory_revision: value.previous_inventory_revision,
+        expected_stack,
+        purpose: value.purpose,
+        locator_result_hash: value.locator_result_hash,
+    };
+    validate_player_locator_item_consume_v1(&request)?;
+    if value.consumed_stack.count != 1 {
+        return Err(WireError::new(
+            "player-locator-item-consumed-stack",
+            "player locator item receipt must attest exactly one consumed unit",
+        ));
+    }
+    if value.request_payload_hash == CanonicalHash::default()
+        || value.accepted_receipt_hash == CanonicalHash::default()
+        || value.inventory_result_hash == CanonicalHash::default()
+    {
+        return Err(WireError::new(
+            "player-locator-item-receipt-hash",
+            "player locator item receipt hashes must be non-zero",
+        ));
+    }
+    let expected_sequence = value
+        .before
+        .revision
+        .sequence
+        .checked_add(1)
+        .ok_or_else(|| WireError::new("player-locator-item-gameplay", "gameplay sequence overflow"))?;
+    let expected_inventory = value
+        .before
+        .revision
+        .inventory
+        .checked_add(1)
+        .ok_or_else(|| WireError::new("player-locator-item-gameplay", "gameplay inventory revision overflow"))?;
+    if value.before.world != value.after.world
+        || value.before.revision.epoch != value.after.revision.epoch
+        || value.after.revision.sequence != expected_sequence
+        || value.after.revision.inventory != expected_inventory
+        || value.before.revision.machines != value.after.revision.machines
+        || value.before.revision.combat != value.after.revision.combat
+        || value.before.revision.progression != value.after.revision.progression
+        || value.before.revision.cardforge != value.after.revision.cardforge
+        || value.before.state_hash == value.after.state_hash
+    {
+        return Err(WireError::new(
+            "player-locator-item-gameplay",
+            "player locator item receipt gameplay identities do not attest one inventory-only transition",
+        ));
+    }
+    Ok(())
+}
+
+pub fn encode_player_creative_slot_set_v1(value: &PlayerCreativeSlotSetWireV1) -> Result<Vec<u8>, WireError> {
+    validate_player_creative_slot_set_v1(value)?;
+    let mut writer = Writer::default();
+    write_container_key(&mut writer, &value.inventory)?;
+    writer.u16(value.selected_slot);
+    writer.u64(value.expected_inventory_revision);
+    write_optional_item_stack(&mut writer, &value.expected_stack);
+    write_item_stack(&mut writer, &value.replacement_stack);
+    wrap_schema(
+        PLAYER_CREATIVE_SLOT_SET_V1_MAGIC,
+        PLAYER_CREATIVE_SLOT_SET_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_player_creative_slot_set_v1(bytes: &[u8]) -> Result<PlayerCreativeSlotSetWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_CREATIVE_SLOT_SET_V1_MAGIC,
+        PLAYER_CREATIVE_SLOT_SET_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let value = PlayerCreativeSlotSetWireV1 {
+        inventory: read_container_key(&mut reader)?,
+        selected_slot: reader.u16()?,
+        expected_inventory_revision: reader.u64()?,
+        expected_stack: read_optional_item_stack(&mut reader)?,
+        replacement_stack: read_item_stack(&mut reader)?,
+    };
+    reader.finish()?;
+    validate_player_creative_slot_set_v1(&value)?;
+    Ok(value)
+}
+
+pub fn player_creative_slot_set_receipt_hash_v1(
+    value: &PlayerCreativeSlotSetReceiptWireV1,
+) -> Result<CanonicalHash, WireError> {
+    let mut writer = Writer::default();
+    write_player_creative_slot_set_receipt_contents_v1(&mut writer, value)?;
+    Ok(CanonicalHash(wire_checksum_v1(&writer.finish())))
+}
+
+pub fn encode_player_creative_slot_set_receipt_v1(
+    value: &PlayerCreativeSlotSetReceiptWireV1,
+) -> Result<Vec<u8>, WireError> {
+    validate_player_creative_slot_set_receipt_v1(value)?;
+    let mut writer = Writer::default();
+    write_player_creative_slot_set_receipt_contents_v1(&mut writer, value)?;
+    writer.hash(value.receipt_hash);
+    wrap_schema(
+        PLAYER_CREATIVE_SLOT_SET_RECEIPT_V1_MAGIC,
+        PLAYER_CREATIVE_SLOT_SET_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_player_creative_slot_set_receipt_v1(
+    bytes: &[u8],
+) -> Result<PlayerCreativeSlotSetReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_CREATIVE_SLOT_SET_RECEIPT_V1_MAGIC,
+        PLAYER_CREATIVE_SLOT_SET_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let value = PlayerCreativeSlotSetReceiptWireV1 {
+        request_payload_hash: reader.hash()?,
+        before: read_gameplay_identity(&mut reader)?,
+        after: read_gameplay_identity(&mut reader)?,
+        accepted_receipt_hash: reader.hash()?,
+        inventory: read_container_key(&mut reader)?,
+        selected_slot: reader.u16()?,
+        previous_inventory_revision: reader.u64()?,
+        resulting_inventory_revision: reader.u64()?,
+        prior_stack: read_optional_item_stack(&mut reader)?,
+        replacement_stack: read_item_stack(&mut reader)?,
+        inventory_result_hash: reader.hash()?,
+        receipt_hash: reader.hash()?,
+    };
+    reader.finish()?;
+    validate_player_creative_slot_set_receipt_v1(&value)?;
+    Ok(value)
+}
+
+fn write_player_creative_slot_set_receipt_contents_v1(
+    writer: &mut Writer,
+    value: &PlayerCreativeSlotSetReceiptWireV1,
+) -> Result<(), WireError> {
+    writer.hash(value.request_payload_hash);
+    write_gameplay_identity(writer, &value.before)?;
+    write_gameplay_identity(writer, &value.after)?;
+    writer.hash(value.accepted_receipt_hash);
+    write_container_key(writer, &value.inventory)?;
+    writer.u16(value.selected_slot);
+    writer.u64(value.previous_inventory_revision);
+    writer.u64(value.resulting_inventory_revision);
+    write_optional_item_stack(writer, &value.prior_stack);
+    write_item_stack(writer, &value.replacement_stack);
+    writer.hash(value.inventory_result_hash);
+    Ok(())
+}
+
+fn validate_player_creative_slot_set_v1(value: &PlayerCreativeSlotSetWireV1) -> Result<(), WireError> {
+    let mut writer = Writer::default();
+    write_container_key(&mut writer, &value.inventory)?;
+    if value.inventory.kind != ContainerKind::Player || value.inventory.owner_id.is_none() {
+        return Err(WireError::new(
+            "player-creative-slot-inventory",
+            "Creative slot set requires an owned player inventory",
+        ));
+    }
+    if value.selected_slot >= PLAYER_INVENTORY_IMPORT_SLOT_COUNT_V1 as u16 {
+        return Err(WireError::new(
+            "player-creative-slot-selected",
+            "Creative slot set selected slot is outside the player inventory",
+        ));
+    }
+    if let Some(expected) = &value.expected_stack {
+        expected
+            .validate(blockwild_gameplay::MAX_ITEM_STACK)
+            .map_err(|error| WireError::new("player-creative-slot-stack", error.message))?;
+    }
+    value
+        .replacement_stack
+        .validate(blockwild_gameplay::MAX_ITEM_STACK)
+        .map_err(|error| WireError::new("player-creative-slot-stack", error.message))?;
+    Ok(())
+}
+
+fn validate_player_creative_slot_set_receipt_v1(value: &PlayerCreativeSlotSetReceiptWireV1) -> Result<(), WireError> {
+    let request = PlayerCreativeSlotSetWireV1 {
+        inventory: value.inventory.clone(),
+        selected_slot: value.selected_slot,
+        expected_inventory_revision: value.previous_inventory_revision,
+        expected_stack: value.prior_stack.clone(),
+        replacement_stack: value.replacement_stack.clone(),
+    };
+    validate_player_creative_slot_set_v1(&request)?;
+    let request_bytes = encode_player_creative_slot_set_v1(&request)?;
+    if value.request_payload_hash != CanonicalHash(wire_checksum_v1(&request_bytes)) {
+        return Err(WireError::new(
+            "player-creative-slot-request-hash",
+            "Creative slot set receipt request hash does not match its canonical request",
+        ));
+    }
+    if value.previous_inventory_revision.checked_add(1) != Some(value.resulting_inventory_revision) {
+        return Err(WireError::new(
+            "player-creative-slot-revision",
+            "Creative slot set receipt must advance inventory revision exactly once",
+        ));
+    }
+    if value.accepted_receipt_hash == CanonicalHash::default()
+        || value.inventory_result_hash == CanonicalHash::default()
+        || value.receipt_hash == CanonicalHash::default()
+    {
+        return Err(WireError::new(
+            "player-creative-slot-receipt-hash",
+            "Creative slot set receipt hashes must be non-zero",
+        ));
+    }
+    let expected_sequence = value
+        .before
+        .revision
+        .sequence
+        .checked_add(1)
+        .ok_or_else(|| WireError::new("player-creative-slot-gameplay", "gameplay sequence overflow"))?;
+    let expected_inventory = value
+        .before
+        .revision
+        .inventory
+        .checked_add(1)
+        .ok_or_else(|| WireError::new("player-creative-slot-gameplay", "gameplay inventory revision overflow"))?;
+    if value.before.world != value.after.world
+        || value.before.revision.epoch != value.after.revision.epoch
+        || value.after.revision.sequence != expected_sequence
+        || value.after.revision.inventory != expected_inventory
+        || value.before.revision.machines != value.after.revision.machines
+        || value.before.revision.combat != value.after.revision.combat
+        || value.before.revision.progression != value.after.revision.progression
+        || value.before.revision.cardforge != value.after.revision.cardforge
+        || value.before.state_hash == value.after.state_hash
+    {
+        return Err(WireError::new(
+            "player-creative-slot-gameplay",
+            "Creative slot set receipt gameplay identities do not attest one inventory-only transition",
+        ));
+    }
+    if player_creative_slot_set_receipt_hash_v1(value)? != value.receipt_hash {
+        return Err(WireError::new(
+            "player-creative-slot-receipt-hash",
+            "Creative slot set receipt hash does not match its canonical fields",
+        ));
+    }
+    Ok(())
+}
+
+pub fn encode_player_game_mode_set_v1(value: &PlayerGameModeSetWireV1) -> Result<Vec<u8>, WireError> {
+    validate_player_game_mode_set_v1(value)?;
+    let mut writer = Writer::default();
+    writer.string(&value.external_entity_id)?;
+    writer.string(&value.actor_id)?;
+    writer.u64(value.player_id.packed());
+    writer.flag(value.expected_creative_mode);
+    writer.u8(value.expected_flags);
+    writer.flag(value.requested_creative_mode);
+    wrap_schema(
+        PLAYER_GAME_MODE_SET_V1_MAGIC,
+        PLAYER_GAME_MODE_SET_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_player_game_mode_set_v1(bytes: &[u8]) -> Result<PlayerGameModeSetWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_GAME_MODE_SET_V1_MAGIC,
+        PLAYER_GAME_MODE_SET_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let external_entity_id = reader.string()?;
+    let actor_id = reader.string()?;
+    let player_packed = reader.u64()?;
+    let value = PlayerGameModeSetWireV1 {
+        external_entity_id,
+        actor_id,
+        player_id: PlayerId::new(player_packed as u32, (player_packed >> 32) as u32),
+        expected_creative_mode: reader.flag()?,
+        expected_flags: reader.u8()?,
+        requested_creative_mode: reader.flag()?,
+    };
+    reader.finish()?;
+    validate_player_game_mode_set_v1(&value)?;
+    Ok(value)
+}
+
+pub fn player_game_mode_set_receipt_hash_v1(
+    value: &PlayerGameModeSetReceiptWireV1,
+) -> Result<CanonicalHash, WireError> {
+    let mut writer = Writer::default();
+    write_player_game_mode_set_receipt_contents_v1(&mut writer, value)?;
+    Ok(CanonicalHash(wire_checksum_v1(&writer.finish())))
+}
+
+pub fn encode_player_game_mode_set_receipt_v1(value: &PlayerGameModeSetReceiptWireV1) -> Result<Vec<u8>, WireError> {
+    validate_player_game_mode_set_receipt_v1(value)?;
+    let mut writer = Writer::default();
+    write_player_game_mode_set_receipt_contents_v1(&mut writer, value)?;
+    writer.hash(value.receipt_hash);
+    wrap_schema(
+        PLAYER_GAME_MODE_SET_RECEIPT_V1_MAGIC,
+        PLAYER_GAME_MODE_SET_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_player_game_mode_set_receipt_v1(bytes: &[u8]) -> Result<PlayerGameModeSetReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_GAME_MODE_SET_RECEIPT_V1_MAGIC,
+        PLAYER_GAME_MODE_SET_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let request_payload_hash = reader.hash()?;
+    let before = read_integrated_runtime_identity_v2(&mut reader)?;
+    let after = read_integrated_runtime_identity_v2(&mut reader)?;
+    let external_entity_id = reader.string()?;
+    let actor_id = reader.string()?;
+    let player_packed = reader.u64()?;
+    let value = PlayerGameModeSetReceiptWireV1 {
+        request_payload_hash,
+        before,
+        after,
+        external_entity_id,
+        actor_id,
+        player_id: PlayerId::new(player_packed as u32, (player_packed >> 32) as u32),
+        prior_creative_mode: reader.flag()?,
+        prior_flags: reader.u8()?,
+        resulting_creative_mode: reader.flag()?,
+        resulting_flags: reader.u8()?,
+        receipt_hash: reader.hash()?,
+    };
+    reader.finish()?;
+    validate_player_game_mode_set_receipt_v1(&value)?;
+    Ok(value)
+}
+
+fn write_player_game_mode_set_receipt_contents_v1(
+    writer: &mut Writer,
+    value: &PlayerGameModeSetReceiptWireV1,
+) -> Result<(), WireError> {
+    writer.hash(value.request_payload_hash);
+    write_integrated_runtime_identity_v2(writer, &value.before)?;
+    write_integrated_runtime_identity_v2(writer, &value.after)?;
+    writer.string(&value.external_entity_id)?;
+    writer.string(&value.actor_id)?;
+    writer.u64(value.player_id.packed());
+    writer.flag(value.prior_creative_mode);
+    writer.u8(value.prior_flags);
+    writer.flag(value.resulting_creative_mode);
+    writer.u8(value.resulting_flags);
+    Ok(())
+}
+
+fn validate_player_game_mode_set_v1(value: &PlayerGameModeSetWireV1) -> Result<(), WireError> {
+    let mut writer = Writer::default();
+    writer.string(&value.external_entity_id)?;
+    writer.string(&value.actor_id)?;
+    if value.external_entity_id.is_empty()
+        || value.external_entity_id.len() > 512
+        || value.external_entity_id.chars().any(char::is_control)
+        || value.actor_id.is_empty()
+        || value.actor_id.len() > 512
+        || value.actor_id.chars().any(char::is_control)
+        || value.player_id.packed() == 0
+    {
+        return Err(WireError::new(
+            "player-game-mode-custody",
+            "player game-mode set requires one non-empty actor/player/external-entity custody triple",
+        ));
+    }
+    validate_player_game_mode_flags_v1(value.expected_creative_mode, value.expected_flags, "expected")?;
+    if value.expected_creative_mode == value.requested_creative_mode {
+        return Err(WireError::new(
+            "player-game-mode-transition",
+            "player game-mode set requires an actual Creative/Survival transition",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_player_game_mode_flags_v1(creative_mode: bool, flags: u8, field: &str) -> Result<(), WireError> {
+    let creative_flag = flags & RUNTIME_INPUT_FLAG_CREATIVE_V1 != 0;
+    let flying = flags & RUNTIME_INPUT_FLAG_FLYING_V1 != 0;
+    let mounted = flags & RUNTIME_INPUT_FLAG_MOUNTED_V1 != 0;
+    if flags & !RUNTIME_INPUT_FLAG_MASK_V1 != 0
+        || creative_flag != creative_mode
+        || (flying && (!creative_mode || mounted))
+    {
+        return Err(WireError::new(
+            "player-game-mode-flags",
+            format!("player game-mode {field} flags contradict their authoritative mode or contain invalid bits"),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn player_game_mode_resulting_flags_v1(
+    prior_creative_mode: bool,
+    prior_flags: u8,
+    requested_creative_mode: bool,
+) -> Result<u8, WireError> {
+    validate_player_game_mode_flags_v1(prior_creative_mode, prior_flags, "prior")?;
+    let persistent = prior_flags & !(RUNTIME_INPUT_FLAG_CREATIVE_V1 | RUNTIME_INPUT_FLAG_FLYING_V1);
+    let preserve_valid_flying =
+        requested_creative_mode && prior_creative_mode && prior_flags & RUNTIME_INPUT_FLAG_FLYING_V1 != 0;
+    Ok(persistent
+        | (u8::from(requested_creative_mode) * RUNTIME_INPUT_FLAG_CREATIVE_V1)
+        | (u8::from(preserve_valid_flying) * RUNTIME_INPUT_FLAG_FLYING_V1))
+}
+
+fn validate_player_game_mode_set_receipt_v1(value: &PlayerGameModeSetReceiptWireV1) -> Result<(), WireError> {
+    let request = PlayerGameModeSetWireV1 {
+        external_entity_id: value.external_entity_id.clone(),
+        actor_id: value.actor_id.clone(),
+        player_id: value.player_id,
+        expected_creative_mode: value.prior_creative_mode,
+        expected_flags: value.prior_flags,
+        requested_creative_mode: value.resulting_creative_mode,
+    };
+    validate_player_game_mode_set_v1(&request)?;
+    let request_bytes = encode_player_game_mode_set_v1(&request)?;
+    if value.request_payload_hash == CanonicalHash::default()
+        || value.request_payload_hash != CanonicalHash(wire_checksum_v1(&request_bytes))
+    {
+        return Err(WireError::new(
+            "player-game-mode-request-hash",
+            "player game-mode receipt request hash does not match its canonical request",
+        ));
+    }
+    if value.before.schema_version != crate::INTEGRATED_RUNTIME_SCHEMA_V2
+        || value.after.schema_version != crate::INTEGRATED_RUNTIME_SCHEMA_V2
+        || value.before.universe_id.is_empty()
+        || value.before.location_id.is_empty()
+        || value.before.universe_id != value.after.universe_id
+        || value.before.location_id != value.after.location_id
+        || value.before.revision.epoch != value.after.revision.epoch
+        || value.before.revision.world != value.after.revision.world
+        || value.before.revision.entities != value.after.revision.entities
+        || value.before.revision.gameplay != value.after.revision.gameplay
+        || value.before.revision.persistence != value.after.revision.persistence
+        || value.before.revision.network != value.after.revision.network
+        || value.before.revision.simulation.checked_add(1) != Some(value.after.revision.simulation)
+        || value.before.tick != value.after.tick
+        || value.before.state_hash == CanonicalHash::default()
+        || value.after.state_hash == CanonicalHash::default()
+        || value.before.state_hash == value.after.state_hash
+    {
+        return Err(WireError::new(
+            "player-game-mode-identity",
+            "player game-mode receipt does not attest one exact simulation-only runtime transition",
+        ));
+    }
+    let expected_resulting_flags = player_game_mode_resulting_flags_v1(
+        value.prior_creative_mode,
+        value.prior_flags,
+        value.resulting_creative_mode,
+    )?;
+    validate_player_game_mode_flags_v1(value.resulting_creative_mode, value.resulting_flags, "resulting")?;
+    if value.resulting_flags != expected_resulting_flags {
+        return Err(WireError::new(
+            "player-game-mode-result",
+            "player game-mode receipt flags do not match the canonical transition semantics",
+        ));
+    }
+    if value.receipt_hash == CanonicalHash::default()
+        || player_game_mode_set_receipt_hash_v1(value)? != value.receipt_hash
+    {
+        return Err(WireError::new(
+            "player-game-mode-receipt-hash",
+            "player game-mode receipt hash does not match its canonical fields",
+        ));
+    }
+    Ok(())
+}
+
+const PLAYER_RESPAWN_MAX_ABS_POSITION_MILLI_V1: i64 = 33_554_432_000;
+
+pub fn encode_player_respawn_v1(value: &PlayerRespawnWireV1) -> Result<Vec<u8>, WireError> {
+    validate_player_respawn_v1(value)?;
+    let mut writer = Writer::default();
+    write_player_respawn_contents_v1(&mut writer, value)?;
+    wrap_schema(PLAYER_RESPAWN_V1_MAGIC, PLAYER_RESPAWN_V1_INNER_SCHEMA, writer.finish())
+}
+
+pub fn decode_player_respawn_v1(bytes: &[u8]) -> Result<PlayerRespawnWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_RESPAWN_V1_MAGIC,
+        PLAYER_RESPAWN_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let expected = read_integrated_runtime_identity_v2(&mut reader)?;
+    let external_entity_id = reader.string()?;
+    let actor_id = reader.string()?;
+    let player_packed = reader.u64()?;
+    let entity_packed = reader.u64()?;
+    let value = PlayerRespawnWireV1 {
+        expected,
+        external_entity_id,
+        actor_id,
+        player_id: PlayerId::new(player_packed as u32, (player_packed >> 32) as u32),
+        entity_id: EntityId::new(entity_packed as u32, (entity_packed >> 32) as u32),
+        expected_entity_revision: reader.u64()?,
+        expected_gameplay_sequence: reader.u64()?,
+        expected_gameplay_combat_revision: reader.u64()?,
+        expected_combatant_revision: reader.u64()?,
+        expected_death_sequence: reader.u64()?,
+        expected_max_health: reader.u32()?,
+        respawn_position: read_fixed_world_vec3_v1(&mut reader)?,
+        keep_inventory: reader.flag()?,
+    };
+    reader.finish()?;
+    validate_player_respawn_v1(&value)?;
+    Ok(value)
+}
+
+fn write_player_respawn_contents_v1(writer: &mut Writer, value: &PlayerRespawnWireV1) -> Result<(), WireError> {
+    write_integrated_runtime_identity_v2(writer, &value.expected)?;
+    writer.string(&value.external_entity_id)?;
+    writer.string(&value.actor_id)?;
+    writer.u64(value.player_id.packed());
+    writer.u64(value.entity_id.packed());
+    writer.u64(value.expected_entity_revision);
+    writer.u64(value.expected_gameplay_sequence);
+    writer.u64(value.expected_gameplay_combat_revision);
+    writer.u64(value.expected_combatant_revision);
+    writer.u64(value.expected_death_sequence);
+    writer.u32(value.expected_max_health);
+    write_fixed_world_vec3_v1(writer, value.respawn_position);
+    writer.flag(value.keep_inventory);
+    Ok(())
+}
+
+fn validate_player_respawn_v1(value: &PlayerRespawnWireV1) -> Result<(), WireError> {
+    if value.expected.schema_version != crate::INTEGRATED_RUNTIME_SCHEMA_V2
+        || value.expected.universe_id.is_empty()
+        || value.expected.location_id.is_empty()
+        || value.expected.state_hash == CanonicalHash::default()
+        || value.external_entity_id.is_empty()
+        || value.external_entity_id.len() > 512
+        || value.external_entity_id.chars().any(char::is_control)
+        || value.actor_id.is_empty()
+        || value.actor_id.len() > 512
+        || value.actor_id.chars().any(char::is_control)
+        || value.player_id.packed() == 0
+        || value.entity_id.packed() == 0
+        || value.expected_entity_revision == 0
+        || value.expected_death_sequence == 0
+        || value.expected_max_health == 0
+    {
+        return Err(WireError::new(
+            "player-respawn-custody",
+            "player respawn requires exact nonzero integrated, actor, player, entity, death, and vital identities",
+        ));
+    }
+    if [
+        value.expected_entity_revision,
+        value.expected_gameplay_sequence,
+        value.expected_gameplay_combat_revision,
+        value.expected_combatant_revision,
+        value.expected_death_sequence,
+    ]
+    .into_iter()
+    .any(|field| field > MAX_SAFE_U64)
+    {
+        return Err(WireError::new(
+            "player-respawn-u64",
+            "player respawn compare-and-set cursors exceed the JavaScript-safe range",
+        ));
+    }
+    if [
+        value.respawn_position.x_milli,
+        value.respawn_position.y_milli,
+        value.respawn_position.z_milli,
+    ]
+    .into_iter()
+    .any(|coordinate| coordinate.unsigned_abs() > PLAYER_RESPAWN_MAX_ABS_POSITION_MILLI_V1 as u64)
+    {
+        return Err(WireError::new(
+            "player-respawn-position",
+            "player respawn position exceeds the native fixed-point world bounds",
+        ));
+    }
+    Ok(())
+}
+
+pub fn player_respawn_receipt_hash_v1(value: &PlayerRespawnReceiptWireV1) -> Result<CanonicalHash, WireError> {
+    let mut writer = Writer::default();
+    write_player_respawn_receipt_contents_v1(&mut writer, value)?;
+    Ok(CanonicalHash(wire_checksum_v1(&writer.finish())))
+}
+
+pub fn encode_player_respawn_receipt_v1(value: &PlayerRespawnReceiptWireV1) -> Result<Vec<u8>, WireError> {
+    validate_player_respawn_receipt_v1(value)?;
+    let mut writer = Writer::default();
+    write_player_respawn_receipt_contents_v1(&mut writer, value)?;
+    writer.hash(value.receipt_hash);
+    wrap_schema(
+        PLAYER_RESPAWN_RECEIPT_V1_MAGIC,
+        PLAYER_RESPAWN_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
+}
+
+pub fn decode_player_respawn_receipt_v1(bytes: &[u8]) -> Result<PlayerRespawnReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap_schema(
+        PLAYER_RESPAWN_RECEIPT_V1_MAGIC,
+        PLAYER_RESPAWN_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
+    let request_payload_hash = reader.hash()?;
+    let before = read_integrated_runtime_identity_v2(&mut reader)?;
+    let after = read_integrated_runtime_identity_v2(&mut reader)?;
+    let external_entity_id = reader.string()?;
+    let actor_id = reader.string()?;
+    let player_packed = reader.u64()?;
+    let entity_packed = reader.u64()?;
+    let value = PlayerRespawnReceiptWireV1 {
+        request_payload_hash,
+        before,
+        after,
+        external_entity_id,
+        actor_id,
+        player_id: PlayerId::new(player_packed as u32, (player_packed >> 32) as u32),
+        entity_id: EntityId::new(entity_packed as u32, (entity_packed >> 32) as u32),
+        death_sequence: reader.u64()?,
+        prior_entity_revision: reader.u64()?,
+        resulting_entity_revision: reader.u64()?,
+        prior_gameplay_sequence: reader.u64()?,
+        resulting_gameplay_sequence: reader.u64()?,
+        prior_gameplay_combat_revision: reader.u64()?,
+        resulting_gameplay_combat_revision: reader.u64()?,
+        prior_combatant_revision: reader.u64()?,
+        resulting_combatant_revision: reader.u64()?,
+        maximum_health: reader.u32()?,
+        prior_health: reader.u32()?,
+        resulting_health: reader.u32()?,
+        prior_alive: reader.flag()?,
+        resulting_alive: reader.flag()?,
+        respawn_position: read_fixed_world_vec3_v1(&mut reader)?,
+        resulting_oxygen_seconds: reader.f64()?,
+        keep_inventory: reader.flag()?,
+        inventory_before_revision: reader.u64()?,
+        inventory_after_revision: reader.u64()?,
+        equipment_before_revision: reader.u64()?,
+        equipment_after_revision: reader.u64()?,
+        custody_before_hash: reader.hash()?,
+        custody_after_hash: reader.hash()?,
+        generated_drop_count: reader.u32()?,
+        receipt_hash: reader.hash()?,
+    };
+    reader.finish()?;
+    validate_player_respawn_receipt_v1(&value)?;
+    Ok(value)
+}
+
+fn write_player_respawn_receipt_contents_v1(
+    writer: &mut Writer,
+    value: &PlayerRespawnReceiptWireV1,
+) -> Result<(), WireError> {
+    writer.hash(value.request_payload_hash);
+    write_integrated_runtime_identity_v2(writer, &value.before)?;
+    write_integrated_runtime_identity_v2(writer, &value.after)?;
+    writer.string(&value.external_entity_id)?;
+    writer.string(&value.actor_id)?;
+    writer.u64(value.player_id.packed());
+    writer.u64(value.entity_id.packed());
+    writer.u64(value.death_sequence);
+    writer.u64(value.prior_entity_revision);
+    writer.u64(value.resulting_entity_revision);
+    writer.u64(value.prior_gameplay_sequence);
+    writer.u64(value.resulting_gameplay_sequence);
+    writer.u64(value.prior_gameplay_combat_revision);
+    writer.u64(value.resulting_gameplay_combat_revision);
+    writer.u64(value.prior_combatant_revision);
+    writer.u64(value.resulting_combatant_revision);
+    writer.u32(value.maximum_health);
+    writer.u32(value.prior_health);
+    writer.u32(value.resulting_health);
+    writer.flag(value.prior_alive);
+    writer.flag(value.resulting_alive);
+    write_fixed_world_vec3_v1(writer, value.respawn_position);
+    writer.f64(value.resulting_oxygen_seconds);
+    writer.flag(value.keep_inventory);
+    writer.u64(value.inventory_before_revision);
+    writer.u64(value.inventory_after_revision);
+    writer.u64(value.equipment_before_revision);
+    writer.u64(value.equipment_after_revision);
+    writer.hash(value.custody_before_hash);
+    writer.hash(value.custody_after_hash);
+    writer.u32(value.generated_drop_count);
+    Ok(())
+}
+
+fn validate_player_respawn_receipt_v1(value: &PlayerRespawnReceiptWireV1) -> Result<(), WireError> {
+    let request = PlayerRespawnWireV1 {
+        expected: value.before.clone(),
+        external_entity_id: value.external_entity_id.clone(),
+        actor_id: value.actor_id.clone(),
+        player_id: value.player_id,
+        entity_id: value.entity_id,
+        expected_entity_revision: value.prior_entity_revision,
+        expected_gameplay_sequence: value.prior_gameplay_sequence,
+        expected_gameplay_combat_revision: value.prior_gameplay_combat_revision,
+        expected_combatant_revision: value.prior_combatant_revision,
+        expected_death_sequence: value.death_sequence,
+        expected_max_health: value.maximum_health,
+        respawn_position: value.respawn_position,
+        keep_inventory: value.keep_inventory,
+    };
+    validate_player_respawn_v1(&request)?;
+    let request_bytes = encode_player_respawn_v1(&request)?;
+    if value.request_payload_hash == CanonicalHash::default()
+        || value.request_payload_hash != CanonicalHash(wire_checksum_v1(&request_bytes))
+    {
+        return Err(WireError::new(
+            "player-respawn-request-hash",
+            "player respawn receipt request hash does not match its canonical request",
+        ));
+    }
+    let integrated_gameplay_delta = if !value.keep_inventory && value.generated_drop_count > 0 {
+        2
+    } else {
+        1
+    };
+    if value.before.universe_id != value.after.universe_id
+        || value.before.location_id != value.after.location_id
+        || value.before.revision.epoch != value.after.revision.epoch
+        || value.before.revision.world != value.after.revision.world
+        || value.before.revision.persistence != value.after.revision.persistence
+        || value.before.revision.network != value.after.revision.network
+        || value.before.revision.entities.checked_add(1) != Some(value.after.revision.entities)
+        || value.before.revision.gameplay.checked_add(integrated_gameplay_delta) != Some(value.after.revision.gameplay)
+        || value.before.revision.simulation.checked_add(1) != Some(value.after.revision.simulation)
+        || value.before.tick != value.after.tick
+        || value.before.state_hash == value.after.state_hash
+    {
+        return Err(WireError::new(
+            "player-respawn-identity",
+            "player respawn receipt does not attest one exact R5/R6/R7 transition",
+        ));
+    }
+    if value.prior_entity_revision.checked_add(1) != Some(value.resulting_entity_revision)
+        || value.prior_gameplay_sequence.checked_add(1) != Some(value.resulting_gameplay_sequence)
+        || value.prior_gameplay_combat_revision.checked_add(1) != Some(value.resulting_gameplay_combat_revision)
+        || value.prior_combatant_revision.checked_add(1) != Some(value.resulting_combatant_revision)
+        || value.maximum_health == 0
+        || value.prior_health != 0
+        || value.prior_alive
+        || value.resulting_health != value.maximum_health
+        || !value.resulting_alive
+        || !value.resulting_oxygen_seconds.is_finite()
+        || value.resulting_oxygen_seconds <= 0.0
+    {
+        return Err(WireError::new(
+            "player-respawn-result",
+            "player respawn receipt contains contradictory dead/live revisions, vitals, or body reset",
+        ));
+    }
+    let inventory_revision_delta = value
+        .inventory_before_revision
+        .checked_add(1)
+        .is_some_and(|next| next == value.inventory_after_revision);
+    let equipment_revision_delta = value
+        .equipment_before_revision
+        .checked_add(1)
+        .is_some_and(|next| next == value.equipment_after_revision);
+    let inventory_revision_stable = value.inventory_before_revision == value.inventory_after_revision;
+    let equipment_revision_stable = value.equipment_before_revision == value.equipment_after_revision;
+    let custody_hashes_nonzero =
+        value.custody_before_hash != CanonicalHash::default() && value.custody_after_hash != CanonicalHash::default();
+    let inventory_policy_valid = if value.keep_inventory {
+        value.generated_drop_count == 0
+            && inventory_revision_stable
+            && equipment_revision_stable
+            && value.custody_before_hash == value.custody_after_hash
+    } else if value.generated_drop_count == 0 {
+        inventory_revision_stable && equipment_revision_stable && value.custody_before_hash == value.custody_after_hash
+    } else {
+        value.generated_drop_count <= 17
+            && (inventory_revision_stable || inventory_revision_delta)
+            && (equipment_revision_stable || equipment_revision_delta)
+            && (inventory_revision_delta || equipment_revision_delta)
+            && value.custody_before_hash != value.custody_after_hash
+    };
+    if !custody_hashes_nonzero || !inventory_policy_valid {
+        return Err(WireError::new(
+            "player-respawn-inventory-policy",
+            "player respawn receipt contains contradictory keep/drop custody revisions, hashes, or generated-drop count",
+        ));
+    }
+    if value.receipt_hash == CanonicalHash::default() || player_respawn_receipt_hash_v1(value)? != value.receipt_hash {
+        return Err(WireError::new(
+            "player-respawn-receipt-hash",
+            "player respawn receipt hash does not match its canonical fields",
+        ));
+    }
+    Ok(())
 }
 
 pub fn encode_terrain_residency_batch_v1(value: &IntegratedTerrainResidencyBatchV1) -> Result<Vec<u8>, WireError> {
@@ -1690,7 +4616,45 @@ fn validate_terrain_residency_reconcile_wire_receipt_v2(
     Ok(())
 }
 
+fn validate_persistence_dispatch_integers_v1(value: &RuntimePersistenceDispatchWireV1) -> Result<(), WireError> {
+    use RuntimePersistenceDispatchWireV1::*;
+    let values: &[u64] = match value {
+        ReadRecoveryPage { start_record, .. } => &[*start_record],
+        PreserveLegacyBackupChunk {
+            offset, total_bytes, ..
+        }
+        | ImportChunk {
+            offset, total_bytes, ..
+        } => &[*offset, *total_bytes],
+        ExportPage { cursor, .. } => &[*cursor],
+        FinalizeImport { total_bytes, .. } => &[*total_bytes],
+        Retry { previous_request_id } => &[*previous_request_id],
+        _ => &[],
+    };
+    if values.iter().any(|value| *value > MAX_SAFE_U64) {
+        return Err(WireError::new(
+            "domain-number",
+            "persistence u64 exceeds the JavaScript exact range",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_persistence_receipt_integers_v1(value: &RuntimePersistenceDispatchReceiptWireV1) -> Result<(), WireError> {
+    if value.request_id.is_some_and(|id| id > MAX_SAFE_U64)
+        || value.persistence_revision > MAX_SAFE_U64
+        || value.queued_bytes > MAX_SAFE_U64
+    {
+        return Err(WireError::new(
+            "domain-number",
+            "persistence receipt u64 exceeds the JavaScript exact range",
+        ));
+    }
+    Ok(())
+}
+
 pub fn encode_runtime_persistence_dispatch_v1(value: &RuntimePersistenceDispatchWireV1) -> Result<Vec<u8>, WireError> {
+    validate_persistence_dispatch_integers_v1(value)?;
     let mut writer = Writer::default();
     match value {
         RuntimePersistenceDispatchWireV1::Commit { browser_request } => {
@@ -1814,11 +4778,19 @@ pub fn encode_runtime_persistence_dispatch_v1(value: &RuntimePersistenceDispatch
         }
         RuntimePersistenceDispatchWireV1::Close => writer.u8(14),
     }
-    wrap(PERSISTENCE_DISPATCH_MAGIC, writer.finish())
+    wrap_schema(
+        PERSISTENCE_DISPATCH_V1_MAGIC,
+        PERSISTENCE_DISPATCH_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_runtime_persistence_dispatch_v1(bytes: &[u8]) -> Result<RuntimePersistenceDispatchWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(PERSISTENCE_DISPATCH_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        PERSISTENCE_DISPATCH_V1_MAGIC,
+        PERSISTENCE_DISPATCH_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = match reader.u8()? {
         1 => RuntimePersistenceDispatchWireV1::Commit {
             browser_request: reader.bytes(MAX_DOMAIN_PAYLOAD_BYTES - DOMAIN_HEADER_BYTES, "persistence commit")?,
@@ -1886,12 +4858,14 @@ pub fn decode_runtime_persistence_dispatch_v1(bytes: &[u8]) -> Result<RuntimePer
         }
     };
     reader.finish()?;
+    validate_persistence_dispatch_integers_v1(&value)?;
     Ok(value)
 }
 
 pub fn encode_runtime_persistence_dispatch_receipt_v1(
     value: &RuntimePersistenceDispatchReceiptWireV1,
 ) -> Result<Vec<u8>, WireError> {
+    validate_persistence_receipt_integers_v1(value)?;
     let mut writer = Writer::default();
     writer.flag(value.request_id.is_some());
     if let Some(request_id) = value.request_id {
@@ -1902,13 +4876,21 @@ pub fn encode_runtime_persistence_dispatch_receipt_v1(
     writer.u64(value.queued_bytes);
     writer.hash(value.state_hash);
     writer.flag(value.closed);
-    wrap(PERSISTENCE_DISPATCH_RECEIPT_MAGIC, writer.finish())
+    wrap_schema(
+        PERSISTENCE_DISPATCH_RECEIPT_V1_MAGIC,
+        PERSISTENCE_DISPATCH_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_runtime_persistence_dispatch_receipt_v1(
     bytes: &[u8],
 ) -> Result<RuntimePersistenceDispatchReceiptWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(PERSISTENCE_DISPATCH_RECEIPT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        PERSISTENCE_DISPATCH_RECEIPT_V1_MAGIC,
+        PERSISTENCE_DISPATCH_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = RuntimePersistenceDispatchReceiptWireV1 {
         request_id: if reader.flag()? { Some(reader.u64()?) } else { None },
         persistence_revision: reader.u64()?,
@@ -1916,6 +4898,66 @@ pub fn decode_runtime_persistence_dispatch_receipt_v1(
         queued_bytes: reader.u64()?,
         state_hash: reader.hash()?,
         closed: reader.flag()?,
+    };
+    reader.finish()?;
+    validate_persistence_receipt_integers_v1(&value)?;
+    Ok(value)
+}
+
+pub fn encode_runtime_persistence_status_query_v1() -> Result<Vec<u8>, WireError> {
+    wrap(PERSISTENCE_STATUS_MAGIC, Vec::new())
+}
+
+pub fn decode_runtime_persistence_status_query_v1(bytes: &[u8]) -> Result<(), WireError> {
+    let reader = Reader::new(unwrap(PERSISTENCE_STATUS_MAGIC, bytes)?);
+    reader.finish()
+}
+
+pub fn encode_runtime_persistence_status_receipt_v1(
+    value: &RuntimePersistenceStatusReceiptWireV1,
+) -> Result<Vec<u8>, WireError> {
+    let mut writer = Writer::default();
+    writer.u64(value.persistence_revision);
+    writer.u32(value.pending);
+    writer.u64(value.queued_bytes);
+    writer.hash(value.dispatcher_state_hash);
+    writer.hash(value.authority_state_hash);
+    writer.flag(value.closed);
+    writer.flag(value.terminal_checkpoint.is_some());
+    if let Some(checkpoint) = &value.terminal_checkpoint {
+        writer.string(&checkpoint.checkpoint_id)?;
+        writer.hash(checkpoint.checkpoint_hash);
+        writer.u64(checkpoint.journal_sequence);
+        writer.u32(checkpoint.record_count);
+        writer.hash(checkpoint.save_set_hash);
+        writer.hash(checkpoint.manifest_hash);
+    }
+    wrap(PERSISTENCE_STATUS_RECEIPT_MAGIC, writer.finish())
+}
+
+pub fn decode_runtime_persistence_status_receipt_v1(
+    bytes: &[u8],
+) -> Result<RuntimePersistenceStatusReceiptWireV1, WireError> {
+    let mut reader = Reader::new(unwrap(PERSISTENCE_STATUS_RECEIPT_MAGIC, bytes)?);
+    let value = RuntimePersistenceStatusReceiptWireV1 {
+        persistence_revision: reader.u64()?,
+        pending: reader.u32()?,
+        queued_bytes: reader.u64()?,
+        dispatcher_state_hash: reader.hash()?,
+        authority_state_hash: reader.hash()?,
+        closed: reader.flag()?,
+        terminal_checkpoint: if reader.flag()? {
+            Some(RuntimePersistenceTerminalCheckpointWireV1 {
+                checkpoint_id: reader.string()?,
+                checkpoint_hash: reader.hash()?,
+                journal_sequence: reader.u64()?,
+                record_count: reader.u32()?,
+                save_set_hash: reader.hash()?,
+                manifest_hash: reader.hash()?,
+            })
+        } else {
+            None
+        },
     };
     reader.finish()?;
     Ok(value)
@@ -1938,11 +4980,19 @@ pub fn encode_network_replication_record_v1(value: &ScopedDeltaRecordV1) -> Resu
     let mut writer = Writer::default();
     write_replication_scope(&mut writer, &value.scope)?;
     write_network_delta_record(&mut writer, &value.record)?;
-    wrap(NETWORK_REPLICATION_MAGIC, writer.finish())
+    wrap_schema(
+        NETWORK_REPLICATION_UPSERT_V1_MAGIC,
+        NETWORK_REPLICATION_UPSERT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_network_replication_record_v1(bytes: &[u8]) -> Result<ScopedDeltaRecordV1, WireError> {
-    let mut reader = Reader::new(unwrap(NETWORK_REPLICATION_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        NETWORK_REPLICATION_UPSERT_V1_MAGIC,
+        NETWORK_REPLICATION_UPSERT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = ScopedDeltaRecordV1 {
         scope: read_replication_scope(&mut reader)?,
         record: read_network_delta_record(&mut reader)?,
@@ -1970,11 +5020,19 @@ pub fn encode_network_delta_build_request_v1(value: &NetworkDeltaBuildRequestWir
     write_network_identity(&mut writer, &value.source.from)?;
     write_network_identity(&mut writer, &value.source.to)?;
     write_network_interest(&mut writer, &value.interest)?;
-    wrap(NETWORK_DELTA_BUILD_MAGIC, writer.finish())
+    wrap_schema(
+        NETWORK_DELTA_BUILD_V1_MAGIC,
+        NETWORK_DELTA_BUILD_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_network_delta_build_request_v1(bytes: &[u8]) -> Result<NetworkDeltaBuildRequestWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(NETWORK_DELTA_BUILD_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        NETWORK_DELTA_BUILD_V1_MAGIC,
+        NETWORK_DELTA_BUILD_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let source = InterestDeltaBuildSourceV1 {
         session_id: reader.string()?,
         delta_id: reader.string()?,
@@ -1995,11 +5053,19 @@ pub fn encode_network_reconnect_request_v1(value: &NetworkReconnectRequestWireV1
     writer.string(&value.session_id)?;
     writer.string(&value.peer_id)?;
     writer.u64(value.connection_generation);
-    wrap(NETWORK_RECONNECT_MAGIC, writer.finish())
+    wrap_schema(
+        NETWORK_RECONNECT_V1_MAGIC,
+        NETWORK_RECONNECT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_network_reconnect_request_v1(bytes: &[u8]) -> Result<NetworkReconnectRequestWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(NETWORK_RECONNECT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        NETWORK_RECONNECT_V1_MAGIC,
+        NETWORK_RECONNECT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = NetworkReconnectRequestWireV1 {
         session_id: reader.string()?,
         peer_id: reader.string()?,
@@ -2012,11 +5078,19 @@ pub fn decode_network_reconnect_request_v1(bytes: &[u8]) -> Result<NetworkReconn
 pub fn encode_network_peer_release_v1(peer_id: &str) -> Result<Vec<u8>, WireError> {
     let mut writer = Writer::default();
     writer.string(peer_id)?;
-    wrap(NETWORK_PEER_RELEASE_MAGIC, writer.finish())
+    wrap_schema(
+        NETWORK_PEER_RELEASE_V1_MAGIC,
+        NETWORK_PEER_RELEASE_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_network_peer_release_v1(bytes: &[u8]) -> Result<String, WireError> {
-    let mut reader = Reader::new(unwrap(NETWORK_PEER_RELEASE_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        NETWORK_PEER_RELEASE_V1_MAGIC,
+        NETWORK_PEER_RELEASE_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let peer_id = reader.string()?;
     reader.finish()?;
     Ok(peer_id)
@@ -2025,11 +5099,19 @@ pub fn decode_network_peer_release_v1(bytes: &[u8]) -> Result<String, WireError>
 pub fn encode_network_command_release_v1(command_id: &str) -> Result<Vec<u8>, WireError> {
     let mut writer = Writer::default();
     writer.string(command_id)?;
-    wrap(NETWORK_COMMAND_RELEASE_MAGIC, writer.finish())
+    wrap_schema(
+        NETWORK_COMMAND_RELEASE_V1_MAGIC,
+        NETWORK_COMMAND_RELEASE_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_network_command_release_v1(bytes: &[u8]) -> Result<String, WireError> {
-    let mut reader = Reader::new(unwrap(NETWORK_COMMAND_RELEASE_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        NETWORK_COMMAND_RELEASE_V1_MAGIC,
+        NETWORK_COMMAND_RELEASE_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let command_id = reader.string()?;
     reader.finish()?;
     Ok(command_id)
@@ -2059,11 +5141,19 @@ pub fn encode_network_peer_grant_v1(value: &NetworkPeerGrantV1) -> Result<Vec<u8
     writer.u64(value.expires_at);
     writer.u64(value.next_sequence);
     write_network_interest(&mut writer, &value.interest)?;
-    wrap(NETWORK_PEER_GRANT_MAGIC, writer.finish())
+    wrap_schema(
+        NETWORK_PEER_GRANT_V1_MAGIC,
+        NETWORK_PEER_GRANT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_network_peer_grant_v1(bytes: &[u8]) -> Result<NetworkPeerGrantV1, WireError> {
-    let mut reader = Reader::new(unwrap(NETWORK_PEER_GRANT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        NETWORK_PEER_GRANT_V1_MAGIC,
+        NETWORK_PEER_GRANT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let session_id = reader.string()?;
     let peer_id = reader.string()?;
     let connection_id = reader.string()?;
@@ -2123,11 +5213,19 @@ pub fn encode_network_agent_grant_v1(value: &AgentCapabilityGrantV1) -> Result<V
     write_agent_capabilities(&mut writer, &value.requested)?;
     write_agent_capabilities(&mut writer, &value.granted)?;
     writer.u64(value.expires_at);
-    wrap(NETWORK_AGENT_GRANT_MAGIC, writer.finish())
+    wrap_schema(
+        NETWORK_AGENT_GRANT_V1_MAGIC,
+        NETWORK_AGENT_GRANT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_network_agent_grant_v1(bytes: &[u8]) -> Result<AgentCapabilityGrantV1, WireError> {
-    let mut reader = Reader::new(unwrap(NETWORK_AGENT_GRANT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        NETWORK_AGENT_GRANT_V1_MAGIC,
+        NETWORK_AGENT_GRANT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = AgentCapabilityGrantV1 {
         agent_id: reader.string()?,
         peer_id: reader.string()?,
@@ -2402,11 +5500,19 @@ pub fn encode_gameplay_actor_grant_v1(actor_id: &str, grant: &ActorGrant) -> Res
     for scope in &grant.scopes {
         writer.u8(scope_tag(*scope));
     }
-    wrap(GAMEPLAY_GRANT_MAGIC, writer.finish())
+    wrap_schema(
+        GAMEPLAY_ACTOR_GRANT_V1_MAGIC,
+        GAMEPLAY_ACTOR_GRANT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_gameplay_actor_grant_v1(bytes: &[u8]) -> Result<(String, ActorGrant), WireError> {
-    let mut reader = Reader::new(unwrap(GAMEPLAY_GRANT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        GAMEPLAY_ACTOR_GRANT_V1_MAGIC,
+        GAMEPLAY_ACTOR_GRANT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let actor_id = reader.string()?;
     let player_id = reader.option_player_id()?;
     let entity_id = reader.option_entity_id()?;
@@ -2414,12 +5520,14 @@ pub fn decode_gameplay_actor_grant_v1(bytes: &[u8]) -> Result<(String, ActorGran
     let count = reader.count(16, "gameplay scope count")?;
     let mut scopes = BTreeSet::new();
     for _ in 0..count {
-        if !scopes.insert(read_scope(&mut reader)?) {
+        let scope = read_scope(&mut reader)?;
+        if scopes.last().is_some_and(|previous| scope <= *previous) {
             return Err(WireError::new(
                 "gameplay-grant",
-                "gameplay grant contains a duplicate scope",
+                "gameplay grant scopes must be unique and canonically ordered",
             ));
         }
+        scopes.insert(scope);
     }
     reader.finish()?;
     Ok((
@@ -2434,6 +5542,15 @@ pub fn decode_gameplay_actor_grant_v1(bytes: &[u8]) -> Result<(String, ActorGran
 }
 
 pub fn encode_gameplay_batch_v1(value: &GameplayBatch) -> Result<Vec<u8>, WireError> {
+    if value.schema_version != blockwild_gameplay::GAMEPLAY_SCHEMA_VERSION {
+        return Err(WireError::new("gameplay-schema", "unsupported gameplay batch schema"));
+    }
+    if value.commands.is_empty() || value.commands.len() > blockwild_gameplay::MAX_COMMANDS_PER_BATCH {
+        return Err(WireError::new(
+            "gameplay-count",
+            "gameplay command count must be between 1 and 256",
+        ));
+    }
     let mut writer = Writer::default();
     writer.string(&value.batch_id)?;
     writer.string(&value.idempotency_key)?;
@@ -2447,12 +5564,24 @@ pub fn encode_gameplay_batch_v1(value: &GameplayBatch) -> Result<Vec<u8>, WireEr
     for command in &value.commands {
         write_gameplay_command(&mut writer, command)?;
     }
+    // Validate bounded field encodings before hashing potentially large input.
+    if value.command_hash != value.calculate_command_hash() {
+        return Err(WireError::new("gameplay-hash", "gameplay command hash mismatch"));
+    }
     writer.hash(value.command_hash);
-    wrap(GAMEPLAY_COMMAND_MAGIC, writer.finish())
+    wrap_schema(
+        GAMEPLAY_COMMAND_V1_MAGIC,
+        GAMEPLAY_COMMAND_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_gameplay_batch_v1(bytes: &[u8]) -> Result<GameplayBatch, WireError> {
-    let mut reader = Reader::new(unwrap(GAMEPLAY_COMMAND_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        GAMEPLAY_COMMAND_V1_MAGIC,
+        GAMEPLAY_COMMAND_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let batch_id = reader.string()?;
     let idempotency_key = reader.string()?;
     let actor = read_gameplay_actor(&mut reader)?;
@@ -2501,11 +5630,19 @@ pub fn encode_gameplay_receipt_v1(value: &GameplayReceipt) -> Result<Vec<u8>, Wi
             writer.string(&rejection.message)?;
         }
     }
-    wrap(GAMEPLAY_RECEIPT_MAGIC, writer.finish())
+    wrap_schema(
+        GAMEPLAY_RECEIPT_V1_MAGIC,
+        GAMEPLAY_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_gameplay_receipt_v1(bytes: &[u8]) -> Result<GameplayReceipt, WireError> {
-    let mut reader = Reader::new(unwrap(GAMEPLAY_RECEIPT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        GAMEPLAY_RECEIPT_V1_MAGIC,
+        GAMEPLAY_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let result = match reader.u8()? {
         0 => GameplayReceipt::Rejected {
             batch_id: reader.string()?,
@@ -2704,6 +5841,19 @@ fn write_inventory_command(writer: &mut Writer, value: &InventoryCommand) -> Res
             write_generated_drop_provenance_v1(writer, &value.provenance);
             writer.hash(value.request_hash);
         }
+        InventoryCommand::ConsumeInventoryUnitV1(value) => {
+            writer.u8(INVENTORY_COMMAND_CONSUME_UNIT_V1_TAG as u8);
+            write_container_key(writer, &value.inventory)?;
+            writer.u16(value.slot);
+            writer.u64(value.expected_container_revision);
+            write_item_stack(writer, &value.expected_stack);
+        }
+        InventoryCommand::SetCreativeInventorySlotV1(_) => {
+            return Err(WireError::new(
+                "inventory-command-dedicated",
+                "creative inventory slot mutation is only accepted through its dedicated wire operation",
+            ));
+        }
     }
     Ok(())
 }
@@ -2794,6 +5944,18 @@ fn read_inventory_command(reader: &mut Reader<'_>) -> Result<InventoryCommand, W
                 request_hash: reader.hash()?,
             }),
         ),
+        tag if u16::from(tag) == INVENTORY_COMMAND_CONSUME_UNIT_V1_TAG => {
+            Ok(InventoryCommand::ConsumeInventoryUnitV1(ConsumeInventoryUnitV1 {
+                inventory: read_container_key(reader)?,
+                slot: reader.u16()?,
+                expected_container_revision: reader.u64()?,
+                expected_stack: read_item_stack(reader)?,
+            }))
+        }
+        tag if u16::from(tag) == INVENTORY_COMMAND_SET_CREATIVE_SLOT_V1_TAG => Err(WireError::new(
+            "inventory-command-dedicated",
+            "creative inventory slot mutation is only accepted through its dedicated wire operation",
+        )),
         _ => Err(WireError::new("inventory-command", "unknown inventory command tag")),
     }
 }
@@ -3091,6 +6253,17 @@ fn validate_player_bootstrap_custody(value: &PlayerBootstrapCustodyWireV1) -> Re
             "player custody must contain the exact nine inventory and eight equipment slots",
         ));
     }
+    let metadata_bytes = value.referenced_metadata.iter().try_fold(0_usize, |total, metadata| {
+        total
+            .checked_add(metadata.canonical_json_bytes.len())
+            .and_then(|bytes| bytes.checked_add(metadata.unknown_extension_bytes.len()))
+    });
+    if metadata_bytes.is_none_or(|bytes| bytes > blockwild_gameplay::MAX_PLAYER_INVENTORY_IMPORT_METADATA_BYTES_V1) {
+        return Err(WireError::new(
+            "player-bootstrap-metadata",
+            "player custody metadata exceeds its aggregate byte bound",
+        ));
+    }
     let referenced = value
         .inventory_slots
         .iter()
@@ -3111,12 +6284,9 @@ fn validate_player_bootstrap_custody(value: &PlayerBootstrapCustodyWireV1) -> Re
         ));
     }
     for metadata in &value.referenced_metadata {
-        if metadata.hash != metadata.calculate_hash() {
-            return Err(WireError::new(
-                "player-bootstrap-metadata",
-                "player custody metadata hash does not match its canonical bytes",
-            ));
-        }
+        metadata
+            .validate_wire()
+            .map_err(|error| WireError::new("player-bootstrap-metadata", error.message))?;
     }
     Ok(())
 }
@@ -3446,6 +6616,7 @@ fn write_combat_command(writer: &mut Writer, value: &CombatCommand) -> Result<()
             writer.u64(*expected_target_revision);
             writer.string(ability_id)?;
             writer.string(projectile_id)?;
+            unpack_entity_id(entity_id.packed())?;
             writer.u64(entity_id.packed());
             writer.u8(content_domain_tag(*content_domain));
             writer.string(content_id)?;
@@ -3573,6 +6744,7 @@ fn write_combat_command(writer: &mut Writer, value: &CombatCommand) -> Result<()
             writer.u8(8);
             writer.string(source_id)?;
             writer.string(summon_id)?;
+            unpack_entity_id(entity_id.packed())?;
             writer.u64(entity_id.packed());
             writer.u8(content_domain_tag(*content_domain));
             writer.string(content_id)?;
@@ -3965,6 +7137,12 @@ fn write_accepted_gameplay_receipt(writer: &mut Writer, value: &AcceptedReceipt)
     for event in &value.events {
         write_gameplay_event(writer, event)?;
     }
+    if value.receipt_hash != value.calculate_hash() {
+        return Err(WireError::new(
+            "gameplay-receipt-hash",
+            "gameplay receipt hash mismatch",
+        ));
+    }
     writer.hash(value.receipt_hash);
     Ok(())
 }
@@ -3976,9 +7154,14 @@ fn read_accepted_gameplay_receipt(reader: &mut Reader<'_>) -> Result<AcceptedRec
     let domain_count = reader.count(5, "touched gameplay domains")?;
     let mut touched_domains = BTreeSet::new();
     for _ in 0..domain_count {
-        if !touched_domains.insert(read_domain(reader)?) {
-            return Err(WireError::new("gameplay-receipt", "duplicate touched domain"));
+        let domain = read_domain(reader)?;
+        if touched_domains.last().is_some_and(|previous| domain <= *previous) {
+            return Err(WireError::new(
+                "gameplay-receipt",
+                "touched domains must be unique and canonically ordered",
+            ));
         }
+        touched_domains.insert(domain);
     }
     let resource_count = reader.count(MAX_COLLECTION, "resource delta count")?;
     let mut resource_deltas = Vec::with_capacity(resource_count);
@@ -4004,7 +7187,7 @@ fn read_accepted_gameplay_receipt(reader: &mut Reader<'_>) -> Result<AcceptedRec
     for _ in 0..event_count {
         events.push(read_gameplay_event(reader)?);
     }
-    Ok(AcceptedReceipt {
+    let value = AcceptedReceipt {
         batch_id,
         before,
         after,
@@ -4013,7 +7196,14 @@ fn read_accepted_gameplay_receipt(reader: &mut Reader<'_>) -> Result<AcceptedRec
         stat_deltas,
         events,
         receipt_hash: reader.hash()?,
-    })
+    };
+    if value.receipt_hash != value.calculate_hash() {
+        return Err(WireError::new(
+            "gameplay-receipt-hash",
+            "gameplay receipt hash mismatch",
+        ));
+    }
+    Ok(value)
 }
 
 fn write_gameplay_event(writer: &mut Writer, value: &GameplayEvent) -> Result<(), WireError> {
@@ -4203,11 +7393,19 @@ fn read_rejection_code(reader: &mut Reader<'_>) -> Result<RejectionCode, WireErr
 pub fn encode_entity_authority_export_v1(value: EntityAuthorityExportWireV1) -> Result<Vec<u8>, WireError> {
     let mut writer = Writer::default();
     writer.u64(value.expected_revision);
-    wrap(ENTITY_AUTHORITY_EXPORT_MAGIC, writer.finish())
+    wrap_schema(
+        ENTITY_AUTHORITY_EXPORT_V1_MAGIC,
+        ENTITY_AUTHORITY_EXPORT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_entity_authority_export_v1(bytes: &[u8]) -> Result<EntityAuthorityExportWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(ENTITY_AUTHORITY_EXPORT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        ENTITY_AUTHORITY_EXPORT_V1_MAGIC,
+        ENTITY_AUTHORITY_EXPORT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = EntityAuthorityExportWireV1 {
         expected_revision: reader.u64()?,
     };
@@ -4225,11 +7423,19 @@ pub fn encode_entity_authority_import_v2(value: &EntityAuthorityImportWireV2) ->
         blockwild_entity::MAX_ENTITY_AUTHORITY_SNAPSHOT_BYTES,
         "entity authority snapshot",
     )?;
-    wrap(ENTITY_AUTHORITY_IMPORT_MAGIC, writer.finish())
+    wrap_schema(
+        ENTITY_AUTHORITY_IMPORT_V2_MAGIC,
+        ENTITY_AUTHORITY_IMPORT_V2_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_entity_authority_import_v2(bytes: &[u8]) -> Result<EntityAuthorityImportWireV2, WireError> {
-    let mut reader = Reader::new(unwrap(ENTITY_AUTHORITY_IMPORT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        ENTITY_AUTHORITY_IMPORT_V2_MAGIC,
+        ENTITY_AUTHORITY_IMPORT_V2_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = EntityAuthorityImportWireV2 {
         expected_revision: reader.u64()?,
         snapshot: reader.bytes(
@@ -4251,13 +7457,21 @@ pub fn encode_entity_authority_import_receipt_v1(
     writer.u64(value.revision);
     writer.u32(value.entity_count);
     writer.hash(value.state_hash);
-    wrap(ENTITY_AUTHORITY_IMPORT_RECEIPT_MAGIC, writer.finish())
+    wrap_schema(
+        ENTITY_AUTHORITY_IMPORT_RECEIPT_V1_MAGIC,
+        ENTITY_AUTHORITY_IMPORT_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_entity_authority_import_receipt_v1(
     bytes: &[u8],
 ) -> Result<EntityAuthorityImportReceiptWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(ENTITY_AUTHORITY_IMPORT_RECEIPT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        ENTITY_AUTHORITY_IMPORT_RECEIPT_V1_MAGIC,
+        ENTITY_AUTHORITY_IMPORT_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = EntityAuthorityImportReceiptWireV1 {
         previous_revision: reader.u64()?,
         revision: reader.u64()?,
@@ -4272,11 +7486,19 @@ pub fn encode_entity_compatibility_export_v1(value: EntityCompatibilityExportWir
     let mut writer = Writer::default();
     writer.u64(value.entity_id.packed());
     writer.u64(value.expected_entity_revision);
-    wrap(ENTITY_COMPATIBILITY_EXPORT_MAGIC, writer.finish())
+    wrap_schema(
+        ENTITY_COMPATIBILITY_EXPORT_V1_MAGIC,
+        ENTITY_COMPATIBILITY_EXPORT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_entity_compatibility_export_v1(bytes: &[u8]) -> Result<EntityCompatibilityExportWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(ENTITY_COMPATIBILITY_EXPORT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        ENTITY_COMPATIBILITY_EXPORT_V1_MAGIC,
+        ENTITY_COMPATIBILITY_EXPORT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let value = EntityCompatibilityExportWireV1 {
         entity_id: unpack_entity_id(reader.u64()?)?,
         expected_entity_revision: reader.u64()?,
@@ -4299,11 +7521,19 @@ pub fn encode_entity_compatibility_import_v1(value: &EntityCompatibilityImportWi
         blockwild_entity::MAX_ENTITY_AUTHORITY_SNAPSHOT_BYTES,
         "entity compatibility record",
     )?;
-    wrap(ENTITY_COMPATIBILITY_IMPORT_MAGIC, writer.finish())
+    wrap_schema(
+        ENTITY_COMPATIBILITY_IMPORT_V1_MAGIC,
+        ENTITY_COMPATIBILITY_IMPORT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_entity_compatibility_import_v1(bytes: &[u8]) -> Result<EntityCompatibilityImportWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(ENTITY_COMPATIBILITY_IMPORT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        ENTITY_COMPATIBILITY_IMPORT_V1_MAGIC,
+        ENTITY_COMPATIBILITY_IMPORT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let sequence = reader.u64()?;
     let expected_revision = reader.u64()?;
     let tick = reader.u64()?;
@@ -4341,11 +7571,15 @@ pub fn encode_entity_command_batch_v1(value: &EntityCommandBatch) -> Result<Vec<
     for command in &value.commands {
         write_entity_command(&mut writer, command)?;
     }
-    wrap(ENTITY_COMMAND_MAGIC, writer.finish())
+    wrap_schema(ENTITY_COMMAND_V1_MAGIC, ENTITY_COMMAND_V1_INNER_SCHEMA, writer.finish())
 }
 
 pub fn decode_entity_command_batch_v1(bytes: &[u8]) -> Result<EntityCommandBatch, WireError> {
-    let mut reader = Reader::new(unwrap(ENTITY_COMMAND_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        ENTITY_COMMAND_V1_MAGIC,
+        ENTITY_COMMAND_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let sequence = reader.u64()?;
     let expected_revision = reader.u64()?;
     let tick = reader.u64()?;
@@ -4420,11 +7654,15 @@ pub fn encode_entity_event_batch_v1(value: &EntityEventBatch) -> Result<Vec<u8>,
             EntityEventKind::DormantSummaryChanged => writer.u8(23),
         }
     }
-    wrap(ENTITY_RECEIPT_MAGIC, writer.finish())
+    wrap_schema(ENTITY_RECEIPT_V1_MAGIC, ENTITY_RECEIPT_V1_INNER_SCHEMA, writer.finish())
 }
 
 pub fn decode_entity_event_batch_v1(bytes: &[u8]) -> Result<EntityEventBatch, WireError> {
-    let mut reader = Reader::new(unwrap(ENTITY_RECEIPT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        ENTITY_RECEIPT_V1_MAGIC,
+        ENTITY_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let sequence = reader.u64()?;
     let previous_revision = reader.u64()?;
     let revision = reader.u64()?;
@@ -5454,11 +8692,19 @@ pub fn encode_content_install_page_v1(value: &ContentInstallPageWireV1) -> Resul
             "content extension bytes",
         )?;
     }
-    wrap(CONTENT_INSTALL_PAGE_MAGIC, writer.finish())
+    wrap_schema(
+        CONTENT_INSTALL_PAGE_V1_MAGIC,
+        CONTENT_INSTALL_PAGE_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_content_install_page_v1(bytes: &[u8]) -> Result<ContentInstallPageWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(CONTENT_INSTALL_PAGE_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        CONTENT_INSTALL_PAGE_V1_MAGIC,
+        CONTENT_INSTALL_PAGE_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let install_id = reader.string()?;
     let manifest_schema = reader.u16()?;
     let source_revision = reader.string()?;
@@ -5523,11 +8769,19 @@ pub fn encode_content_install_receipt_v1(value: &ContentInstallReceiptWireV1) ->
     writer.u32(value.accepted_entries);
     writer.u32(value.installed_entries);
     writer.u64(value.installed_bytes);
-    wrap(CONTENT_INSTALL_RECEIPT_MAGIC, writer.finish())
+    wrap_schema(
+        CONTENT_INSTALL_RECEIPT_V1_MAGIC,
+        CONTENT_INSTALL_RECEIPT_V1_INNER_SCHEMA,
+        writer.finish(),
+    )
 }
 
 pub fn decode_content_install_receipt_v1(bytes: &[u8]) -> Result<ContentInstallReceiptWireV1, WireError> {
-    let mut reader = Reader::new(unwrap(CONTENT_INSTALL_RECEIPT_MAGIC, bytes)?);
+    let mut reader = Reader::new(unwrap_schema(
+        CONTENT_INSTALL_RECEIPT_V1_MAGIC,
+        CONTENT_INSTALL_RECEIPT_V1_INNER_SCHEMA,
+        bytes,
+    )?);
     let status = match reader.u8()? {
         0 => ContentInstallReceiptStatusV1::Staged,
         1 => ContentInstallReceiptStatusV1::Installed,
@@ -5701,6 +8955,594 @@ mod tests {
         CameraProfileV1::default()
     }
 
+    fn basic_dirt_projection_fixture_v1() -> RuntimeBasicDirtActionProjectionReceiptWireV1 {
+        let identity = IntegratedRuntimeIdentityV2 {
+            schema_version: crate::INTEGRATED_RUNTIME_SCHEMA_V2,
+            universe_id: "universe:receipt".into(),
+            location_id: "surface".into(),
+            revision: IntegratedRuntimeRevisionV2 {
+                epoch: 1,
+                world: 2,
+                entities: 3,
+                gameplay: 4,
+                persistence: 5,
+                network: 6,
+                simulation: 7,
+            },
+            tick: 8,
+            state_hash: CanonicalHash([0x11; 16]),
+        };
+        let mut content = IntegratedRuntimeBasicDirtActionContentBindingV1 {
+            manifest_hash: CanonicalHash([0x21; 16]),
+            installed_registry_hash: CanonicalHash([0x22; 16]),
+            catalog_schema_version: 2,
+            catalog_content_version: 9,
+            catalog_blob_hash: CanonicalHash([0x23; 16]),
+            action_report_hash: CanonicalHash([0x24; 16]),
+            subset_hash: CanonicalHash::default(),
+        };
+        content.subset_hash = content.calculate_subset_hash_v1();
+        let provenance = GeneratedDropProvenanceV1 {
+            schema_version: blockwild_gameplay::BLOCK_ACTION_GENERATED_DROP_PROVENANCE_SCHEMA_VERSION_V1,
+            manifest_hash: content.manifest_hash,
+            installed_registry_hash: content.installed_registry_hash,
+            catalog_blob_hash: content.catalog_blob_hash,
+            action_report_hash: content.action_report_hash,
+            rng_semantics_hash: CanonicalHash([0x25; 16]),
+            block_action_sequence: 12,
+            origin_input_sequence: 41,
+            block_id: crate::INTEGRATED_RUNTIME_BASIC_DIRT_BLOCK_ID_V1,
+            position: BlockActionLootCellV1 { x: -2, y: 43, z: 5 },
+            loot_plan_hash: CanonicalHash([0x26; 16]),
+            group_ordinal: 0,
+        };
+        let entity_id = EntityId::new(7, 3);
+        let native_drop = crate::IntegratedRuntimeGeneratedDropReceiptV1 {
+            provenance: provenance.clone(),
+            entity_id,
+        };
+        let mut native = IntegratedRuntimeBasicDirtActionReceiptV1 {
+            schema_version: crate::INTEGRATED_RUNTIME_BASIC_DIRT_ACTION_RECEIPT_SCHEMA_V1,
+            sequence: 5,
+            origin_input_sequence: 41,
+            completion_tick: 81,
+            action: IntegratedRuntimeBasicDirtActionKindV1::Mine,
+            position: blockwild_authority::CellPositionV1 { x: -2, y: 43, z: 5 },
+            prior_block_id: crate::INTEGRATED_RUNTIME_BASIC_DIRT_BLOCK_ID_V1,
+            replacement_block_id: blockwild_authority::WORLD_AIR_BLOCK_ID_V1,
+            before_world_revision: WorldAuthorityRevisionV1 {
+                epoch: 1,
+                mutation: 9,
+                residency: 3,
+            },
+            after_world_revision: WorldAuthorityRevisionV1 {
+                epoch: 1,
+                mutation: 10,
+                residency: 3,
+            },
+            before_world_hash: CanonicalHash([0x31; 16]),
+            after_world_hash: CanonicalHash([0x32; 16]),
+            creative_mode: false,
+            inventory: crate::IntegratedRuntimeBasicDirtInventoryDeltaV1 {
+                container: ContainerKey::player("actor:receipt"),
+                slot: 2,
+                before_revision: 4,
+                after_revision: 4,
+                before_stack: Some(ItemStack {
+                    item_code: 91,
+                    count: 1,
+                    durability_millionths: Some(750_000),
+                    metadata_hash: CanonicalHash([0x41; 16]),
+                }),
+                after_stack: Some(ItemStack {
+                    item_code: 91,
+                    count: 1,
+                    durability_millionths: Some(750_000),
+                    metadata_hash: CanonicalHash([0x41; 16]),
+                }),
+            },
+            generated_drops: vec![native_drop],
+            content: content.clone(),
+            receipt_hash: CanonicalHash::default(),
+        };
+        native.receipt_hash = native.calculate_hash_v1();
+        RuntimeBasicDirtActionProjectionReceiptWireV1 {
+            request_payload_hash: CanonicalHash([0x51; 16]),
+            identity,
+            cursor_after: native.sequence,
+            receipt: Some(RuntimeBasicDirtActionProjectionWireV1 {
+                schema_version: native.schema_version,
+                sequence: native.sequence,
+                origin_input_sequence: native.origin_input_sequence,
+                completion_tick: native.completion_tick,
+                action: native.action,
+                position: native.position,
+                prior_block_id: native.prior_block_id,
+                replacement_block_id: native.replacement_block_id,
+                before_world_revision: native.before_world_revision,
+                after_world_revision: native.after_world_revision,
+                before_world_hash: native.before_world_hash,
+                after_world_hash: native.after_world_hash,
+                creative_mode: native.creative_mode,
+                inventory: native.inventory,
+                generated_drops: vec![RuntimeBasicDirtGeneratedDropProjectionWireV1 {
+                    provenance,
+                    entity_id,
+                    stack: ItemStack {
+                        item_code: 2,
+                        count: 1,
+                        durability_millionths: None,
+                        metadata_hash: CanonicalHash([0x52; 16]),
+                    },
+                    position: FixedWorldVec3V1 {
+                        x_milli: -1_750,
+                        y_milli: 43_500,
+                        z_milli: 5_250,
+                    },
+                    velocity_milli_per_second: FixedWorldVec3V1 {
+                        x_milli: 125,
+                        y_milli: 450,
+                        z_milli: -75,
+                    },
+                    rotation: RotationMicroturnsV1 {
+                        yaw: 750_000,
+                        pitch: 0,
+                        roll: 0,
+                    },
+                }],
+                content,
+                receipt_hash: native.receipt_hash,
+            }),
+        }
+    }
+
+    fn native_block_edit_projection_fixture_v1() -> RuntimeNativeBlockEditProjectionReceiptWireV1 {
+        let identity = IntegratedRuntimeIdentityV2 {
+            schema_version: crate::INTEGRATED_RUNTIME_SCHEMA_V2,
+            universe_id: "universe:native-block-edit".into(),
+            location_id: "surface".into(),
+            revision: IntegratedRuntimeRevisionV2 {
+                epoch: 1,
+                world: 9,
+                entities: 10,
+                gameplay: 11,
+                persistence: 12,
+                network: 13,
+                simulation: 14,
+            },
+            tick: 81,
+            state_hash: CanonicalHash([0x61; 16]),
+        };
+        let mut content = IntegratedRuntimeNativeBlockEditContentBindingV1 {
+            block_id: 1,
+            manifest_hash: CanonicalHash([0x21; 16]),
+            installed_registry_hash: CanonicalHash([0x22; 16]),
+            catalog_schema_version: 2,
+            catalog_content_version: 9,
+            catalog_blob_hash: CanonicalHash([0x23; 16]),
+            action_report_hash: CanonicalHash([0x24; 16]),
+            subset_hash: CanonicalHash::default(),
+        };
+        content.subset_hash = content.calculate_subset_hash_v1();
+        let provenance = GeneratedDropProvenanceV1 {
+            schema_version: blockwild_gameplay::BLOCK_ACTION_GENERATED_DROP_PROVENANCE_SCHEMA_VERSION_V1,
+            manifest_hash: content.manifest_hash,
+            installed_registry_hash: content.installed_registry_hash,
+            catalog_blob_hash: content.catalog_blob_hash,
+            action_report_hash: content.action_report_hash,
+            rng_semantics_hash: CanonicalHash([0x25; 16]),
+            block_action_sequence: u64::MAX - 3,
+            origin_input_sequence: 41,
+            block_id: 1,
+            position: BlockActionLootCellV1 { x: -4, y: 50, z: 7 },
+            loot_plan_hash: CanonicalHash([0x26; 16]),
+            group_ordinal: 2,
+        };
+        let (position, velocity_milli_per_second, rotation) = crate::runtime::generated_drop_transform_v9(&provenance);
+        let mut receipt = IntegratedRuntimeNativeBlockEditReceiptV1 {
+            schema_version: crate::INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_RECEIPT_SCHEMA_V1,
+            sequence: 5,
+            origin_input_sequence: 41,
+            completion_tick: 81,
+            action: IntegratedRuntimeNativeBlockEditActionKindV1::Mine,
+            position: blockwild_authority::CellPositionV1 { x: -4, y: 50, z: 7 },
+            prior_block_id: 1,
+            prior_facing: 0,
+            replacement_block_id: 1,
+            replacement_facing: 0,
+            before_world_revision: WorldAuthorityRevisionV1 {
+                epoch: 2,
+                mutation: 17,
+                residency: 4,
+            },
+            after_world_revision: WorldAuthorityRevisionV1 {
+                epoch: 2,
+                mutation: 17,
+                residency: 4,
+            },
+            before_world_hash: CanonicalHash([0x31; 16]),
+            after_world_hash: CanonicalHash([0x31; 16]),
+            creative_mode: false,
+            inventory: IntegratedRuntimeNativeBlockEditInventoryDeltaV1 {
+                container: ContainerKey::player("actor:native-block-edit"),
+                selected_slot: 2,
+                before_revision: 4,
+                after_revision: 5,
+                before_stack: Some(ItemStack {
+                    item_code: 91,
+                    count: 1,
+                    durability_millionths: Some(750_000),
+                    metadata_hash: CanonicalHash([0x41; 16]),
+                }),
+                after_stack: Some(ItemStack {
+                    item_code: 91,
+                    count: 1,
+                    durability_millionths: Some(650_000),
+                    metadata_hash: CanonicalHash([0x41; 16]),
+                }),
+            },
+            generated_drops: vec![IntegratedRuntimeNativeBlockEditGeneratedDropV1 {
+                provenance,
+                entity_id: EntityId::new(7, 3),
+                stack: ItemStack {
+                    item_code: 1,
+                    count: 3,
+                    durability_millionths: None,
+                    metadata_hash: CanonicalHash([0x52; 16]),
+                },
+                position,
+                velocity_milli_per_second,
+                rotation,
+            }],
+            content,
+            receipt_hash: CanonicalHash::default(),
+        };
+        receipt.receipt_hash = receipt.calculate_hash_v1();
+        RuntimeNativeBlockEditProjectionReceiptWireV1 {
+            request_payload_hash: CanonicalHash([0x51; 16]),
+            identity,
+            cursor_after: receipt.sequence,
+            receipt: Some(receipt),
+        }
+    }
+
+    fn native_block_edit_projection_fixture_v2() -> RuntimeNativeBlockEditProjectionReceiptWireV2 {
+        let legacy = native_block_edit_projection_fixture_v1();
+        let receipt = legacy.receipt.expect("fixture has one complete V1 receipt");
+        let mut dirty_evidence = IntegratedRuntimeNativeBlockEditDirtyEvidenceV1 {
+            schema_version: crate::INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_DIRTY_EVIDENCE_SCHEMA_V1,
+            sequence: receipt.sequence,
+            receipt_hash: receipt.receipt_hash,
+            sections: Vec::new(),
+            columns: Vec::new(),
+            subsystem_seeds: Vec::new(),
+            evidence_hash: CanonicalHash::default(),
+        };
+        dirty_evidence.evidence_hash = dirty_evidence.calculate_hash_v1();
+        RuntimeNativeBlockEditProjectionReceiptWireV2 {
+            request_payload_hash: legacy.request_payload_hash,
+            identity: legacy.identity,
+            cursor_after: legacy.cursor_after,
+            receipt: Some(receipt),
+            dirty_evidence: Some(dirty_evidence),
+        }
+    }
+
+    fn native_drop_pickup_projection_fixture_v1() -> RuntimeNativeDropPickupProjectionReceiptWireV1 {
+        let identity = IntegratedRuntimeIdentityV2 {
+            schema_version: crate::INTEGRATED_RUNTIME_SCHEMA_V2,
+            universe_id: "universe:native-pickup".into(),
+            location_id: "surface".into(),
+            revision: IntegratedRuntimeRevisionV2 {
+                epoch: 4,
+                world: 19,
+                entities: 21,
+                gameplay: 71,
+                persistence: 6,
+                network: 7,
+                simulation: 8,
+            },
+            tick: 99,
+            state_hash: CanonicalHash([0xa1; 16]),
+        };
+        let provenance = GeneratedDropProvenanceV1 {
+            schema_version: blockwild_gameplay::BLOCK_ACTION_GENERATED_DROP_PROVENANCE_SCHEMA_VERSION_V1,
+            manifest_hash: CanonicalHash([0x11; 16]),
+            installed_registry_hash: CanonicalHash([0x12; 16]),
+            catalog_blob_hash: CanonicalHash([0x13; 16]),
+            action_report_hash: CanonicalHash([0x14; 16]),
+            rng_semantics_hash: CanonicalHash([0x15; 16]),
+            block_action_sequence: 9,
+            origin_input_sequence: 44,
+            block_id: crate::INTEGRATED_RUNTIME_BASIC_DIRT_BLOCK_ID_V1,
+            position: BlockActionLootCellV1 { x: -7, y: 64, z: 12 },
+            loot_plan_hash: CanonicalHash([0x16; 16]),
+            group_ordinal: 1,
+        };
+        let source_stack = ItemStack {
+            item_code: 2,
+            count: 5,
+            durability_millionths: None,
+            metadata_hash: CanonicalHash([0x33; 16]),
+        };
+        let mut receipt = IntegratedRuntimeNativeDropPickupReceiptV1 {
+            schema_version: crate::INTEGRATED_RUNTIME_NATIVE_DROP_PICKUP_RECEIPT_SCHEMA_V1,
+            sequence: 17,
+            completion_tick: 99,
+            world: WorldKey::new("universe:native-pickup", "surface"),
+            world_revision: WorldAuthorityRevisionV1 {
+                epoch: 2,
+                mutation: 19,
+                residency: 5,
+            },
+            world_state_hash: CanonicalHash([0x21; 16]),
+            player_id: PlayerId::new(3, 1),
+            player_entity_id: EntityId::new(11, 4),
+            inventory_container: ContainerKey::player("player:fixture"),
+            inventory_before_revision: 50,
+            inventory_after_revision: 52,
+            affected_slots: vec![
+                IntegratedRuntimeNativeDropPickupSlotDeltaV1 {
+                    slot: 0,
+                    before_stack: Some(ItemStack {
+                        count: 60,
+                        ..source_stack.clone()
+                    }),
+                    after_stack: Some(ItemStack {
+                        count: 64,
+                        ..source_stack.clone()
+                    }),
+                },
+                IntegratedRuntimeNativeDropPickupSlotDeltaV1 {
+                    slot: 4,
+                    before_stack: None,
+                    after_stack: Some(ItemStack {
+                        count: 1,
+                        ..source_stack.clone()
+                    }),
+                },
+            ],
+            source: IntegratedRuntimeNativeDropPickupSourceV1 {
+                drop_id: provenance.drop_id_v1(),
+                entity_id: EntityId::new(13, 5),
+                origin: IntegratedRuntimeNativeDropPickupOriginV1::GeneratedBlockAction(provenance.clone()),
+                custody_container: ContainerKey {
+                    kind: ContainerKind::Container,
+                    id: provenance.custody_id_v1(),
+                    owner_id: None,
+                },
+                stack: source_stack,
+                custody_slot: 0,
+                custody_before_revision: 8,
+                custody_emptied_revision: 10,
+                spatial_revision: 15,
+                position: FixedWorldVec3V1 {
+                    x_milli: -6_750,
+                    y_milli: 64_500,
+                    z_milli: 12_125,
+                },
+                velocity_milli_per_second: FixedWorldVec3V1 {
+                    x_milli: -125,
+                    y_milli: 375,
+                    z_milli: 50,
+                },
+                rotation: RotationMicroturnsV1 {
+                    yaw: 750_000,
+                    pitch: 125_000,
+                    roll: 0,
+                },
+            },
+            authority: IntegratedRuntimeNativeDropPickupAuthorityEvidenceV1 {
+                before_gameplay_revision: GameplayRevision {
+                    epoch: 2,
+                    sequence: 70,
+                    inventory: 50,
+                    machines: 8,
+                    combat: 9,
+                    progression: 10,
+                    cardforge: 11,
+                },
+                before_gameplay_hash: CanonicalHash([0x41; 16]),
+                after_gameplay_revision: GameplayRevision {
+                    epoch: 2,
+                    sequence: 71,
+                    inventory: 51,
+                    machines: 8,
+                    combat: 9,
+                    progression: 10,
+                    cardforge: 11,
+                },
+                after_gameplay_hash: CanonicalHash([0x42; 16]),
+                before_entity_revision: 20,
+                before_entity_hash: CanonicalHash([0x43; 16]),
+                after_entity_revision: 21,
+                after_entity_hash: CanonicalHash([0x44; 16]),
+                before_world_view_revision: WorldViewRevisionV1 {
+                    epoch: 3,
+                    sequence: 80,
+                    clock: 81,
+                    machine_anchors: 82,
+                    dropped_items: 83,
+                    player_bindings: 84,
+                    environment: 85,
+                    atmosphere_gravity: 86,
+                    celestial: 87,
+                },
+                before_world_view_hash: CanonicalHash([0x45; 16]),
+                after_world_view_revision: WorldViewRevisionV1 {
+                    epoch: 3,
+                    sequence: 81,
+                    clock: 81,
+                    machine_anchors: 82,
+                    dropped_items: 84,
+                    player_bindings: 84,
+                    environment: 85,
+                    atmosphere_gravity: 86,
+                    celestial: 87,
+                },
+                after_world_view_hash: CanonicalHash([0x46; 16]),
+            },
+            receipt_hash: CanonicalHash::default(),
+        };
+        receipt.receipt_hash = receipt.calculate_hash_v1();
+        RuntimeNativeDropPickupProjectionReceiptWireV1 {
+            request_payload_hash: CanonicalHash([0x51; 16]),
+            identity,
+            cursor_after: receipt.sequence,
+            receipt: Some(receipt),
+        }
+    }
+
+    fn native_player_drop_projection_fixture_v1() -> RuntimeNativePlayerDropProjectionReceiptWireV1 {
+        let identity = IntegratedRuntimeIdentityV2 {
+            schema_version: crate::INTEGRATED_RUNTIME_SCHEMA_V2,
+            universe_id: "universe:native-player-drop".into(),
+            location_id: "surface".into(),
+            revision: IntegratedRuntimeRevisionV2 {
+                epoch: 5,
+                world: 17,
+                entities: 23,
+                gameplay: 31,
+                persistence: 7,
+                network: 8,
+                simulation: 9,
+            },
+            tick: 9,
+            state_hash: CanonicalHash([0x61; 16]),
+        };
+        let stack = ItemStack {
+            item_code: 42,
+            count: 2,
+            durability_millionths: Some(875_000),
+            metadata_hash: CanonicalHash([0x62; 16]),
+        };
+        let mut receipt = IntegratedRuntimeNativePlayerDropReceiptV1 {
+            schema_version: crate::INTEGRATED_RUNTIME_NATIVE_PLAYER_DROP_RECEIPT_SCHEMA_V1,
+            sequence: 6,
+            origin_input_sequence: 41,
+            completion_tick: 9,
+            world: WorldKey::new("universe:native-player-drop", "surface"),
+            world_revision: WorldAuthorityRevisionV1 {
+                epoch: 2,
+                mutation: 14,
+                residency: 4,
+            },
+            world_state_hash: CanonicalHash([0x63; 16]),
+            player_id: PlayerId::new(7, 3),
+            player_entity_id: EntityId::new(9, 4),
+            inventory: IntegratedRuntimeNativePlayerDropInventoryDeltaV1 {
+                container: ContainerKey::player("actor:native-player-drop"),
+                selected_slot: 2,
+                before_revision: 12,
+                after_revision: 13,
+                before_stack: Some(stack.clone()),
+                after_stack: Some(ItemStack {
+                    count: 1,
+                    ..stack.clone()
+                }),
+            },
+            drop: IntegratedRuntimeNativePlayerDropSpawnV1 {
+                drop_id: "drop:41:6".into(),
+                entity_id: EntityId::new(10, 4),
+                stack: ItemStack { count: 1, ..stack },
+                custody_container: ContainerKey {
+                    kind: ContainerKind::Container,
+                    id: "drop-custody:41:6".into(),
+                    owner_id: None,
+                },
+                custody_slot: 0,
+                custody_revision: 0,
+                spatial_revision: 0,
+                position: FixedWorldVec3V1 {
+                    x_milli: -1_250,
+                    y_milli: 65_750,
+                    z_milli: 2_500,
+                },
+                velocity_milli_per_second: FixedWorldVec3V1 {
+                    x_milli: -350,
+                    y_milli: 1_250,
+                    z_milli: 75,
+                },
+                rotation: RotationMicroturnsV1 {
+                    yaw: 875_000,
+                    pitch: 125_000,
+                    roll: 0,
+                },
+                created_tick: 8,
+                expires_tick: None,
+                pickup_lock_actor_id: None,
+                pickup_unlock_tick: 15,
+                origin_hash: CanonicalHash::default(),
+            },
+            authority: IntegratedRuntimeNativeDropPickupAuthorityEvidenceV1 {
+                before_gameplay_revision: GameplayRevision {
+                    epoch: 3,
+                    sequence: 30,
+                    inventory: 20,
+                    machines: 4,
+                    combat: 5,
+                    progression: 6,
+                    cardforge: 7,
+                },
+                before_gameplay_hash: CanonicalHash([0x64; 16]),
+                after_gameplay_revision: GameplayRevision {
+                    epoch: 3,
+                    sequence: 31,
+                    inventory: 21,
+                    machines: 4,
+                    combat: 5,
+                    progression: 6,
+                    cardforge: 7,
+                },
+                after_gameplay_hash: CanonicalHash([0x65; 16]),
+                before_entity_revision: 22,
+                before_entity_hash: CanonicalHash([0x66; 16]),
+                after_entity_revision: 23,
+                after_entity_hash: CanonicalHash([0x67; 16]),
+                before_world_view_revision: WorldViewRevisionV1 {
+                    epoch: 4,
+                    sequence: 40,
+                    clock: 41,
+                    machine_anchors: 42,
+                    dropped_items: 43,
+                    player_bindings: 44,
+                    environment: 45,
+                    atmosphere_gravity: 46,
+                    celestial: 47,
+                },
+                before_world_view_hash: CanonicalHash([0x68; 16]),
+                after_world_view_revision: WorldViewRevisionV1 {
+                    epoch: 4,
+                    sequence: 41,
+                    clock: 41,
+                    machine_anchors: 42,
+                    dropped_items: 44,
+                    player_bindings: 44,
+                    environment: 45,
+                    atmosphere_gravity: 46,
+                    celestial: 47,
+                },
+                after_world_view_hash: CanonicalHash([0x69; 16]),
+            },
+            content: IntegratedRuntimeNativePlayerDropContentBindingV1 {
+                configured_manifest_hash: CanonicalHash([0x71; 16]),
+                installed_manifest_hash: CanonicalHash([0x71; 16]),
+                installed_registry_hash: CanonicalHash([0x72; 16]),
+                item_content_hash: CanonicalHash([0x73; 16]),
+                item_content_version: 11,
+            },
+            receipt_hash: CanonicalHash::default(),
+        };
+        receipt.drop.origin_hash = receipt.calculate_origin_hash_v1();
+        receipt.receipt_hash = receipt.calculate_hash_v1();
+        RuntimeNativePlayerDropProjectionReceiptWireV1 {
+            request_payload_hash: CanonicalHash([0x74; 16]),
+            identity,
+            cursor_after: receipt.sequence,
+            receipt: Some(receipt),
+        }
+    }
+
     #[test]
     fn camera_config_wire_is_absolute_exact_and_hash_attested() {
         let config = RuntimeCameraConfigWireV1 {
@@ -5849,6 +9691,508 @@ mod tests {
         let unknown_command = writer.finish();
         let mut reader = Reader::new(&unknown_command);
         assert_eq!(read_gameplay_command(&mut reader).unwrap_err().code, "gameplay-command");
+    }
+
+    #[test]
+    fn locator_item_wire_uses_frozen_tag9_bwv7_bwx7_and_round_trips_exactly() {
+        let inventory = ContainerKey::player("player:locator-wire");
+        let expected_stack = ItemStack {
+            item_code: 603,
+            count: 2,
+            durability_millionths: None,
+            metadata_hash: CanonicalHash([0x33; 16]),
+        };
+        let command = InventoryCommand::ConsumeInventoryUnitV1(ConsumeInventoryUnitV1 {
+            inventory: inventory.clone(),
+            slot: 5,
+            expected_container_revision: 9,
+            expected_stack: expected_stack.clone(),
+        });
+        let state = blockwild_gameplay::GameplayState::new(WorldKey::new("universe", "surface"), 1);
+        let batch = GameplayBatch::new(
+            "locator-wire",
+            "locator-wire",
+            GameplayActor {
+                actor_id: "player:locator-wire".into(),
+                player_id: Some(PlayerId::new(7, 1)),
+                entity_id: Some(EntityId::new(9, 1)),
+                role: ActorRole::Host,
+            },
+            state.identity(),
+            vec![GameplayCommand::Inventory(command)],
+        );
+        let gameplay_bytes = encode_gameplay_batch_v1(&batch).unwrap();
+        assert_eq!(decode_gameplay_batch_v1(&gameplay_bytes).unwrap(), batch);
+        assert!(gameplay_bytes.contains(&(INVENTORY_COMMAND_CONSUME_UNIT_V1_TAG as u8)));
+
+        let request = PlayerLocatorItemConsumeWireV1 {
+            inventory: inventory.clone(),
+            selected_slot: 5,
+            expected_inventory_revision: 9,
+            expected_stack: expected_stack.clone(),
+            purpose: PlayerLocatorItemPurposeV1::SettlementChart,
+            locator_result_hash: CanonicalHash([0x55; 16]),
+        };
+        let request_bytes = encode_player_locator_item_consume_v1(&request).unwrap();
+        assert_eq!(&request_bytes[..8], b"BWV7\x01\0\x01\0");
+        assert_eq!(decode_player_locator_item_consume_v1(&request_bytes).unwrap(), request);
+
+        let before = state.identity();
+        let mut after = before.clone();
+        after.revision.sequence = 1;
+        after.revision.inventory = 1;
+        after.state_hash = CanonicalHash([0x66; 16]);
+        let mut consumed_stack = expected_stack.clone();
+        consumed_stack.count = 1;
+        let mut remaining_stack = expected_stack;
+        remaining_stack.count = 1;
+        let receipt = PlayerLocatorItemConsumeReceiptWireV1 {
+            request_payload_hash: CanonicalHash(wire_checksum_v1(&request_bytes)),
+            purpose: request.purpose,
+            locator_result_hash: request.locator_result_hash,
+            before,
+            after,
+            accepted_receipt_hash: CanonicalHash([0x77; 16]),
+            inventory,
+            selected_slot: 5,
+            previous_inventory_revision: 9,
+            resulting_inventory_revision: 10,
+            consumed_stack,
+            remaining_stack: Some(remaining_stack),
+            inventory_result_hash: CanonicalHash([0x88; 16]),
+        };
+        let receipt_bytes = encode_player_locator_item_consume_receipt_v1(&receipt).unwrap();
+        assert_eq!(&receipt_bytes[..8], b"BWX7\x01\0\x01\0");
+        assert_eq!(
+            decode_player_locator_item_consume_receipt_v1(&receipt_bytes).unwrap(),
+            receipt
+        );
+    }
+
+    #[test]
+    fn locator_item_wire_rejects_zero_result_unknown_purpose_and_bad_receipt_shape() {
+        let request = PlayerLocatorItemConsumeWireV1 {
+            inventory: ContainerKey::player("player:locator-wire-invalid"),
+            selected_slot: 0,
+            expected_inventory_revision: 0,
+            expected_stack: ItemStack::simple(603, 1),
+            purpose: PlayerLocatorItemPurposeV1::DragonLairCharter,
+            locator_result_hash: CanonicalHash::default(),
+        };
+        assert_eq!(
+            encode_player_locator_item_consume_v1(&request).unwrap_err().code,
+            "player-locator-item-result"
+        );
+        let mut valid = request;
+        valid.locator_result_hash = CanonicalHash([1; 16]);
+        let valid_bytes = encode_player_locator_item_consume_v1(&valid).unwrap();
+        let mut reader = Reader::new(
+            unwrap_schema(
+                PLAYER_LOCATOR_ITEM_CONSUME_V1_MAGIC,
+                PLAYER_LOCATOR_ITEM_CONSUME_V1_INNER_SCHEMA,
+                &valid_bytes,
+            )
+            .unwrap(),
+        );
+        read_container_key(&mut reader).unwrap();
+        reader.u16().unwrap();
+        reader.u64().unwrap();
+        read_item_stack(&mut reader).unwrap();
+        let purpose_offset = DOMAIN_HEADER_BYTES + reader.offset;
+        let mut unknown = valid_bytes;
+        unknown[purpose_offset] = u8::MAX;
+        let checksum = wire_checksum_v1(&unknown[DOMAIN_HEADER_BYTES..]);
+        unknown[12..28].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_player_locator_item_consume_v1(&unknown).unwrap_err().code,
+            "player-locator-item-purpose"
+        );
+    }
+
+    #[test]
+    fn creative_slot_is_dedicated_bwf7_bwh7_and_rejects_generic_wire_or_receipt_tamper() {
+        let inventory = ContainerKey::player("player:creative-wire");
+        let prior = Some(ItemStack::simple(42, 2));
+        let replacement = ItemStack::simple(43, 64);
+        let command = InventoryCommand::SetCreativeInventorySlotV1(blockwild_gameplay::SetCreativeInventorySlotV1 {
+            inventory: inventory.clone(),
+            slot: 3,
+            expected_container_revision: 7,
+            expected_stack: prior.clone(),
+            replacement_stack: replacement.clone(),
+        });
+        let state = blockwild_gameplay::GameplayState::new(WorldKey::new("universe", "surface"), 1);
+        let batch = GameplayBatch::new(
+            "creative-slot-wire",
+            "creative-slot-wire",
+            GameplayActor {
+                actor_id: "player:creative-wire".into(),
+                player_id: Some(PlayerId::new(7, 1)),
+                entity_id: Some(EntityId::new(9, 1)),
+                role: ActorRole::Host,
+            },
+            state.identity(),
+            vec![GameplayCommand::Inventory(command)],
+        );
+        assert_eq!(
+            encode_gameplay_batch_v1(&batch).unwrap_err().code,
+            "inventory-command-dedicated"
+        );
+        assert_eq!(
+            read_inventory_command(&mut Reader::new(&[INVENTORY_COMMAND_SET_CREATIVE_SLOT_V1_TAG as u8]))
+                .unwrap_err()
+                .code,
+            "inventory-command-dedicated"
+        );
+
+        let request = PlayerCreativeSlotSetWireV1 {
+            inventory: inventory.clone(),
+            selected_slot: 3,
+            expected_inventory_revision: 7,
+            expected_stack: prior.clone(),
+            replacement_stack: replacement.clone(),
+        };
+        let request_bytes = encode_player_creative_slot_set_v1(&request).unwrap();
+        assert_eq!(&request_bytes[..8], b"BWF7\x01\0\x01\0");
+        assert_eq!(decode_player_creative_slot_set_v1(&request_bytes).unwrap(), request);
+
+        let before = state.identity();
+        let mut after = before.clone();
+        after.revision.sequence = 1;
+        after.revision.inventory = 1;
+        after.state_hash = CanonicalHash([0x62; 16]);
+        let mut receipt = PlayerCreativeSlotSetReceiptWireV1 {
+            request_payload_hash: CanonicalHash(wire_checksum_v1(&request_bytes)),
+            before,
+            after,
+            accepted_receipt_hash: CanonicalHash([0x73; 16]),
+            inventory,
+            selected_slot: 3,
+            previous_inventory_revision: 7,
+            resulting_inventory_revision: 8,
+            prior_stack: prior,
+            replacement_stack: replacement,
+            inventory_result_hash: CanonicalHash([0x84; 16]),
+            receipt_hash: CanonicalHash::default(),
+        };
+        receipt.receipt_hash = player_creative_slot_set_receipt_hash_v1(&receipt).unwrap();
+        let receipt_bytes = encode_player_creative_slot_set_receipt_v1(&receipt).unwrap();
+        assert_eq!(&receipt_bytes[..8], b"BWH7\x01\0\x01\0");
+        assert_eq!(
+            decode_player_creative_slot_set_receipt_v1(&receipt_bytes).unwrap(),
+            receipt
+        );
+
+        let mut tampered = receipt;
+        tampered.inventory_result_hash = CanonicalHash([0x85; 16]);
+        assert_eq!(
+            encode_player_creative_slot_set_receipt_v1(&tampered).unwrap_err().code,
+            "player-creative-slot-receipt-hash"
+        );
+    }
+
+    #[test]
+    fn player_game_mode_is_dedicated_bwm7_bwn7_and_seals_one_simulation_transition() {
+        let request = PlayerGameModeSetWireV1 {
+            external_entity_id: "player:mode-wire:\u{6a21}\u{5f0f}:\u{1f600}".into(),
+            actor_id: "actor:mode-wire:\u{6a21}\u{5f0f}:\u{1f600}".into(),
+            player_id: PlayerId::new(7, 3),
+            expected_creative_mode: true,
+            expected_flags: RUNTIME_INPUT_FLAG_CREATIVE_V1 | RUNTIME_INPUT_FLAG_FLYING_V1,
+            requested_creative_mode: false,
+        };
+        let request_bytes = encode_player_game_mode_set_v1(&request).unwrap();
+        assert_eq!(&request_bytes[..8], b"BWM7\x01\0\x01\0");
+        assert_eq!(decode_player_game_mode_set_v1(&request_bytes).unwrap(), request);
+        assert!(decode_gameplay_batch_v1(&request_bytes).is_err());
+        let mut overlong = request.clone();
+        overlong.external_entity_id = "x".repeat(513);
+        assert_eq!(
+            encode_player_game_mode_set_v1(&overlong).unwrap_err().code,
+            "player-game-mode-custody"
+        );
+        let mut controlled = request.clone();
+        controlled.actor_id = "actor:mode\nwire".into();
+        assert_eq!(
+            encode_player_game_mode_set_v1(&controlled).unwrap_err().code,
+            "domain-string"
+        );
+
+        let before = IntegratedRuntimeIdentityV2 {
+            schema_version: crate::INTEGRATED_RUNTIME_SCHEMA_V2,
+            universe_id: "universe".into(),
+            location_id: "surface".into(),
+            revision: IntegratedRuntimeRevisionV2 {
+                epoch: 2,
+                world: 3,
+                entities: 4,
+                gameplay: 5,
+                persistence: 6,
+                network: 7,
+                simulation: 8,
+            },
+            tick: 9,
+            state_hash: CanonicalHash([0x31; 16]),
+        };
+        let mut after = before.clone();
+        after.revision.simulation = 9;
+        after.state_hash = CanonicalHash([0x32; 16]);
+        let mut receipt = PlayerGameModeSetReceiptWireV1 {
+            request_payload_hash: CanonicalHash(wire_checksum_v1(&request_bytes)),
+            before,
+            after,
+            external_entity_id: request.external_entity_id,
+            actor_id: request.actor_id,
+            player_id: request.player_id,
+            prior_creative_mode: request.expected_creative_mode,
+            prior_flags: request.expected_flags,
+            resulting_creative_mode: request.requested_creative_mode,
+            resulting_flags: 0,
+            receipt_hash: CanonicalHash::default(),
+        };
+        receipt.receipt_hash = player_game_mode_set_receipt_hash_v1(&receipt).unwrap();
+        let receipt_bytes = encode_player_game_mode_set_receipt_v1(&receipt).unwrap();
+        assert_eq!(&receipt_bytes[..8], b"BWN7\x01\0\x01\0");
+        assert_eq!(decode_player_game_mode_set_receipt_v1(&receipt_bytes).unwrap(), receipt);
+
+        let mut tampered = receipt;
+        tampered.resulting_flags = RUNTIME_INPUT_FLAG_CREATIVE_V1;
+        assert_eq!(
+            encode_player_game_mode_set_receipt_v1(&tampered).unwrap_err().code,
+            "player-game-mode-flags"
+        );
+    }
+
+    #[test]
+    fn player_respawn_wire_seals_exact_r5_r6_r7_restore_and_inventory_policy() {
+        let before = IntegratedRuntimeIdentityV2 {
+            schema_version: crate::INTEGRATED_RUNTIME_SCHEMA_V2,
+            universe_id: "universe:respawn".into(),
+            location_id: "surface".into(),
+            revision: IntegratedRuntimeRevisionV2 {
+                epoch: 2,
+                world: 3,
+                entities: 20,
+                gameplay: 30,
+                persistence: 6,
+                network: 7,
+                simulation: 40,
+            },
+            tick: 55,
+            state_hash: CanonicalHash([0x41; 16]),
+        };
+        let request = PlayerRespawnWireV1 {
+            expected: before.clone(),
+            external_entity_id: "player:respawn:\u{6c34}".into(),
+            actor_id: "actor:respawn:\u{6c34}".into(),
+            player_id: PlayerId::new(7, 3),
+            entity_id: EntityId::new(8, 4),
+            expected_entity_revision: 12,
+            expected_gameplay_sequence: 28,
+            expected_gameplay_combat_revision: 9,
+            expected_combatant_revision: 6,
+            expected_death_sequence: 3,
+            expected_max_health: 20_000,
+            respawn_position: FixedWorldVec3V1 {
+                x_milli: -12_500,
+                y_milli: 64_250,
+                z_milli: 8_000,
+            },
+            keep_inventory: true,
+        };
+        let request_bytes = encode_player_respawn_v1(&request).unwrap();
+        assert_eq!(&request_bytes[..8], b"BWD7\x01\0\x01\0");
+        assert_eq!(decode_player_respawn_v1(&request_bytes).unwrap(), request);
+        assert!(decode_gameplay_batch_v1(&request_bytes).is_err());
+
+        let mut after = before.clone();
+        after.revision.entities += 1;
+        after.revision.gameplay += 1;
+        after.revision.simulation += 1;
+        after.state_hash = CanonicalHash([0x42; 16]);
+        let mut receipt = PlayerRespawnReceiptWireV1 {
+            request_payload_hash: CanonicalHash(wire_checksum_v1(&request_bytes)),
+            before,
+            after,
+            external_entity_id: request.external_entity_id.clone(),
+            actor_id: request.actor_id.clone(),
+            player_id: request.player_id,
+            entity_id: request.entity_id,
+            death_sequence: request.expected_death_sequence,
+            prior_entity_revision: request.expected_entity_revision,
+            resulting_entity_revision: request.expected_entity_revision + 1,
+            prior_gameplay_sequence: request.expected_gameplay_sequence,
+            resulting_gameplay_sequence: request.expected_gameplay_sequence + 1,
+            prior_gameplay_combat_revision: request.expected_gameplay_combat_revision,
+            resulting_gameplay_combat_revision: request.expected_gameplay_combat_revision + 1,
+            prior_combatant_revision: request.expected_combatant_revision,
+            resulting_combatant_revision: request.expected_combatant_revision + 1,
+            maximum_health: request.expected_max_health,
+            prior_health: 0,
+            resulting_health: request.expected_max_health,
+            prior_alive: false,
+            resulting_alive: true,
+            respawn_position: request.respawn_position,
+            resulting_oxygen_seconds: 15.0,
+            keep_inventory: true,
+            inventory_before_revision: 4,
+            inventory_after_revision: 4,
+            equipment_before_revision: 2,
+            equipment_after_revision: 2,
+            custody_before_hash: CanonicalHash([0x43; 16]),
+            custody_after_hash: CanonicalHash([0x43; 16]),
+            generated_drop_count: 0,
+            receipt_hash: CanonicalHash::default(),
+        };
+        receipt.receipt_hash = player_respawn_receipt_hash_v1(&receipt).unwrap();
+        let receipt_bytes = encode_player_respawn_receipt_v1(&receipt).unwrap();
+        assert_eq!(&receipt_bytes[..8], b"BWE7\x01\0\x01\0");
+        assert_eq!(decode_player_respawn_receipt_v1(&receipt_bytes).unwrap(), receipt);
+
+        let mut stale = request.clone();
+        stale.respawn_position.x_milli = i64::MIN;
+        assert_eq!(
+            encode_player_respawn_v1(&stale).unwrap_err().code,
+            "player-respawn-position"
+        );
+        let mut tampered = receipt.clone();
+        tampered.inventory_after_revision += 1;
+        assert_eq!(
+            encode_player_respawn_receipt_v1(&tampered).unwrap_err().code,
+            "player-respawn-inventory-policy"
+        );
+
+        let seal_receipt = |value: &mut PlayerRespawnReceiptWireV1| {
+            let request = PlayerRespawnWireV1 {
+                expected: value.before.clone(),
+                external_entity_id: value.external_entity_id.clone(),
+                actor_id: value.actor_id.clone(),
+                player_id: value.player_id,
+                entity_id: value.entity_id,
+                expected_entity_revision: value.prior_entity_revision,
+                expected_gameplay_sequence: value.prior_gameplay_sequence,
+                expected_gameplay_combat_revision: value.prior_gameplay_combat_revision,
+                expected_combatant_revision: value.prior_combatant_revision,
+                expected_death_sequence: value.death_sequence,
+                expected_max_health: value.maximum_health,
+                respawn_position: value.respawn_position,
+                keep_inventory: value.keep_inventory,
+            };
+            value.request_payload_hash = CanonicalHash(wire_checksum_v1(&encode_player_respawn_v1(&request).unwrap()));
+            value.receipt_hash = CanonicalHash::default();
+            value.receipt_hash = player_respawn_receipt_hash_v1(value).unwrap();
+        };
+
+        let mut empty_drop = receipt.clone();
+        empty_drop.keep_inventory = false;
+        seal_receipt(&mut empty_drop);
+        let empty_drop_bytes = encode_player_respawn_receipt_v1(&empty_drop).unwrap();
+        assert_eq!(&empty_drop_bytes[..8], b"BWE7\x01\0\x01\0");
+        assert_eq!(decode_player_respawn_receipt_v1(&empty_drop_bytes).unwrap(), empty_drop);
+
+        let mut inventory_only = empty_drop.clone();
+        inventory_only.after.revision.gameplay += 1;
+        inventory_only.inventory_after_revision += 1;
+        inventory_only.custody_after_hash = CanonicalHash([0x44; 16]);
+        inventory_only.generated_drop_count = 9;
+        seal_receipt(&mut inventory_only);
+        let inventory_only_bytes = encode_player_respawn_receipt_v1(&inventory_only).unwrap();
+        assert_eq!(
+            decode_player_respawn_receipt_v1(&inventory_only_bytes).unwrap(),
+            inventory_only
+        );
+
+        let mut equipment_only = empty_drop.clone();
+        equipment_only.after.revision.gameplay += 1;
+        equipment_only.equipment_after_revision += 1;
+        equipment_only.custody_after_hash = CanonicalHash([0x45; 16]);
+        equipment_only.generated_drop_count = 8;
+        seal_receipt(&mut equipment_only);
+        let equipment_only_bytes = encode_player_respawn_receipt_v1(&equipment_only).unwrap();
+        assert_eq!(
+            decode_player_respawn_receipt_v1(&equipment_only_bytes).unwrap(),
+            equipment_only
+        );
+
+        let mut both_lanes = empty_drop.clone();
+        both_lanes.after.revision.gameplay += 1;
+        both_lanes.inventory_after_revision += 1;
+        both_lanes.equipment_after_revision += 1;
+        both_lanes.custody_after_hash = CanonicalHash([0x46; 16]);
+        both_lanes.generated_drop_count = 17;
+        seal_receipt(&mut both_lanes);
+        let both_lanes_bytes = encode_player_respawn_receipt_v1(&both_lanes).unwrap();
+        assert_eq!(decode_player_respawn_receipt_v1(&both_lanes_bytes).unwrap(), both_lanes);
+
+        let mut bad_integrated_delta = inventory_only.clone();
+        bad_integrated_delta.after.revision.gameplay -= 1;
+        seal_receipt(&mut bad_integrated_delta);
+        assert_eq!(
+            encode_player_respawn_receipt_v1(&bad_integrated_delta)
+                .unwrap_err()
+                .code,
+            "player-respawn-identity"
+        );
+
+        let mut bad_empty_delta = empty_drop.clone();
+        bad_empty_delta.after.revision.gameplay += 1;
+        seal_receipt(&mut bad_empty_delta);
+        assert_eq!(
+            encode_player_respawn_receipt_v1(&bad_empty_delta).unwrap_err().code,
+            "player-respawn-identity"
+        );
+
+        let mut bad_empty_lane_delta = empty_drop.clone();
+        bad_empty_lane_delta.inventory_after_revision += 1;
+        seal_receipt(&mut bad_empty_lane_delta);
+        assert_eq!(
+            encode_player_respawn_receipt_v1(&bad_empty_lane_delta)
+                .unwrap_err()
+                .code,
+            "player-respawn-inventory-policy"
+        );
+
+        let mut bad_empty_custody_hash = empty_drop.clone();
+        bad_empty_custody_hash.custody_after_hash = CanonicalHash([0x47; 16]);
+        seal_receipt(&mut bad_empty_custody_hash);
+        assert_eq!(
+            encode_player_respawn_receipt_v1(&bad_empty_custody_hash)
+                .unwrap_err()
+                .code,
+            "player-respawn-inventory-policy"
+        );
+
+        let mut bad_lane_delta = inventory_only.clone();
+        bad_lane_delta.inventory_after_revision += 1;
+        seal_receipt(&mut bad_lane_delta);
+        assert_eq!(
+            encode_player_respawn_receipt_v1(&bad_lane_delta).unwrap_err().code,
+            "player-respawn-inventory-policy"
+        );
+
+        let mut bad_stable_lanes = inventory_only.clone();
+        bad_stable_lanes.inventory_after_revision = bad_stable_lanes.inventory_before_revision;
+        seal_receipt(&mut bad_stable_lanes);
+        assert_eq!(
+            encode_player_respawn_receipt_v1(&bad_stable_lanes).unwrap_err().code,
+            "player-respawn-inventory-policy"
+        );
+
+        let mut bad_custody_hash = inventory_only.clone();
+        bad_custody_hash.custody_after_hash = bad_custody_hash.custody_before_hash;
+        seal_receipt(&mut bad_custody_hash);
+        assert_eq!(
+            encode_player_respawn_receipt_v1(&bad_custody_hash).unwrap_err().code,
+            "player-respawn-inventory-policy"
+        );
+
+        let mut bad_drop_count = both_lanes;
+        bad_drop_count.generated_drop_count = 18;
+        seal_receipt(&mut bad_drop_count);
+        assert_eq!(
+            encode_player_respawn_receipt_v1(&bad_drop_count).unwrap_err().code,
+            "player-respawn-inventory-policy"
+        );
     }
 
     #[test]
@@ -6134,6 +10478,516 @@ mod tests {
                 .unwrap_err()
                 .code,
             "context-continuity-cursor"
+        );
+    }
+
+    #[test]
+    fn basic_dirt_projection_wire_round_trips_every_native_and_spatial_field() {
+        let receipt = basic_dirt_projection_fixture_v1();
+        let query = RuntimeBasicDirtActionReceiptQueryWireV1 {
+            expected: receipt.identity.clone(),
+            after_sequence: receipt.cursor_after - 1,
+        };
+        let query_bytes = encode_runtime_basic_dirt_action_receipt_query_v1(&query).unwrap();
+        assert_eq!(&query_bytes[..8], b"BWQ7\x01\0\x01\0");
+        assert_eq!(
+            decode_runtime_basic_dirt_action_receipt_query_v1(&query_bytes).unwrap(),
+            query
+        );
+
+        let bytes = encode_runtime_basic_dirt_action_projection_receipt_v1(&receipt).unwrap();
+        assert_eq!(&bytes[..8], b"BWR7\x01\0\x01\0");
+        assert!(bytes.len() < MAX_DOMAIN_PAYLOAD_BYTES);
+        let decoded = decode_runtime_basic_dirt_action_projection_receipt_v1(&bytes).unwrap();
+        assert_eq!(decoded, receipt);
+        let projected = decoded.receipt.unwrap();
+        assert_eq!(projected.native_receipt_v1().receipt_hash, projected.receipt_hash);
+        assert_eq!(projected.generated_drops[0].entity_id, EntityId::new(7, 3));
+        assert_eq!(
+            projected.generated_drops[0].stack.metadata_hash,
+            CanonicalHash([0x52; 16])
+        );
+        assert_eq!(projected.generated_drops[0].position.y_milli, 43_500);
+        assert_eq!(projected.generated_drops[0].velocity_milli_per_second.z_milli, -75);
+        assert_eq!(projected.generated_drops[0].rotation.yaw, 750_000);
+
+        let empty = RuntimeBasicDirtActionProjectionReceiptWireV1 {
+            request_payload_hash: CanonicalHash([0x61; 16]),
+            identity: query.expected,
+            cursor_after: MAX_SAFE_U64,
+            receipt: None,
+        };
+        assert_eq!(
+            decode_runtime_basic_dirt_action_projection_receipt_v1(
+                &encode_runtime_basic_dirt_action_projection_receipt_v1(&empty).unwrap()
+            )
+            .unwrap(),
+            empty
+        );
+    }
+
+    #[test]
+    fn native_block_edit_projection_wire_round_trips_full_generated_evidence_and_rejects_tamper() {
+        let projection = native_block_edit_projection_fixture_v1();
+        let query = RuntimeNativeBlockEditReceiptQueryWireV1 {
+            expected: projection.identity.clone(),
+            after_sequence: projection.cursor_after - 1,
+        };
+        let query_bytes = encode_runtime_native_block_edit_receipt_query_v1(&query).unwrap();
+        assert_eq!(&query_bytes[..8], b"BWZ7\x01\0\x01\0");
+        assert_eq!(
+            decode_runtime_native_block_edit_receipt_query_v1(&query_bytes).unwrap(),
+            query
+        );
+
+        let bytes = encode_runtime_native_block_edit_projection_receipt_v1(&projection).unwrap();
+        assert_eq!(&bytes[..8], b"BWY7\x01\0\x01\0");
+        assert!(bytes.len() < MAX_DOMAIN_PAYLOAD_BYTES);
+        let decoded = decode_runtime_native_block_edit_projection_receipt_v1(&bytes).unwrap();
+        assert_eq!(decoded, projection);
+        let generated = &decoded.receipt.as_ref().unwrap().generated_drops[0];
+        assert_eq!(generated.provenance.block_action_sequence, u64::MAX - 3);
+        assert_eq!(generated.stack.count, 3);
+        assert_eq!(
+            (
+                generated.position,
+                generated.velocity_milli_per_second,
+                generated.rotation
+            ),
+            crate::runtime::generated_drop_transform_v9(&generated.provenance)
+        );
+
+        assert_eq!(
+            encode_runtime_native_block_edit_receipt_query_v1(&RuntimeNativeBlockEditReceiptQueryWireV1 {
+                expected: projection.identity.clone(),
+                after_sequence: MAX_SAFE_U64 + 1,
+            })
+            .unwrap_err()
+            .code,
+            "native-block-edit-query-cursor"
+        );
+        let mut bad_cursor = projection.clone();
+        bad_cursor.cursor_after += 1;
+        assert_eq!(
+            encode_runtime_native_block_edit_projection_receipt_v1(&bad_cursor)
+                .unwrap_err()
+                .code,
+            "native-block-edit-projection-cursor"
+        );
+        let mut bad_facing = projection.clone();
+        let native = bad_facing.receipt.as_mut().unwrap();
+        native.prior_facing = 4;
+        native.receipt_hash = native.calculate_hash_v1();
+        assert_eq!(
+            encode_runtime_native_block_edit_projection_receipt_v1(&bad_facing)
+                .unwrap_err()
+                .code,
+            "native-block-edit-receipt"
+        );
+        let mut aliased_mutation = projection.clone();
+        let native = aliased_mutation.receipt.as_mut().unwrap();
+        native.after_world_revision.mutation += 1;
+        native.receipt_hash = native.calculate_hash_v1();
+        assert_eq!(
+            encode_runtime_native_block_edit_projection_receipt_v1(&aliased_mutation)
+                .unwrap_err()
+                .code,
+            "native-block-edit-receipt"
+        );
+        let mut tampered = bytes;
+        *tampered.last_mut().unwrap() ^= 1;
+        let checksum = wire_checksum_v1(&tampered[DOMAIN_HEADER_BYTES..]);
+        tampered[12..28].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_runtime_native_block_edit_projection_receipt_v1(&tampered)
+                .unwrap_err()
+                .code,
+            "native-block-edit-receipt"
+        );
+
+        let empty = RuntimeNativeBlockEditProjectionReceiptWireV1 {
+            request_payload_hash: CanonicalHash([0x71; 16]),
+            identity: query.expected,
+            cursor_after: MAX_SAFE_U64,
+            receipt: None,
+        };
+        assert_eq!(
+            decode_runtime_native_block_edit_projection_receipt_v1(
+                &encode_runtime_native_block_edit_projection_receipt_v1(&empty).unwrap()
+            )
+            .unwrap(),
+            empty
+        );
+    }
+
+    #[test]
+    fn native_block_edit_v2_wire_round_trips_present_empty_dirty_evidence_and_legacy_gap() {
+        let projection = native_block_edit_projection_fixture_v2();
+        let query = RuntimeNativeBlockEditReceiptQueryWireV2 {
+            expected: projection.identity.clone(),
+            after_sequence: projection.cursor_after - 1,
+        };
+        let query_bytes = encode_runtime_native_block_edit_receipt_query_v2(&query).unwrap();
+        assert_eq!(&query_bytes[..8], b"BWZ8\x01\0\x01\0");
+        assert_eq!(
+            decode_runtime_native_block_edit_receipt_query_v2(&query_bytes).unwrap(),
+            query
+        );
+
+        let bytes = encode_runtime_native_block_edit_projection_receipt_v2(&projection).unwrap();
+        assert_eq!(&bytes[..8], b"BWY8\x01\0\x01\0");
+        assert_eq!(bytes.len(), 822);
+        let decoded = decode_runtime_native_block_edit_projection_receipt_v2(&bytes).unwrap();
+        assert_eq!(decoded, projection);
+        let evidence = decoded.dirty_evidence.as_ref().unwrap();
+        assert!(evidence.sections.is_empty());
+        assert!(evidence.columns.is_empty());
+        assert!(evidence.subsystem_seeds.is_empty());
+        assert_eq!(
+            evidence.evidence_hash,
+            CanonicalHash([
+                0x5a, 0xe8, 0xa3, 0x38, 0x3d, 0xf4, 0xd3, 0xfc, 0xc8, 0x3a, 0x57, 0x1e, 0x90, 0x7d, 0x25, 0x03,
+            ])
+        );
+
+        let mut legacy = projection.clone();
+        legacy.dirty_evidence = None;
+        assert_eq!(
+            decode_runtime_native_block_edit_projection_receipt_v2(
+                &encode_runtime_native_block_edit_projection_receipt_v2(&legacy).unwrap()
+            )
+            .unwrap(),
+            legacy
+        );
+        let mut orphan = legacy.clone();
+        orphan.receipt = None;
+        orphan.dirty_evidence = projection.dirty_evidence.clone();
+        assert_eq!(
+            encode_runtime_native_block_edit_projection_receipt_v2(&orphan)
+                .unwrap_err()
+                .code,
+            "native-block-edit-v2-dirty-orphan"
+        );
+
+        let mut tampered_shape = projection.clone();
+        tampered_shape.dirty_evidence.as_mut().unwrap().sequence += 1;
+        assert_eq!(
+            encode_runtime_native_block_edit_projection_receipt_v2(&tampered_shape)
+                .unwrap_err()
+                .code,
+            "native-block-edit-v2-dirty-evidence"
+        );
+        let mut tampered_bytes = bytes;
+        *tampered_bytes.last_mut().unwrap() ^= 1;
+        let checksum = wire_checksum_v1(&tampered_bytes[DOMAIN_HEADER_BYTES..]);
+        tampered_bytes[12..28].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_runtime_native_block_edit_projection_receipt_v2(&tampered_bytes)
+                .unwrap_err()
+                .code,
+            "native-block-edit-v2-dirty-evidence"
+        );
+
+        let empty = RuntimeNativeBlockEditProjectionReceiptWireV2 {
+            request_payload_hash: CanonicalHash([0x72; 16]),
+            identity: query.expected,
+            cursor_after: MAX_SAFE_U64,
+            receipt: None,
+            dirty_evidence: None,
+        };
+        let empty_bytes = encode_runtime_native_block_edit_projection_receipt_v2(&empty).unwrap();
+        assert_eq!(&empty_bytes[empty_bytes.len() - 2..], &[0, 0]);
+        assert_eq!(
+            decode_runtime_native_block_edit_projection_receipt_v2(&empty_bytes).unwrap(),
+            empty
+        );
+    }
+
+    #[test]
+    fn native_drop_pickup_projection_wire_round_trips_every_exact_field() {
+        let projection = native_drop_pickup_projection_fixture_v1();
+        let native = projection.receipt.as_ref().unwrap();
+        native.validate_shape_v1().unwrap();
+        let query = RuntimeNativeDropPickupReceiptQueryWireV1 {
+            expected: projection.identity.clone(),
+            after_sequence: native.sequence - 1,
+        };
+        let query_bytes = encode_runtime_native_drop_pickup_receipt_query_v1(&query).unwrap();
+        assert_eq!(&query_bytes[..8], b"BWQ8\x01\0\x01\0");
+        assert_eq!(
+            decode_runtime_native_drop_pickup_receipt_query_v1(&query_bytes).unwrap(),
+            query
+        );
+
+        let bytes = encode_runtime_native_drop_pickup_projection_receipt_v1(&projection).unwrap();
+        assert_eq!(&bytes[..8], b"BWR8\x01\0\x01\0");
+        assert!(bytes.len() < MAX_DOMAIN_PAYLOAD_BYTES);
+        let decoded = decode_runtime_native_drop_pickup_projection_receipt_v1(&bytes).unwrap();
+        assert_eq!(decoded, projection);
+        let native = decoded.receipt.unwrap();
+        assert_eq!(native.affected_slots.len(), 2);
+        assert_eq!(native.affected_slots[0].after_stack.as_ref().unwrap().count, 64);
+        assert_eq!(native.affected_slots[1].after_stack.as_ref().unwrap().count, 1);
+        assert_eq!(native.source.drop_id, "block-loot-v1:9:1");
+        assert_eq!(native.source.custody_container.id, "block-loot-custody-v1:9:1");
+        assert_eq!(native.source.custody_slot, 0);
+        assert_eq!(native.source.position.x_milli, -6_750);
+        assert_eq!(native.source.velocity_milli_per_second.x_milli, -125);
+        assert_eq!(native.authority.before_gameplay_revision.sequence, 70);
+        assert_eq!(native.authority.after_world_view_revision.dropped_items, 84);
+        assert_eq!(
+            native.receipt_hash,
+            CanonicalHash([
+                0xf0, 0x45, 0x2e, 0x86, 0x9a, 0x4a, 0x2c, 0xa3, 0x60, 0x25, 0xb4, 0x97, 0xd0, 0xaa, 0xd8, 0x64,
+            ])
+        );
+
+        let empty = RuntimeNativeDropPickupProjectionReceiptWireV1 {
+            request_payload_hash: CanonicalHash([0x61; 16]),
+            identity: query.expected,
+            cursor_after: MAX_SAFE_U64,
+            receipt: None,
+        };
+        assert_eq!(
+            decode_runtime_native_drop_pickup_projection_receipt_v1(
+                &encode_runtime_native_drop_pickup_projection_receipt_v1(&empty).unwrap()
+            )
+            .unwrap(),
+            empty
+        );
+
+        let mut player_origin = projection;
+        let player_receipt = player_origin.receipt.as_mut().unwrap();
+        player_receipt.source.origin = IntegratedRuntimeNativeDropPickupOriginV1::PlayerDrop {
+            player_drop_sequence: 6,
+            player_drop_receipt_hash: CanonicalHash([0xab; 16]),
+        };
+        player_receipt.receipt_hash = player_receipt.calculate_hash_v1();
+        let player_bytes = encode_runtime_native_drop_pickup_projection_receipt_v1(&player_origin).unwrap();
+        assert_eq!(&player_bytes[..8], b"BWR8\x01\0\x01\0");
+        assert_eq!(
+            decode_runtime_native_drop_pickup_projection_receipt_v1(&player_bytes).unwrap(),
+            player_origin
+        );
+
+        let mut death_origin = player_origin;
+        let death_receipt = death_origin.receipt.as_mut().unwrap();
+        death_receipt.source.origin = IntegratedRuntimeNativeDropPickupOriginV1::PlayerDeathDrop {
+            respawn_sequence: 7,
+            respawn_receipt_hash: CanonicalHash([0xac; 16]),
+            source_lane: PlayerDeathCustodyLaneV1::Equipment,
+            source_slot: 3,
+        };
+        death_receipt.receipt_hash = death_receipt.calculate_hash_v1();
+        let death_bytes = encode_runtime_native_drop_pickup_projection_receipt_v1(&death_origin).unwrap();
+        assert_eq!(&death_bytes[..8], b"BWR8\x01\0\x01\0");
+        let decoded_death = decode_runtime_native_drop_pickup_projection_receipt_v1(&death_bytes).unwrap();
+        assert_eq!(
+            decoded_death.receipt.as_ref().unwrap().source.custody_slot,
+            death_origin.receipt.as_ref().unwrap().source.custody_slot
+        );
+        assert_eq!(decoded_death, death_origin);
+    }
+
+    #[test]
+    fn native_player_drop_projection_wire_round_trips_and_rejects_cursor_origin_and_hash_tamper() {
+        let projection = native_player_drop_projection_fixture_v1();
+        let native = projection.receipt.as_ref().unwrap();
+        native.validate_shape_v1().unwrap();
+        assert_eq!(
+            native.drop.origin_hash,
+            CanonicalHash([
+                0xac, 0xc3, 0xc2, 0x6b, 0xf1, 0x40, 0x31, 0xc7, 0xc8, 0x1a, 0xbd, 0xd6, 0x5b, 0x26, 0x47, 0x46,
+            ])
+        );
+        assert_eq!(
+            native.receipt_hash,
+            CanonicalHash([
+                0xa1, 0xbc, 0xe5, 0x13, 0x66, 0xae, 0xae, 0x31, 0x10, 0xdf, 0xa6, 0x18, 0x35, 0x4e, 0x39, 0x45,
+            ])
+        );
+        let query = RuntimeNativePlayerDropReceiptQueryWireV1 {
+            expected: projection.identity.clone(),
+            after_sequence: native.sequence - 1,
+        };
+        let query_bytes = encode_runtime_native_player_drop_receipt_query_v1(&query).unwrap();
+        assert_eq!(&query_bytes[..8], b"BWQ9\x01\0\x01\0");
+        assert_eq!(
+            decode_runtime_native_player_drop_receipt_query_v1(&query_bytes).unwrap(),
+            query
+        );
+        let bytes = encode_runtime_native_player_drop_projection_receipt_v1(&projection).unwrap();
+        assert_eq!(&bytes[..8], b"BWS9\x01\0\x01\0");
+        assert!(bytes.len() < MAX_DOMAIN_PAYLOAD_BYTES);
+        assert_eq!(
+            decode_runtime_native_player_drop_projection_receipt_v1(&bytes).unwrap(),
+            projection
+        );
+
+        assert_eq!(
+            encode_runtime_native_player_drop_receipt_query_v1(&RuntimeNativePlayerDropReceiptQueryWireV1 {
+                expected: projection.identity.clone(),
+                after_sequence: MAX_SAFE_U64 + 1,
+            })
+            .unwrap_err()
+            .code,
+            "native-player-drop-query-cursor"
+        );
+        let mut bad_cursor = projection.clone();
+        bad_cursor.cursor_after += 1;
+        assert_eq!(
+            encode_runtime_native_player_drop_projection_receipt_v1(&bad_cursor)
+                .unwrap_err()
+                .code,
+            "native-player-drop-projection-cursor"
+        );
+        let mut bad_origin = projection.clone();
+        bad_origin.receipt.as_mut().unwrap().drop.origin_hash = CanonicalHash([0xee; 16]);
+        assert_eq!(
+            encode_runtime_native_player_drop_projection_receipt_v1(&bad_origin)
+                .unwrap_err()
+                .code,
+            "native-player-drop-projection-native"
+        );
+        let mut bad_hash = projection;
+        bad_hash.receipt.as_mut().unwrap().receipt_hash = CanonicalHash([0xef; 16]);
+        assert_eq!(
+            encode_runtime_native_player_drop_projection_receipt_v1(&bad_hash)
+                .unwrap_err()
+                .code,
+            "native-player-drop-projection-native"
+        );
+    }
+
+    #[test]
+    fn native_drop_pickup_projection_wire_rejects_unsafe_cursors_and_tamper() {
+        let mut projection = native_drop_pickup_projection_fixture_v1();
+        assert_eq!(
+            encode_runtime_native_drop_pickup_receipt_query_v1(&RuntimeNativeDropPickupReceiptQueryWireV1 {
+                expected: projection.identity.clone(),
+                after_sequence: MAX_SAFE_U64 + 1,
+            })
+            .unwrap_err()
+            .code,
+            "native-drop-pickup-query-cursor"
+        );
+
+        projection.cursor_after += 1;
+        assert_eq!(
+            encode_runtime_native_drop_pickup_projection_receipt_v1(&projection)
+                .unwrap_err()
+                .code,
+            "native-drop-pickup-projection-cursor"
+        );
+        projection.cursor_after -= 1;
+        projection.receipt.as_mut().unwrap().source.stack.count += 1;
+        assert_eq!(
+            encode_runtime_native_drop_pickup_projection_receipt_v1(&projection)
+                .unwrap_err()
+                .code,
+            "native-drop-pickup-projection-native"
+        );
+
+        let projection = native_drop_pickup_projection_fixture_v1();
+        let mut bytes = encode_runtime_native_drop_pickup_projection_receipt_v1(&projection).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        let checksum = wire_checksum_v1(&bytes[DOMAIN_HEADER_BYTES..]);
+        bytes[12..28].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_runtime_native_drop_pickup_projection_receipt_v1(&bytes)
+                .unwrap_err()
+                .code,
+            "native-drop-pickup-projection-native"
+        );
+    }
+
+    #[test]
+    fn basic_dirt_projection_wire_rejects_unsafe_cursors_tamper_and_bounds() {
+        let mut receipt = basic_dirt_projection_fixture_v1();
+        assert_eq!(
+            encode_runtime_basic_dirt_action_receipt_query_v1(&RuntimeBasicDirtActionReceiptQueryWireV1 {
+                expected: receipt.identity.clone(),
+                after_sequence: MAX_SAFE_U64 + 1,
+            })
+            .unwrap_err()
+            .code,
+            "basic-dirt-action-query-cursor"
+        );
+
+        receipt.cursor_after += 1;
+        assert_eq!(
+            encode_runtime_basic_dirt_action_projection_receipt_v1(&receipt)
+                .unwrap_err()
+                .code,
+            "basic-dirt-action-projection-cursor"
+        );
+        receipt.cursor_after -= 1;
+        receipt.receipt.as_mut().unwrap().receipt_hash = CanonicalHash([0xee; 16]);
+        assert_eq!(
+            encode_runtime_basic_dirt_action_projection_receipt_v1(&receipt)
+                .unwrap_err()
+                .code,
+            "basic-dirt-action-projection-native"
+        );
+
+        let mut receipt = basic_dirt_projection_fixture_v1();
+        receipt.receipt.as_mut().unwrap().generated_drops[0].position.x_milli =
+            blockwild_gameplay::WORLD_VIEW_COORDINATE_LIMIT_MILLI_V1 + 1;
+        assert_eq!(
+            encode_runtime_basic_dirt_action_projection_receipt_v1(&receipt)
+                .unwrap_err()
+                .code,
+            "basic-dirt-action-projection-spatial"
+        );
+
+        let mut receipt = basic_dirt_projection_fixture_v1();
+        receipt.receipt.as_mut().unwrap().generated_drops[0].stack.count = 0;
+        assert_eq!(
+            encode_runtime_basic_dirt_action_projection_receipt_v1(&receipt)
+                .unwrap_err()
+                .code,
+            "basic-dirt-action-projection-drop"
+        );
+
+        let receipt = basic_dirt_projection_fixture_v1();
+        let mut bytes = encode_runtime_basic_dirt_action_projection_receipt_v1(&receipt).unwrap();
+        let body = unwrap_schema(
+            BASIC_DIRT_ACTION_PROJECTION_RECEIPT_V1_MAGIC,
+            BASIC_DIRT_ACTION_PROJECTION_RECEIPT_V1_INNER_SCHEMA,
+            &bytes,
+        )
+        .unwrap();
+        let mut reader = Reader::new(body);
+        let _ = reader.hash().unwrap();
+        let _ = read_integrated_runtime_identity_v2(&mut reader).unwrap();
+        let _ = reader.u64().unwrap();
+        assert!(reader.flag().unwrap());
+        let _ = reader.u16().unwrap();
+        let _ = reader.u64().unwrap();
+        let _ = reader.u64().unwrap();
+        let _ = reader.u64().unwrap();
+        let action_body_offset = reader.offset;
+        bytes[DOMAIN_HEADER_BYTES + action_body_offset] = 0xff;
+        let checksum = wire_checksum_v1(&bytes[DOMAIN_HEADER_BYTES..]);
+        bytes[12..28].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_runtime_basic_dirt_action_projection_receipt_v1(&bytes)
+                .unwrap_err()
+                .code,
+            "basic-dirt-action-projection-action"
+        );
+
+        let mut trailing = encode_runtime_basic_dirt_action_projection_receipt_v1(&receipt).unwrap();
+        trailing.push(0xaa);
+        let body_length = u32::try_from(trailing.len() - DOMAIN_HEADER_BYTES).unwrap();
+        trailing[8..12].copy_from_slice(&body_length.to_le_bytes());
+        let checksum = wire_checksum_v1(&trailing[DOMAIN_HEADER_BYTES..]);
+        trailing[12..28].copy_from_slice(&checksum);
+        assert_eq!(
+            decode_runtime_basic_dirt_action_projection_receipt_v1(&trailing)
+                .unwrap_err()
+                .code,
+            "domain-trailing"
         );
     }
 
@@ -6860,6 +11714,37 @@ mod tests {
     }
 
     #[test]
+    fn persistence_terminal_status_is_append_only_and_attests_one_exact_checkpoint() {
+        let query = encode_runtime_persistence_status_query_v1().unwrap();
+        assert_eq!(&query[..8], b"BWS8\x01\x00\x01\x00");
+        decode_runtime_persistence_status_query_v1(&query).unwrap();
+
+        let receipt = RuntimePersistenceStatusReceiptWireV1 {
+            persistence_revision: 9,
+            pending: 0,
+            queued_bytes: 0,
+            dispatcher_state_hash: CanonicalHash([1; 16]),
+            authority_state_hash: CanonicalHash([2; 16]),
+            closed: false,
+            terminal_checkpoint: Some(RuntimePersistenceTerminalCheckpointWireV1 {
+                checkpoint_id: "checkpoint:水".into(),
+                checkpoint_hash: CanonicalHash([3; 16]),
+                journal_sequence: 7,
+                record_count: 6,
+                save_set_hash: CanonicalHash([4; 16]),
+                manifest_hash: CanonicalHash([5; 16]),
+            }),
+        };
+        let encoded = encode_runtime_persistence_status_receipt_v1(&receipt).unwrap();
+        assert_eq!(&encoded[..8], b"BWT8\x01\x00\x01\x00");
+        assert_eq!(
+            encoded.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "425754380100010084000000f3e4b66006cdcf7c18da4b682f8cb46a0900000000000000000000000000000000000000010101010101010101010101010101010202020202020202020202020202020200010e000000636865636b706f696e743ae6b0b4030303030303030303030303030303030700000000000000060000000404040404040404040404040404040405050505050505050505050505050505"
+        );
+        assert_eq!(decode_runtime_persistence_status_receipt_v1(&encoded).unwrap(), receipt);
+    }
+
+    #[test]
     fn content_page_wire_preserves_unicode_high_bytes_and_domains() {
         let bundle = blockwild_gameplay::compile_content_bundle(
             "content-\u{6c34}-1",
@@ -6869,7 +11754,7 @@ mod tests {
                 schema_id: "item-definition".into(),
                 schema_version: 1,
                 content_version: 9,
-                aliases: vec!["item:orb-\u{6c34}".into()],
+                aliases: vec!["item:orb-\u{6c34}".into(), "item:orb:\u{6c34}".into()],
                 canonical_bytes: "{\"name\":\"Mizu \u{6c34}\"}".as_bytes().to_vec(),
                 unknown_extension_bytes: vec![0, 0x80, 0xff],
             }],
@@ -6888,11 +11773,11 @@ mod tests {
         let encoded = encode_content_install_page_v1(&page).unwrap();
         assert_eq!(
             bundle.manifest.manifest_hash.to_hex(),
-            "d7ebbffbc6730af930252027558e948f"
+            "2bbeaab8b5f3691230252027558e948f"
         );
         assert_eq!(
             encoded.iter().map(|byte| format!("{byte:02x}")).collect::<String>(),
-            "42574337010001009b0100004b75543dd8edf6a838b55f7d5a2a31e528000000696e7374616c6c3a643765626266666263363733306166393330323532303237353538653934386601000d000000636f6e74656e742de6b0b42d31d7ebbffbc6730af930252027558e948f0b000001000000eb1512b3b15918c9c87a01591f93f5580100000000adf4e63002272ee2c83a57a61812458f0200000000a10cf256ba7281bac83a57a61812417b0300000000efe23061189c39a0c83a57a67211d5ea040000000045af961395cd5b99c83a5716c2882d30050000000078e14c613113a899c83a57a67211d5c006000000002fe966db6f45b565c83a57969fa148f607000000007a00de9183d68586c83a5796090d490a0800000000462f9f6d667aac6ac83a5766dfaead27090000000091e7b6db86082917c83a579650a7b4dd0a00000000a21d2c4d687bc6c2c83a5786670accc300000000010000000100000000070000006f72623ae6b0b40f0000006974656d2d646566696e6974696f6e010009000000010000000c0000006974656d3a6f72622de6b0b4130000007b226e616d65223a224d697a7520e6b0b4227d030000000080ff"
+            "4257433701000100ab010000009477ab704087d238b55f7d5a2a31e528000000696e7374616c6c3a326262656161623862356633363931323330323532303237353538653934386601000d000000636f6e74656e742de6b0b42d312bbeaab8b5f3691230252027558e948f0b00000100000002859f5276f16bedc87a01591faa188b0100000000adf4e63002272ee2c83a57a61812458f0200000000a10cf256ba7281bac83a57a61812417b0300000000efe23061189c39a0c83a57a67211d5ea040000000045af961395cd5b99c83a5716c2882d30050000000078e14c613113a899c83a57a67211d5c006000000002fe966db6f45b565c83a57969fa148f607000000007a00de9183d68586c83a5796090d490a0800000000462f9f6d667aac6ac83a5766dfaead27090000000091e7b6db86082917c83a579650a7b4dd0a00000000a21d2c4d687bc6c2c83a5786670accc300000000010000000100000000070000006f72623ae6b0b40f0000006974656d2d646566696e6974696f6e010009000000020000000c0000006974656d3a6f72622de6b0b40c0000006974656d3a6f72623ae6b0b4130000007b226e616d65223a224d697a7520e6b0b4227d030000000080ff"
         );
         assert_eq!(decode_content_install_page_v1(&encoded).unwrap(), page);
         assert!(encoded.iter().any(|byte| *byte >= 0x80));

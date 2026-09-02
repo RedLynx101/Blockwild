@@ -1,0 +1,226 @@
+{
+  "schema": 1,
+  "description": "One-factor normalized world-option extension for the frozen 131-case R3 terrain promotion corpus. This file deliberately carries no composed certificate hash until native and Wasm parity plus anti-vacuity checks pass.",
+  "baseCorpusCases": 131,
+  "baseCorpusHash": "11604d437bd0c32d30164d1a8093d8dc",
+  "extensionCases": 24,
+  "composedCorpusCases": 155,
+  "composedCoverage": 89,
+  "normalizedOptionsBase": {
+    "biomeScale": 1.35,
+    "caveFrequency": 1,
+    "enabledFactions": [
+      "hobbits",
+      "goblins",
+      "atlantians",
+      "sugarcourt",
+      "wood-elves",
+      "dwarves"
+    ],
+    "largeTownFrequency": "balanced",
+    "profile": "world-below-v15",
+    "resourceAbundance": 1,
+    "roadCoverage": "regional",
+    "settlementClustering": "regional",
+    "settlementDensity": 1,
+    "settlementPattern": "heartlands-v2",
+    "structures": true
+  },
+  "requiredCoverage": [
+    "option-profile-legacy-v14",
+    "option-cave-frequency-min",
+    "option-cave-frequency-max",
+    "option-biome-scale-min",
+    "option-biome-scale-max",
+    "option-resource-abundance-min",
+    "option-resource-abundance-max",
+    "option-enabled-factions-empty",
+    "option-enabled-factions-hobbits",
+    "option-enabled-factions-goblins",
+    "option-enabled-factions-atlantians",
+    "option-enabled-factions-sugarcourt",
+    "option-enabled-factions-wood-elves",
+    "option-enabled-factions-dwarves",
+    "option-settlement-pattern-legacy",
+    "option-settlement-density-min",
+    "option-settlement-density-max",
+    "option-settlement-clustering-even",
+    "option-settlement-clustering-strong",
+    "option-road-coverage-none",
+    "option-road-coverage-local",
+    "option-road-coverage-dense",
+    "option-large-town-frequency-rare",
+    "option-large-town-frequency-frequent"
+  ],
+  "cases": [
+    {
+      "id": "option-profile-legacy-v14",
+      "seed": "HEARTHROADS",
+      "chunk": [-130, -191],
+      "options": { "profile": "legacy-v14", "settlementPattern": "heartlands-v2" },
+      "edits": [[49151, 3], [0, 7], [24576, 13]],
+      "coverage": ["option-profile-legacy-v14"]
+    },
+    {
+      "id": "option-cave-frequency-min",
+      "seed": "CAVE-OPTIONS",
+      "chunk": [0, 0],
+      "options": { "caveFrequency": 0 },
+      "coverage": ["option-cave-frequency-min"]
+    },
+    {
+      "id": "option-cave-frequency-max",
+      "seed": "CAVE-OPTIONS",
+      "chunk": [0, 0],
+      "options": { "caveFrequency": 3 },
+      "coverage": ["option-cave-frequency-max"]
+    },
+    {
+      "id": "option-biome-scale-min",
+      "seed": "BIOME-OPTIONS",
+      "chunk": [7, -9],
+      "options": { "biomeScale": 0.25 },
+      "coverage": ["option-biome-scale-min"]
+    },
+    {
+      "id": "option-biome-scale-max",
+      "seed": "BIOME-OPTIONS",
+      "chunk": [7, -9],
+      "options": { "biomeScale": 4 },
+      "coverage": ["option-biome-scale-max"]
+    },
+    {
+      "id": "option-resource-abundance-min",
+      "seed": "RESOURCE-OPTIONS",
+      "chunk": [-1, -1],
+      "options": { "resourceAbundance": 0.25 },
+      "coverage": ["option-resource-abundance-min"]
+    },
+    {
+      "id": "option-resource-abundance-max",
+      "seed": "RESOURCE-OPTIONS",
+      "chunk": [-1, -1],
+      "options": { "resourceAbundance": 4 },
+      "coverage": ["option-resource-abundance-max"]
+    },
+    {
+      "id": "option-enabled-factions-empty",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-70, 51],
+      "options": { "enabledFactions": [] },
+      "coverage": ["option-enabled-factions-empty"]
+    },
+    {
+      "id": "option-enabled-factions-hobbits",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-70, 51],
+      "options": { "enabledFactions": ["hobbits"] },
+      "coverage": ["option-enabled-factions-hobbits"]
+    },
+    {
+      "id": "option-enabled-factions-goblins",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-92, 154],
+      "options": { "enabledFactions": ["goblins"] },
+      "coverage": ["option-enabled-factions-goblins"]
+    },
+    {
+      "id": "option-enabled-factions-atlantians",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-252, -28],
+      "options": { "enabledFactions": ["atlantians"] },
+      "coverage": ["option-enabled-factions-atlantians"]
+    },
+    {
+      "id": "option-enabled-factions-sugarcourt",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-91, 171],
+      "options": { "enabledFactions": ["sugarcourt"] },
+      "coverage": ["option-enabled-factions-sugarcourt"]
+    },
+    {
+      "id": "option-enabled-factions-wood-elves",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-558, 133],
+      "options": { "enabledFactions": ["wood-elves"] },
+      "coverage": ["option-enabled-factions-wood-elves"]
+    },
+    {
+      "id": "option-enabled-factions-dwarves",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-84, 171],
+      "options": { "enabledFactions": ["dwarves"] },
+      "coverage": ["option-enabled-factions-dwarves"]
+    },
+    {
+      "id": "option-settlement-pattern-legacy",
+      "seed": "LOCATOR-LEGACY",
+      "chunk": [-250, 147],
+      "options": { "settlementPattern": "legacy-scattered-v1" },
+      "coverage": ["option-settlement-pattern-legacy"]
+    },
+    {
+      "id": "option-settlement-density-min",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-70, 51],
+      "options": { "settlementDensity": 0 },
+      "coverage": ["option-settlement-density-min"]
+    },
+    {
+      "id": "option-settlement-density-max",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-70, 51],
+      "options": { "settlementDensity": 2 },
+      "coverage": ["option-settlement-density-max"]
+    },
+    {
+      "id": "option-settlement-clustering-even",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-199, 410],
+      "options": { "settlementClustering": "even" },
+      "coverage": ["option-settlement-clustering-even"]
+    },
+    {
+      "id": "option-settlement-clustering-strong",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-70, 51],
+      "options": { "settlementClustering": "strong" },
+      "coverage": ["option-settlement-clustering-strong"]
+    },
+    {
+      "id": "option-road-coverage-none",
+      "seed": "r3-road-breadth-0",
+      "chunk": [-136, -45],
+      "options": { "roadCoverage": "none" },
+      "coverage": ["option-road-coverage-none"]
+    },
+    {
+      "id": "option-road-coverage-local",
+      "seed": "r3-road-breadth-0",
+      "chunk": [-136, -45],
+      "options": { "roadCoverage": "local" },
+      "coverage": ["option-road-coverage-local"]
+    },
+    {
+      "id": "option-road-coverage-dense",
+      "seed": "r3-road-breadth-0",
+      "chunk": [-136, -45],
+      "options": { "roadCoverage": "dense" },
+      "coverage": ["option-road-coverage-dense"]
+    },
+    {
+      "id": "option-large-town-frequency-rare",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-966, -1350],
+      "options": { "largeTownFrequency": "rare" },
+      "coverage": ["option-large-town-frequency-rare"]
+    },
+    {
+      "id": "option-large-town-frequency-frequent",
+      "seed": "r3-settlement-breadth-0",
+      "chunk": [-70, 51],
+      "options": { "largeTownFrequency": "frequent" },
+      "coverage": ["option-large-town-frequency-frequent"]
+    }
+  ]
+}

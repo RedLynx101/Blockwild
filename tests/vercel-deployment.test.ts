@@ -13,9 +13,20 @@ test("Vercel uses a native Next build without replacing the Sites build", () => 
     buildCommand: string;
   };
 
-  assert.equal(packageJson.scripts.build, "bash scripts/build-verified.sh");
+  assert.equal(packageJson.scripts.build, "node scripts/run-sites-build.mjs");
+  assert.equal(packageJson.scripts["build:worldgen-rollback"], "node scripts/run-worldgen-rollback-build.mjs sites");
   assert.equal(packageJson.scripts["build:vercel"], "node scripts/clean-next-build-cache.mjs && npm run build:wiki && next build --webpack");
+  assert.equal(packageJson.scripts["build:vercel:worldgen-rollback"], "node scripts/run-worldgen-rollback-build.mjs vercel");
   assert.equal(vercelConfig.buildCommand, "npm run build:vercel");
+
+  const sitesBuild = readFileSync(resolve(root, "scripts/run-sites-build.mjs"), "utf8");
+  assert.match(sitesBuild, /node_modules", "vinext", "dist", "cli\.js/u);
+  assert.match(sitesBuild, /spawnSync\(process\.execPath/u);
+  assert.match(sitesBuild, /Validated Sites artifact/u);
+
+  const nextConfig = readFileSync(resolve(root, "next.config.ts"), "utf8");
+  assert.match(nextConfig, /resolveWorldgenBuildProfile\(\)/u);
+  assert.match(nextConfig, /NEXT_PUBLIC_BLOCKWILD_WORLDGEN_BUILD_PROFILE: worldgenBuildProfile/u);
 });
 
 test("Cardforge helpers do not collide with Next route conventions", () => {

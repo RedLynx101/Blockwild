@@ -10,11 +10,13 @@ import {
 } from "../app/game/rust-integrated-runtime-content.ts";
 import {
   attestRenderPresentationCatalogV1,
+  BLOCKWILD_RENDER_PRESENTATION_COVERAGE_R10,
   BLOCKWILD_RENDER_PRESENTATION_CATALOG_V1,
   BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
   BLOCKWILD_WORLD_PROP_OWNERSHIP_POLICY_V1,
   canonicalWorldPropOwnershipPolicyHashV1,
   canonicalWorldPropSourceInventoryHashV1,
+  createRenderPresentationCoverageInventoryR10,
   loadAttestedRenderPresentationCatalogV1,
   createRenderPresentationRegistryV1,
   renderPresentationWorldPropOwnershipPolicyV1,
@@ -111,6 +113,71 @@ test("missing render profiles enumerate exact sorted source IDs without fabricat
   assert.equal(catalog.profiles.some((profile) => profile.model.id === "skeleton-arrow"), false);
   const specialBlocks = catalog.missingProfiles.find((profile) => profile.id === "missing:world-prop:special-block-shapes");
   assert.equal(specialBlocks?.sourcePresentationIds.length, 172);
+});
+
+test("R10 presentation coverage is deterministic, exhaustive, and distinguishes contracts from live blockers", () => {
+  const catalog = BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2;
+  const coverage = createRenderPresentationCoverageInventoryR10(catalog);
+  assert.deepEqual(coverage, BLOCKWILD_RENDER_PRESENTATION_COVERAGE_R10);
+  assert.deepEqual(createRenderPresentationCoverageInventoryR10(catalog), coverage);
+  assert.equal(coverage.coverageHash, "eab25899b5f55241c81ad0f3ca7703d7");
+  assert.equal(coverage.catalogId, RENDER_PRESENTATION_CATALOG_ID_V1);
+  assert.equal(coverage.profileCatalogSchema, catalog.schema);
+  assert.equal(coverage.modelCatalogHash, catalog.catalog.canonicalHash);
+  assert.deepEqual(coverage.entries.map((entry) => entry.id),
+    [...coverage.entries.map((entry) => entry.id)].sort());
+  assert.equal(new Set(coverage.entries.map((entry) => entry.id)).size, coverage.entries.length);
+  assert.deepEqual(coverage.families.map((family) => family.family), [
+    "celestial", "dropped-item", "held-item", "machine", "particle", "projectile",
+    "sky", "summon", "vehicle", "weather", "world-prop",
+  ]);
+
+  const exactRoles = new Set(["dropped-item", "held-item", "machine", "projectile", "summon"]);
+  for (const profile of catalog.profiles) {
+    const entry = coverage.entries.find((candidate) => candidate.profileId === profile.id);
+    assert.ok(entry, profile.id);
+    assert.equal(entry.modelId, profile.model.id, profile.id);
+    assert.equal(entry.status, exactRoles.has(profile.role) ? "exact-contract" : "blocked", profile.id);
+    assert.equal(entry.extractionProtocol === null, !exactRoles.has(profile.role), profile.id);
+    assert.equal(entry.blockerId === null, exactRoles.has(profile.role), profile.id);
+  }
+  for (const missing of catalog.missingProfiles) {
+    const entry = coverage.entries.find((candidate) => candidate.id === `catalog:${missing.id}`);
+    assert.ok(entry, missing.id);
+    assert.equal(entry.status, "blocked");
+    assert.equal(entry.blockerId, missing.id);
+    assert.equal(entry.profileId, null);
+    assert.equal(entry.modelId, null);
+  }
+
+  assert.deepEqual(coverage.entries.filter((entry) => entry.id.startsWith("dynamic:")).map((entry) => entry.id), [
+    "dynamic:active-chest-articulation",
+    "dynamic:aquarium",
+    "dynamic:butterfly-exhibit",
+    "dynamic:capture-orb-rack-and-healer-contents",
+    "dynamic:fireplace-flame",
+    "dynamic:morph-loom-contents",
+    "dynamic:tome-display",
+  ]);
+  assert.deepEqual(coverage.entries.filter((entry) => entry.id.startsWith("runtime-schema:")).map((entry) => entry.family),
+    ["celestial", "particle", "sky", "vehicle", "weather"]);
+  assert.deepEqual(coverage.families, [
+    { family: "celestial", exactContracts: 0, blockers: 1 },
+    { family: "dropped-item", exactContracts: 7, blockers: 29 },
+    { family: "held-item", exactContracts: 11, blockers: 28 },
+    { family: "machine", exactContracts: 3, blockers: 12 },
+    { family: "particle", exactContracts: 0, blockers: 1 },
+    { family: "projectile", exactContracts: 1, blockers: 4 },
+    { family: "sky", exactContracts: 0, blockers: 1 },
+    { family: "summon", exactContracts: 4, blockers: 1 },
+    { family: "vehicle", exactContracts: 0, blockers: 2 },
+    { family: "weather", exactContracts: 0, blockers: 1 },
+    { family: "world-prop", exactContracts: 0, blockers: 15 },
+  ]);
+  assert.throws(() => createRenderPresentationCoverageInventoryR10({
+    ...catalog,
+    integrationBlockers: Object.freeze([...catalog.integrationBlockers, "zz-unclassified-runtime-gap"]),
+  }), /unclassified render presentation integration blocker/u);
 });
 
 test("world prop policy attests complete BWR2 terrain ownership and all bounded dynamic families", () => {
@@ -248,7 +315,7 @@ test("production content carries the distinct attested catalog and retains block
   assert.equal(artifact.schemaVersion, 2);
   assert.equal(artifact.contentVersion, 2);
   assert.equal(artifact.canonicalBytes.byteLength, 74_655);
-  assert.equal(artifact.blobHash, "9cf7e945678eb2eec83a571eb2c8f56d");
+  assert.equal(artifact.blobHash, "f6f01b50c711b705c83a571eb2c8f56d");
   assert.deepEqual(JSON.parse(decoder.decode(artifact.canonicalBytes)), BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2);
 });
 

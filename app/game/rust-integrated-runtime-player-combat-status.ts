@@ -1,17 +1,23 @@
 import { rustIntegratedRuntimeWireChecksumV1 } from "./rust-integrated-runtime-codec";
 import { RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES } from "./rust-integrated-runtime-contract";
 import {
+  RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1,
+  rustIntegratedRuntimeDomainWireFamilyV1,
+} from "./rust-integrated-runtime-domain-schema.generated";
+import {
   RustIntegratedPlayerInventoryReaderV1,
   RustIntegratedPlayerInventoryWriterV1,
 } from "./rust-integrated-runtime-player-inventory";
 
-export const RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1 =
-  "blockwild.simulation.player-combat-bootstrap-status.r7.v1";
-export const RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1 =
-  "blockwild.simulation.player-combat-bootstrap-status-receipt.r7.v1";
+const BWS7_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("player-combat-bootstrap-status-v1");
+const BWO7_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("player-combat-bootstrap-status-receipt-v1");
 
-const BWS7_MAGIC = Uint8Array.of(0x42, 0x57, 0x53, 0x37);
-const BWO7_MAGIC = Uint8Array.of(0x42, 0x57, 0x4f, 0x37);
+export const RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1 = BWS7_SCHEMA.typeId;
+export const RUST_INTEGRATED_PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1 = BWO7_SCHEMA.typeId;
+
+const wireEncoder = new TextEncoder();
+const BWS7_MAGIC = wireEncoder.encode(BWS7_SCHEMA.magic);
+const BWO7_MAGIC = wireEncoder.encode(BWO7_SCHEMA.magic);
 const HEADER_BYTES = 28;
 const U64_MAX = (BigInt(1) << BigInt(64)) - BigInt(1);
 
@@ -90,22 +96,22 @@ function bytesHash(value: Uint8Array) {
   return [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function wrap(magic: Uint8Array, body: Uint8Array) {
+function wrap(magic: Uint8Array, schema: number, body: Uint8Array) {
   if (body.byteLength > RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES - HEADER_BYTES) {
     fail("player-combat-status-size", "player combat status packet exceeds its byte budget");
   }
   const packet = new Uint8Array(HEADER_BYTES + body.byteLength);
   const view = new DataView(packet.buffer);
   packet.set(magic);
-  view.setUint16(4, 1, true);
-  view.setUint16(6, 1, true);
+  view.setUint16(4, RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1, true);
+  view.setUint16(6, schema, true);
   view.setUint32(8, body.byteLength, true);
   packet.set(hashBytes(rustIntegratedRuntimeWireChecksumV1(body), "combat status checksum"), 12);
   packet.set(body, HEADER_BYTES);
   return packet;
 }
 
-function unwrap(packet: Uint8Array, magic: Uint8Array) {
+function unwrap(packet: Uint8Array, magic: Uint8Array, schema: number) {
   if (!(packet instanceof Uint8Array)
     || packet.byteLength < HEADER_BYTES
     || packet.byteLength > RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES
@@ -113,8 +119,8 @@ function unwrap(packet: Uint8Array, magic: Uint8Array) {
     fail("player-combat-status-header", "player combat status packet header is malformed");
   }
   const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
-  if (view.getUint16(4, true) !== 1
-    || view.getUint16(6, true) !== 1
+  if (view.getUint16(4, true) !== RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1
+    || view.getUint16(6, true) !== schema
     || view.getUint32(8, true) !== packet.byteLength - HEADER_BYTES) {
     fail("player-combat-status-header", "player combat status packet version or length is invalid");
   }
@@ -226,11 +232,11 @@ export function encodeRustIntegratedPlayerCombatBootstrapStatusQueryV1(
   writer.string(value.externalEntityId, "external entity id");
   writer.string(value.actorId, "actor id");
   writer.u64(value.playerId);
-  return wrap(BWS7_MAGIC, writer.finish());
+  return wrap(BWS7_MAGIC, BWS7_SCHEMA.innerSchema, writer.finish());
 }
 
 export function decodeRustIntegratedPlayerCombatBootstrapStatusQueryV1(packet: Uint8Array) {
-  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWS7_MAGIC));
+  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWS7_MAGIC, BWS7_SCHEMA.innerSchema));
   const value = Object.freeze({
     externalEntityId: reader.string("external entity id"),
     actorId: reader.string("actor id"),
@@ -264,14 +270,14 @@ export function encodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1(
     writer.u8(combatant.alive ? 1 : 0);
     writer.u8(combatant.crossDomainParity ? 1 : 0);
   });
-  return wrap(BWO7_MAGIC, writer.finish());
+  return wrap(BWO7_MAGIC, BWO7_SCHEMA.innerSchema, writer.finish());
 }
 
 export function decodeRustIntegratedPlayerCombatBootstrapStatusReceiptV1(
   packet: Uint8Array,
   expectedRequestPayloadHash?: string,
 ) {
-  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWO7_MAGIC));
+  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWO7_MAGIC, BWO7_SCHEMA.innerSchema));
   const requestPayloadHash = bytesHash(reader.take(16));
   if (expectedRequestPayloadHash !== undefined
     && requestPayloadHash !== checkedHash(expectedRequestPayloadHash, "expected request payload hash")) {

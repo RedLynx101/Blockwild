@@ -146,7 +146,7 @@ function validateCanonicalGenerationOptionsJson(value: string) {
   const enabledFactions = options.enabledFactions;
   if (JSON.stringify(options) !== value || JSON.stringify(Object.keys(options)) !== JSON.stringify(GENERATION_OPTION_KEYS)) fail("terrain-generation-options", "terrain generation options are not in canonical field order");
   const rounded = (candidate: unknown, minimum: number, maximum: number) => typeof candidate === "number" && Number.isFinite(candidate) && candidate >= minimum && candidate <= maximum && candidate === Math.round(candidate * 100) / 100;
-  if (!rounded(options.biomeScale, 0.25, 4) || !rounded(options.caveFrequency, 0, 3) || !rounded(options.resourceAbundance, 0.25, 4) || !rounded(options.settlementDensity, 0, 3)
+  if (!rounded(options.biomeScale, 0.25, 4) || !rounded(options.caveFrequency, 0, 3) || !rounded(options.resourceAbundance, 0.25, 4) || !rounded(options.settlementDensity, 0, 2)
     || options.profile !== "legacy-v14" && options.profile !== "world-below-v15"
     || options.settlementPattern !== "legacy-scattered-v1" && options.settlementPattern !== "heartlands-v2"
     || options.settlementClustering !== "even" && options.settlementClustering !== "regional" && options.settlementClustering !== "strong"

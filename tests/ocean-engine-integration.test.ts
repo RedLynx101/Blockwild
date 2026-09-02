@@ -59,7 +59,14 @@ test("saved Aetherbell lifecycle, morph, and follower orders survive the live re
   const growth = stepLeviathanEgg(egg, { elapsedTicks: 1, underwater: true }).hatchling!;
   const morph = createAetherbellMorphState("air");
   const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
+  const requestedChunks: Array<readonly [number, number]> = [];
   const captured: { position: THREE.Vector3 | null; options: Record<string, unknown> | null } = { position: null, options: null };
+  engine.world = {
+    requestChunk: (cx: number, cz: number) => {
+      requestedChunks.push([cx, cz]);
+      return { cx, cz };
+    },
+  } as never;
   (engine as unknown as { spawnMob: (kind: string, position: THREE.Vector3, options: Record<string, unknown>) => unknown }).spawnMob = (_kind, position, options) => {
     captured.position = position.clone();
     captured.options = options;
@@ -80,6 +87,7 @@ test("saved Aetherbell lifecycle, morph, and follower orders survive the live re
     followDistance: 8,
     followCommand: "hold",
   }));
+  assert.deepEqual(requestedChunks, [[0, 0]], "restore should acquire the creature's resident chunk before spawning it");
   assert.equal(captured.position?.y, -18, "aquatic saves must not be regrounded during restore");
   assert.deepEqual(captured.options?.leviathanGrowth, growth);
   assert.deepEqual(captured.options?.aetherbellMorph, morph);

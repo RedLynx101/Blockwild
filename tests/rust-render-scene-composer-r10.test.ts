@@ -307,7 +307,7 @@ function presentation(
   }> = {},
 ): RenderEntityPresentationR10 {
   return Object.freeze({
-    entityId, entityRevision: BigInt(4), externalEntityId: `external-${entityId}`, specimenId: `specimen-${entityId}`,
+    entityId, entityRevision: BigInt(4), class: "creature", externalEntityId: `external-${entityId}`, specimenId: `specimen-${entityId}`,
     kindKey: "test-creature", variantKey: "aurora", name: "Ægir 🐉", modelKey: "test-model", modelRevision: 1,
     modelHash: Uint8Array.from({ length: 16 }, (_, index) => 0xf0 - index), residency: "hot", tier: options.tier ?? "hero",
     protection: BigInt(9), tamed: true, movementMode: options.parentMount ? "mounted" : "ground",

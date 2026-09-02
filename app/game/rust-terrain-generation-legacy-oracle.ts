@@ -20,7 +20,7 @@ export function generateChunkWithLegacyOracleV2(request: GenerateChunkRequestV2)
   if (request.generatorHash !== expectedGeneratorHash) {
     throw new Error(`Generator hash does not match TypeScript generator v${GENERATOR_VERSION}`);
   }
-  const world = new ChunkWorld();
+  const world = new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
   try {
     const edits = decodeTerrainGenerationEditsV2(request.edits);
     const savedEdits = edits.length

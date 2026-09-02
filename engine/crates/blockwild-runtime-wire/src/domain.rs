@@ -28,6 +28,8 @@ pub const PERSISTENCE_TRANSACTION_TYPE_V1: &str = "blockwild.persistence.transac
 pub const PERSISTENCE_RECEIPT_TYPE_V1: &str = "blockwild.persistence.journal-receipt.r8.v1";
 pub const PERSISTENCE_DISPATCH_TYPE_V1: &str = "blockwild.persistence.dispatch.r8.v1";
 pub const PERSISTENCE_DISPATCH_RECEIPT_TYPE_V1: &str = "blockwild.persistence.dispatch-receipt.r8.v1";
+pub const PERSISTENCE_STATUS_TYPE_V1: &str = "blockwild.persistence.status.r8.v1";
+pub const PERSISTENCE_STATUS_RECEIPT_TYPE_V1: &str = "blockwild.persistence.status-receipt.r8.v1";
 
 pub const NETWORK_REQUEST_TYPE_V1: &str = "blockwild.network.browser-request.r9.v1";
 pub const NETWORK_RESPONSE_TYPE_V1: &str = "blockwild.network.browser-response.r9.v1";

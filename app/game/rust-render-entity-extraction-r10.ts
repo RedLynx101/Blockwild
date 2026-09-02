@@ -86,6 +86,7 @@ export type RenderEntityFrameContextR10 = Readonly<{
 export type RenderEntityPresentationR10 = Readonly<{
   entityId: bigint;
   entityRevision: bigint;
+  class: RenderEntityClassR10;
   externalEntityId: string;
   specimenId: string;
   kindKey: string;
@@ -723,6 +724,7 @@ export class RustEntityRenderExtractionR10 {
       presentations.push(Object.freeze({
         entityId: record.entityId,
         entityRevision: record.entityRevision,
+        class: record.class,
         externalEntityId: record.externalEntityId,
         specimenId: record.specimenId,
         kindKey: record.kindKey,

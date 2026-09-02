@@ -74,6 +74,7 @@ export type PhysicsBodyV1 = Readonly<{
   drowningAccumulator: number;
   swimEntryMomentumSpeed: number;
   swimSurfaceBreachReady: boolean;
+  swimShoreExitReady: boolean;
   swimSurfaceBreachSeconds: number;
   swimStrokeCooldownSeconds: number;
   swimSurfaceBobActive: boolean;
@@ -326,6 +327,13 @@ function requireFinite(value: number, minimum: number, maximum: number, label: s
   return Object.is(value, -0) ? 0 : value;
 }
 
+function requireBoolean(value: boolean, label: string) {
+  if (typeof value !== "boolean") {
+    throw new SimulationContractError("invalid-boolean", `${label} must be a boolean`);
+  }
+  return value;
+}
+
 function requireLabel(value: string, label: string, maximum = 128) {
   if (typeof value !== "string" || value.length < 1 || value.length > maximum) {
     throw new SimulationContractError("invalid-label", `${label} must be a non-empty string no longer than ${maximum} code units`);
@@ -401,6 +409,7 @@ function normalizeBody(body: PhysicsBodyV1): PhysicsBodyV1 {
     oxygenSeconds: requireFinite(body.oxygenSeconds, 0, 86_400, "body.oxygenSeconds"),
     drowningAccumulator: requireFinite(body.drowningAccumulator, 0, 86_400, "body.drowningAccumulator"),
     swimEntryMomentumSpeed: requireFinite(body.swimEntryMomentumSpeed, 0, 1_000_000, "body.swimEntryMomentumSpeed"),
+    swimShoreExitReady: requireBoolean(body.swimShoreExitReady, "body.swimShoreExitReady"),
     swimSurfaceBreachSeconds: requireFinite(body.swimSurfaceBreachSeconds, 0, 86_400, "body.swimSurfaceBreachSeconds"),
     swimStrokeCooldownSeconds: requireFinite(body.swimStrokeCooldownSeconds, 0, 86_400, "body.swimStrokeCooldownSeconds"),
   });
@@ -413,7 +422,8 @@ function writeBody(hasher: TypeScriptCanonicalHasher, body: PhysicsBodyV1) {
   for (const value of [body.radius, body.height, body.mass, body.fallDistance, body.oxygenSeconds, body.drowningAccumulator,
     body.swimEntryMomentumSpeed, body.swimSurfaceBreachSeconds, body.swimStrokeCooldownSeconds]) writeFloat(hasher, value);
   hasher.writeU16(body.grounded ? 1 : 0).writeU16(body.crouching ? 1 : 0)
-    .writeU16(body.swimSurfaceBreachReady ? 1 : 0).writeU16(body.swimSurfaceBobActive ? 1 : 0);
+    .writeU16(body.swimSurfaceBreachReady ? 1 : 0).writeU16(body.swimSurfaceBobActive ? 1 : 0)
+    .writeU16(body.swimShoreExitReady ? 1 : 0);
 }
 
 export function hashPhysicsStepInputV1(input: Omit<PhysicsStepInputV1, "inputHash">) {

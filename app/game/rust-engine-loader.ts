@@ -14,6 +14,12 @@ export interface RustEngineWasmExports {
   blockwild_engine_take_events(handle: number): RustEngineBytes;
   blockwild_engine_state_hash(handle: number): RustEngineBytes;
   blockwild_engine_destroy(handle: number): RustEngineBytes;
+  /** Certified pure generator queries required by Rust worldgen authority. */
+  blockwild_generate_chunk_v2?(request: Uint8Array): RustEngineBytes;
+  blockwild_query_settlements_v1?(request: Uint8Array): RustEngineBytes;
+  blockwild_query_dragon_lair_v1?(request: Uint8Array): RustEngineBytes;
+  blockwild_generation_parity_certificate_v2?(): RustEngineBytes;
+  blockwild_locator_parity_certificate_v1?(): RustEngineBytes;
   /** Coarse R2 whole-section kernels. Older artifacts may omit them. */
   blockwild_world_mesh_section_v1?(snapshot: Uint8Array, registry: Uint8Array): RustEngineBytes;
   blockwild_world_light_section_v1?(snapshot: Uint8Array, registry: Uint8Array, directSkyAbove: Uint8Array): RustEngineBytes;

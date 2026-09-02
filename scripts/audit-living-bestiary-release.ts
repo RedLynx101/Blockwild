@@ -129,7 +129,9 @@ function auditDwarvenHolds(seedCount = 50) {
   const results = [];
   for (let index = 0; index < seedCount; index += 1) {
     const seed = `DEEPGEAR-RELEASE-${index.toString().padStart(2, "0")}`;
-    const world = new ChunkWorld();
+    // Historical authored-content oracle: this does not attest production
+    // worldgen authority and intentionally exercises the legacy TS generator.
+    const world = new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
     world.reset(seed, undefined, { profile: "world-below-v15" });
     results.push({ seed, ...dwarfHoldAudit(world) });
   }

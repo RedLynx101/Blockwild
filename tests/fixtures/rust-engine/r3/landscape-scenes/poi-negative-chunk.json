@@ -23,7 +23,7 @@
     ],
     "fov": 48
   },
-  "resourceBytes": 85214,
+  "resourceBytes": 99390,
   "frameBytes": 261,
   "source": "published Rust/Wasm generation -> renderer extraction V2"
 }

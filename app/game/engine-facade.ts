@@ -97,7 +97,9 @@ export class RustWorkerEngineBackend implements EngineBackend {
 export type EngineFacadePolicy = Readonly<{
   /** R0 deliberately keeps this false; Rust authority is promoted by later phase gates. */
   allowRustAuthority?: boolean;
+  /** Shadow execution is inert unless a caller explicitly opens this diagnostic policy. */
   allowRustShadow?: boolean;
+  /** wgpu extraction is likewise opt-in; selecting a backend alone is insufficient. */
   allowWgpuShadow?: boolean;
   allowWgpuPrimary?: boolean;
   webGpuAvailable?: boolean;
@@ -205,8 +207,8 @@ export class EngineFacade {
     this.requestedRenderer = options.rendererSelection ?? "three";
     this.policy = {
       allowRustAuthority: options.policy?.allowRustAuthority ?? false,
-      allowRustShadow: options.policy?.allowRustShadow ?? true,
-      allowWgpuShadow: options.policy?.allowWgpuShadow ?? true,
+      allowRustShadow: options.policy?.allowRustShadow ?? false,
+      allowWgpuShadow: options.policy?.allowWgpuShadow ?? false,
       allowWgpuPrimary: options.policy?.allowWgpuPrimary ?? false,
       webGpuAvailable: options.policy?.webGpuAvailable ?? (typeof navigator !== "undefined" && "gpu" in navigator),
     };

@@ -5,13 +5,14 @@ import {
   LEGACY_TERRAIN_CONTENT_HASH_V2,
   TERRAIN_GENERATION_CELL_COUNT_V2,
   TERRAIN_GENERATION_COLUMN_COUNT_V2,
+  TERRAIN_GENERATION_PROMOTION_CORPUS_CASES_V2,
+  TERRAIN_GENERATION_PROMOTION_CORPUS_HASH_V2,
   TERRAIN_GENERATION_SECTION_COUNT_V2,
   createGenerateChunkRequestV2,
   createGeneratedChunkV2,
   legacyTerrainGeneratorHashV2,
 } from "../app/game/terrain-generation-contract.ts";
 import {
-  TERRAIN_GENERATION_PARITY_MINIMUM_CASES_V2,
   encodeRustTerrainGenerationRequestV2,
   parseTerrainGenerationParityCertificateV2,
   terrainGenerationCertificatePromotesV2,
@@ -52,13 +53,19 @@ test("promotion is fail-closed on corpus size, identities, and byte equality", (
     generatorVersion: 18,
     generatorHash: source.generatorHash,
     contentHash: source.contentHash,
-    corpusHash: "0123456789abcdef0123456789abcdef",
-    corpusCases: TERRAIN_GENERATION_PARITY_MINIMUM_CASES_V2,
+    corpusHash: TERRAIN_GENERATION_PROMOTION_CORPUS_HASH_V2,
+    corpusCases: TERRAIN_GENERATION_PROMOTION_CORPUS_CASES_V2,
     byteEqual: true,
   })));
   assert.equal(terrainGenerationCertificatePromotesV2(certificate, source), true);
   assert.equal(terrainGenerationCertificatePromotesV2({ ...certificate, byteEqual: false }, source), false);
-  assert.equal(terrainGenerationCertificatePromotesV2({ ...certificate, corpusCases: certificate.corpusCases - 1 }, source), false);
+  assert.equal(terrainGenerationCertificatePromotesV2({ ...certificate, corpusCases: 154 }, source), false);
+  assert.equal(terrainGenerationCertificatePromotesV2({ ...certificate, corpusCases: 156 }, source), false);
+  assert.equal(terrainGenerationCertificatePromotesV2({ ...certificate, corpusHash: "0".repeat(32) }, source), false);
+  assert.equal(terrainGenerationCertificatePromotesV2({
+    ...certificate,
+    corpusHash: "4d4e6b1445b00f3430164d1a8093d8dc",
+  }, source), false);
   assert.equal(terrainGenerationCertificatePromotesV2({ ...certificate, generatorHash: "f".repeat(32) }, source), false);
 });
 

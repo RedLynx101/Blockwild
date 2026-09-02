@@ -88,6 +88,7 @@ function physicsSource(): PhysicsStepInputV1Source {
       drowningAccumulator: 0,
       swimEntryMomentumSpeed: 0,
       swimSurfaceBreachReady: true,
+      swimShoreExitReady: true,
       swimSurfaceBreachSeconds: 0,
       swimStrokeCooldownSeconds: 0,
       swimSurfaceBobActive: false,
@@ -131,6 +132,17 @@ test("physics jobs are coarse, revision-bound, deterministic, and transferable",
   assert.ok(simulationResultIsCurrentV1(result, input.identity.world));
   const nextIdentity = createWorldAuthorityIdentityV1(address, { ...input.identity.world.revision, mutation: input.identity.world.revision.mutation + 1 });
   assert.equal(simulationResultIsCurrentV1(result, nextIdentity), false, "a world mutation makes the result stale");
+});
+
+test("physics jobs require the dedicated shore-exit press latch", () => {
+  for (const value of [undefined, null, 0, "true"]) {
+    const source = physicsSource();
+    (source.body as unknown as Record<string, unknown>).swimShoreExitReady = value;
+    assert.throws(
+      () => createPhysicsStepInputV1(source),
+      (error: unknown) => error instanceof SimulationContractError && error.code === "invalid-boolean",
+    );
+  }
 });
 
 test("tampered world snapshots are rejected before physics leaves TypeScript", () => {

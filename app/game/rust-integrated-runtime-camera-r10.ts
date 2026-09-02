@@ -1,13 +1,28 @@
 import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow";
-import { RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES } from "./rust-integrated-runtime-contract";
-import { rustIntegratedRuntimeWireChecksumV1 } from "./rust-integrated-runtime-codec";
+import {
+  createRustIntegratedDomainWireDescriptorV1,
+  unwrapRustIntegratedDomainPacketV1,
+  wrapRustIntegratedDomainPacketV1,
+  type RustIntegratedDomainWireFailureV1,
+} from "./rust-integrated-runtime-domain-wire";
+import { rustIntegratedRuntimeDomainWireFamilyV1 } from "./rust-integrated-runtime-domain-schema.generated";
 
-export const RUST_INTEGRATED_CAMERA_CONFIG_TYPE_V1 = "blockwild.simulation.camera-config.r5.v1";
-export const RUST_INTEGRATED_CAMERA_CONFIG_RECEIPT_TYPE_V1 = "blockwild.simulation.camera-config-receipt.r5.v1";
+const CONFIG_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("simulation-camera-config-v1");
+const RECEIPT_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("simulation-camera-config-receipt-v1");
 
-const CONFIG_MAGIC = Uint8Array.of(0x42, 0x57, 0x43, 0x35); // BWC5
-const RECEIPT_MAGIC = Uint8Array.of(0x42, 0x57, 0x52, 0x35); // BWR5
-const HEADER_BYTES = 28;
+export const RUST_INTEGRATED_CAMERA_CONFIG_TYPE_V1 = CONFIG_SCHEMA.typeId;
+export const RUST_INTEGRATED_CAMERA_CONFIG_RECEIPT_TYPE_V1 = RECEIPT_SCHEMA.typeId;
+
+const CONFIG_WIRE = createRustIntegratedDomainWireDescriptorV1({
+  magic: CONFIG_SCHEMA.magic,
+  schema: CONFIG_SCHEMA.innerSchema,
+  label: "camera configuration",
+});
+const RECEIPT_WIRE = createRustIntegratedDomainWireDescriptorV1({
+  magic: RECEIPT_SCHEMA.magic,
+  schema: RECEIPT_SCHEMA.innerSchema,
+  label: "camera configuration receipt",
+});
 const MAX_SAFE_U64 = BigInt(Number.MAX_SAFE_INTEGER);
 const HASH_PATTERN = /^[0-9a-f]{32}$/u;
 
@@ -51,6 +66,8 @@ export class RustIntegratedCameraWireErrorR10 extends Error {
 function fail(code: string, message: string): never {
   throw new RustIntegratedCameraWireErrorR10(code, message);
 }
+
+const failDomainWire: RustIntegratedDomainWireFailureV1 = (code, message) => fail(`camera-${code}`, message);
 
 function hashBytes(value: string) {
   if (!HASH_PATTERN.test(value)) fail("camera-hash", "camera hash is not a canonical 128-bit hash");
@@ -122,41 +139,6 @@ function validateProfile(value: RustIntegratedCameraProfileR10) {
   return value;
 }
 
-function wrap(magic: Uint8Array, body: Uint8Array) {
-  if (body.byteLength > RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES - HEADER_BYTES) {
-    fail("camera-size", "camera configuration packet exceeds its byte budget");
-  }
-  const packet = new Uint8Array(HEADER_BYTES + body.byteLength);
-  const view = new DataView(packet.buffer);
-  packet.set(magic);
-  view.setUint16(4, 1, true);
-  view.setUint16(6, 1, true);
-  view.setUint32(8, body.byteLength, true);
-  packet.set(hashBytes(rustIntegratedRuntimeWireChecksumV1(body)), 12);
-  packet.set(body, HEADER_BYTES);
-  return packet;
-}
-
-function unwrap(packet: Uint8Array, magic: Uint8Array) {
-  if (!(packet instanceof Uint8Array)
-    || packet.byteLength < HEADER_BYTES
-    || packet.byteLength > RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES
-    || !magic.every((byte, index) => packet[index] === byte)) {
-    fail("camera-header", "camera configuration packet header is malformed");
-  }
-  const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
-  if (view.getUint16(4, true) !== 1
-    || view.getUint16(6, true) !== 1
-    || view.getUint32(8, true) !== packet.byteLength - HEADER_BYTES) {
-    fail("camera-header", "camera configuration packet version or length is invalid");
-  }
-  const body = packet.subarray(HEADER_BYTES);
-  if (bytesHash(packet.subarray(12, 28)) !== rustIntegratedRuntimeWireChecksumV1(body)) {
-    fail("camera-checksum", "camera configuration packet checksum is invalid");
-  }
-  return body;
-}
-
 function bodyConfig(value: RustIntegratedCameraConfigR10) {
   checkedRevision(value.expectedCameraRevision, "expected camera revision");
   validateProfile(value.profile);
@@ -206,11 +188,11 @@ export function rustIntegratedCameraStateHashR10(
 }
 
 export function encodeRustIntegratedCameraConfigR10(value: RustIntegratedCameraConfigR10) {
-  return wrap(CONFIG_MAGIC, bodyConfig(value));
+  return wrapRustIntegratedDomainPacketV1(CONFIG_WIRE, bodyConfig(value), failDomainWire);
 }
 
 export function decodeRustIntegratedCameraConfigR10(packet: Uint8Array): RustIntegratedCameraConfigR10 {
-  const body = unwrap(packet, CONFIG_MAGIC);
+  const body = unwrapRustIntegratedDomainPacketV1(CONFIG_WIRE, packet, failDomainWire);
   if (body.byteLength !== 8 + 1 + 12 * 8) fail("camera-trailing", "camera configuration body is truncated or has trailing bytes");
   const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
   const value = Object.freeze({
@@ -245,11 +227,11 @@ export function encodeRustIntegratedCameraConfigReceiptR10(value: RustIntegrated
   view.setUint8(32, modeTag(value.mode));
   profileValues(value.profile).forEach((field, index) => view.setFloat64(33 + index * 8, field, true));
   body.set(hashBytes(value.cameraStateHash), 33 + 12 * 8);
-  return wrap(RECEIPT_MAGIC, body);
+  return wrapRustIntegratedDomainPacketV1(RECEIPT_WIRE, body, failDomainWire);
 }
 
 export function decodeRustIntegratedCameraConfigReceiptR10(packet: Uint8Array): RustIntegratedCameraConfigReceiptR10 {
-  const body = unwrap(packet, RECEIPT_MAGIC);
+  const body = unwrapRustIntegratedDomainPacketV1(RECEIPT_WIRE, packet, failDomainWire);
   if (body.byteLength !== 16 + 8 + 8 + 1 + 12 * 8 + 16) fail("camera-trailing", "camera receipt body is truncated or has trailing bytes");
   const view = new DataView(body.buffer, body.byteOffset, body.byteLength);
   const value = Object.freeze({

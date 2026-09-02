@@ -77,12 +77,36 @@ test("compiler rejects duplicate, cyclic, functional and non-finite content with
     { domain: "item", id: "cycle", schemaId: "test", schemaVersion: 1, contentVersion: 1, value: cyclic },
     { domain: "item", id: "function", schemaId: "test", schemaVersion: 1, contentVersion: 1, value: { run: () => 1 } },
     { domain: "item", id: "nan", schemaId: "test", schemaVersion: 1, contentVersion: 1, value: { amount: Number.NaN } },
-    { domain: "item", id: "alias-a", schemaId: "test", schemaVersion: 1, contentVersion: 1, aliases: ["shared:alias"], value: 1 },
-    { domain: "item", id: "alias-b", schemaId: "test", schemaVersion: 1, contentVersion: 1, aliases: ["shared:alias"], value: 2 },
+    { domain: "item", id: "alias-a", schemaId: "test", schemaVersion: 1, contentVersion: 1, aliases: ["item:alias-a", "shared:alias"], value: 1 },
+    { domain: "item", id: "alias-b", schemaId: "test", schemaVersion: 1, contentVersion: 1, aliases: ["item:alias-b", "shared:alias"], value: 2 },
   ];
   const bundle = compileRustProductionContent("fixture-v1", sources);
   assert.equal(bundle.manifest, null);
   assert.deepEqual(new Set(bundle.blockers.map((blocker) => blocker.code)), new Set(["duplicate-id", "serialization-cycle", "unsupported-value", "alias-conflict"]));
+});
+
+test("compiler requires the canonical domain and id alias while preserving compatible secondary aliases", () => {
+  const base: RustContentSourceEntry = {
+    domain: "machine-profile", id: "render-presentations", schemaId: "render-presentation-catalog",
+    schemaVersion: 2, contentVersion: 2, value: { profiles: [] },
+  };
+  const rejected = compileRustProductionContent("fixture-v1", [{
+    ...base, aliases: ["render-presentation-catalog:production"],
+  }]);
+  assert.equal(rejected.manifest, null);
+  assert.deepEqual(rejected.blockers, [{
+    code: "descriptor-mismatch", domain: "machine-profile", id: "render-presentations", path: "$.aliases",
+    expected: "machine-profile:render-presentations", actual: "render-presentation-catalog:production",
+  }]);
+
+  const accepted = compileRustProductionContent("fixture-v1", [{
+    ...base, aliases: ["render-presentation-catalog:production", "machine-profile:render-presentations"],
+  }]);
+  assert.deepEqual(accepted.blockers, []);
+  assert.deepEqual(accepted.artifacts[0].aliases, [
+    "machine-profile:render-presentations",
+    "render-presentation-catalog:production",
+  ]);
 });
 
 test("production compiler covers all eleven canonical domains without blockers or drift", () => {
@@ -90,12 +114,12 @@ test("production compiler covers all eleven canonical domains without blockers o
   assert.deepEqual(bundle.blockers, []);
   assert.ok(bundle.manifest);
   assert.equal(bundle.artifacts.length, 3_248);
-  assert.equal(bundle.manifest.manifestHash, "e1fdb93aa0bd804e90284a7b66cd64fc");
+  assert.equal(bundle.manifest.manifestHash, "f38f882de81660cf90284a7b66cd64fc");
   const expected = {
-    item: { count: 538, hash: "68b1935aeb931b6248d0f4dcc74913c1" },
+    item: { count: 538, hash: "7a4d38179d3d13c548946a8daa83b4c3" },
     "crafting-recipe": { count: 198, hash: "d1d9d49ba264b18cc83a527d0fca8a83" },
     "machine-recipe": { count: 46, hash: "ed2dd1f09fc42315c85a98f1da201cdf" },
-    "machine-profile": { count: 15, hash: "c3e5e2294cbbb8cdc81a2845cbc5ab14" },
+    "machine-profile": { count: 15, hash: "2031a33b0d2a2edbc81a2845cbc5ab14" },
     "ability-spell": { count: 698, hash: "4b6e9337787c42b4c8ba6f426602f3cd" },
     "creature-profile": { count: 233, hash: "39350a2a0924329cc862d4a931cbf04a" },
     "creature-type-chart": { count: 42, hash: "dc45e95703ba3221c89afaa5f421f6e0" },
@@ -105,6 +129,13 @@ test("production compiler covers all eleven canonical domains without blockers o
     "cardforge-pack": { count: 7, hash: "12c32cdb4aa4f473c89ac5605bfa6d91" },
   } as const;
   assert.deepEqual(bundle.manifest.domains, expected);
+  const presentation = bundle.artifacts.find((artifact) =>
+    artifact.domain === "machine-profile" && artifact.id === "render-presentations");
+  assert.ok(presentation);
+  assert.deepEqual(presentation.aliases, [
+    "machine-profile:render-presentations",
+    "render-presentation-catalog:production",
+  ]);
   assert.deepEqual(validateRustContentExpectation(bundle, { manifestHash: bundle.manifest.manifestHash, domains: expected }), []);
   const drift = validateRustContentExpectation(bundle, { manifestHash: "00000000000000000000000000000000", domains: { item: { ...expected.item, count: 1 } } });
   assert.deepEqual(drift.map((blocker) => blocker.code), ["count-drift", "manifest-hash-drift"]);
@@ -128,8 +159,8 @@ test("production block actions are a bounded exact projection of authored block 
   assert.ok(artifact);
   assert.equal(artifact.schemaId, "block-action-catalog");
   assert.equal(artifact.schemaVersion, RUST_BLOCK_ACTION_CATALOG_SCHEMA);
-  assert.equal(artifact.canonicalBytes.length, 238_041);
-  assert.equal(artifact.blobHash, "4292b5a0f6ef4503c83a571e121f6862");
+  assert.equal(artifact.canonicalBytes.length, 238_081);
+  assert.equal(artifact.blobHash, "6922da9c3e5d7205c83a571e121f6862");
 
   const decoded = JSON.parse(decoder.decode(artifact.canonicalBytes)) as {
     schema: number;
@@ -182,6 +213,23 @@ test("production block actions are a bounded exact projection of authored block 
       topologyFlags,
     }, `block ${definition.id}`);
   }
+  for (const wallTorch of [
+    BlockId.TorchWallNorth, BlockId.TorchWallSouth, BlockId.TorchWallEast, BlockId.TorchWallWest,
+  ]) assert.equal(itemForBlock(wallTorch), BlockId.Torch, `wall torch ${wallTorch} must use the canonical Torch inventory item`);
+  for (const profile of decoded.profiles) {
+    const loot = profile.breakProfile as { loot?: { selfDropMode?: string; rules?: Array<{
+      item?: number; chanceMillionths?: number; chanceModifier?: string; rollScope?: string;
+      count?: unknown; ordinal?: number;
+    }> } };
+    if (loot.loot?.selfDropMode !== "mapped-item") continue;
+    assert.equal(typeof profile.item, "number", `mapped-item block ${profile.id} must declare its canonical item`);
+    assert.equal(loot.loot.rules?.length, 1, `mapped-item block ${profile.id} must have one canonical loot rule`);
+    const rule = loot.loot.rules?.[0];
+    assert.deepEqual(rule, {
+      id: "mapped-item", item: profile.item, chanceMillionths: 1_000_000, chanceModifier: "none",
+      rollScope: "none", count: { kind: "constant", value: 1 }, ordinal: 0,
+    }, `mapped-item block ${profile.id} must emit the exact native canonical self-drop rule`);
+  }
   assert.deepEqual(decoded, blockwildBlockActionCatalogV2());
 });
 
@@ -189,16 +237,16 @@ test("production action-promotion evidence is exact, bounded, non-empty and not 
   const bundle = compileBlockwildProductionContent();
   const report = createRustActionPromotionReportV1(bundle);
   assert.equal(report.schemaVersion, 1);
-  assert.equal(report.manifestHash, "e1fdb93aa0bd804e90284a7b66cd64fc");
+  assert.equal(report.manifestHash, "f38f882de81660cf90284a7b66cd64fc");
   assert.equal(report.installedRegistryHash, null, "the browser compiler cannot invent a native installed-registry hash");
   assert.equal(report.blockActionCatalogSchemaVersion, 2);
   assert.equal(report.blockActionCatalogContentVersion, 1);
-  assert.equal(report.blockActionCatalogBlobHash, "4292b5a0f6ef4503c83a571e121f6862");
+  assert.equal(report.blockActionCatalogBlobHash, "6922da9c3e5d7205c83a571e121f6862");
   assert.equal(report.rngSemanticsVersionId, "block-action-rng-semantics-v1");
   assert.equal(report.rngSemanticsHash, "e039b2a9d2b0b2edc83a4ff74517302e");
   assert.equal(report.runtimeSemanticFeatureId, "block-action-runtime-semantics-v1");
   assert.equal(report.supportLevel, "declared-blocked");
-  assert.equal(report.reportHash, "2f0c433012940ae8586bf19cff2a5308");
+  assert.equal(report.reportHash, "bc2f948cfcf03f11586bf19cff2a5308");
   assert.deepEqual(report.blockers.map(({ scope, blockerId, disposition, affectedBlockCount }) => ({
     scope, blockerId, disposition, affectedBlockCount,
   })), [

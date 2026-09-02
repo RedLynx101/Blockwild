@@ -32,6 +32,11 @@ import {
   type RenderEntityPresentationR10,
   type RustEntityRenderExtractionR10,
 } from "./rust-render-entity-extraction-r10.ts";
+import type {
+  RustPresentationBindingIdentityR10,
+  RustPresentationFrameR10,
+} from "./rust-render-presentation-extraction-r10.ts";
+import type { RenderPresentationCoverageInventoryR10 } from "./rust-render-presentation-profile.ts";
 import {
   decodeRustAuthoritativeExtractionR10,
   type RustAudioExtractionR10,
@@ -67,6 +72,7 @@ export type RenderSceneExtractionSinkR10 = Readonly<{
 export type RenderEntityPresentationViewR10 = Readonly<{
   entityId: bigint;
   entityRevision: bigint;
+  class: RenderEntityPresentationR10["class"];
   externalEntityId: string;
   specimenId: string;
   kindKey: string;
@@ -154,6 +160,9 @@ export type RustRenderSceneComposerDiagnosticsR10 = Readonly<{
   cameraAuthorityTick: bigint | null;
   cameraPoseHash: string | null;
   pendingTerrainFrameSequence: bigint | null;
+  presentationCoverageHash: string | null;
+  presentationBindings: number;
+  presentationBlockers: number;
   sink: Readonly<Record<string, unknown>>;
 }>;
 
@@ -164,6 +173,7 @@ export type RustRenderSceneComposerOptionsR10 = Readonly<{
   trustedModelCatalogHash: string;
   trustedModelCatalogRevision: bigint;
   entityExtractor?: Pick<RustEntityRenderExtractionR10, "extractBytes" | "resetResourceReplay" | "resetRevisionGuard">;
+  presentationCoverage?: RenderPresentationCoverageInventoryR10;
   maxInstances?: number;
   maxParticles?: number;
   maxResourceOperations?: number;
@@ -230,6 +240,10 @@ function equalBytes(left: Uint8Array, right: Uint8Array) {
   let difference = 0;
   for (let index = 0; index < left.byteLength; index += 1) difference |= left[index] ^ right[index];
   return difference === 0;
+}
+
+function equalIds(left: readonly bigint[], right: readonly bigint[]) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function hex(bytes: Uint8Array) {
@@ -383,6 +397,7 @@ function safePresentation(value: RenderEntityPresentationR10): RenderEntityPrese
   return Object.freeze({
     entityId: value.entityId,
     entityRevision: value.entityRevision,
+    class: value.class,
     externalEntityId: value.externalEntityId,
     specimenId: value.specimenId,
     kindKey: value.kindKey,
@@ -416,6 +431,70 @@ function safePresentation(value: RenderEntityPresentationR10): RenderEntityPrese
     instanceIds: Object.freeze([...value.instanceIds]),
     visible: value.visible,
     actionPhase: value.action.phase,
+  });
+}
+
+function presentationFrameFromResult(result: RenderEntityExtractionResultR10): RustPresentationFrameR10 | null {
+  const candidate = (result as RenderEntityExtractionResultR10 & Readonly<{
+    presentationFrame?: RustPresentationFrameR10;
+  }>).presentationFrame;
+  return candidate ?? null;
+}
+
+function safeBindingIdentity(binding: RustPresentationBindingIdentityR10) {
+  const { contentHash, ...presentationCatalog } = binding.presentationCatalog;
+  return Object.freeze({
+    role: binding.role,
+    primaryContentRef: Object.freeze({ ...binding.primaryContentRef }),
+    profileId: binding.profileId,
+    modelId: binding.modelId,
+    presentationCatalog: Object.freeze({
+      ...presentationCatalog,
+      contentHashHex: hex(contentHash),
+    }),
+    modelCatalog: Object.freeze({ ...binding.modelCatalog }),
+  });
+}
+
+function safeBoundPresentation(value: RustPresentationFrameR10["bindings"][number]) {
+  if (value.role === "held-item") {
+    const { metadataHash, binding, instanceIds, ...rest } = value;
+    return Object.freeze({
+      ...rest,
+      metadataHashHex: hex(metadataHash),
+      binding: safeBindingIdentity(binding),
+      instanceIds: Object.freeze([...instanceIds]),
+    });
+  }
+  if (value.role === "machine") {
+    const { contentHash, binding, instanceIds, ...rest } = value;
+    return Object.freeze({
+      ...rest,
+      contentHashHex: hex(contentHash),
+      binding: safeBindingIdentity(binding),
+      instanceIds: Object.freeze([...instanceIds]),
+    });
+  }
+  const { binding, instanceIds, ...rest } = value;
+  return Object.freeze({
+    ...rest,
+    binding: safeBindingIdentity(binding),
+    instanceIds: Object.freeze([...instanceIds]),
+  });
+}
+
+function safePresentationFrame(value: RustPresentationFrameR10) {
+  return Object.freeze({
+    schema: value.schema,
+    extractionRevision: value.extractionRevision,
+    authorityTick: value.authorityTick,
+    coverageHash: value.coverageHash,
+    bindings: Object.freeze(value.bindings.map(safeBoundPresentation)),
+    heldBlockers: Object.freeze(value.heldBlockers.map((blocker) => Object.freeze({ ...blocker }))),
+    droppedBlockers: Object.freeze(value.droppedBlockers.map((blocker) => Object.freeze({ ...blocker }))),
+    machineBlockers: Object.freeze(value.machineBlockers.map((blocker) => Object.freeze({ ...blocker }))),
+    combatBlockers: Object.freeze(value.combatBlockers.map((blocker) => Object.freeze({ ...blocker }))),
+    runtimeBlockers: Object.freeze(value.runtimeBlockers.map((blocker) => Object.freeze({ ...blocker }))),
   });
 }
 
@@ -563,6 +642,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
   private readonly trustedModelCatalogHash: string;
   private readonly trustedModelCatalogRevision: bigint;
   private readonly entityExtractor: RustRenderSceneComposerOptionsR10["entityExtractor"];
+  private readonly presentationCoverage: RenderPresentationCoverageInventoryR10 | null;
   private readonly maxInstances: number;
   private readonly maxParticles: number;
   private readonly maxResourceOperations: number;
@@ -586,6 +666,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
   private entityExtractionSignature: string | null = null;
   private entityResult: RenderEntityExtractionResultR10 | null = null;
   private presentations: readonly RenderEntityPresentationViewR10[] = Object.freeze([]);
+  private presentationFrame: ReturnType<typeof safePresentationFrame> | null = null;
   private domainBundle: RustDomainBundleR10 | null = null;
   private audioExtraction: RustAudioExtractionR10 | null = null;
   private runtimeDiagnostics: RustRuntimeDiagnosticsR10 | null = null;
@@ -612,6 +693,16 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     this.trustedModelCatalogRevision = u64(options.trustedModelCatalogRevision, "trusted model catalog revision");
     invariant(this.trustedModelCatalogRevision > BigInt(0), "trusted model catalog revision must be positive");
     this.entityExtractor = options.entityExtractor;
+    this.presentationCoverage = options.presentationCoverage ?? null;
+    if (this.presentationCoverage !== null) {
+      invariant(this.presentationCoverage.schema === 1
+        && /^[0-9a-f]{32}$/u.test(this.presentationCoverage.coverageHash),
+      "presentation coverage inventory identity is invalid");
+      invariant(this.presentationCoverage.modelCatalogHash === this.trustedModelCatalogHash,
+        "presentation coverage model catalog differs from the scene composer");
+      invariant(this.presentationCoverage.entries.every((entry, index, entries) => index === 0
+        || entries[index - 1].id < entry.id), "presentation coverage inventory is not canonical and unique");
+    }
     this.maxInstances = boundedPositiveInteger(options.maxInstances ?? RENDER_MAX_INSTANCES_V2, RENDER_MAX_INSTANCES_V2, "scene instance cap");
     this.maxParticles = boundedPositiveInteger(options.maxParticles ?? RENDER_MAX_PARTICLES_V2, RENDER_MAX_PARTICLES_V2, "scene particle cap");
     this.maxResourceOperations = boundedPositiveInteger(options.maxResourceOperations ?? RENDER_MAX_RESOURCE_OPERATIONS_V2, RENDER_MAX_RESOURCE_OPERATIONS_V2, "scene resource operation cap");
@@ -802,6 +893,8 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     }
     const frame = canonicalFrame(result.frame);
     invariant(frame.resourceRevision === (result.resources?.revision ?? this.entity.revision), "entity frame resource revision does not match its source stream");
+    const presentationFrame = presentationFrameFromResult(result);
+    this.validatePresentationFrame(result, presentationFrame);
     const presentations = Object.freeze(result.presentations.map(safePresentation));
     this.validateEntityPhases(frame, presentations);
     const desired = referencedResourceKeys(frame);
@@ -816,6 +909,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
       presentations: Object.freeze([...result.presentations]),
     });
     this.presentations = presentations;
+    this.presentationFrame = presentationFrame === null ? null : safePresentationFrame(presentationFrame);
     this.entityExtractionRevision = result.extractionRevision;
     this.entityExtractionSignature = signature;
     this.metadataRevision += BigInt(1);
@@ -864,6 +958,27 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
       modelCatalogHash: this.trustedModelCatalogHash,
       modelCatalogRevision: this.trustedModelCatalogRevision,
       entries: Object.freeze([...this.presentations]),
+    });
+  }
+
+  presentationMetadata() {
+    const staticBlockers = this.presentationCoverage?.entries
+      .filter((entry) => entry.status === "blocked")
+      .map((entry) => entry.blockerId)
+      .filter((value): value is string => value !== null) ?? ["presentation-coverage-inventory-not-installed"];
+    const frameBlockers = this.presentationFrame === null ? ["presentation-frame-not-submitted"] : [
+      ...this.presentationFrame.heldBlockers.map((blocker) => blocker.blockerId ?? blocker.id),
+      ...this.presentationFrame.droppedBlockers.map((blocker) => blocker.blockerId ?? blocker.id),
+      ...this.presentationFrame.machineBlockers.map((blocker) => blocker.blockerId ?? blocker.id),
+      ...this.presentationFrame.combatBlockers.map((blocker) => blocker.blockerId ?? blocker.id),
+      ...this.presentationFrame.runtimeBlockers.map((blocker) => blocker.blockerId),
+    ];
+    const blockers = Object.freeze([...new Set([...staticBlockers, ...frameBlockers])].sort());
+    return Object.freeze({
+      schema: 1 as const,
+      coverage: this.presentationCoverage,
+      frame: this.presentationFrame,
+      promotion: Object.freeze({ ready: blockers.length === 0, blockers }),
     });
   }
 
@@ -940,6 +1055,9 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
         && this.terrainFrameSequence < this.latestTerrainFrame.frameSequence
         ? this.latestTerrainFrame.frameSequence
         : null,
+      presentationCoverageHash: this.presentationCoverage?.coverageHash ?? null,
+      presentationBindings: this.presentationFrame?.bindings.length ?? 0,
+      presentationBlockers: this.presentationMetadata().promotion.blockers.length,
       sink: this.sink.diagnostics(),
     });
   }
@@ -988,6 +1106,141 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     this.runtimeDiagnostics = diagnostics;
     this.domainExtractionSignature = signature;
     this.metadataRevision += BigInt(1);
+  }
+
+  private validatePresentationFrame(
+    result: RenderEntityExtractionResultR10,
+    frame: RustPresentationFrameR10 | null,
+  ) {
+    if (this.presentationCoverage === null) {
+      invariant(frame === null, "presentation frame arrived without an attested coverage inventory");
+      return;
+    }
+    invariant(frame !== null, "attested presentation coverage requires one exact presentation frame");
+    invariant(frame.schema === 1 && frame.coverageHash === this.presentationCoverage.coverageHash,
+      "presentation frame coverage identity differs from the scene composer");
+    invariant(frame.extractionRevision === result.extractionRevision && frame.authorityTick === result.authorityTick,
+      "presentation frame authority identity differs from BWR6");
+    const exactContracts = new Map(this.presentationCoverage.entries
+      .filter((entry) => entry.status === "exact-contract")
+      .map((entry) => [`${entry.family}:${entry.profileId}:${entry.modelId}`, entry] as const));
+    const instances = new Map(result.frame.instances.map((instance) => [instance.stableId, instance] as const));
+    const entities = new Map(result.presentations.map((entity) => [entity.entityId, entity] as const));
+    const claimedInstances = new Set<bigint>();
+    const bindingIds = new Set<string>();
+    let previousBindingId = "";
+    for (const binding of frame.bindings) {
+      invariant(previousBindingId < binding.id, "presentation frame bindings are not canonical and unique");
+      previousBindingId = binding.id;
+      invariant(!bindingIds.has(binding.id), "presentation frame binding id is duplicated");
+      bindingIds.add(binding.id);
+      invariant(binding.role === binding.binding.role,
+        `presentation binding '${binding.id}' role differs from its identity`);
+      invariant(binding.binding.presentationCatalog.id === this.presentationCoverage.catalogId
+        && binding.binding.presentationCatalog.schema === this.presentationCoverage.profileCatalogSchema
+        && binding.binding.presentationCatalog.revision === this.presentationCoverage.profileCatalogRevision,
+      `presentation binding '${binding.id}' catalog identity differs from coverage`);
+      invariant(binding.binding.modelCatalog.canonicalHash === this.trustedModelCatalogHash
+        && binding.binding.modelCatalog.revision === this.trustedModelCatalogRevision,
+      `presentation binding '${binding.id}' model catalog identity differs from the composer`);
+      invariant(binding.binding.presentationCatalog.contentHash.byteLength === 16
+        && binding.binding.presentationCatalog.contentHash.some((value) => value !== 0),
+      `presentation binding '${binding.id}' content identity is invalid`);
+      const contract = exactContracts.get(`${binding.role}:${binding.binding.profileId}:${binding.binding.modelId}`);
+      invariant(contract !== undefined,
+        `presentation binding '${binding.id}' has no exact coverage contract`);
+      invariant(contract.sourcePresentationIds.includes(
+        `${binding.binding.primaryContentRef.domain}:${binding.binding.primaryContentRef.id}`,
+      ), `presentation binding '${binding.id}' primary content ref differs from coverage`);
+      invariant(binding.instanceIds.length > 0, `presentation binding '${binding.id}' has no instances`);
+      for (const instanceId of binding.instanceIds) {
+        invariant(instances.has(instanceId), `presentation binding '${binding.id}' references a missing instance`);
+        invariant(!claimedInstances.has(instanceId), `presentation instance ${instanceId} is claimed by multiple bindings`);
+        claimedInstances.add(instanceId);
+      }
+      if (binding.role === "held-item") {
+        const entity = entities.get(binding.entityId);
+        const attachment = entity?.equipment.find((equipment) =>
+          equipment.slotKey === "world-view-held-right-hand");
+        invariant(entity?.class === "player" && binding.binding.primaryContentRef.domain === "item"
+          && binding.binding.primaryContentRef.id === binding.itemId && attachment?.itemKey === binding.itemId
+          && attachment.count === binding.count && attachment.durability === binding.durability
+          && equalIds(binding.instanceIds, attachment.instanceIds),
+        `held presentation binding '${binding.id}' differs from its player attachment`);
+        const durabilityPresent = attachment.custom.find(([key]) => key === "world-view.durability-present")?.[1];
+        const metadataHash = attachment.custom.find(([key]) => key === "world-view.metadata-hash")?.[1];
+        invariant(durabilityPresent?.byteLength === 1
+          && durabilityPresent[0] === (binding.durabilityPresent ? 1 : 0)
+          && metadataHash !== undefined && equalBytes(metadataHash, binding.metadataHash),
+        `held presentation binding '${binding.id}' metadata differs from its player attachment`);
+      } else if (binding.role === "machine") {
+        invariant(binding.presentationId === binding.binding.profileId
+          && binding.profileId === binding.binding.profileId
+          && binding.modelId === binding.binding.modelId
+          && binding.binding.primaryContentRef.domain === "machine-profile"
+          && binding.contentVersion === binding.binding.presentationCatalog.contentVersion
+          && equalBytes(binding.contentHash, binding.binding.presentationCatalog.contentHash)
+          && binding.instanceIds.every((instanceId) => instances.get(instanceId)?.domain === 5),
+        `machine presentation binding '${binding.id}' differs from its exact machine record`);
+      } else {
+        const entity = entities.get(binding.entityId);
+        const expectedClass = binding.role === "projectile" ? "projectile"
+          : binding.role === "summon" ? "creature" : "construct";
+        const expectedDomain = binding.role === "summon" ? "creature-profile" : "item";
+        const contentId = binding.role === "dropped-item" ? binding.itemId : binding.contentId;
+        const sourceId = binding.role === "dropped-item" ? binding.dropId : binding.recordId;
+        invariant(entity?.class === expectedClass && entity.modelKey === binding.binding.modelId
+          && entity.externalEntityId === sourceId
+          && entity.modelRevision === binding.binding.presentationCatalog.contentVersion
+          && equalBytes(entity.modelHash, binding.binding.presentationCatalog.contentHash)
+          && binding.binding.primaryContentRef.domain === expectedDomain
+          && binding.binding.primaryContentRef.id === contentId
+          && equalIds(binding.instanceIds, entity.instanceIds),
+        `${binding.role} presentation binding '${binding.id}' differs from its exact BWR6 entity`);
+        if (binding.role === "dropped-item") invariant(entity.kindKey === "dropped-item",
+          `dropped presentation binding '${binding.id}' has a wrong-kind BWR6 entity`);
+      }
+    }
+    const blockerIds = new Set<string>();
+    for (const blockers of [
+      frame.heldBlockers, frame.droppedBlockers, frame.machineBlockers, frame.combatBlockers, frame.runtimeBlockers,
+    ] as const) {
+      let previous = "";
+      for (const blocker of blockers) {
+        invariant(previous < blocker.id, "presentation frame blockers are not canonical and unique");
+        previous = blocker.id;
+        invariant(!blockerIds.has(blocker.id), `presentation blocker '${blocker.id}' is duplicated`);
+        blockerIds.add(blocker.id);
+      }
+    }
+    const heldEntities = new Set(frame.bindings
+      .flatMap((binding) => binding.role === "held-item" ? [binding.entityId] : []));
+    const droppedEntities = new Set(frame.bindings
+      .flatMap((binding) => binding.role === "dropped-item" ? [binding.entityId] : []));
+    const projectileEntities = new Set(frame.bindings
+      .flatMap((binding) => binding.role === "projectile" ? [binding.entityId] : []));
+    const summonEntities = new Set(frame.bindings
+      .flatMap((binding) => binding.role === "summon" ? [binding.entityId] : []));
+    const summonModels = new Set(this.presentationCoverage.entries
+      .filter((entry) => entry.status === "exact-contract" && entry.family === "summon" && entry.modelId !== null)
+      .map((entry) => entry.modelId!));
+    for (const entity of result.presentations) {
+      invariant(entity.class !== "vehicle", `vehicle entity ${entity.entityId} has no exact semantic presentation contract`);
+      if (entity.class === "projectile") invariant(projectileEntities.has(entity.entityId),
+        `projectile entity ${entity.entityId} has no exact semantic presentation record`);
+      if (entity.class === "construct" && entity.kindKey === "dropped-item") invariant(droppedEntities.has(entity.entityId),
+        `dropped entity ${entity.entityId} has no exact semantic presentation record`);
+      if (entity.class === "creature" && summonModels.has(entity.modelKey)) invariant(summonEntities.has(entity.entityId),
+        `summon entity ${entity.entityId} has no exact semantic presentation record`);
+      if (entity.equipment.some((equipment) => equipment.slotKey === "world-view-held-right-hand")) {
+        invariant(heldEntities.has(entity.entityId), `held attachment on entity ${entity.entityId} has no exact presentation record`);
+      }
+    }
+    const machineInstances = new Set(frame.bindings
+      .filter((binding) => binding.role === "machine")
+      .flatMap((binding) => binding.instanceIds));
+    for (const instance of result.frame.instances) if (instance.domain === 5) invariant(machineInstances.has(instance.stableId),
+      `machine instance ${instance.stableId} has no exact presentation record`);
   }
 
   private validateEntityPhases(frame: RenderFrameV2, presentations: readonly RenderEntityPresentationViewR10[]) {

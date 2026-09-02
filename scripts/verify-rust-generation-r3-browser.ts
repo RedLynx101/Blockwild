@@ -1,18 +1,12 @@
 import { createServer } from "node:http";
-import { existsSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import {
-  LEGACY_TERRAIN_CONTENT_HASH_V2,
-  createGenerateChunkRequestV2,
   createGeneratedChunkV2,
-  legacyTerrainGeneratorHashV2,
-  stableTerrainGenerationJsonV2,
-  type GenerateChunkRequestV2,
-  type TerrainGenerationEditPair,
 } from "../app/game/terrain-generation-contract.ts";
 import { terrainGenerationChunksByteEqualV2 } from "../app/game/rust-terrain-generation-backend.ts";
 import {
@@ -21,25 +15,28 @@ import {
   parseTerrainGenerationParityCertificateV2,
 } from "../app/game/rust-terrain-generation-bridge.ts";
 import { generateChunkWithLegacyOracleV2 } from "../app/game/rust-terrain-generation-legacy-oracle.ts";
-
-type CorpusCase = Readonly<{
-  id: string;
-  seed: string;
-  chunk: readonly [number, number];
-  options?: Readonly<Record<string, unknown>>;
-  edits?: readonly TerrainGenerationEditPair[];
-}>;
-type CorpusManifest = Readonly<{
-  cases: readonly CorpusCase[];
-  genericSweep: Readonly<{
-    cases: number;
-    seedModulo: number;
-    xMultiplier: number;
-    zMultiplier: number;
-    coordinateModulus: number;
-    coordinateOffset: number;
-  }>;
-}>;
+import {
+  RUST_ENGINE_SOURCE_SNAPSHOT_SCHEMA,
+  RustEngineToolError,
+  assertSha256,
+  isDirectInvocation,
+  parseCommandLine,
+  validatePublishedArtifacts,
+} from "./rust-engine-common.mjs";
+import {
+  COMPOSED_PROMOTION_CASES_V2,
+  COMPOSED_PROMOTION_COVERAGE_V2,
+  FROZEN_PROMOTION_CASES_V1,
+  NORMALIZED_OPTION_EXTENSION_CASES_V1,
+  assignStableCorpusOrdinals,
+  expandFrozenPromotionCases,
+  expandNormalizedOptionCases,
+  loadFrozenPromotionCorpusV1,
+  loadNormalizedOptionsExtensionV1,
+  promotionCorpusHashV2,
+  requestForPromotionCase,
+  type PromotionParityHashRowV2,
+} from "./lib/rust-worldgen-promotion-corpus.ts";
 type BrowserInitialization = Readonly<{
   certificate: number[];
   coldMilliseconds: number;
@@ -49,6 +46,141 @@ type BrowserGeneration = Readonly<{ result: number[]; duration: number }>;
 const ROOT = path.resolve(import.meta.dirname, "..");
 const WORK = path.join(ROOT, "work", "hybrid-rust-migration", "r3-generation");
 const FIXTURE = path.join(ROOT, "engine", "target", "release", `blockwild-generation-fixture${process.platform === "win32" ? ".exe" : ""}`);
+const OPTIONS = {
+  "public-dir": { type: "string", default: "public/engine" },
+  "expected-artifact-hash": { type: "string", default: null },
+  output: { type: "string", default: path.relative(ROOT, path.join(WORK, "browser-worker-performance.json")) },
+};
+const ALLOWED_PUBLIC_DIRECTORIES = Object.freeze([
+  "public/engine",
+  "public/engine-locator-candidate",
+]);
+
+function comparablePath(value: string) {
+  const resolved = path.resolve(value);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function lstatIfPresent(value: string) {
+  try {
+    return lstatSync(value);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function assertRealDirectoryAtExpectedPath(directory: string, expectedRealPath: string, label: string) {
+  if (!existsSync(directory)) throw new RustEngineToolError(`${label} is missing: ${directory}`);
+  const entry = lstatSync(directory);
+  if (entry.isSymbolicLink() || !entry.isDirectory()) {
+    throw new RustEngineToolError(`${label} must be a real non-symlink directory: ${directory}`);
+  }
+  const actualRealPath = realpathSync(directory);
+  if (comparablePath(actualRealPath) !== comparablePath(expectedRealPath)) {
+    throw new RustEngineToolError(
+      `${label} resolves outside its exact approved path: expected ${expectedRealPath}, found ${actualRealPath}.`,
+    );
+  }
+  return actualRealPath;
+}
+
+export function resolveR3BrowserPublicDirectory(requestedPath: string, repositoryRoot = ROOT) {
+  const resolved = path.resolve(repositoryRoot, requestedPath);
+  const allowedRelativePath = ALLOWED_PUBLIC_DIRECTORIES.find(
+    (relativePath) => comparablePath(path.resolve(repositoryRoot, relativePath)) === comparablePath(resolved),
+  );
+  if (!allowedRelativePath) {
+    throw new RustEngineToolError(
+      `R3 browser --public-dir must resolve to public/engine or public/engine-locator-candidate; received ${resolved}.`,
+    );
+  }
+  const canonicalRepositoryRoot = realpathSync(repositoryRoot);
+  assertRealDirectoryAtExpectedPath(
+    resolved,
+    path.join(canonicalRepositoryRoot, ...allowedRelativePath.split("/")),
+    "R3 browser public root",
+  );
+  return resolved;
+}
+
+export function resolveR3BrowserOutputPath(requestedPath: string, repositoryRoot = ROOT) {
+  const resolved = path.resolve(repositoryRoot, requestedPath);
+  if (path.extname(resolved) !== ".json") {
+    throw new RustEngineToolError(`R3 browser --output must use the lowercase .json extension: ${resolved}`);
+  }
+
+  const workRoot = path.resolve(repositoryRoot, "work");
+  const relativeOutput = path.relative(workRoot, resolved);
+  if (!relativeOutput || relativeOutput.startsWith("..") || path.isAbsolute(relativeOutput)) {
+    throw new RustEngineToolError(`R3 browser --output must be strictly inside ${workRoot}; received ${resolved}.`);
+  }
+  const canonicalRepositoryRoot = realpathSync(repositoryRoot);
+  const canonicalWorkRoot = assertRealDirectoryAtExpectedPath(
+    workRoot,
+    path.join(canonicalRepositoryRoot, "work"),
+    "R3 browser work root",
+  );
+
+  const segments = relativeOutput.split(path.sep);
+  let current = workRoot;
+  for (const [index, segment] of segments.entries()) {
+    current = path.join(current, segment);
+    const entry = lstatIfPresent(current);
+    if (!entry) break;
+    if (entry.isSymbolicLink()) {
+      throw new RustEngineToolError(`R3 browser --output may not traverse or replace a symlink: ${current}`);
+    }
+    const isOutput = index === segments.length - 1;
+    if ((!isOutput && !entry.isDirectory()) || (isOutput && !entry.isFile())) {
+      throw new RustEngineToolError(
+        `R3 browser --output ${isOutput ? "must be a regular file when it exists" : "parent must be a directory"}: ${current}`,
+      );
+    }
+    const canonicalCurrent = realpathSync(current);
+    const canonicalRelative = path.relative(canonicalWorkRoot, canonicalCurrent);
+    if (!canonicalRelative || canonicalRelative.startsWith("..") || path.isAbsolute(canonicalRelative)) {
+      throw new RustEngineToolError(`R3 browser --output resolves outside the canonical work root: ${current}`);
+    }
+  }
+  return path.join(canonicalWorkRoot, ...relativeOutput.split(path.sep));
+}
+
+function validatedArtifactSourceSnapshot(manifest: Record<string, unknown>) {
+  const sourceSnapshot = manifest.sourceSnapshot as Record<string, unknown> | undefined;
+  if (
+    !sourceSnapshot
+    || sourceSnapshot.schema !== RUST_ENGINE_SOURCE_SNAPSHOT_SCHEMA
+    || !Number.isSafeInteger(sourceSnapshot.fileCount)
+    || Number(sourceSnapshot.fileCount) <= 0
+  ) {
+    throw new RustEngineToolError("Selected Rust engine artifact lacks a valid source snapshot.");
+  }
+  return Object.freeze({
+    schema: RUST_ENGINE_SOURCE_SNAPSHOT_SCHEMA,
+    digest: assertSha256(sourceSnapshot.digest, "Selected Rust engine artifact source digest"),
+    fileCount: Number(sourceSnapshot.fileCount),
+  });
+}
+
+export function selectR3BrowserArtifact(publicEngineDirectory: string, expectedArtifactHash: string) {
+  const expectedHash = assertSha256(expectedArtifactHash, "Expected R3 browser artifact hash");
+  const verification = validatePublishedArtifacts(publicEngineDirectory);
+  const variant = verification.index.defaultVariant as string;
+  const selected = verification.artifacts.find((artifact: { variant: string }) => artifact.variant === variant);
+  if (!selected) throw new RustEngineToolError(`R3 browser artifact index has no validated default variant ${variant}.`);
+  if (selected.hash !== expectedHash) {
+    throw new RustEngineToolError(
+      `R3 browser artifact hash mismatch: expected ${expectedHash}, selected ${selected.hash}.`,
+    );
+  }
+  return Object.freeze({
+    variant,
+    hash: selected.hash as string,
+    directory: selected.directory as string,
+    sourceSnapshot: validatedArtifactSourceSnapshot(selected.manifest as Record<string, unknown>),
+  });
+}
 
 function percentile(values: readonly number[], fraction: number) {
   const sorted = [...values].sort((left, right) => left - right);
@@ -63,38 +195,6 @@ function timingSummary(values: readonly number[]) {
     p95: percentile(values, 0.95),
     p99: percentile(values, 0.99),
   };
-}
-
-function expandedCases(manifest: CorpusManifest) {
-  const generic = Array.from({ length: manifest.genericSweep.cases }, (_, index): CorpusCase => ({
-    id: `generic-${index.toString().padStart(3, "0")}`,
-    seed: `r3-v18-corpus-${index % manifest.genericSweep.seedModulo}`,
-    chunk: [
-      (Math.imul(index, manifest.genericSweep.xMultiplier) % manifest.genericSweep.coordinateModulus) - manifest.genericSweep.coordinateOffset,
-      manifest.genericSweep.coordinateOffset - (Math.imul(index, manifest.genericSweep.zMultiplier) % manifest.genericSweep.coordinateModulus),
-    ],
-  }));
-  return [...manifest.cases, ...generic];
-}
-
-function requestFor(entry: CorpusCase, taskId: number): GenerateChunkRequestV2 {
-  const [cx, cz] = entry.chunk;
-  const generationOptions = entry.options ?? {};
-  const namespace = `terrain-v5|g18|${entry.seed}|${stableTerrainGenerationJsonV2(generationOptions)}|${cx},${cz}|${entry.edits?.length ? 1 : 0}`;
-  return createGenerateChunkRequestV2({
-    epoch: 1,
-    taskId,
-    revision: taskId,
-    namespace,
-    contentHash: LEGACY_TERRAIN_CONTENT_HASH_V2,
-    generatorHash: legacyTerrainGeneratorHashV2(namespace),
-    seedText: entry.seed,
-    generationOptions,
-    key: `${cx},${cz}`,
-    cx,
-    cz,
-    edits: entry.edits ?? [],
-  });
 }
 
 async function playwrightModule() {
@@ -146,13 +246,32 @@ function readPacketBatch(bytes: Uint8Array) {
   return results;
 }
 
-async function main() {
-  const manifest = JSON.parse(await readFile(path.join(ROOT, "tests", "fixtures", "rust-engine", "r3", "promotion-corpus.json"), "utf8")) as CorpusManifest;
-  const engineManifest = JSON.parse(await readFile(path.join(ROOT, "public", "engine", "manifest.json"), "utf8"));
-  const artifactHash = engineManifest.artifacts[engineManifest.defaultVariant].hash as string;
-  const artifact = path.join(ROOT, "public", "engine", artifactHash);
-  const cases = expandedCases(manifest);
-  const requests = cases.map((entry, index) => requestFor(entry, index + 1));
+export async function verifyRustGenerationR3Browser(argv = process.argv) {
+  const options = parseCommandLine(argv, OPTIONS);
+  const publicEngineDirectory = resolveR3BrowserPublicDirectory(options["public-dir"]);
+  const outputPath = resolveR3BrowserOutputPath(options.output);
+  if (!options["expected-artifact-hash"]) {
+    throw new RustEngineToolError("R3 browser verification requires --expected-artifact-hash.");
+  }
+  const selectedArtifact = selectR3BrowserArtifact(publicEngineDirectory, options["expected-artifact-hash"]);
+  const artifactHash = selectedArtifact.hash;
+  const artifact = selectedArtifact.directory;
+  const [frozenManifest, extensionManifest] = await Promise.all([
+    loadFrozenPromotionCorpusV1(),
+    loadNormalizedOptionsExtensionV1(),
+  ]);
+  const cases = assignStableCorpusOrdinals(
+    expandFrozenPromotionCases(frozenManifest),
+    expandNormalizedOptionCases(extensionManifest),
+  );
+  const requiredCoverageCount = new Set([
+    ...frozenManifest.requiredCoverage,
+    ...extensionManifest.requiredCoverage,
+  ]).size;
+  if (cases.length !== COMPOSED_PROMOTION_CASES_V2 || requiredCoverageCount !== COMPOSED_PROMOTION_COVERAGE_V2) {
+    throw new Error("shared promotion corpus does not retain the exact 155-case / 89-coverage shape");
+  }
+  const requests = cases.map(requestForPromotionCase);
   const packets = requests.map(encodeRustTerrainGenerationRequestV2);
 
   const referenceDurations: number[] = [];
@@ -192,6 +311,7 @@ async function main() {
   const browser = await playwright.chromium.launch({ headless: true, executablePath: browserExecutable(), args: ["--ignore-gpu-blocklist"] });
   let browserInitialization: BrowserInitialization;
   const browserDurations: number[] = [];
+  const browserParityRows: PromotionParityHashRowV2[] = [];
   try {
     const page = await browser.newPage();
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
@@ -231,6 +351,11 @@ async function main() {
       browserDurations.push(generated.duration);
       const candidate = decodeRustTerrainGenerationResultV2(Uint8Array.from(generated.result), requests[index]);
       if (!terrainGenerationChunksByteEqualV2(references[index], candidate)) throw new Error(`${cases[index].id}: browser Worker result differs from TS oracle`);
+      browserParityRows.push(Object.freeze({
+        id: cases[index].id,
+        referenceChunkHash: references[index].chunkHash,
+        candidateChunkHash: candidate.chunkHash,
+      }));
     }
     await page.evaluate("globalThis.blockwildR3GenerationWorker.terminate()");
   } finally {
@@ -238,8 +363,12 @@ async function main() {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
   const certificate = parseTerrainGenerationParityCertificateV2(Uint8Array.from(browserInitialization.certificate));
+  const browserCorpusHash = promotionCorpusHashV2(frozenManifest, extensionManifest, browserParityRows);
+  if (certificate.corpusHash !== browserCorpusHash) {
+    throw new Error("browser Worker certificate does not identify the exact 155-case v2 corpus");
+  }
 
-  const releaseBuild = spawnSync("cargo", ["build", "--release", "-p", "blockwild-generation", "--bin", "blockwild-generation-fixture"], {
+  const releaseBuild = spawnSync("cargo", ["build", "--locked", "--release", "-p", "blockwild-generation", "--bin", "blockwild-generation-fixture"], {
     cwd: path.join(ROOT, "engine"), encoding: "utf8", timeout: 300_000,
   });
   if (releaseBuild.status !== 0) throw new Error(releaseBuild.stderr || releaseBuild.stdout);
@@ -251,19 +380,59 @@ async function main() {
   if (native.status !== 0) throw new Error(native.stderr || native.stdout);
   const nativeMetrics = JSON.parse(native.stdout.trim()) as Record<string, number> & { perCaseUs: number[] };
   const nativeResults = readPacketBatch(new Uint8Array(await readFile(output)));
+  if (nativeMetrics.samples !== cases.length || nativeMetrics.perCaseUs.length !== cases.length || nativeResults.length !== cases.length) {
+    throw new Error(`native benchmark returned an incomplete corpus: expected ${cases.length} cases`);
+  }
+  const nativeParityRows: PromotionParityHashRowV2[] = [];
   for (const [index, result] of nativeResults.entries()) {
     const candidate = decodeRustTerrainGenerationResultV2(result, requests[index]);
     if (!terrainGenerationChunksByteEqualV2(references[index], candidate)) throw new Error(`${cases[index].id}: native benchmark result differs from TS oracle`);
+    nativeParityRows.push(Object.freeze({
+      id: cases[index].id,
+      referenceChunkHash: references[index].chunkHash,
+      candidateChunkHash: candidate.chunkHash,
+    }));
   }
+  const nativeCorpusHash = promotionCorpusHashV2(frozenManifest, extensionManifest, nativeParityRows);
+  if (nativeCorpusHash !== browserCorpusHash) throw new Error("native and browser Worker corpus identities differ");
 
   const wasmBytes = (await readFile(path.join(artifact, "engine_bg.wasm"))).byteLength;
   const jsBytes = (await readFile(path.join(artifact, "engine.js"))).byteLength;
+  const namedCaseCount = frozenManifest.cases.length;
+  const genericCaseCount = frozenManifest.genericSweep.cases;
+  const optionStart = FROZEN_PROMOTION_CASES_V1;
+  const optionLaneRows = cases.slice(optionStart).map((entry, offset) => {
+    const index = optionStart + offset;
+    return Object.freeze({
+      ordinal: entry.ordinal,
+      id: entry.id,
+      typescriptMilliseconds: referenceDurations[index],
+      nativeMilliseconds: nativeMetrics.perCaseUs[index] / 1_000,
+      browserWorkerMilliseconds: browserDurations[index],
+    });
+  });
   const result = {
-    schema: 1,
+    schema: 2,
     generatorVersion: 18,
     corpusCases: cases.length,
+    corpus: {
+      namedCases: namedCaseCount,
+      genericCases: genericCaseCount,
+      normalizedOptionCases: NORMALIZED_OPTION_EXTENSION_CASES_V1,
+      totalCases: cases.length,
+      requiredCoverageCount,
+      corpusHash: browserCorpusHash,
+      order: "67 frozen named cases, 64 frozen generic cases, then 24 normalized option lanes; request identity follows stable ordinals 1..155",
+    },
     certificate,
     artifactHash,
+    artifact: {
+      variant: selectedArtifact.variant,
+      publicDirectory: path.relative(ROOT, publicEngineDirectory).replaceAll(path.sep, "/"),
+      selectedPath: path.relative(ROOT, artifact).replaceAll(path.sep, "/"),
+      hash: artifactHash,
+      sourceSnapshot: selectedArtifact.sourceSnapshot,
+    },
     transferredBytes: { wasm: wasmBytes, javascript: jsBytes, total: wasmBytes + jsBytes },
     timingMilliseconds: {
       typescriptOracle: timingSummary(referenceDurations),
@@ -278,10 +447,19 @@ async function main() {
         ...timingSummary(browserDurations),
       },
       genericSweep: {
-        typescriptOracle: timingSummary(referenceDurations.slice(manifest.cases.length)),
-        nativeRust: timingSummary(nativeMetrics.perCaseUs.slice(manifest.cases.length).map((value) => value / 1_000)),
-        browserWorkerWasm: timingSummary(browserDurations.slice(manifest.cases.length)),
+        typescriptOracle: timingSummary(referenceDurations.slice(namedCaseCount, optionStart)),
+        nativeRust: timingSummary(nativeMetrics.perCaseUs.slice(namedCaseCount, optionStart).map((value) => value / 1_000)),
+        browserWorkerWasm: timingSummary(browserDurations.slice(namedCaseCount, optionStart)),
       },
+      normalizedOptionLanes: {
+        typescriptOracle: timingSummary(referenceDurations.slice(optionStart)),
+        nativeRust: timingSummary(nativeMetrics.perCaseUs.slice(optionStart).map((value) => value / 1_000)),
+        browserWorkerWasm: timingSummary(browserDurations.slice(optionStart)),
+      },
+    },
+    normalizedOptionLanes: {
+      cases: optionLaneRows.length,
+      rows: optionLaneRows,
     },
     slowestCases: cases.map((entry, index) => ({
       id: entry.id,
@@ -292,12 +470,24 @@ async function main() {
     assertions: {
       exactTypeScriptNative: true,
       exactTypeScriptBrowserWorkerWasm: true,
+      exactV2CorpusHashAcrossNativeAndBrowserWorker: true,
       certificateFailClosed: true,
       workerConstructsChunkWorld: false,
     },
   };
-  await writeFile(path.join(WORK, "browser-worker-performance.json"), `${JSON.stringify(result, null, 2)}\n`);
+  await mkdir(path.dirname(outputPath), { recursive: true });
+  const verifiedOutputPath = resolveR3BrowserOutputPath(outputPath);
+  await writeFile(verifiedOutputPath, `${JSON.stringify(result, null, 2)}\n`);
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  return result;
 }
 
-await main();
+if (isDirectInvocation(import.meta.url)) {
+  try {
+    await verifyRustGenerationR3Browser();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`R3 browser verification failed: ${message}\n`);
+    process.exitCode = 1;
+  }
+}

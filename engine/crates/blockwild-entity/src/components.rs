@@ -302,8 +302,8 @@ impl EntityComponents {
                 step_height: 1.05,
                 velocity: record.velocity,
                 desired_velocity: Vec3::ZERO,
-                grounded: true,
-                submerged: false,
+                grounded: compatibility_bool(record, "physics.grounded", true),
+                submerged: compatibility_bool(record, "physics.inLiquid", false),
                 movement_mode: MovementMode::Ground,
                 action: ActionState {
                     key: "idle".to_owned(),
@@ -387,6 +387,11 @@ impl EntityComponents {
             sentient: None,
             unknown_extensions: BTreeMap::new(),
         }
+    }
+
+    pub(crate) fn synchronize_compatibility_physics(&mut self, record: &EntityCompatibilityRecord) {
+        self.locomotion.grounded = compatibility_bool(record, "physics.grounded", self.locomotion.grounded);
+        self.locomotion.submerged = compatibility_bool(record, "physics.inLiquid", self.locomotion.submerged);
     }
 
     pub fn validate(&self) -> Result<(), &'static str> {
@@ -573,6 +578,14 @@ impl EntityComponents {
         }
         Ok(())
     }
+}
+
+fn compatibility_bool(record: &EntityCompatibilityRecord, key: &str, fallback: bool) -> bool {
+    record
+        .custom
+        .get(key)
+        .and_then(|value| value.parse::<bool>().ok())
+        .unwrap_or(fallback)
 }
 
 fn check_key(value: &str) -> Result<(), &'static str> {

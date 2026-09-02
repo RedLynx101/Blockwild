@@ -261,6 +261,63 @@ impl DeltaReceiverV1 {
         })
     }
 
+    /// Apply a delta carrying the host-authorized interest window for this
+    /// presentation. An interest change is admitted only by the exact next
+    /// keyframe, because keyframes atomically replace the scoped replicated
+    /// records. Any rejected transition leaves both the receiver cursor and
+    /// its prior interest window unchanged.
+    pub fn apply_with_interest(
+        &mut self,
+        interest: NetworkInterestSetV1,
+        delta: &NetworkDeltaV1,
+    ) -> Result<DeltaApplyOutcomeV1, NetworkError> {
+        interest.validate()?;
+        if interest.interest_hash == self.interest.interest_hash {
+            return self.apply(delta);
+        }
+        delta.validate()?;
+        let unchanged = |code| DeltaApplyOutcomeV1 {
+            code,
+            sequence: self.expected_sequence,
+            state_hash: self.state.canonical_state_hash(),
+        };
+        if delta.session_id != self.session_id {
+            return Ok(unchanged(DeltaApplyCodeV1::SessionMismatch));
+        }
+        if delta.peer_id != self.peer_id {
+            return Ok(unchanged(DeltaApplyCodeV1::PeerMismatch));
+        }
+        if delta.interest_hash != interest.interest_hash
+            || !delta.keyframe
+            || interest.sequence <= self.interest.sequence
+        {
+            return Ok(unchanged(DeltaApplyCodeV1::InterestMismatch));
+        }
+        if delta.sequence < self.expected_sequence {
+            return Ok(unchanged(DeltaApplyCodeV1::Duplicate));
+        }
+        if delta.sequence > self.expected_sequence {
+            return Ok(unchanged(DeltaApplyCodeV1::SequenceGap));
+        }
+        if delta.acknowledged_command_sequence < self.acknowledged_command_sequence {
+            return Ok(unchanged(DeltaApplyCodeV1::CommandAcknowledgementRegressed));
+        }
+        let mut transitioned = Self::new(
+            self.session_id.clone(),
+            self.peer_id.clone(),
+            self.connection_generation,
+            interest,
+            self.expected_sequence,
+            self.acknowledged_command_sequence,
+            self.state.clone(),
+        )?;
+        let outcome = transitioned.apply(delta)?;
+        if outcome.code == DeltaApplyCodeV1::Applied {
+            *self = transitioned;
+        }
+        Ok(outcome)
+    }
+
     pub fn reconnect_checkpoint(&self) -> Result<NetworkReconnectCheckpointV1, NetworkError> {
         NetworkReconnectCheckpointV1::new(
             self.session_id.clone(),

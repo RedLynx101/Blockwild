@@ -4,19 +4,22 @@
 //! decode them, negotiate compatibility, authorize human/agent commands, or
 //! accept a delta/reconnect transition.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use blockwild_types::{CanonicalHash, CanonicalHasher};
 
 use crate::{
     AgentAuthorityCodeV1, AgentCapabilityGrantV1, AgentWorkAuthorityV1, AgentWorkCommandV1, DeltaApplyCodeV1,
     DeltaReceiverV1, HandshakeDecisionCodeV1, NetworkAuthorityIdentityV1, NetworkAuthorityV1, NetworkCapabilityV1,
-    NetworkCommandReceiptV1, NetworkCommandV1, NetworkCompatibilityRecordV1, NetworkDeltaV1, NetworkError,
-    NetworkErrorCode, NetworkHandshakeV1, NetworkInterestChunkV1, NetworkInterestSetV1, NetworkPeerGrantV1,
-    NetworkReceiptCodeV1, NetworkReceiptStatusV1, NetworkReconnectCheckpointV1, ReplicatedStateV1, WorldAddressV1,
-    decode_agent_work_command_v1, decode_network_checkpoint_v1, decode_network_command_v1, decode_network_delta_v1,
-    decode_network_handshake_v1, encode_agent_work_command_v1, encode_network_checkpoint_v1, encode_network_command_v1,
-    encode_network_delta_v1, encode_network_handshake_v1, negotiate_network_handshake_v1,
+    NetworkCommandKindV1, NetworkCommandReceiptV1, NetworkCommandV1, NetworkCompatibilityRecordV1, NetworkDeltaV1,
+    NetworkError, NetworkErrorCode, NetworkHandshakeV1, NetworkInterestChunkV1, NetworkInterestSetV1,
+    NetworkPeerGrantV1, NetworkPeerKindV1, NetworkPlayerPoseProjectionSourceV1, NetworkPlayerPoseProjectionV1,
+    NetworkPlayerPoseV1, NetworkReceiptCodeV1, NetworkReceiptStatusV1, NetworkReconnectCheckpointV1, ReplicatedStateV1,
+    WorldAddressV1, decode_agent_work_command_v1, decode_network_checkpoint_v1, decode_network_command_v1,
+    decode_network_delta_v1, decode_network_handshake_v1, decode_network_player_pose_projection_v1,
+    decode_network_player_pose_v1, encode_agent_work_command_v1, encode_network_checkpoint_v1,
+    encode_network_command_v1, encode_network_delta_v1, encode_network_handshake_v1,
+    encode_network_player_pose_projection_v1, encode_network_player_pose_v1, negotiate_network_handshake_v1,
 };
 
 pub const NETWORK_BROWSER_PROTOCOL_V1: u16 = 1;
@@ -24,6 +27,8 @@ pub const NETWORK_BROWSER_HEADER_BYTES_V1: usize = 36;
 pub const NETWORK_BROWSER_MAX_WIRE_BYTES_V1: usize = 64 * 1024 * 1024;
 pub const NETWORK_BROWSER_MAX_BATCH_PACKETS_V1: usize = 512;
 pub const NETWORK_BROWSER_MAX_DELTA_RECEIVERS_V1: usize = 1_024;
+pub const NETWORK_BROWSER_MAX_PLAYER_POSE_RECORDS_V1: usize = 1_024;
+pub const NETWORK_BROWSER_MAX_PLAYER_POSE_PROJECTIONS_V1: usize = 512;
 
 const REQUEST_MAGIC: [u8; 4] = *b"BWRN";
 const RESPONSE_MAGIC: [u8; 4] = *b"BWNA";
@@ -31,10 +36,12 @@ const REQUEST_HANDSHAKE: u16 = 1;
 const REQUEST_COMMAND_BATCH: u16 = 2;
 const REQUEST_DELTA_DELIVERY: u16 = 3;
 const REQUEST_AGENT_COMMAND: u16 = 4;
+const REQUEST_GUEST_POSE: u16 = 5;
 const RESPONSE_HANDSHAKE: u16 = 101;
 const RESPONSE_COMMAND_BATCH: u16 = 102;
 const RESPONSE_DELTA_DELIVERY: u16 = 103;
 const RESPONSE_AGENT_COMMAND: u16 = 104;
+const RESPONSE_GUEST_POSE: u16 = 105;
 const RESPONSE_ERROR: u16 = 255;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -63,6 +70,13 @@ pub enum NetworkBrowserRequestV1 {
         envelope: NetworkCommandV1,
         work: AgentWorkCommandV1,
     },
+    GuestPose {
+        request_id: u64,
+        current: NetworkAuthorityIdentityV1,
+        now: u64,
+        command: NetworkCommandV1,
+        pose: NetworkPlayerPoseV1,
+    },
 }
 
 impl NetworkBrowserRequestV1 {
@@ -72,7 +86,8 @@ impl NetworkBrowserRequestV1 {
             Self::Handshake { request_id, .. }
             | Self::CommandBatch { request_id, .. }
             | Self::DeltaDelivery { request_id, .. }
-            | Self::AgentCommand { request_id, .. } => *request_id,
+            | Self::AgentCommand { request_id, .. }
+            | Self::GuestPose { request_id, .. } => *request_id,
         }
     }
 }
@@ -101,6 +116,12 @@ pub enum NetworkBrowserResponseV1 {
         receipt: Option<NetworkCommandReceiptV1>,
         authority_fingerprint: CanonicalHash,
     },
+    GuestPose {
+        request_id: u64,
+        receipt: NetworkCommandReceiptV1,
+        projection: Option<Box<NetworkPlayerPoseProjectionV1>>,
+        authority_fingerprint: CanonicalHash,
+    },
     Error {
         request_id: u64,
         code: String,
@@ -117,6 +138,10 @@ pub struct NetworkBrowserAuthorityRuntimeV1 {
     network: NetworkAuthorityV1,
     agent: AgentWorkAuthorityV1,
     delta_receivers: BTreeMap<(String, String, u64), DeltaReceiverV1>,
+    player_pose_history: BTreeMap<String, NetworkPlayerPoseProjectionV1>,
+    active_player_poses: BTreeMap<String, NetworkPlayerPoseProjectionV1>,
+    player_pose_projections: BTreeMap<String, NetworkPlayerPoseProjectionV1>,
+    player_pose_projection_order: VecDeque<String>,
 }
 
 impl NetworkBrowserAuthorityRuntimeV1 {
@@ -126,11 +151,24 @@ impl NetworkBrowserAuthorityRuntimeV1 {
             session_id,
             agent: AgentWorkAuthorityV1::default(),
             delta_receivers: BTreeMap::new(),
+            player_pose_history: BTreeMap::new(),
+            active_player_poses: BTreeMap::new(),
+            player_pose_projections: BTreeMap::new(),
+            player_pose_projection_order: VecDeque::new(),
         })
     }
 
     pub fn upsert_peer_grant(&mut self, grant: NetworkPeerGrantV1) -> Result<(), NetworkError> {
+        let prior_binding = self
+            .network
+            .grant(&grant.peer_id)
+            .map(|current| (current.connection_id.clone(), current.actor_id.clone()));
+        let peer_id = grant.peer_id.clone();
+        let next_binding = (grant.connection_id.clone(), grant.actor_id.clone());
         self.network.upsert_grant(grant)?;
+        if prior_binding.is_some_and(|prior| prior != next_binding) {
+            self.active_player_poses.remove(&peer_id);
+        }
         Ok(())
     }
 
@@ -140,6 +178,7 @@ impl NetworkBrowserAuthorityRuntimeV1 {
 
     pub fn release_peer(&mut self, peer_id: &str) {
         self.network.release_peer(peer_id);
+        self.active_player_poses.remove(peer_id);
         self.delta_receivers
             .retain(|(_, receiver_peer_id, _), _| receiver_peer_id != peer_id);
     }
@@ -151,9 +190,49 @@ impl NetworkBrowserAuthorityRuntimeV1 {
         self.network.release_command(command_id);
     }
 
+    /// Record the exact authority identity carried by a successfully built
+    /// peer delta. The network authority supplies the active connection id so
+    /// callers cannot forge or accidentally retain a cursor across reconnects.
+    pub fn record_delta_presentation(&mut self, delta: &NetworkDeltaV1) -> Result<bool, NetworkError> {
+        if delta.session_id != self.session_id {
+            return Err(NetworkError::new(
+                NetworkErrorCode::InvalidLabel,
+                "delta presentation belongs to another authority session",
+            ));
+        }
+        self.network
+            .record_peer_presentation(&delta.peer_id, delta.sequence, &delta.to)
+    }
+
     #[must_use]
     pub fn authority_fingerprint(&self) -> CanonicalHash {
         self.network.authority_fingerprint()
+    }
+
+    #[must_use]
+    /// Last durable record in this authority runtime's per-peer hash chain.
+    /// It survives release solely to preserve monotonic reconnect ancestry.
+    pub fn latest_player_pose_projection(&self, peer_id: &str) -> Option<&NetworkPlayerPoseProjectionV1> {
+        self.player_pose_history.get(peer_id)
+    }
+
+    #[must_use]
+    /// Presentation-safe record for the currently granted connection only.
+    pub fn active_player_pose_projection(&self, peer_id: &str) -> Option<&NetworkPlayerPoseProjectionV1> {
+        let projection = self.active_player_poses.get(peer_id)?;
+        let grant = self.network.grant(peer_id)?;
+        (grant.connection_id == projection.connection_id && grant.actor_id == projection.player_id)
+            .then_some(projection)
+    }
+
+    #[must_use]
+    pub fn player_pose_record_count(&self) -> usize {
+        self.player_pose_history.len()
+    }
+
+    #[must_use]
+    pub fn player_pose_projection_cache_count(&self) -> usize {
+        self.player_pose_projections.len()
     }
 
     pub fn reconnect_checkpoint(
@@ -181,6 +260,20 @@ impl NetworkBrowserAuthorityRuntimeV1 {
                 now,
                 commands,
             } => {
+                let mut contains_pose = false;
+                for command in &commands {
+                    if command.kind == NetworkCommandKindV1::Pose {
+                        let pose = decode_network_player_pose_v1(&command.payload)?;
+                        prevalidate_guest_pose_command(command, &pose)?;
+                        contains_pose = true;
+                    }
+                }
+                if contains_pose {
+                    return Err(NetworkError::new(
+                        NetworkErrorCode::InvalidEnum,
+                        "native guest pose commands require the dedicated browser request",
+                    ));
+                }
                 let mut receipts = Vec::with_capacity(commands.len());
                 for command in &commands {
                     receipts.push(self.network.authorize(command, &current, now)?);
@@ -237,16 +330,7 @@ impl NetworkBrowserAuthorityRuntimeV1 {
                         message: "A keyframe is required to initialize this Rust delta receiver.".to_owned(),
                     });
                 };
-                let receiver_checkpoint = receiver.reconnect_checkpoint()?;
-                let outcome = if receiver_checkpoint.interest_hash != interest.interest_hash {
-                    crate::DeltaApplyOutcomeV1 {
-                        code: DeltaApplyCodeV1::InterestMismatch,
-                        sequence: receiver_checkpoint.acknowledged_delta_sequence.saturating_add(1),
-                        state_hash: receiver.state().canonical_state_hash(),
-                    }
-                } else {
-                    receiver.apply(&delta)?
-                };
+                let outcome = receiver.apply_with_interest(interest, &delta)?;
                 NetworkBrowserResponseV1::DeltaDelivery {
                     request_id,
                     code: outcome.code,
@@ -272,8 +356,115 @@ impl NetworkBrowserAuthorityRuntimeV1 {
                     authority_fingerprint: self.network.authority_fingerprint(),
                 }
             }
+            NetworkBrowserRequestV1::GuestPose {
+                request_id,
+                current,
+                now,
+                command,
+                pose,
+            } => {
+                let (receipt, projection) = self.authorize_guest_pose(&command, &pose, &current, now)?;
+                NetworkBrowserResponseV1::GuestPose {
+                    request_id,
+                    receipt,
+                    projection: projection.map(Box::new),
+                    authority_fingerprint: self.network.authority_fingerprint(),
+                }
+            }
         };
         encode_network_browser_response_v1(&response)
+    }
+
+    fn authorize_guest_pose(
+        &mut self,
+        command: &NetworkCommandV1,
+        pose: &NetworkPlayerPoseV1,
+        current: &NetworkAuthorityIdentityV1,
+        now: u64,
+    ) -> Result<(NetworkCommandReceiptV1, Option<NetworkPlayerPoseProjectionV1>), NetworkError> {
+        prevalidate_guest_pose_command(command, pose)?;
+        let cached = self
+            .player_pose_projections
+            .get(&command.idempotency_key)
+            .filter(|projection| projection.command_hash == command.command_hash)
+            .cloned();
+
+        // Stage generic authority separately so no projection-construction
+        // failure can leave a consumed command sequence or receipt behind.
+        let mut staged_network = self.network.clone();
+        let receipt = staged_network.authorize_active_peer_command(command, current, now)?;
+        if !receipt.accepted() {
+            self.network = staged_network;
+            return Ok((receipt, None));
+        }
+        if let Some(projection) = cached {
+            if projection.receipt_hash != receipt.receipt_hash {
+                return Err(NetworkError::new(
+                    NetworkErrorCode::HashMismatch,
+                    "cached native player pose projection receipt drifted",
+                ));
+            }
+            self.network = staged_network;
+            return Ok((receipt, Some(projection)));
+        }
+
+        if !self.player_pose_history.contains_key(&command.peer_id)
+            && self.player_pose_history.len() >= NETWORK_BROWSER_MAX_PLAYER_POSE_RECORDS_V1
+        {
+            return Err(NetworkError::new(
+                NetworkErrorCode::Budget,
+                "network browser native player pose record budget is exhausted",
+            ));
+        }
+        let prior = self.player_pose_history.get(&command.peer_id);
+        let record_revision = prior.map_or(Ok(1), |projection| {
+            projection.record_revision.checked_add(1).ok_or_else(|| {
+                NetworkError::new(
+                    NetworkErrorCode::InvalidInteger,
+                    "native player pose record revision overflow",
+                )
+            })
+        })?;
+        crate::safe_integer(record_revision, "native player pose record revision")?;
+        let previous_record_hash = prior.map_or(CanonicalHash::default(), |projection| projection.record_hash);
+
+        let presentation = staged_network.peer_presentation(&command.peer_id).ok_or_else(|| {
+            NetworkError::new(
+                NetworkErrorCode::HashMismatch,
+                "accepted native player pose lacks a connection-bound presentation",
+            )
+        })?;
+        let projection = NetworkPlayerPoseProjectionV1::new(NetworkPlayerPoseProjectionSourceV1 {
+            session_id: command.session_id.clone(),
+            peer_id: command.peer_id.clone(),
+            connection_id: command.connection_id.clone(),
+            player_id: pose.player_id.clone(),
+            command_id: command.command_id.clone(),
+            command_sequence: command.sequence,
+            command_hash: command.command_hash,
+            receipt_hash: receipt.receipt_hash,
+            presented_delta_sequence: presentation.delta_sequence,
+            presented_identity_hash: presentation.identity.state_hash,
+            record_revision,
+            previous_record_hash,
+            pose: pose.clone(),
+        })?;
+
+        self.network = staged_network;
+        self.player_pose_history
+            .insert(command.peer_id.clone(), projection.clone());
+        self.active_player_poses
+            .insert(command.peer_id.clone(), projection.clone());
+        let cache_key = command.idempotency_key.clone();
+        self.player_pose_projections
+            .insert(cache_key.clone(), projection.clone());
+        self.player_pose_projection_order.push_back(cache_key);
+        while self.player_pose_projection_order.len() > NETWORK_BROWSER_MAX_PLAYER_POSE_PROJECTIONS_V1 {
+            if let Some(expired) = self.player_pose_projection_order.pop_front() {
+                self.player_pose_projections.remove(&expired);
+            }
+        }
+        Ok((receipt, Some(projection)))
     }
 }
 
@@ -393,6 +584,23 @@ pub fn prepare_network_agent_request_v1(
     wrap(REQUEST_MAGIC, REQUEST_AGENT_COMMAND, request_id, payload.finish())
 }
 
+pub fn prepare_network_guest_pose_request_v1(
+    request_id: u64,
+    current: &NetworkAuthorityIdentityV1,
+    now: u64,
+    command: &NetworkCommandV1,
+) -> Result<Vec<u8>, NetworkError> {
+    current.validate()?;
+    crate::safe_integer(now, "native player pose authority clock")?;
+    let pose = decode_network_player_pose_v1(&command.payload)?;
+    prevalidate_guest_pose_command(command, &pose)?;
+    let mut payload = Writer::default();
+    payload.identity(current)?;
+    payload.u64(now);
+    payload.bytes(&encode_network_command_v1(command)?)?;
+    wrap(REQUEST_MAGIC, REQUEST_GUEST_POSE, request_id, payload.finish())
+}
+
 pub fn decode_network_browser_request_v1(bytes: &[u8]) -> Result<NetworkBrowserRequestV1, NetworkError> {
     let (kind, request_id, payload) = unwrap(REQUEST_MAGIC, bytes)?;
     let mut reader = Reader::new(payload);
@@ -438,6 +646,21 @@ pub fn decode_network_browser_request_v1(bytes: &[u8]) -> Result<NetworkBrowserR
             envelope: decode_network_command_v1(&reader.bytes(crate::NETWORK_MAX_COMMAND_WIRE_BYTES_V1)?)?,
             work: decode_agent_work_command_v1(&reader.bytes(crate::AGENT_MAX_COMMAND_BYTES_V1 + 4096)?)?,
         },
+        REQUEST_GUEST_POSE => {
+            let current = reader.identity()?;
+            let now = reader.u64()?;
+            crate::safe_integer(now, "native player pose authority clock")?;
+            let command = decode_network_command_v1(&reader.bytes(crate::NETWORK_MAX_COMMAND_WIRE_BYTES_V1)?)?;
+            let pose = decode_network_player_pose_v1(&command.payload)?;
+            prevalidate_guest_pose_command(&command, &pose)?;
+            NetworkBrowserRequestV1::GuestPose {
+                request_id,
+                current,
+                now,
+                command,
+                pose,
+            }
+        }
         _ => {
             return Err(NetworkError::new(
                 NetworkErrorCode::InvalidEnum,
@@ -505,6 +728,22 @@ pub fn encode_network_browser_response_v1(response: &NetworkBrowserResponseV1) -
             }
             payload.hash(*authority_fingerprint);
             (RESPONSE_AGENT_COMMAND, *request_id)
+        }
+        NetworkBrowserResponseV1::GuestPose {
+            request_id,
+            receipt,
+            projection,
+            authority_fingerprint,
+        } => {
+            validate_command_receipt_hash(receipt)?;
+            validate_guest_pose_response_binding(receipt, projection.as_deref())?;
+            payload.receipt(receipt)?;
+            payload.u8(u8::from(projection.is_some()));
+            if let Some(projection) = projection {
+                payload.bytes(&encode_network_player_pose_projection_v1(projection)?)?;
+            }
+            payload.hash(*authority_fingerprint);
+            (RESPONSE_GUEST_POSE, *request_id)
         }
         NetworkBrowserResponseV1::Error {
             request_id,
@@ -591,6 +830,24 @@ pub fn decode_network_browser_response_v1(bytes: &[u8]) -> Result<NetworkBrowser
                 authority_fingerprint: reader.hash()?,
             }
         }
+        RESPONSE_GUEST_POSE => {
+            let receipt = reader.receipt()?;
+            validate_command_receipt_hash(&receipt)?;
+            let projection = if reader.flag()? {
+                Some(Box::new(decode_network_player_pose_projection_v1(
+                    &reader.bytes(crate::NETWORK_PLAYER_POSE_PROJECTION_MAX_WIRE_BYTES_V1)?,
+                )?))
+            } else {
+                None
+            };
+            validate_guest_pose_response_binding(&receipt, projection.as_deref())?;
+            NetworkBrowserResponseV1::GuestPose {
+                request_id,
+                receipt,
+                projection,
+                authority_fingerprint: reader.hash()?,
+            }
+        }
         RESPONSE_ERROR => NetworkBrowserResponseV1::Error {
             request_id,
             code: reader.string()?,
@@ -605,6 +862,100 @@ pub fn decode_network_browser_response_v1(bytes: &[u8]) -> Result<NetworkBrowser
     };
     reader.finish()?;
     Ok(result)
+}
+
+fn prevalidate_guest_pose_command(command: &NetworkCommandV1, pose: &NetworkPlayerPoseV1) -> Result<(), NetworkError> {
+    command.validate()?;
+    pose.validate()?;
+    if command.kind != NetworkCommandKindV1::Pose
+        || command.peer_kind != NetworkPeerKindV1::Human
+        || command.required_capability != NetworkCapabilityV1::Interact
+        || !command.lease_keys.is_empty()
+    {
+        return Err(NetworkError::new(
+            NetworkErrorCode::InvalidEnum,
+            "native guest pose command has an invalid authority shape",
+        ));
+    }
+    if command.peer_id != command.actor_id || command.actor_id != pose.player_id {
+        return Err(NetworkError::new(
+            NetworkErrorCode::InvalidLabel,
+            "native guest pose player, actor, and peer ids must match",
+        ));
+    }
+    if command.payload != encode_network_player_pose_v1(pose)? {
+        return Err(NetworkError::new(
+            NetworkErrorCode::HashMismatch,
+            "native guest pose command payload is not canonical",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_guest_pose_response_binding(
+    receipt: &NetworkCommandReceiptV1,
+    projection: Option<&NetworkPlayerPoseProjectionV1>,
+) -> Result<(), NetworkError> {
+    if receipt.accepted() != projection.is_some() {
+        return Err(NetworkError::new(
+            NetworkErrorCode::WireType,
+            "native player pose response acceptance and projection disagree",
+        ));
+    }
+    if let Some(projection) = projection
+        && (projection.command_id != receipt.command_id
+            || projection.peer_id != receipt.peer_id
+            || projection.receipt_hash != receipt.receipt_hash)
+    {
+        return Err(NetworkError::new(
+            NetworkErrorCode::HashMismatch,
+            "native player pose response receipt and projection disagree",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_command_receipt_hash(receipt: &NetworkCommandReceiptV1) -> Result<(), NetworkError> {
+    if receipt.schema_version != crate::NETWORK_AUTHORITY_SCHEMA_V1 {
+        return Err(NetworkError::new(
+            NetworkErrorCode::SchemaMismatch,
+            "native player pose authority receipt schema mismatch",
+        ));
+    }
+    crate::label(&receipt.command_id, 180, "native player pose receipt command id")?;
+    crate::label(
+        &receipt.idempotency_key,
+        256,
+        "native player pose receipt idempotency key",
+    )?;
+    crate::label(&receipt.peer_id, 180, "native player pose receipt peer id")?;
+    receipt.identity.validate()?;
+    if match receipt.status {
+        NetworkReceiptStatusV1::Accepted => receipt.code.is_some() || !receipt.message.is_empty(),
+        NetworkReceiptStatusV1::Rejected => receipt.code.is_none(),
+    } {
+        return Err(NetworkError::new(
+            NetworkErrorCode::WireType,
+            "native player pose authority receipt shape is not canonical",
+        ));
+    }
+    let mut hasher = CanonicalHasher::new("blockwild-network-receipt-v1");
+    hasher.write_str(receipt.status.as_str());
+    hasher.write_str(&receipt.command_id);
+    hasher.write_str(&receipt.idempotency_key);
+    hasher.write_str(&receipt.peer_id);
+    hasher.write_str(&receipt.identity.state_hash.to_hex());
+    if let Some(code) = receipt.code {
+        hasher.write_str(code.as_str());
+        hasher.write_str(&receipt.message);
+    }
+    if hasher.finish() != receipt.receipt_hash {
+        return Err(NetworkError::new(
+            NetworkErrorCode::HashMismatch,
+            "native player pose authority receipt hash mismatch",
+        ));
+    }
+    Ok(())
 }
 
 fn wrap(magic: [u8; 4], kind: u16, request_id: u64, payload: Vec<u8>) -> Result<Vec<u8>, NetworkError> {
@@ -1256,6 +1607,266 @@ mod tests {
             .expect("receiver checkpoint");
         assert_eq!(durable.acknowledged_delta_sequence, 1);
         assert_eq!(durable.identity, keyframe.to);
+    }
+
+    #[test]
+    fn browser_runtime_rebinds_interest_only_on_the_exact_next_keyframe() {
+        fn deliver(
+            runtime: &mut NetworkBrowserAuthorityRuntimeV1,
+            request_id: u64,
+            checkpoint: &NetworkReconnectCheckpointV1,
+            interest: &NetworkInterestSetV1,
+            delta: &NetworkDeltaV1,
+        ) -> DeltaApplyCodeV1 {
+            let request = prepare_network_delta_delivery_request_v1(request_id, checkpoint, interest, delta).unwrap();
+            match decode_network_browser_response_v1(&runtime.process(&request).unwrap()).unwrap() {
+                NetworkBrowserResponseV1::DeltaDelivery { code, .. } => code,
+                _ => panic!("wrong response"),
+            }
+        }
+
+        let fixture = canonical_network_fixture_v1().unwrap();
+        let checkpoint = NetworkReconnectCheckpointV1::new(
+            "session-r9".into(),
+            "peer-1".into(),
+            7,
+            0,
+            0,
+            fixture.starting_identity.clone(),
+            fixture.interest.interest_hash,
+        )
+        .unwrap();
+        let record_a = NetworkDeltaRecordV1::new(
+            NetworkDeltaRecordKindV1::World,
+            "chunk:interest-a".into(),
+            1,
+            vec![0xa0],
+        )
+        .unwrap();
+        let record_b = NetworkDeltaRecordV1::new(
+            NetworkDeltaRecordKindV1::World,
+            "chunk:interest-b".into(),
+            1,
+            vec![0xb0],
+        )
+        .unwrap();
+        let initial = NetworkDeltaV1::new(NetworkDeltaSourceV1 {
+            session_id: "session-r9".into(),
+            delta_id: "delta:interest:initial".into(),
+            peer_id: "peer-1".into(),
+            keyframe: true,
+            sequence: 1,
+            acknowledged_command_sequence: 4,
+            from: fixture.starting_identity,
+            to: fixture.delta.to,
+            interest_hash: fixture.interest.interest_hash,
+            records: vec![record_a.clone()],
+        })
+        .unwrap();
+        let mut runtime = NetworkBrowserAuthorityRuntimeV1::new("session-r9".into()).unwrap();
+        let initial_request =
+            prepare_network_delta_delivery_request_v1(40, &checkpoint, &fixture.interest, &initial).unwrap();
+        let initial_response = decode_network_browser_response_v1(&runtime.process(&initial_request).unwrap()).unwrap();
+        assert!(matches!(
+            initial_response,
+            NetworkBrowserResponseV1::DeltaDelivery {
+                code: DeltaApplyCodeV1::Applied,
+                sequence: 1,
+                ..
+            }
+        ));
+
+        let before = runtime
+            .reconnect_checkpoint("session-r9", "peer-1", 7)
+            .unwrap()
+            .expect("initial receiver checkpoint");
+        let moved_chunks = fixture
+            .interest
+            .chunks
+            .iter()
+            .cloned()
+            .map(|mut chunk| {
+                chunk.chunk_x += 1;
+                chunk
+            })
+            .collect();
+        let moved_interest = NetworkInterestSetV1::new(
+            fixture.interest.sequence + 1,
+            moved_chunks,
+            fixture.interest.entity_ids.clone(),
+        )
+        .unwrap();
+        let stale_interest = NetworkInterestSetV1::new(
+            fixture.interest.sequence,
+            fixture.interest.chunks.clone(),
+            [
+                fixture.interest.entity_ids.clone(),
+                vec!["player:stale-interest".into()],
+            ]
+            .concat(),
+        )
+        .unwrap();
+        let changed = |delta_id: &str, keyframe: bool, sequence: u64, acknowledged_command_sequence: u64| {
+            NetworkDeltaV1::new(NetworkDeltaSourceV1 {
+                session_id: "session-r9".into(),
+                delta_id: delta_id.into(),
+                peer_id: "peer-1".into(),
+                keyframe,
+                sequence,
+                acknowledged_command_sequence,
+                from: initial.to.clone(),
+                to: initial.to.clone(),
+                interest_hash: moved_interest.interest_hash,
+                records: vec![record_b.clone()],
+            })
+            .unwrap()
+        };
+        assert_eq!(
+            deliver(
+                &mut runtime,
+                41,
+                &before,
+                &moved_interest,
+                &changed("delta:interest:ordinary", false, 2, 4)
+            ),
+            DeltaApplyCodeV1::InterestMismatch
+        );
+        let stale_transition = NetworkDeltaV1::new(NetworkDeltaSourceV1 {
+            session_id: "session-r9".into(),
+            delta_id: "delta:interest:non-increasing".into(),
+            peer_id: "peer-1".into(),
+            keyframe: true,
+            sequence: 2,
+            acknowledged_command_sequence: 4,
+            from: initial.to.clone(),
+            to: initial.to.clone(),
+            interest_hash: stale_interest.interest_hash,
+            records: initial.records.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            deliver(&mut runtime, 46, &before, &stale_interest, &stale_transition),
+            DeltaApplyCodeV1::InterestMismatch
+        );
+        assert_eq!(
+            deliver(
+                &mut runtime,
+                47,
+                &before,
+                &stale_interest,
+                &changed("delta:interest:hash-disagreement", true, 2, 4),
+            ),
+            DeltaApplyCodeV1::InterestMismatch
+        );
+        assert_eq!(
+            deliver(
+                &mut runtime,
+                42,
+                &before,
+                &moved_interest,
+                &changed("delta:interest:duplicate", true, 1, 4)
+            ),
+            DeltaApplyCodeV1::Duplicate
+        );
+        assert_eq!(
+            deliver(
+                &mut runtime,
+                43,
+                &before,
+                &moved_interest,
+                &changed("delta:interest:gap", true, 3, 4)
+            ),
+            DeltaApplyCodeV1::SequenceGap
+        );
+        assert_eq!(
+            deliver(
+                &mut runtime,
+                44,
+                &before,
+                &moved_interest,
+                &changed("delta:interest:ack-regression", true, 2, 3),
+            ),
+            DeltaApplyCodeV1::CommandAcknowledgementRegressed
+        );
+        assert_eq!(
+            runtime
+                .reconnect_checkpoint("session-r9", "peer-1", 7)
+                .unwrap()
+                .expect("unchanged receiver checkpoint"),
+            before
+        );
+        let receiver_before = runtime
+            .delta_receivers
+            .get(&("session-r9".into(), "peer-1".into(), 7))
+            .expect("initial receiver state");
+        assert_eq!(receiver_before.state().record_count(), 1);
+        assert!(receiver_before.state().record(&record_a.key()).is_some());
+        assert!(receiver_before.state().record(&record_b.key()).is_none());
+
+        assert_eq!(
+            deliver(
+                &mut runtime,
+                45,
+                &before,
+                &moved_interest,
+                &changed("delta:interest:transition", true, 2, 4),
+            ),
+            DeltaApplyCodeV1::Applied
+        );
+        let transitioned = runtime
+            .reconnect_checkpoint("session-r9", "peer-1", 7)
+            .unwrap()
+            .expect("transitioned receiver checkpoint");
+        assert_eq!(transitioned.acknowledged_delta_sequence, 2);
+        assert_eq!(transitioned.acknowledged_command_sequence, 4);
+        assert_eq!(transitioned.interest_hash, moved_interest.interest_hash);
+        assert_eq!(transitioned.identity, initial.to);
+        let receiver_after = runtime
+            .delta_receivers
+            .get(&("session-r9".into(), "peer-1".into(), 7))
+            .expect("transitioned receiver state");
+        assert_eq!(receiver_after.state().record_count(), 1);
+        assert!(receiver_after.state().record(&record_a.key()).is_none());
+        assert!(receiver_after.state().record(&record_b.key()).is_some());
+
+        let record_b_next = NetworkDeltaRecordV1::new(
+            NetworkDeltaRecordKindV1::World,
+            "chunk:interest-b".into(),
+            2,
+            vec![0xb1],
+        )
+        .unwrap();
+        let ordinary = NetworkDeltaV1::new(NetworkDeltaSourceV1 {
+            session_id: "session-r9".into(),
+            delta_id: "delta:interest:ordinary-after-transition".into(),
+            peer_id: "peer-1".into(),
+            keyframe: false,
+            sequence: 3,
+            acknowledged_command_sequence: 4,
+            from: initial.to.clone(),
+            to: initial.to.clone(),
+            interest_hash: moved_interest.interest_hash,
+            records: vec![record_b_next.clone()],
+        })
+        .unwrap();
+        assert_eq!(
+            deliver(&mut runtime, 48, &transitioned, &moved_interest, &ordinary),
+            DeltaApplyCodeV1::Applied
+        );
+        let final_checkpoint = runtime
+            .reconnect_checkpoint("session-r9", "peer-1", 7)
+            .unwrap()
+            .expect("post-transition ordinary checkpoint");
+        assert_eq!(final_checkpoint.acknowledged_delta_sequence, 3);
+        let final_receiver = runtime
+            .delta_receivers
+            .get(&("session-r9".into(), "peer-1".into(), 7))
+            .expect("post-transition ordinary receiver state");
+        assert_eq!(final_receiver.state().record_count(), 1);
+        assert_eq!(
+            final_receiver.state().record(&record_b_next.key()),
+            Some(&record_b_next)
+        );
     }
 
     #[test]

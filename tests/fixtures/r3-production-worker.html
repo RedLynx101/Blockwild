@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Blockwild · production terrain worker</title>
+  <style>
+    body { margin: 24px; background: #edf1eb; color: #183c31; font: 16px/1.5 system-ui, sans-serif; }
+    main { max-width: 1100px; margin: auto; }
+    button { padding: 10px 18px; border: 0; border-radius: 5px; background: #183c31; color: white; font: inherit; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: default; }
+    canvas { display: block; width: 100%; height: auto; margin-top: 16px; border-radius: 8px; box-shadow: 0 2px 8px #183c3120; }
+    p { margin: 12px 0; }
+  </style>
+</head>
+<body><main>
+  <button id="run">Verify actual production workers</button>
+  <p>155 independent legacy-oracle cases · three request orders · lifecycle rejection and cleanup</p>
+  <canvas id="evidence" width="1100" height="620" aria-label="Production terrain worker verification status"></canvas>
+  <p>This is a worker correctness gate, not gameplay, visual, or performance acceptance.</p>
+</main><script type="module" src="./r3-production-worker.ts"></script></body>
+</html>

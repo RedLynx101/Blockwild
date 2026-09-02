@@ -162,6 +162,200 @@ Every timing family contains count, mean, p50, p95, p99, minimum, and maximum. R
 - reject any phase that breaches the plan's scenario floor even if a kernel microbenchmark improves;
 - treat cold-start and transferred-byte growth as first-class costs.
 
+### Node scenario baseline identity
+
+`npm run benchmark:performance-scenarios` is explicitly a **legacy TypeScript
+CPU baseline**, not a Rust/Wasm comparison. Both `ChunkWorld` instances select
+TypeScript through the constructor because Node has no production browser
+Worker. The result records that backend identity and seven untimed checkpoints
+requiring completed generation and player-chunk readiness, including both
+worlds and the actual player-edit location. A failed or empty generation lane
+must fail the benchmark rather than appear faster.
+
+The evaluator in `scripts/autoresearch/blockwild-performance-evaluator.mjs`
+preserves all ten workloads and their iteration counts. It rejects duplicate,
+missing or extra scenarios, invalid timings, missing readiness, and mismatched
+or absent backend identities before producing normalized comparisons. Historical
+identity-free summaries are retained as historical evidence; do not add identity
+fields retrospectively or compare them as if they passed these new guards.
+Re-measure a matching baseline for new normalized comparisons. A fresh single
+run on 2026-09-02 passed every guard with 48 main-world and 11 settlement-world
+generated chunks (p95 geometric mean 4.445 ms); this is a tooling sanity check,
+not a Rust speedup or the required interleaved final performance study.
+
+### Actual terrain-worker corpus gate
+
+The production-worker gate uses the normal `TerrainGenerationPipeline` factory
+and `terrain-generation-worker.ts`, with the selected immutable compatibility
+package served at the unchanged `/engine` URLs. It accepts only canonical
+`public/engine` or isolated `public/engine-schema-candidate`, requires an exact
+artifact hash matching current source, and needs a fresh output directory:
+
+```powershell
+node --import tsx scripts/verify-rust-generation-production-worker.mjs `
+  --public-dir public/engine `
+  --expected-artifact-hash <verified-current-compatibility-hash> `
+  --output work/hybrid-rust-migration/browser/r3-production-worker-fresh
+```
+
+This runs the installed game-development browser client against a loopback-only
+Vite harness. It compares all ten payload streams and decoded POI metadata to
+independent legacy-oracle bytes for 155 cases in forward, reverse and zipper
+order. Additional probes cover cancellation, stale supersession, epoch reset,
+one diagnostic crash/replacement, input-buffer detachment, received-buffer
+ownership and explicit worker disposal. The worker's output transfer list is
+source-audited; sender-side output detachment is not dynamically observed and
+is explicitly recorded as such. Review `shot-0.png`, `summary.json`,
+`requests.json` and `cleanup.json`; a screenshot merely existing is not visual
+acceptance. No source edits or overlapping browser gates may run during the
+source/artifact snapshot window.
+
+Reported worker timings are observational end-to-end request timings, not an
+accepted comparison against Node oracle timings. This gate complements, rather
+than replaces, the real-game terrain edit/save/reload verifier and the remaining
+browser performance, old-save and cache/soak requirements.
+
+### Historical import and persistent-cache gates
+
+These are separate, unmeasured correctness lanes. Use fresh output directories,
+the unchanged canonical `c7bfb66c` package, and no concurrent source edits or
+browser gates:
+
+```powershell
+node --import tsx scripts/verify-rust-r3-old-save-browser.mjs `
+  --engine-dir public/engine `
+  --expected-artifact-hash c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b `
+  --output work/hybrid-rust-migration/browser/r3-old-saves-fresh
+
+node --import tsx scripts/verify-rust-r3-persistent-cache-browser.mjs `
+  --output work/hybrid-rust-migration/r3-persistent-cache/fresh
+```
+
+The import lane uploads two frozen **synthetic historical-format** public
+exports, not archived user saves: generator 16 with an omitted settlement pattern,
+and generator 17 with modern settings. It checks independent migrated options,
+generation identity, exact edits in real Rust worker inputs/results, drawable
+terrain, Save & Quit, hard reload and Continue without reimport. Each case owns a
+fresh browser profile. Generator-2 raw-key bootstrap migration is a separate gate.
+
+The cache lane uses default `ChunkWorld` and the existing nonempty
+`surface-poi-negative` oracle case. Real travel and lease expiry must evict the
+target, and its observed IndexedDB write must commit and survive disposal.
+A fresh same-origin page must restore through normal scheduling with an actual
+target-specific disk hit, no memory hit and no target regeneration. All restored
+bytes are captured before streaming updates and compared with the committed
+snapshot; all immutable arrays and POI bytes also match the independent oracle.
+Normal drawable readiness is checked afterward. This lane does not cover live
+edit-halo namespace rejection or native persistence authority.
+
+Both runners retain state, errors, source/artifact identity and owned-resource
+cleanup evidence. Manually inspect their original screenshots before accepting
+a run. The cache lane's installed game-development client checks only the idle
+UI: its virtual-time shim cannot supply the eviction/lease acceptance clock.
+
+## Matched browser generation benchmark
+
+`scripts/benchmark-r3-generation-browser.mjs` builds the same small production
+fixture twice through the real world-generation build selector. Both lanes use
+the default `ChunkWorld` constructor. The comparison does not substitute the
+Node oracle for the TypeScript browser implementation.
+
+```powershell
+node --import tsx scripts/benchmark-r3-generation-browser.mjs `
+  --public-dir public/engine `
+  --expected-artifact-hash <verified-current-compatibility-hash> `
+  --pairs 5 `
+  --skill-review `
+  --output work/hybrid-rust-migration/r3-performance-fresh
+```
+
+Use `--pairs 1` only for a diagnostic complete pair. Five pairs alternate lane
+order; failed or incomplete runs are retained and cannot become accepted
+samples. Run without overlapping browser gates or source edits. Every output
+directory must be fresh. The tool owns its loopback servers and fresh browser
+processes and checks source/artifact identity again after cleanup.
+Each lane retains complete compact-JSON `evidence.json` on disk. Between lanes,
+the runner retains only a detached comparison projection and a readable summary,
+not the repeated chunk-readiness/telemetry graphs. Every callback's clock,
+position and timing remains in the projection and is revalidated for comparison.
+
+Two workloads remain separate:
+
+- All 155 corpus cases: compare all ten generated streams and POI metadata at
+  the isolated accepted-chunk boundary, before cross-chunk lighting updates.
+  Report initialized-runtime/cold-world-cache acceptance and reset-to-accepted
+  latency separately; the latter includes Rust worker recreation. Neither is
+  described as retained-cache warm-world performance.
+- Five persistent-world landscape traces: drive one real world update per real
+  browser animation frame, retaining normal caches during walking, sprinting,
+  and reversal. V2 advances the unchanged 420 movement ticks through production's
+  60 Hz accumulator, 80 ms delta clamp and four-tick backlog cap, after each
+  streaming update. High-refresh callbacks with zero movement ticks are retained;
+  one final update observes the endpoint. Actual callback counts are variable,
+  and raw timestamps, accumulators, steps and positions must reconcile exactly.
+  Report generation, frame/update tails, and installed versus
+  local-height opaque/cutout drawable readiness. This does not prove transparent
+  water rendering or complete game/render/input latency.
+
+V1 diagnostic directories are retained as fixed-frame stress evidence only.
+Their movement advanced by 1/60 second per callback, which accelerated travel
+on high-refresh displays. Never relabel those records as production-speed
+walk/sprint results or combine them with V2 comparisons.
+
+Measured lanes do not inject virtual time or force SwiftShader. They record and
+require accelerated browser graphics. Independent expected bytes are prepared
+outside browser timing; their retained browser memory is harness overhead, not
+whole-game memory. Each lane starts with a fresh browser; content-addressed
+engine/bundle assets retain the production immutable-cache policy for later
+worker resets, while unversioned manifests/configuration and oracle data are
+no-store. Production loader fetch overrides remain intact. Local delivery is
+not a production CDN measurement. The short reverse trace tests resident
+backtracking, not evicted-chunk restoration from the persistent cache.
+
+The optional installed game-development client run is separately labeled
+correctness/visual review and excluded from all performance samples. Inspect its
+screenshot and each measured lane's `screen.png` or `failed-screen.png` manually.
+The summary deliberately does not auto-promote performance acceptance: review
+scenario floors, cold costs, memory and readiness evidence before updating the
+authority ledger.
+
+## Clean-checkout source identity
+
+The source snapshot hashes raw bytes, including engine tests and schema docs.
+`.gitattributes` therefore pins LF for text under `engine/` and the two external
+source-hashed build scripts, while preserving binary detection. Verify the
+current source through an isolated Git checkout before claiming that a source
+commit reproduces an artifact:
+
+```powershell
+node scripts/verify-rust-source-checkout.mjs `
+  --expected-source-digest <verified-current-source-digest> `
+  --expected-file-count <verified-source-file-count> `
+  --output work/rust-source-checkout/fresh-check
+```
+
+This creates its own repository and clean clone beneath a fresh `work/`
+directory, with `core.autocrlf=true`, `core.eol=crlf`, and isolated Git settings.
+It never stages or commits in the real repository. The retained report requires
+the exact input set, identical raw-byte hashes before/copy/checkout/after, and a
+clean checkout. This verifies checkout byte reproducibility, not a native build,
+complete application dependency closure, or a production release.
+
+Published packages have a separate byte boundary: `public/engine/** -text`
+disables Git text conversion for content-addressed glue, declarations, manifests
+and Wasm. Their checksums cover generated bytes, so even a harmless LF-to-CRLF
+conversion invalidates publication. `tests/rust-engine-artifact-checkout.test.mjs`
+exercises real isolated Git checkout and tar archive with Windows line-ending
+settings for both compatibility and renderer-lab variants. Its negative control
+must detect unpinned conversion; binary bytes must survive unchanged.
+
+Validate a checkpoint's extracted tree with `validatePublishedArtifacts`, not
+only its working directory. When an index replaces an artifact, include the
+corresponding unreferenced-directory removals in the same checkpoint. Retaining
+an obsolete package outside the index fails validation and is not TypeScript
+rollback support. Do not rewrite extracted artifact bytes or loosen checksums
+to make a broken checkpoint pass.
+
 ## Failure recovery
 
 - **No workspace:** wait for or restore `engine/Cargo.toml`; the builder does not scaffold it.

@@ -202,7 +202,7 @@ function canonicalGenerationOptionsJson(value: unknown) {
   if (!rounded(options.biomeScale, 0.25, 4)
     || !rounded(options.caveFrequency, 0, 3)
     || !rounded(options.resourceAbundance, 0.25, 4)
-    || !rounded(options.settlementDensity, 0, 3)
+    || !rounded(options.settlementDensity, 0, 2)
     || (options.profile !== "legacy-v14" && options.profile !== "world-below-v15")
     || (options.settlementPattern !== "legacy-scattered-v1" && options.settlementPattern !== "heartlands-v2")
     || (options.settlementClustering !== "even" && options.settlementClustering !== "regional" && options.settlementClustering !== "strong")

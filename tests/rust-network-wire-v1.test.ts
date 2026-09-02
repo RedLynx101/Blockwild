@@ -244,6 +244,25 @@ test("source and UTF-8 helpers form a narrow multiplayer-envelope boundary", () 
   assert.equal(decodeNetworkCommandWireV1(encoded).commandId, "cmd-wrapper");
 });
 
+test("presentation-state appends command-kind tag 7 without renumbering existing kinds", () => {
+  const canonical = canonicalValues().command;
+  const command = createNetworkCommandV1({
+    ...canonical,
+    commandId: "cmd-player-state",
+    idempotencyKey: "idem-player-state",
+    kind: "presentation-state",
+    leaseKeys: [],
+  });
+  const encoded = encodeNetworkCommandWireV1(command);
+  const view = new DataView(encoded.buffer, encoded.byteOffset, encoded.byteLength);
+  let cursor = NETWORK_WIRE_HEADER_BYTES_V1;
+  for (let index = 0; index < 6; index += 1) cursor = skipString(view, cursor);
+  assert.equal(encoded[cursor], 0, "the canonical human peer tag remains zero");
+  assert.equal(encoded[cursor + 1], 7, "presentation-state is the additive command-kind tag");
+  assert.equal(decodeNetworkCommandWireV1(encoded).kind, "presentation-state");
+  assert.equal(decodeNetworkCommandWireV1(fromHex(fixture.canonical.command)).kind, "gameplay", "the canonical gameplay tag remains unchanged");
+});
+
 test("BWN1 parsing fails closed on framing, tags, UTF-8, u64, hashes, and trailing data", () => {
   const base = fromHex(fixture.canonical.handshake);
   assert.throws(() => decodeNetworkHandshakeWireV1(base.subarray(0, 15)), (error: unknown) => error instanceof NetworkWireV1Error && error.code === "truncated");

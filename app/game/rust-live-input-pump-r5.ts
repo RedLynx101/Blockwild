@@ -1,4 +1,5 @@
 import {
+  RUST_INTEGRATED_RUNTIME_FIXED_STEP_US,
   RUST_RUNTIME_INPUT_BUTTON_MASK_V1,
   RUST_RUNTIME_INPUT_BUTTON_V1,
   RUST_RUNTIME_INPUT_FLAG_MASK_V1,
@@ -19,6 +20,7 @@ import {
 } from "./rust-integrated-runtime-contract.ts";
 import {
   rustIntegratedRuntimeSemanticActionReceiptHashV2,
+  rustIntegratedRuntimeWireChecksumV1,
   sealRustIntegratedRuntimeContextCommandV2,
 } from "./rust-integrated-runtime-codec.ts";
 import type {
@@ -26,6 +28,34 @@ import type {
   RustIntegratedPlayerRuntimeContinuityV1,
 } from "./rust-integrated-runtime-player-status.ts";
 import type { RustIntegratedRuntimeContextContinuityV2 } from "./rust-integrated-runtime-context-continuity-v2.ts";
+import {
+  RUST_INTEGRATED_RUNTIME_BASIC_DIRT_ACTION_SEED_CURSOR_V1,
+  encodeRustIntegratedRuntimeBasicDirtActionProjectionReceiptV1,
+  queryRustIntegratedRuntimeBasicDirtActionReceiptV1,
+  type RustIntegratedRuntimeBasicDirtActionProjectionV1,
+} from "./rust-integrated-runtime-basic-dirt-action.ts";
+import {
+  RUST_INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_CAPABILITY_V2,
+  RUST_INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_SEED_CURSOR_V1,
+  encodeRustIntegratedRuntimeNativeBlockEditProjectionReceiptV1,
+  encodeRustIntegratedRuntimeNativeBlockEditProjectionReceiptV2,
+  queryRustIntegratedRuntimeNativeBlockEditReceiptV1,
+  queryRustIntegratedRuntimeNativeBlockEditReceiptV2,
+  type RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2,
+  type RustIntegratedRuntimeNativeBlockEditReceiptV1,
+} from "./rust-integrated-runtime-native-block-edit.ts";
+import {
+  RUST_INTEGRATED_RUNTIME_DROP_PICKUP_SEED_CURSOR_V1,
+  encodeRustIntegratedRuntimeDropPickupProjectionReceiptV1,
+  queryRustIntegratedRuntimeDropPickupReceiptV1,
+  type RustIntegratedRuntimeDropPickupProjectionV1,
+} from "./rust-integrated-runtime-drop-pickup.ts";
+import {
+  RUST_INTEGRATED_RUNTIME_NATIVE_PLAYER_DROP_SEED_CURSOR_V1,
+  encodeRustIntegratedRuntimeNativePlayerDropProjectionReceiptV1,
+  queryRustIntegratedRuntimeNativePlayerDropReceiptV1,
+  type RustIntegratedRuntimeNativePlayerDropProjectionV1,
+} from "./rust-integrated-runtime-player-drop.ts";
 import {
   planRustLiveCameraConfigR10,
   rustLiveCameraConfigMatchesR10,
@@ -37,6 +67,47 @@ import {
   decodeRustLiveCameraViewR10,
   type RustLiveCameraViewR10,
 } from "./rust-live-camera-view-r10.ts";
+import {
+  decodeRustIntegratedPlayerLocatorItemConsumeV1,
+  encodeRustIntegratedPlayerLocatorItemConsumeV1,
+  planRustLiveLocatorItemConsumeV1,
+  rehydrateRustLiveLocatorItemConsumePlanV1,
+  rustIntegratedContainerViewKeyV1,
+  rustLiveLocatorItemConsumePlanRecordV1,
+  validateRustLiveLocatorItemConsumeAfterCommandV1,
+  validateRustLiveLocatorItemConsumeReceiptV1,
+  type RustIntegratedPlayerLocatorItemConsumeV1,
+  type RustLiveLocatorItemConsumePlanV1,
+  type RustLiveLocatorItemConsumeValidatedReceiptV1,
+} from "./rust-integrated-runtime-player-locator-consume.ts";
+import {
+  decodeRustIntegratedPlayerCreativeSlotSetV1,
+  encodeRustIntegratedPlayerCreativeSlotSetV1,
+  planRustLiveCreativeSlotSetV1,
+  validateRustLiveCreativeSlotSetAfterCommandV1,
+  validateRustLiveCreativeSlotSetReceiptV1,
+  type RustIntegratedPlayerCreativeSlotSetV1,
+  type RustLiveCreativeSlotSetPlanV1,
+  type RustLiveCreativeSlotSetValidatedReceiptV1,
+} from "./rust-integrated-runtime-player-creative-slot.ts";
+import {
+  planRustLivePlayerRespawnV1,
+  rehydrateRustLivePlayerRespawnPlanV1,
+  rustIntegratedPlayerRespawnParentAttestsReceiptV1,
+  rustLivePlayerRespawnPlanRecordV1,
+  validateRustLivePlayerRespawnAfterCommandV1,
+  validateRustLivePlayerRespawnReceiptV1,
+  type RustIntegratedFixedWorldVec3V1,
+  type RustIntegratedPlayerRespawnV1,
+  type RustLivePlayerRespawnPlanV1,
+  type RustLivePlayerRespawnReadbackV1,
+  type RustLivePlayerRespawnValidatedReceiptV1,
+} from "./rust-integrated-runtime-player-respawn.ts";
+import {
+  decodeRustLivePlayerViewR10,
+  type RustLivePlayerDeathRespawnR10,
+  type RustLivePlayerViewR10,
+} from "./rust-live-player-view-r10.ts";
 
 export const RUST_LIVE_INPUT_STEP_BUDGET_US_R5 = 8_000;
 export const RUST_LIVE_INPUT_AXIS_DIVISOR_R5 = 32_767;
@@ -122,6 +193,10 @@ export interface RustLiveInputPumpServiceR5 {
     view?: RustIntegratedRuntimeExtractionViewV1,
   ): Promise<RustIntegratedRuntimeExtractionV1>;
   command?(batch: RustIntegratedRuntimeCommandBatchV1): Promise<RustIntegratedRuntimeCommandReceiptV1>;
+  /** Lookup-only exact command recovery after a durable browser plan outlives dispatch acknowledgement. */
+  recoverCommand?(batch: RustIntegratedRuntimeCommandBatchV1): Promise<RustIntegratedRuntimeCommandReceiptV1>;
+  /** Read-only artifact capability observation; the concrete integrated service already exposes this. */
+  diagnostics?(): Readonly<{ capabilities: readonly string[] }>;
 }
 
 export type RustLiveInputPumpOptionsR5 = Readonly<{
@@ -137,6 +212,21 @@ export type RustLiveInputPumpOptionsR5 = Readonly<{
   nextContextCommandSequence?: number | null;
   /** Exact nonmutating BWO6 observation composed with BWO5 at activation. */
   contextContinuity?: RustIntegratedRuntimeContextContinuityV2;
+  /**
+   * Explicit browser projection cursor. A number (including zero) is a tracked
+   * current-save cursor; null is a legacy/untracked restore that seeds to the
+   * native latest cursor without replay. Absence keeps compatibility callers
+   * outside this receipt lane until their save schema is wired.
+   */
+  initialBasicDirtActionCursor?: number | null;
+  /** Generic R4 block-edit custody. When configured it supersedes the Basic Dirt query lane. */
+  initialNativeBlockEditCursor?: number | null;
+  /** Same tracked-versus-legacy custody rule as the Basic Dirt receipt lane. */
+  initialDropPickupCursor?: number | null;
+  /** Same tracked-versus-legacy custody rule as the other native receipt lanes. */
+  initialNativePlayerDropCursor?: number | null;
+  /** Full false-policy parent cursor. Null seeds to the newest native parent without replay. */
+  initialNativeDeathRespawnCursor?: number | null;
 }>;
 
 export type RustLiveInputPumpAdvanceOptionsR5 = Readonly<{
@@ -144,7 +234,7 @@ export type RustLiveInputPumpAdvanceOptionsR5 = Readonly<{
   view?: RustIntegratedRuntimeExtractionViewV1;
 }>;
 
-export type RustLiveInputPumpExtractionCauseR5 = "initial" | "authority" | "viewport" | "camera-config";
+export type RustLiveInputPumpExtractionCauseR5 = "initial" | "authority" | "viewport" | "camera-config" | "player-respawn";
 
 export type RustLiveInputPumpAdvanceResultR5 = Readonly<{
   discarded: boolean;
@@ -152,6 +242,62 @@ export type RustLiveInputPumpAdvanceResultR5 = Readonly<{
   extraction: RustIntegratedRuntimeExtractionV1 | null;
   cause?: RustLiveInputPumpExtractionCauseR5 | null;
   camera?: RustLiveCameraViewR10 | null;
+  nativeBlockEdit?: RustLiveInputPumpNativeBlockEditDeliveryV1 | null;
+  basicDirtAction?: RustLiveInputPumpBasicDirtActionDeliveryV1 | null;
+  dropPickup?: RustLiveInputPumpDropPickupDeliveryV1 | null;
+  playerDrop?: RustLiveInputPumpPlayerDropDeliveryV1 | null;
+  deathRespawn?: RustLiveInputPumpDeathRespawnDeliveryV1 | null;
+}>;
+
+export type RustLiveInputPumpNativeBlockEditDeliveryV1 = Readonly<{
+  protocolVersion: 1 | 2;
+  legacyFallback: "v1-capability" | "v2-pre-v14" | null;
+  worldGeneration: number;
+  queryIdentity: RustIntegratedRuntimeIdentityV1;
+  cursorBefore: number;
+  cursorAfter: number;
+  requestPayloadHash: string;
+  projectionPayloadHash: string;
+  receipt: RustIntegratedRuntimeNativeBlockEditReceiptV1;
+  dirty: RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2 | null;
+}>;
+
+export type RustLiveInputPumpBasicDirtActionDeliveryV1 = Readonly<{
+  worldGeneration: number;
+  queryIdentity: RustIntegratedRuntimeIdentityV1;
+  cursorBefore: number;
+  cursorAfter: number;
+  requestPayloadHash: string;
+  projectionPayloadHash: string;
+  receipt: RustIntegratedRuntimeBasicDirtActionProjectionV1;
+}>;
+
+export type RustLiveInputPumpDropPickupDeliveryV1 = Readonly<{
+  worldGeneration: number;
+  queryIdentity: RustIntegratedRuntimeIdentityV1;
+  cursorBefore: number;
+  cursorAfter: number;
+  requestPayloadHash: string;
+  projectionPayloadHash: string;
+  receipt: RustIntegratedRuntimeDropPickupProjectionV1;
+}>;
+
+export type RustLiveInputPumpPlayerDropDeliveryV1 = Readonly<{
+  worldGeneration: number;
+  queryIdentity: RustIntegratedRuntimeIdentityV1;
+  cursorBefore: number;
+  cursorAfter: number;
+  requestPayloadHash: string;
+  projectionPayloadHash: string;
+  receipt: RustIntegratedRuntimeNativePlayerDropProjectionV1;
+}>;
+
+export type RustLiveInputPumpDeathRespawnDeliveryV1 = Readonly<{
+  worldGeneration: number;
+  queryIdentity: RustIntegratedRuntimeIdentityV1;
+  cursorBefore: number;
+  cursorAfter: number;
+  parent: RustLivePlayerDeathRespawnR10;
 }>;
 
 export type RustLiveInputPumpViewResultR5 = Readonly<{
@@ -169,6 +315,53 @@ export type RustLiveInputPumpCameraConfigResultR10 = Readonly<{
   camera: RustLiveCameraViewR10 | null;
 }>;
 
+export type RustLiveInputPumpLocatorItemConsumeResultV1 = Readonly<{
+  discarded: boolean;
+  plan: RustLiveLocatorItemConsumePlanV1 | null;
+  receipt: RustIntegratedRuntimeCommandReceiptV1 | null;
+  validated: RustLiveLocatorItemConsumeValidatedReceiptV1 | null;
+  extraction: RustIntegratedRuntimeExtractionV1 | null;
+  player: RustLivePlayerViewR10 | null;
+}>;
+
+export type RustLiveInputPumpLocatorItemConsumeOptionsV1 = Readonly<{
+  /** Must durably persist the exact plan. Rejection prevents native dispatch and fails the pump closed. */
+  beforeDispatch?: (plan: RustLiveLocatorItemConsumePlanV1) => Promise<void>;
+}>;
+
+export type RustLiveInputPumpCreativeSlotSetResultV1 = Readonly<{
+  discarded: boolean;
+  plan: RustLiveCreativeSlotSetPlanV1 | null;
+  receipt: RustIntegratedRuntimeCommandReceiptV1 | null;
+  validated: RustLiveCreativeSlotSetValidatedReceiptV1 | null;
+  extraction: RustIntegratedRuntimeExtractionV1 | null;
+  player: RustLivePlayerViewR10 | null;
+}>;
+
+export type RustLiveInputPumpPlayerRespawnOptionsV1 = Readonly<{
+  /** Must durably retain the exact canonical BWD7 plan before native dispatch. */
+  beforeDispatch?: (plan: RustLivePlayerRespawnPlanV1) => Promise<void>;
+}>;
+
+export type RustLiveInputPumpPlayerRespawnResultV1 = Readonly<{
+  discarded: boolean;
+  plan: RustLivePlayerRespawnPlanV1 | null;
+  receipt: RustIntegratedRuntimeCommandReceiptV1 | null;
+  validated: RustLivePlayerRespawnValidatedReceiptV1 | null;
+  extraction: RustIntegratedRuntimeExtractionV1 | null;
+  player: RustLivePlayerViewR10 | null;
+  camera: RustLiveCameraViewR10 | null;
+  view: RustIntegratedRuntimeExtractionViewV1 | null;
+  deathRespawn: RustLiveInputPumpDeathRespawnDeliveryV1 | null;
+}>;
+
+export type RustLiveInputPumpNativeCheckpointResultV1<T> = Readonly<{
+  discarded: boolean;
+  value: T | null;
+  before: RustIntegratedRuntimeIdentityV1 | null;
+  after: RustIntegratedRuntimeIdentityV1 | null;
+}>;
+
 export type RustLiveCameraConfigUpdateR10 = RustLiveCameraConfigIntentR10
   | ((current: RustLiveCameraViewR10) => RustLiveCameraConfigIntentR10);
 
@@ -184,11 +377,16 @@ export type RustLiveInputPumpDiagnosticsR5 = Readonly<{
   pendingInputSequence: number | null;
   nextInputSequence: number;
   nextActionSequence: number;
+  lastActionReceipt: RustIntegratedRuntimeInputActionReceiptV1 | null;
   nextContextCommandSequence: number | null;
   queuedContextCommands: number;
   lastMonotonicTimeUs: number;
   lastExtractionRevision: number;
   lastAuthorityTick: number;
+  lastNetworkRevision: number;
+  networkIdentityAdoptions: number;
+  lastAppliedMoveX: number;
+  lastAppliedMoveZ: number;
   lastAppliedButtons: number;
   selectedSlot: number;
   authoritativeFlags: number;
@@ -197,11 +395,60 @@ export type RustLiveInputPumpDiagnosticsR5 = Readonly<{
   stepCalls: number;
   extractionCalls: number;
   commandCalls: number;
+  creativeSlotSetCalls: number;
   viewExtractionCalls: number;
   lastView: RustIntegratedRuntimeExtractionViewV1 | null;
   cameraRevision: bigint | null;
   appliedInputs: number;
   discardedContinuations: number;
+  nativeBlockEditQueryConfigured: boolean;
+  nativeBlockEditProtocolVersion: 1 | 2;
+  nativeBlockEditCursor: number | null;
+  nativeBlockEditLegacySeedPending: boolean;
+  nativeBlockEditQueryCalls: number;
+  pendingNativeBlockEditSequence: number | null;
+  pendingNativeBlockEditReceiptHash: string | null;
+  pendingNativeBlockEditIdentityHash: string | null;
+  pendingNativeBlockEditDirtyEvidenceHash: string | null;
+  pendingNativeBlockEditLegacyFallback: "v1-capability" | "v2-pre-v14" | null;
+  lastAcknowledgedNativeBlockEditSequence: number | null;
+  lastAcknowledgedNativeBlockEditReceiptHash: string | null;
+  basicDirtActionQueryConfigured: boolean;
+  basicDirtActionQuerySuppressedByNativeBlockEdit: boolean;
+  basicDirtActionCursor: number | null;
+  basicDirtActionLegacySeedPending: boolean;
+  basicDirtActionQueryCalls: number;
+  pendingBasicDirtActionSequence: number | null;
+  pendingBasicDirtActionReceiptHash: string | null;
+  pendingBasicDirtActionIdentityHash: string | null;
+  lastAcknowledgedBasicDirtActionSequence: number | null;
+  lastAcknowledgedBasicDirtActionReceiptHash: string | null;
+  dropPickupQueryConfigured: boolean;
+  dropPickupCursor: number | null;
+  dropPickupLegacySeedPending: boolean;
+  dropPickupQueryCalls: number;
+  pendingDropPickupSequence: number | null;
+  pendingDropPickupReceiptHash: string | null;
+  pendingDropPickupIdentityHash: string | null;
+  lastAcknowledgedDropPickupSequence: number | null;
+  lastAcknowledgedDropPickupReceiptHash: string | null;
+  playerDropQueryConfigured: boolean;
+  playerDropCursor: number | null;
+  playerDropLegacySeedPending: boolean;
+  playerDropQueryCalls: number;
+  pendingPlayerDropSequence: number | null;
+  pendingPlayerDropReceiptHash: string | null;
+  pendingPlayerDropIdentityHash: string | null;
+  lastAcknowledgedPlayerDropSequence: number | null;
+  lastAcknowledgedPlayerDropReceiptHash: string | null;
+  deathRespawnQueryConfigured: boolean;
+  deathRespawnCursor: number | null;
+  deathRespawnLegacySeedPending: boolean;
+  pendingDeathRespawnSequence: number | null;
+  pendingDeathRespawnReceiptHash: string | null;
+  pendingDeathRespawnIdentityHash: string | null;
+  lastAcknowledgedDeathRespawnSequence: number | null;
+  lastAcknowledgedDeathRespawnReceiptHash: string | null;
   lastError: string | null;
 }>;
 
@@ -230,6 +477,7 @@ type StagedAppliedInputR5 = Readonly<{
   pending: PendingInputR5;
   authoritativeFlags: number;
   nextActionSequence: number;
+  lastActionReceipt: RustIntegratedRuntimeInputActionReceiptV1 | null;
 }>;
 
 export class RustLiveInputPumpErrorR5 extends Error {
@@ -265,9 +513,29 @@ function assertBoolean(value: boolean, label: string) {
   return value;
 }
 
+function exactEpochMicroseconds(milliseconds: number) {
+  if (!Number.isFinite(milliseconds) || milliseconds < 0) return null;
+  const microseconds = Math.floor(milliseconds * 1_000);
+  return Number.isSafeInteger(microseconds) && microseconds <= U64_SAFE_MAX
+    ? microseconds
+    : null;
+}
+
 function defaultNowUs() {
-  const milliseconds = typeof performance !== "undefined" ? performance.now() : Date.now();
-  return Math.floor(milliseconds * 1_000);
+  if (typeof performance !== "undefined") {
+    try {
+      const performanceMicroseconds = exactEpochMicroseconds(
+        performance.timeOrigin + performance.now(),
+      );
+      if (performanceMicroseconds !== null) return performanceMicroseconds;
+    } catch { /* Fall through to the epoch clock when Performance is unavailable or hostile. */ }
+  }
+  // Date.now is reload-stable and remains exactly representable in integer
+  // microseconds for contemporary browser epochs. If neither epoch source is
+  // exact, fail closed: zero would make restored continuity crawl by +1 us.
+  const dateMicroseconds = exactEpochMicroseconds(Date.now());
+  if (dateMicroseconds !== null) return dateMicroseconds;
+  fail("monotonic-clock-unavailable", "browser epoch clocks cannot provide one exact safe microsecond timestamp");
 }
 
 function errorText(error: unknown) {
@@ -281,8 +549,89 @@ function identityDoesNotRegress(before: RustIntegratedRuntimeIdentityV1, after: 
     .every((key) => after.revision[key] >= before.revision[key]);
 }
 
+function identityMatchesHydratedLocatorReceipt(
+  receiptAfter: RustIntegratedRuntimeIdentityV1,
+  current: RustIntegratedRuntimeIdentityV1,
+) {
+  if (receiptAfter.universeId !== current.universeId
+    || receiptAfter.locationId !== current.locationId
+    || receiptAfter.tick !== current.tick
+    || receiptAfter.revision.epoch !== current.revision.epoch
+    || receiptAfter.revision.world !== current.revision.world
+    || receiptAfter.revision.entities !== current.revision.entities
+    || receiptAfter.revision.gameplay !== current.revision.gameplay
+    || receiptAfter.revision.network !== current.revision.network
+    || receiptAfter.revision.simulation !== current.revision.simulation
+    ) {
+    return false;
+  }
+  return rustIntegratedRuntimeIdentityEqualsV1(current, receiptAfter)
+    || current.stateHash !== receiptAfter.stateHash;
+}
+
+function identityIsExactNativePersistenceSuccessor(
+  before: RustIntegratedRuntimeIdentityV1,
+  after: RustIntegratedRuntimeIdentityV1,
+) {
+  return before.universeId === after.universeId
+    && before.locationId === after.locationId
+    && before.tick === after.tick
+    && before.revision.epoch === after.revision.epoch
+    && before.revision.world === after.revision.world
+    && before.revision.entities === after.revision.entities
+    && before.revision.gameplay === after.revision.gameplay
+    && before.revision.network === after.revision.network
+    && before.revision.simulation === after.revision.simulation
+    && after.revision.persistence > before.revision.persistence
+    && after.stateHash !== before.stateHash;
+}
+
+function identityIsExactExternalNetworkSuccessor(
+  before: RustIntegratedRuntimeIdentityV1,
+  after: RustIntegratedRuntimeIdentityV1,
+) {
+  return before.universeId === after.universeId
+    && before.locationId === after.locationId
+    && before.tick === after.tick
+    && before.revision.epoch === after.revision.epoch
+    && before.revision.world === after.revision.world
+    && before.revision.entities === after.revision.entities
+    && before.revision.gameplay === after.revision.gameplay
+    && before.revision.persistence === after.revision.persistence
+    && before.revision.simulation === after.revision.simulation
+    && after.revision.network > before.revision.network
+    && after.stateHash !== before.stateHash;
+}
+
 function frozenIdentity(value: RustIntegratedRuntimeIdentityV1): RustIntegratedRuntimeIdentityV1 {
   return Object.freeze({ ...value, revision: Object.freeze({ ...value.revision }) });
+}
+
+function exactFixedMilli(value: number, label: string) {
+  finite(value, label);
+  const scaled = value * 1_000;
+  const rounded = Math.round(scaled);
+  if (!Number.isSafeInteger(rounded) || Math.abs(scaled - rounded) > 1e-6) {
+    fail("player-respawn-readback", `${label} is not an exact native milli-unit value`);
+  }
+  return rounded;
+}
+
+function exactFixedVector(
+  value: Readonly<{ x: number; y: number; z: number }>,
+  label: string,
+): RustIntegratedFixedWorldVec3V1 {
+  return Object.freeze({
+    xMilli: exactFixedMilli(value.x, `${label} x`),
+    yMilli: exactFixedMilli(value.y, `${label} y`),
+    zMilli: exactFixedMilli(value.z, `${label} z`),
+  });
+}
+
+function invariantRespawnNeutral(moveX: number, moveZ: number, buttons: number) {
+  if (moveX !== 0 || moveZ !== 0 || buttons !== 0) {
+    fail("player-respawn-input", "committed player respawn neutral input retained movement or buttons");
+  }
 }
 
 function frozenFrame(value: RustIntegratedRuntimeInputFrameV1): RustIntegratedRuntimeInputFrameV1 {
@@ -435,6 +784,8 @@ function validateContinuity(
     nextInputSequence,
     nextActionSequence,
     lastMonotonicTimeUs: safeU64(continuity.lastMonotonicTimeUs, "last monotonic time"),
+    lastAppliedMoveX: continuity.lastAppliedInput?.moveX ?? 0,
+    lastAppliedMoveZ: continuity.lastAppliedInput?.moveZ ?? 0,
     lastAppliedButtons: continuity.lastAppliedInput?.buttons ?? 0,
     selectedSlot,
   });
@@ -469,6 +820,8 @@ export class RustLiveInputPumpR5 {
   private readonly service: RustLiveInputPumpServiceR5;
   private readonly nowUs: () => number;
   private readonly playerExternalEntityId: string | null;
+  private readonly playerActorId: string | null;
+  private readonly playerInventoryViewKey: string | null;
   private readonly actionTransitions = new Map<number, boolean[]>();
   private tail: Promise<unknown> = Promise.resolve();
   private stopPromise: Promise<void> | null = null;
@@ -479,13 +832,22 @@ export class RustLiveInputPumpR5 {
   private inFlight = false;
   private latest: QuantizedIntentR5;
   private physicalActionButtons: number;
+  private lastAppliedMoveX = 0;
+  private lastAppliedMoveZ = 0;
   private lastAppliedButtons: number;
   private selectedSlot: number;
   private authoritativeFlags: number;
   private nextInputSequence: number;
   private nextActionSequence: number;
+  private lastActionReceipt: RustIntegratedRuntimeInputActionReceiptV1 | null = null;
   private nextContextCommandSequence: number | null;
   private readonly contextContinuityConfigured: boolean;
+  private readonly nativeBlockEditQueryConfigured: boolean;
+  private readonly nativeBlockEditProtocolVersion: 1 | 2;
+  private readonly basicDirtActionQueryConfigured: boolean;
+  private readonly dropPickupQueryConfigured: boolean;
+  private readonly playerDropQueryConfigured: boolean;
+  private readonly deathRespawnQueryConfigured: boolean;
   private readonly contextCommandIntents: RustLiveContextCommandIntentV2[] = [];
   private lastMonotonicTimeUs: number;
   private lastIdentity: RustIntegratedRuntimeIdentityV1;
@@ -499,9 +861,35 @@ export class RustLiveInputPumpR5 {
   private stepCalls = 0;
   private extractionCalls = 0;
   private commandCalls = 0;
+  private creativeSlotSetCalls = 0;
   private viewExtractionCalls = 0;
   private appliedInputs = 0;
+  private networkIdentityAdoptions = 0;
   private discardedContinuations = 0;
+  private nativeBlockEditCursor: number | null = null;
+  private nativeBlockEditLegacySeedPending = false;
+  private nativeBlockEditQueryCalls = 0;
+  private pendingNativeBlockEdit: RustLiveInputPumpNativeBlockEditDeliveryV1 | null = null;
+  private lastAcknowledgedNativeBlockEdit: RustLiveInputPumpNativeBlockEditDeliveryV1 | null = null;
+  private basicDirtActionCursor: number | null = null;
+  private basicDirtActionLegacySeedPending = false;
+  private basicDirtActionQueryCalls = 0;
+  private pendingBasicDirtAction: RustLiveInputPumpBasicDirtActionDeliveryV1 | null = null;
+  private lastAcknowledgedBasicDirtAction: RustLiveInputPumpBasicDirtActionDeliveryV1 | null = null;
+  private dropPickupCursor: number | null = null;
+  private dropPickupLegacySeedPending = false;
+  private dropPickupQueryCalls = 0;
+  private pendingDropPickup: RustLiveInputPumpDropPickupDeliveryV1 | null = null;
+  private lastAcknowledgedDropPickup: RustLiveInputPumpDropPickupDeliveryV1 | null = null;
+  private playerDropCursor: number | null = null;
+  private playerDropLegacySeedPending = false;
+  private playerDropQueryCalls = 0;
+  private pendingPlayerDrop: RustLiveInputPumpPlayerDropDeliveryV1 | null = null;
+  private lastAcknowledgedPlayerDrop: RustLiveInputPumpPlayerDropDeliveryV1 | null = null;
+  private deathRespawnCursor: number | null = null;
+  private deathRespawnLegacySeedPending = false;
+  private pendingDeathRespawn: RustLiveInputPumpDeathRespawnDeliveryV1 | null = null;
+  private lastAcknowledgedDeathRespawn: RustLiveInputPumpDeathRespawnDeliveryV1 | null = null;
 
   constructor(options: RustLiveInputPumpOptionsR5) {
     this.service = options.service;
@@ -515,6 +903,10 @@ export class RustLiveInputPumpR5 {
       && (typeof this.playerExternalEntityId !== "string" || this.playerExternalEntityId.length === 0)) {
       fail("camera-binding", "live input pump external player identity is empty");
     }
+    this.playerActorId = options.status.worldViewBinding?.actorId ?? null;
+    this.playerInventoryViewKey = options.status.worldViewBinding === null
+      ? null
+      : rustIntegratedContainerViewKeyV1(options.status.worldViewBinding.inventoryContainer);
     const identity = frozenIdentity(this.service.identity());
     const continuity = validateContinuity(options.status, identity);
     this.lastIdentity = identity;
@@ -537,7 +929,51 @@ export class RustLiveInputPumpR5 {
     this.nextContextCommandSequence = observedContextSequence === null
       ? null
       : integer(observedContextSequence, 1, U64_SAFE_MAX, "next context command sequence");
+    this.nativeBlockEditQueryConfigured = options.initialNativeBlockEditCursor !== undefined;
+    this.nativeBlockEditProtocolVersion = this.service.diagnostics?.().capabilities
+      .includes(RUST_INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_CAPABILITY_V2) ? 2 : 1;
+    if (this.nativeBlockEditQueryConfigured && !this.service.command) {
+      fail("native-block-edit-service", "Rust runtime does not expose the read-only native block-edit receipt query");
+    }
+    this.nativeBlockEditLegacySeedPending = options.initialNativeBlockEditCursor === null;
+    this.nativeBlockEditCursor = typeof options.initialNativeBlockEditCursor === "number"
+      ? integer(options.initialNativeBlockEditCursor, 0, U64_SAFE_MAX, "initial native block-edit cursor")
+      : null;
+    this.basicDirtActionQueryConfigured = options.initialBasicDirtActionCursor !== undefined;
+    if (this.basicDirtActionQueryConfigured && !this.service.command) {
+      fail("basic-dirt-action-service", "Rust runtime does not expose the read-only basic Dirt receipt query");
+    }
+    this.basicDirtActionLegacySeedPending = options.initialBasicDirtActionCursor === null;
+    this.basicDirtActionCursor = typeof options.initialBasicDirtActionCursor === "number"
+      ? integer(options.initialBasicDirtActionCursor, 0, U64_SAFE_MAX, "initial basic Dirt action cursor")
+      : null;
+    this.dropPickupQueryConfigured = options.initialDropPickupCursor !== undefined;
+    if (this.dropPickupQueryConfigured && !this.service.command) {
+      fail("drop-pickup-service", "Rust runtime does not expose the read-only native drop-pickup receipt query");
+    }
+    this.dropPickupLegacySeedPending = options.initialDropPickupCursor === null;
+    this.dropPickupCursor = typeof options.initialDropPickupCursor === "number"
+      ? integer(options.initialDropPickupCursor, 0, U64_SAFE_MAX, "initial native drop-pickup cursor")
+      : null;
+    this.playerDropQueryConfigured = options.initialNativePlayerDropCursor !== undefined;
+    if (this.playerDropQueryConfigured && !this.service.command) {
+      fail("player-drop-service", "Rust runtime does not expose the read-only native player-drop receipt query");
+    }
+    this.playerDropLegacySeedPending = options.initialNativePlayerDropCursor === null;
+    this.playerDropCursor = typeof options.initialNativePlayerDropCursor === "number"
+      ? integer(options.initialNativePlayerDropCursor, 0, U64_SAFE_MAX, "initial native player-drop cursor")
+      : null;
+    this.deathRespawnQueryConfigured = options.initialNativeDeathRespawnCursor !== undefined;
+    if (this.deathRespawnQueryConfigured && this.playerExternalEntityId === null) {
+      fail("death-respawn-binding", "tracked native death-respawn projection requires an external player identity");
+    }
+    this.deathRespawnLegacySeedPending = options.initialNativeDeathRespawnCursor === null;
+    this.deathRespawnCursor = typeof options.initialNativeDeathRespawnCursor === "number"
+      ? integer(options.initialNativeDeathRespawnCursor, 0, U64_SAFE_MAX, "initial native death-respawn cursor")
+      : null;
     this.lastMonotonicTimeUs = continuity.lastMonotonicTimeUs;
+    this.lastAppliedMoveX = continuity.lastAppliedMoveX;
+    this.lastAppliedMoveZ = continuity.lastAppliedMoveZ;
     this.lastAppliedButtons = continuity.lastAppliedButtons;
     this.physicalActionButtons = continuity.lastAppliedButtons & ACTION_BUTTON_MASK;
     this.selectedSlot = continuity.selectedSlot;
@@ -597,6 +1033,40 @@ export class RustLiveInputPumpR5 {
     }
   }
 
+  /**
+   * Adopts the one identity axis that Rust multiplayer legitimately advances
+   * outside the player pump. The caller must hold the integrated multiplayer
+   * authority's exclusive queue until its following pump operation settles;
+   * otherwise another network mutation could land between this CAS and step.
+   */
+  adoptExternalNetworkSuccessor(worldGeneration: number) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    const lifecycle = this.lifecycle;
+    return this.enqueueOperation(async () => {
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) {
+        this.discardedContinuations += 1;
+        return false;
+      }
+      const before = this.lastIdentity;
+      const after = frozenIdentity(this.service.identity());
+      if (rustIntegratedRuntimeIdentityEqualsV1(before, after)) return false;
+      if (this.pendingNativeBlockEdit !== null
+        || this.pendingBasicDirtAction !== null
+        || this.pendingDropPickup !== null
+        || this.pendingPlayerDrop !== null
+        || this.pendingDeathRespawn !== null) {
+        fail("identity-drift", "Rust network identity advanced while a durable player receipt awaited projection");
+      }
+      if (!identityIsExactExternalNetworkSuccessor(before, after)) {
+        fail("identity-drift", "Rust runtime identity moved outside the live input pump on a non-network axis");
+      }
+      this.lastIdentity = after;
+      this.networkIdentityAdoptions += 1;
+      return true;
+    });
+  }
+
   advance(
     worldGeneration: number,
     options: RustLiveInputPumpAdvanceOptionsR5 = {},
@@ -619,6 +1089,175 @@ export class RustLiveInputPumpR5 {
 
   syncInitial(worldGeneration: number, view?: RustIntegratedRuntimeExtractionViewV1) {
     return this.advance(worldGeneration, { initialSync: true, ...(view ? { view } : {}) });
+  }
+
+  /**
+   * Advances generic native block-edit projection custody only after the exact
+   * BWY7 receipt has been projected and durably checkpointed by the caller.
+   */
+  acknowledgeNativeBlockEdit(
+    worldGeneration: number,
+    delivery: RustLiveInputPumpNativeBlockEditDeliveryV1,
+  ) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    try {
+      this.validateNativeBlockEditDelivery(delivery);
+      const pending = this.pendingNativeBlockEdit;
+      if (pending !== null) {
+        if (!this.nativeBlockEditDeliveriesEqual(delivery, pending)) {
+          fail("native-block-edit-acknowledgement", "native block-edit acknowledgement does not match the pending exact receipt");
+        }
+        this.nativeBlockEditCursor = pending.cursorAfter;
+        this.lastAcknowledgedNativeBlockEdit = pending;
+        this.pendingNativeBlockEdit = null;
+        return true;
+      }
+      const acknowledged = this.lastAcknowledgedNativeBlockEdit;
+      if (acknowledged !== null && this.nativeBlockEditDeliveriesEqual(delivery, acknowledged)) return false;
+      if (acknowledged !== null && delivery.receipt.sequence === acknowledged.receipt.sequence) {
+        fail("native-block-edit-acknowledgement-conflict", "native block-edit receipt sequence was acknowledged with a conflicting hash");
+      }
+      fail("native-block-edit-acknowledgement", "there is no matching pending native block-edit receipt");
+    } catch (error) {
+      this.failClosed(error);
+      throw error;
+    }
+  }
+
+  /**
+   * Advances browser projection custody only after the exact delivered BWR7
+   * receipt has been projected and durably checkpointed by the caller. The
+   * first exact acknowledgement returns true; a byte-identical duplicate is
+   * idempotent and returns false. Every mismatch fails the pump closed.
+   */
+  acknowledgeBasicDirtAction(
+    worldGeneration: number,
+    delivery: RustLiveInputPumpBasicDirtActionDeliveryV1,
+  ) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    try {
+      this.validateBasicDirtActionDelivery(delivery);
+      const pending = this.pendingBasicDirtAction;
+      if (pending !== null) {
+        if (!this.basicDirtActionDeliveriesEqual(delivery, pending)) {
+          fail("basic-dirt-action-acknowledgement", "basic Dirt acknowledgement does not match the pending exact receipt");
+        }
+        this.basicDirtActionCursor = pending.cursorAfter;
+        this.lastAcknowledgedBasicDirtAction = pending;
+        this.pendingBasicDirtAction = null;
+        return true;
+      }
+      const acknowledged = this.lastAcknowledgedBasicDirtAction;
+      if (acknowledged !== null && this.basicDirtActionDeliveriesEqual(delivery, acknowledged)) return false;
+      if (acknowledged !== null && delivery.receipt.sequence === acknowledged.receipt.sequence) {
+        fail("basic-dirt-action-acknowledgement-conflict", "basic Dirt receipt sequence was acknowledged with a conflicting hash");
+      }
+      fail("basic-dirt-action-acknowledgement", "there is no matching pending basic Dirt receipt");
+    } catch (error) {
+      this.failClosed(error);
+      throw error;
+    }
+  }
+
+  /**
+   * Releases one exact BWR8 native pickup only after the browser has projected
+   * and durably checkpointed its inventory/drop removal transaction.
+   */
+  acknowledgeDropPickup(
+    worldGeneration: number,
+    delivery: RustLiveInputPumpDropPickupDeliveryV1,
+  ) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    try {
+      this.validateDropPickupDelivery(delivery);
+      const pending = this.pendingDropPickup;
+      if (pending !== null) {
+        if (!this.dropPickupDeliveriesEqual(delivery, pending)) {
+          fail("drop-pickup-acknowledgement", "drop-pickup acknowledgement does not match the pending exact receipt");
+        }
+        this.dropPickupCursor = pending.cursorAfter;
+        this.lastAcknowledgedDropPickup = pending;
+        this.pendingDropPickup = null;
+        return true;
+      }
+      const acknowledged = this.lastAcknowledgedDropPickup;
+      if (acknowledged !== null && this.dropPickupDeliveriesEqual(delivery, acknowledged)) return false;
+      if (acknowledged !== null && delivery.receipt.sequence === acknowledged.receipt.sequence) {
+        fail("drop-pickup-acknowledgement-conflict", "drop-pickup receipt sequence was acknowledged with a conflicting hash");
+      }
+      fail("drop-pickup-acknowledgement", "there is no matching pending drop-pickup receipt");
+    } catch (error) {
+      this.failClosed(error);
+      throw error;
+    }
+  }
+
+  /**
+   * Releases one exact BWS9 native player drop only after its inventory/spawn
+   * transaction and browser projection cursor are durably checkpointed.
+   */
+  acknowledgePlayerDrop(
+    worldGeneration: number,
+    delivery: RustLiveInputPumpPlayerDropDeliveryV1,
+  ) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    try {
+      this.validatePlayerDropDelivery(delivery);
+      const pending = this.pendingPlayerDrop;
+      if (pending !== null) {
+        if (!this.playerDropDeliveriesEqual(delivery, pending)) {
+          fail("player-drop-acknowledgement", "player-drop acknowledgement does not match the pending exact receipt");
+        }
+        this.playerDropCursor = pending.cursorAfter;
+        this.lastAcknowledgedPlayerDrop = pending;
+        this.pendingPlayerDrop = null;
+        return true;
+      }
+      const acknowledged = this.lastAcknowledgedPlayerDrop;
+      if (acknowledged !== null && this.playerDropDeliveriesEqual(delivery, acknowledged)) return false;
+      if (acknowledged !== null && delivery.receipt.sequence === acknowledged.receipt.sequence) {
+        fail("player-drop-acknowledgement-conflict", "player-drop receipt sequence was acknowledged with a conflicting hash");
+      }
+      fail("player-drop-acknowledgement", "there is no matching pending player-drop receipt");
+    } catch (error) {
+      this.failClosed(error);
+      throw error;
+    }
+  }
+
+  /** Advances the persisted false-policy parent cursor only after exact projection/checkpoint. */
+  acknowledgeDeathRespawn(
+    worldGeneration: number,
+    delivery: RustLiveInputPumpDeathRespawnDeliveryV1,
+  ) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    try {
+      this.validateDeathRespawnDelivery(delivery);
+      const pending = this.pendingDeathRespawn;
+      if (pending !== null) {
+        if (!this.deathRespawnDeliveriesEqual(delivery, pending)) {
+          fail("death-respawn-acknowledgement", "death-respawn acknowledgement does not match the pending exact parent");
+        }
+        this.deathRespawnCursor = pending.cursorAfter;
+        this.lastAcknowledgedDeathRespawn = pending;
+        this.pendingDeathRespawn = null;
+        return true;
+      }
+      const acknowledged = this.lastAcknowledgedDeathRespawn;
+      if (acknowledged !== null && this.deathRespawnDeliveriesEqual(delivery, acknowledged)) return false;
+      if (acknowledged !== null && delivery.cursorAfter === acknowledged.cursorAfter) {
+        fail("death-respawn-acknowledgement-conflict", "death-respawn parent sequence was acknowledged with a conflicting hash");
+      }
+      fail("death-respawn-acknowledgement", "there is no matching pending death-respawn parent");
+    } catch (error) {
+      this.failClosed(error);
+      throw error;
+    }
   }
 
   refreshView(worldGeneration: number, view: RustIntegratedRuntimeExtractionViewV1) {
@@ -644,6 +1283,91 @@ export class RustLiveInputPumpR5 {
     return this.enqueueOperation(() => this.runCameraConfig(worldGeneration, lifecycle, desired, requested));
   }
 
+  consumeLocatorItem(
+    worldGeneration: number,
+    intent: RustIntegratedPlayerLocatorItemConsumeV1,
+    options: RustLiveInputPumpLocatorItemConsumeOptionsV1 = {},
+  ) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    const request = decodeRustIntegratedPlayerLocatorItemConsumeV1(
+      encodeRustIntegratedPlayerLocatorItemConsumeV1(intent),
+    );
+    const lifecycle = this.lifecycle;
+    return this.enqueueOperation(() => this.runNewLocatorItemConsume(
+      worldGeneration,
+      lifecycle,
+      request,
+      options.beforeDispatch,
+    ));
+  }
+
+  setCreativeSlot(worldGeneration: number, intent: RustIntegratedPlayerCreativeSlotSetV1) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    const request = decodeRustIntegratedPlayerCreativeSlotSetV1(encodeRustIntegratedPlayerCreativeSlotSetV1(intent));
+    const lifecycle = this.lifecycle;
+    return this.enqueueOperation(() => this.runCreativeSlotSet(worldGeneration, lifecycle, request));
+  }
+
+  respawnPlayer(
+    worldGeneration: number,
+    intent: RustIntegratedPlayerRespawnV1,
+    options: RustLiveInputPumpPlayerRespawnOptionsV1 = {},
+  ) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    const lifecycle = this.lifecycle;
+    return this.enqueueOperation(() => this.runNewPlayerRespawn(
+      worldGeneration,
+      lifecycle,
+      intent,
+      options.beforeDispatch,
+    ));
+  }
+
+  /** Same-byte retry for a plan retained before dispatch acknowledgement. */
+  retryPlayerRespawn(worldGeneration: number, durablePlan: RustLivePlayerRespawnPlanV1) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    const plan = rehydrateRustLivePlayerRespawnPlanV1(rustLivePlayerRespawnPlanRecordV1(durablePlan));
+    const lifecycle = this.lifecycle;
+    return this.enqueueOperation(() => this.runRetainedPlayerRespawn(worldGeneration, lifecycle, plan));
+  }
+
+  recoverLocatorItem(
+    worldGeneration: number,
+    durablePlan: RustLiveLocatorItemConsumePlanV1,
+  ) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    const plan = rehydrateRustLiveLocatorItemConsumePlanV1(
+      rustLiveLocatorItemConsumePlanRecordV1(durablePlan),
+    );
+    const lifecycle = this.lifecycle;
+    return this.enqueueOperation(() => this.runRecoveredLocatorItemConsume(worldGeneration, lifecycle, plan));
+  }
+
+  /**
+   * Runs one explicitly awaited native checkpoint behind every live input and
+   * command, then adopts only its persistence-only authority successor.
+   * Detached native saves are forbidden because they would move the worker
+   * identity without moving this pump's serialized continuity cursor.
+   */
+  checkpointNativePersistence<T>(
+    worldGeneration: number,
+    checkpoint: () => Promise<T>,
+  ) {
+    this.requireGeneration(worldGeneration);
+    this.requireReady();
+    const lifecycle = this.lifecycle;
+    return this.enqueueOperation(() => this.runNativePersistenceCheckpoint(
+      worldGeneration,
+      lifecycle,
+      checkpoint,
+    ));
+  }
+
   async drain() {
     await this.tail;
   }
@@ -653,11 +1377,31 @@ export class RustLiveInputPumpR5 {
     if (this.stateValue === "stopped") return Promise.resolve();
     if (this.stateValue !== "failed") this.stateValue = "stopping";
     this.lifecycle += 1;
+    this.pendingNativeBlockEdit = null;
+    this.lastAcknowledgedNativeBlockEdit = null;
+    this.pendingBasicDirtAction = null;
+    this.lastAcknowledgedBasicDirtAction = null;
+    this.pendingDropPickup = null;
+    this.lastAcknowledgedDropPickup = null;
+    this.pendingPlayerDrop = null;
+    this.lastAcknowledgedPlayerDrop = null;
+    this.pendingDeathRespawn = null;
+    this.lastAcknowledgedDeathRespawn = null;
     this.stopPromise = (async () => {
       await this.tail;
       this.pendingInput = null;
       for (const queue of this.actionTransitions.values()) queue.length = 0;
       this.contextCommandIntents.length = 0;
+      this.nativeBlockEditCursor = null;
+      this.nativeBlockEditLegacySeedPending = false;
+      this.basicDirtActionCursor = null;
+      this.basicDirtActionLegacySeedPending = false;
+      this.dropPickupCursor = null;
+      this.dropPickupLegacySeedPending = false;
+      this.playerDropCursor = null;
+      this.playerDropLegacySeedPending = false;
+      this.deathRespawnCursor = null;
+      this.deathRespawnLegacySeedPending = false;
       this.stateValue = "stopped";
     })();
     return this.stopPromise;
@@ -676,11 +1420,16 @@ export class RustLiveInputPumpR5 {
       pendingInputSequence: this.pendingInput?.frame.sequence ?? null,
       nextInputSequence: this.nextInputSequence,
       nextActionSequence: this.nextActionSequence,
+      lastActionReceipt: this.lastActionReceipt,
       nextContextCommandSequence: this.nextContextCommandSequence,
       queuedContextCommands: this.contextCommandIntents.length,
       lastMonotonicTimeUs: this.lastMonotonicTimeUs,
       lastExtractionRevision: this.lastExtractionRevision,
       lastAuthorityTick: this.lastIdentity.tick,
+      lastNetworkRevision: this.lastIdentity.revision.network,
+      networkIdentityAdoptions: this.networkIdentityAdoptions,
+      lastAppliedMoveX: this.lastAppliedMoveX,
+      lastAppliedMoveZ: this.lastAppliedMoveZ,
       lastAppliedButtons: this.lastAppliedButtons,
       selectedSlot: this.selectedSlot,
       authoritativeFlags: this.authoritativeFlags,
@@ -689,11 +1438,61 @@ export class RustLiveInputPumpR5 {
       stepCalls: this.stepCalls,
       extractionCalls: this.extractionCalls,
       commandCalls: this.commandCalls,
+      creativeSlotSetCalls: this.creativeSlotSetCalls,
       viewExtractionCalls: this.viewExtractionCalls,
       lastView: this.lastView,
       cameraRevision: this.camera?.cameraRevision ?? null,
       appliedInputs: this.appliedInputs,
       discardedContinuations: this.discardedContinuations,
+      nativeBlockEditQueryConfigured: this.nativeBlockEditQueryConfigured,
+      nativeBlockEditProtocolVersion: this.nativeBlockEditProtocolVersion,
+      nativeBlockEditCursor: this.nativeBlockEditCursor,
+      nativeBlockEditLegacySeedPending: this.nativeBlockEditLegacySeedPending,
+      nativeBlockEditQueryCalls: this.nativeBlockEditQueryCalls,
+      pendingNativeBlockEditSequence: this.pendingNativeBlockEdit?.receipt.sequence ?? null,
+      pendingNativeBlockEditReceiptHash: this.pendingNativeBlockEdit?.receipt.receiptHash ?? null,
+      pendingNativeBlockEditIdentityHash: this.pendingNativeBlockEdit?.queryIdentity.stateHash ?? null,
+      pendingNativeBlockEditDirtyEvidenceHash: this.pendingNativeBlockEdit?.dirty?.evidenceHash ?? null,
+      pendingNativeBlockEditLegacyFallback: this.pendingNativeBlockEdit?.legacyFallback ?? null,
+      lastAcknowledgedNativeBlockEditSequence: this.lastAcknowledgedNativeBlockEdit?.receipt.sequence ?? null,
+      lastAcknowledgedNativeBlockEditReceiptHash: this.lastAcknowledgedNativeBlockEdit?.receipt.receiptHash ?? null,
+      basicDirtActionQueryConfigured: this.basicDirtActionQueryConfigured,
+      basicDirtActionQuerySuppressedByNativeBlockEdit:
+        this.nativeBlockEditQueryConfigured && this.basicDirtActionQueryConfigured,
+      basicDirtActionCursor: this.basicDirtActionCursor,
+      basicDirtActionLegacySeedPending: this.basicDirtActionLegacySeedPending,
+      basicDirtActionQueryCalls: this.basicDirtActionQueryCalls,
+      pendingBasicDirtActionSequence: this.pendingBasicDirtAction?.receipt.sequence ?? null,
+      pendingBasicDirtActionReceiptHash: this.pendingBasicDirtAction?.receipt.receiptHash ?? null,
+      pendingBasicDirtActionIdentityHash: this.pendingBasicDirtAction?.queryIdentity.stateHash ?? null,
+      lastAcknowledgedBasicDirtActionSequence: this.lastAcknowledgedBasicDirtAction?.receipt.sequence ?? null,
+      lastAcknowledgedBasicDirtActionReceiptHash: this.lastAcknowledgedBasicDirtAction?.receipt.receiptHash ?? null,
+      dropPickupQueryConfigured: this.dropPickupQueryConfigured,
+      dropPickupCursor: this.dropPickupCursor,
+      dropPickupLegacySeedPending: this.dropPickupLegacySeedPending,
+      dropPickupQueryCalls: this.dropPickupQueryCalls,
+      pendingDropPickupSequence: this.pendingDropPickup?.receipt.sequence ?? null,
+      pendingDropPickupReceiptHash: this.pendingDropPickup?.receipt.receiptHash ?? null,
+      pendingDropPickupIdentityHash: this.pendingDropPickup?.queryIdentity.stateHash ?? null,
+      lastAcknowledgedDropPickupSequence: this.lastAcknowledgedDropPickup?.receipt.sequence ?? null,
+      lastAcknowledgedDropPickupReceiptHash: this.lastAcknowledgedDropPickup?.receipt.receiptHash ?? null,
+      playerDropQueryConfigured: this.playerDropQueryConfigured,
+      playerDropCursor: this.playerDropCursor,
+      playerDropLegacySeedPending: this.playerDropLegacySeedPending,
+      playerDropQueryCalls: this.playerDropQueryCalls,
+      pendingPlayerDropSequence: this.pendingPlayerDrop?.receipt.sequence ?? null,
+      pendingPlayerDropReceiptHash: this.pendingPlayerDrop?.receipt.receiptHash ?? null,
+      pendingPlayerDropIdentityHash: this.pendingPlayerDrop?.queryIdentity.stateHash ?? null,
+      lastAcknowledgedPlayerDropSequence: this.lastAcknowledgedPlayerDrop?.receipt.sequence ?? null,
+      lastAcknowledgedPlayerDropReceiptHash: this.lastAcknowledgedPlayerDrop?.receipt.receiptHash ?? null,
+      deathRespawnQueryConfigured: this.deathRespawnQueryConfigured,
+      deathRespawnCursor: this.deathRespawnCursor,
+      deathRespawnLegacySeedPending: this.deathRespawnLegacySeedPending,
+      pendingDeathRespawnSequence: this.pendingDeathRespawn?.cursorAfter ?? null,
+      pendingDeathRespawnReceiptHash: this.pendingDeathRespawn?.parent.receiptHash ?? null,
+      pendingDeathRespawnIdentityHash: this.pendingDeathRespawn?.queryIdentity.stateHash ?? null,
+      lastAcknowledgedDeathRespawnSequence: this.lastAcknowledgedDeathRespawn?.cursorAfter ?? null,
+      lastAcknowledgedDeathRespawnReceiptHash: this.lastAcknowledgedDeathRespawn?.parent.receiptHash ?? null,
       lastError: this.lastError,
     });
   }
@@ -705,6 +1504,22 @@ export class RustLiveInputPumpR5 {
     view: RustIntegratedRuntimeExtractionViewV1 | null,
   ): Promise<RustLiveInputPumpAdvanceResultR5> {
     if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
+    if (this.pendingNativeBlockEdit !== null
+      || this.pendingBasicDirtAction !== null
+      || this.pendingDropPickup !== null
+      || this.pendingPlayerDrop !== null
+      || this.pendingDeathRespawn !== null) {
+      return Object.freeze({
+        discarded: false,
+        step: null,
+        extraction: null,
+        ...(this.nativeBlockEditQueryConfigured ? { nativeBlockEdit: this.pendingNativeBlockEdit } : {}),
+        ...(this.basicDirtActionQueryConfigured ? { basicDirtAction: this.pendingBasicDirtAction } : {}),
+        ...(this.dropPickupQueryConfigured ? { dropPickup: this.pendingDropPickup } : {}),
+        ...(this.playerDropQueryConfigured ? { playerDrop: this.pendingPlayerDrop } : {}),
+        ...(this.deathRespawnQueryConfigured ? { deathRespawn: this.pendingDeathRespawn } : {}),
+      });
+    }
     this.requireReady();
     if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), this.lastIdentity)) {
       fail("identity-drift", "Rust runtime identity moved outside the live input pump");
@@ -752,10 +1567,68 @@ export class RustLiveInputPumpR5 {
     if (staged) this.commitAppliedInput(staged);
     if (contextApplied) this.commitContextCommands(pending);
 
+    let nativeBlockEdit: RustLiveInputPumpNativeBlockEditDeliveryV1 | null = null;
+    if (this.nativeBlockEditQueryConfigured) {
+      this.inFlight = true;
+      this.commandCalls += 1;
+      this.nativeBlockEditQueryCalls += 1;
+      try {
+        nativeBlockEdit = await this.queryNativeBlockEditAfterStep(
+          worldGeneration,
+          step.inputsApplied === 1 ? pending.frame.sequence : null,
+        );
+      }
+      catch (error) { if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded(); throw error; }
+      finally { this.inFlight = false; }
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
+    }
+    let basicDirtAction: RustLiveInputPumpBasicDirtActionDeliveryV1 | null = null;
+    if (this.basicDirtActionQueryConfigured && !this.nativeBlockEditQueryConfigured) {
+      this.inFlight = true;
+      this.commandCalls += 1;
+      this.basicDirtActionQueryCalls += 1;
+      try { basicDirtAction = await this.queryBasicDirtActionAfterStep(worldGeneration); }
+      catch (error) { if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded(); throw error; }
+      finally { this.inFlight = false; }
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
+    }
+    let dropPickup: RustLiveInputPumpDropPickupDeliveryV1 | null = null;
+    if (this.dropPickupQueryConfigured && nativeBlockEdit === null && basicDirtAction === null) {
+      this.inFlight = true;
+      this.commandCalls += 1;
+      this.dropPickupQueryCalls += 1;
+      try { dropPickup = await this.queryDropPickupAfterStep(worldGeneration); }
+      catch (error) { if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded(); throw error; }
+      finally { this.inFlight = false; }
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
+    }
+    let playerDrop: RustLiveInputPumpPlayerDropDeliveryV1 | null = null;
+    if (this.playerDropQueryConfigured
+      && nativeBlockEdit === null
+      && basicDirtAction === null
+      && dropPickup === null) {
+      this.inFlight = true;
+      this.commandCalls += 1;
+      this.playerDropQueryCalls += 1;
+      try { playerDrop = await this.queryPlayerDropAfterStep(worldGeneration); }
+      catch (error) { if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded(); throw error; }
+      finally { this.inFlight = false; }
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
+    }
+
     const authorityChanged = step.fixedSteps > 0 || step.inputsApplied === 1;
     const viewChanged = view !== null && !sameView(this.lastView, view);
     if (!authorityChanged && !initialSync && !viewChanged) {
-      return Object.freeze({ discarded: false, step, extraction: null });
+      return Object.freeze({
+        discarded: false,
+        step,
+        extraction: null,
+        ...(this.nativeBlockEditQueryConfigured ? { nativeBlockEdit } : {}),
+        ...(this.basicDirtActionQueryConfigured ? { basicDirtAction } : {}),
+        ...(this.dropPickupQueryConfigured ? { dropPickup } : {}),
+        ...(this.playerDropQueryConfigured ? { playerDrop } : {}),
+        ...(this.deathRespawnQueryConfigured ? { deathRespawn: null } : {}),
+      });
     }
 
     this.inFlight = true;
@@ -768,6 +1641,13 @@ export class RustLiveInputPumpR5 {
     if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discarded();
     this.validateExtraction(extraction, step.identity, authorityChanged || viewChanged);
     const camera = view ? this.decodeCamera(extraction, view) : null;
+    const deathRespawn = this.deathRespawnQueryConfigured
+      ? this.observeDeathRespawnAfterExtraction(
+        worldGeneration,
+        extraction.identity,
+        decodeRustLivePlayerViewR10(extraction, this.serviceExternalEntityId()),
+      )
+      : null;
     this.commitExtraction(extraction, view, camera);
     return Object.freeze({
       discarded: false,
@@ -775,6 +1655,11 @@ export class RustLiveInputPumpR5 {
       extraction,
       cause: initialSync ? "initial" : authorityChanged ? "authority" : "viewport",
       camera,
+      ...(this.nativeBlockEditQueryConfigured ? { nativeBlockEdit } : {}),
+      ...(this.basicDirtActionQueryConfigured ? { basicDirtAction } : {}),
+      ...(this.dropPickupQueryConfigured ? { dropPickup } : {}),
+      ...(this.playerDropQueryConfigured ? { playerDrop } : {}),
+      ...(this.deathRespawnQueryConfigured ? { deathRespawn } : {}),
     });
   }
 
@@ -862,6 +1747,627 @@ export class RustLiveInputPumpR5 {
     return Object.freeze({ discarded: false, changed: true, receipt, extraction, camera });
   }
 
+  private async runNewLocatorItemConsume(
+    worldGeneration: number,
+    lifecycle: number,
+    intent: RustIntegratedPlayerLocatorItemConsumeV1,
+    beforeDispatch?: (plan: RustLiveLocatorItemConsumePlanV1) => Promise<void>,
+  ): Promise<RustLiveInputPumpLocatorItemConsumeResultV1> {
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedLocatorItemConsume();
+    const actorId = this.playerActorId;
+    const inventoryViewKey = this.playerInventoryViewKey;
+    if (actorId === null || inventoryViewKey === null) {
+      fail("locator-consume-binding", "live input status has no authoritative player inventory binding");
+    }
+    if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), this.lastIdentity)) {
+      fail("identity-drift", "Rust runtime identity moved outside the live input pump");
+    }
+    const plan = planRustLiveLocatorItemConsumeV1(this.lastIdentity, actorId, intent);
+    if (plan.inventoryViewKey !== inventoryViewKey) {
+      fail("locator-consume-binding", "locator command inventory is not the pump's authoritative player inventory");
+    }
+    if (beforeDispatch) {
+      await beforeDispatch(plan);
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedLocatorItemConsume(plan);
+      if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), plan.batch.expected)) {
+        fail("identity-drift", "Rust runtime identity moved while the locator command plan was persisted");
+      }
+    }
+    return this.dispatchLocatorItemPlan(worldGeneration, lifecycle, plan, false);
+  }
+
+  private assertPlayerRespawnLaneClear() {
+    if (this.pendingNativeBlockEdit !== null
+      || this.pendingBasicDirtAction !== null
+      || this.pendingDropPickup !== null
+      || this.pendingPlayerDrop !== null
+      || this.pendingDeathRespawn !== null) {
+      fail("player-respawn-projection", "native player respawn cannot cross an unacknowledged browser projection");
+    }
+    if (this.pendingInput !== null || this.contextCommandIntents.length > 0
+      || [...this.actionTransitions.values()].some((queue) => queue.length > 0)) {
+      fail("player-respawn-input", "native player respawn cannot cross pending input, action, or context-command custody");
+    }
+  }
+
+  private async runNewPlayerRespawn(
+    worldGeneration: number,
+    lifecycle: number,
+    intent: RustIntegratedPlayerRespawnV1,
+    beforeDispatch?: (plan: RustLivePlayerRespawnPlanV1) => Promise<void>,
+  ): Promise<RustLiveInputPumpPlayerRespawnResultV1> {
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedPlayerRespawn();
+    this.assertPlayerRespawnLaneClear();
+    const initialIdentity = this.lastIdentity;
+    if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), initialIdentity)
+      || !rustIntegratedRuntimeIdentityEqualsV1(intent.expected, initialIdentity)) {
+      fail("identity-drift", "player respawn intent does not bind the pump's exact current identity");
+    }
+    if (intent.externalEntityId !== this.playerExternalEntityId || intent.actorId !== this.playerActorId) {
+      fail("player-respawn-binding", "player respawn intent does not match the pump's authoritative player binding");
+    }
+    if (!intent.keepInventory && (!this.deathRespawnQueryConfigured || this.deathRespawnLegacySeedPending)) {
+      fail("death-respawn-cursor", "false-policy respawn requires a seeded durable parent cursor");
+    }
+    if (!this.service.command) {
+      fail("player-respawn-service", "live input service does not expose integrated player respawn commands");
+    }
+    let currentIntent = intent;
+    if (this.lastAppliedMoveX !== 0 || this.lastAppliedMoveZ !== 0 || this.lastAppliedButtons !== 0) {
+      const neutralized = await this.neutralizePlayerRespawnInput(worldGeneration, lifecycle);
+      if (!neutralized) return this.discardedPlayerRespawn();
+      const rebound = await this.rebindPlayerRespawnAfterNeutralInput(
+        worldGeneration,
+        lifecycle,
+        intent,
+      );
+      if (rebound === null) return this.discardedPlayerRespawn();
+      currentIntent = rebound;
+    }
+    const plan = planRustLivePlayerRespawnV1(this.lastIdentity, Object.freeze({
+      ...currentIntent,
+      expected: this.lastIdentity,
+    }));
+    if (beforeDispatch) {
+      await beforeDispatch(plan);
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedPlayerRespawn(plan);
+      if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), plan.batch.expected)) {
+        fail("identity-drift", "Rust runtime identity moved while the respawn command plan was persisted");
+      }
+    }
+    return this.dispatchPlayerRespawnPlan(worldGeneration, lifecycle, plan);
+  }
+
+  private async runRetainedPlayerRespawn(
+    worldGeneration: number,
+    lifecycle: number,
+    plan: RustLivePlayerRespawnPlanV1,
+  ): Promise<RustLiveInputPumpPlayerRespawnResultV1> {
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedPlayerRespawn(plan);
+    this.assertPlayerRespawnLaneClear();
+    if (plan.request.externalEntityId !== this.playerExternalEntityId
+      || plan.request.actorId !== this.playerActorId) {
+      fail("player-respawn-binding", "retained player respawn plan does not match the pump's authoritative binding");
+    }
+    if (!plan.request.keepInventory && (!this.deathRespawnQueryConfigured || this.deathRespawnLegacySeedPending)) {
+      fail("death-respawn-cursor", "retained false-policy respawn requires a seeded durable parent cursor");
+    }
+    if (!this.service.command) {
+      fail("player-respawn-service", "live input service does not expose integrated player respawn commands");
+    }
+    const current = this.service.identity();
+    if (!rustIntegratedRuntimeIdentityEqualsV1(current, this.lastIdentity)) {
+      fail("identity-drift", "Rust runtime identity moved outside the live input pump");
+    }
+    if (rustIntegratedRuntimeIdentityEqualsV1(current, plan.batch.expected)
+      && (this.lastAppliedMoveX !== 0 || this.lastAppliedMoveZ !== 0 || this.lastAppliedButtons !== 0)) {
+      fail("player-respawn-input", "retained pre-dispatch respawn plan is no longer input-neutral");
+    }
+    return this.dispatchPlayerRespawnPlan(worldGeneration, lifecycle, plan);
+  }
+
+  private async neutralizePlayerRespawnInput(worldGeneration: number, lifecycle: number) {
+    integer(this.lastIdentity.tick, 0, U64_SAFE_MAX - 1, "Rust authority tick");
+    const pending = Object.freeze({
+      frame: frozenFrame({
+        sequence: this.nextInputSequence,
+        targetTick: this.lastIdentity.tick + 1,
+        moveX: 0,
+        moveZ: 0,
+        lookYaw: this.latest.lookYaw,
+        lookPitch: this.latest.lookPitch,
+        buttons: 0,
+        selectedSlot: this.selectedSlot,
+        flags: this.authoritativeFlags,
+      }),
+      submitted: false,
+      consumedTransitions: Object.freeze([]),
+      expectedActions: Object.freeze([]),
+      contextCommands: Object.freeze([]),
+      contextIntentCount: 0,
+    } satisfies PendingInputR5);
+    let submitted = false;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = this.lastIdentity;
+      const minimum = integer(
+        this.lastMonotonicTimeUs + RUST_INTEGRATED_RUNTIME_FIXED_STEP_US,
+        1,
+        U64_SAFE_MAX,
+        "player respawn neutral input time",
+      );
+      const monotonicTimeUs = Math.max(this.nextMonotonicTime(), minimum);
+      this.inFlight = true;
+      this.stepCalls += 1;
+      let step: RustLiveRuntimeStepResultR5;
+      try {
+        step = await this.service.step(
+          monotonicTimeUs,
+          RUST_LIVE_INPUT_STEP_BUDGET_US_R5,
+          submitted ? Object.freeze([]) : Object.freeze([pending.frame]),
+        );
+      } catch (error) {
+        if (!this.continuationIsLive(worldGeneration, lifecycle)) return false;
+        throw error;
+      } finally {
+        this.inFlight = false;
+      }
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return false;
+      const staged = this.validateStep(before, pending, step);
+      this.lastMonotonicTimeUs = monotonicTimeUs;
+      this.lastIdentity = frozenIdentity(step.identity);
+      submitted = true;
+      this.pendingInput = step.inputsApplied === 0 ? Object.freeze({ ...pending, submitted: true }) : null;
+      if (staged) {
+        this.commitAppliedInput(staged);
+        invariantRespawnNeutral(this.lastAppliedMoveX, this.lastAppliedMoveZ, this.lastAppliedButtons);
+        return true;
+      }
+    }
+    fail("player-respawn-input", "neutral native input did not apply within two exact fixed-step attempts");
+  }
+
+  /**
+   * Neutral input advances R5/R6/R7 before a new respawn plan exists. Re-read
+   * all explicit BWD7 compare-and-swap cursors from one successor extraction so
+   * the persisted bytes cannot combine the new outer identity with stale
+   * entity/gameplay cursors from the pre-neutral death view.
+   */
+  private async rebindPlayerRespawnAfterNeutralInput(
+    worldGeneration: number,
+    lifecycle: number,
+    intent: RustIntegratedPlayerRespawnV1,
+  ): Promise<RustIntegratedPlayerRespawnV1 | null> {
+    const identity = this.lastIdentity;
+    this.inFlight = true;
+    this.extractionCalls += 1;
+    let extraction: RustIntegratedRuntimeExtractionV1;
+    try {
+      extraction = await this.service.extract(
+        this.lastExtractionRevision,
+        undefined,
+        this.lastView ?? undefined,
+      );
+    } catch (error) {
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return null;
+      throw error;
+    } finally {
+      this.inFlight = false;
+    }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return null;
+    this.validateExtraction(extraction, identity, true);
+
+    const player = decodeRustLivePlayerViewR10(extraction, this.serviceExternalEntityId());
+    const gameplaySequence = player.gameplaySequence;
+    const gameplayCombatRevision = player.gameplayCombatRevision;
+    const combatantRevision = player.combat.combatantRevision;
+    const deathSequence = player.deathSequence;
+    const lastRespawnSequence = player.lastRespawnSequence;
+    if (player.extractionRevision !== BigInt(extraction.extractionRevision)
+      || player.authorityTick !== BigInt(identity.tick)
+      || player.respawnAuthoritySchema !== 1
+      || typeof gameplaySequence !== "bigint"
+      || typeof gameplayCombatRevision !== "bigint"
+      || typeof combatantRevision !== "bigint"
+      || typeof deathSequence !== "bigint"
+      || lastRespawnSequence !== null && typeof lastRespawnSequence !== "bigint") {
+      fail("player-respawn-rebind", "post-neutral extraction omits the exact current R5/R6/R7 respawn authority envelope");
+    }
+    if (player.externalEntityId !== intent.externalEntityId
+      || player.externalEntityId !== this.playerExternalEntityId
+      || player.actorId !== intent.actorId
+      || player.actorId !== this.playerActorId
+      || player.playerId !== intent.playerId
+      || player.entityId !== intent.entityId
+      || deathSequence !== intent.expectedDeathSequence) {
+      fail("player-respawn-rebind", "post-neutral extraction changed player, entity, actor, or death custody");
+    }
+    if (player.health !== 0
+      || player.combat.health !== 0
+      || player.combat.alive
+      || player.combat.maxHealth !== intent.expectedMaxHealth
+      || lastRespawnSequence !== null && lastRespawnSequence >= deathSequence) {
+      fail("player-respawn-rebind", "post-neutral extraction is not the same dead player with unchanged maximum health");
+    }
+    if (player.queuedInputsEmpty !== true
+      || player.pendingContextCommandsEmpty !== true
+      || player.pendingMovementResultEmpty !== true
+      || player.miningStateEmpty !== true
+      || player.buttons !== 0) {
+      fail("player-respawn-rebind", "post-neutral extraction is not ready for one exact native respawn command");
+    }
+
+    const rebound = Object.freeze({
+      ...intent,
+      expected: frozenIdentity(extraction.identity),
+      expectedEntityRevision: player.entityRevision,
+      expectedGameplaySequence: gameplaySequence,
+      expectedGameplayCombatRevision: gameplayCombatRevision,
+      expectedCombatantRevision: combatantRevision,
+    });
+    const view = this.lastView;
+    const camera = view === null ? null : this.decodeCamera(extraction, view);
+    this.commitExtraction(extraction, view, camera);
+    return rebound;
+  }
+
+  private async dispatchPlayerRespawnPlan(
+    worldGeneration: number,
+    lifecycle: number,
+    plan: RustLivePlayerRespawnPlanV1,
+  ): Promise<RustLiveInputPumpPlayerRespawnResultV1> {
+    const command = this.service.command;
+    if (!command) fail("player-respawn-service", "live input service does not expose integrated player respawn commands");
+    this.inFlight = true;
+    this.commandCalls += 1;
+    let receipt: RustIntegratedRuntimeCommandReceiptV1;
+    try { receipt = await command.call(this.service, plan.batch); }
+    catch (error) {
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedPlayerRespawn(plan);
+      throw error;
+    } finally { this.inFlight = false; }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedPlayerRespawn(plan);
+    const validated = validateRustLivePlayerRespawnReceiptV1(plan, receipt);
+    if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), validated.outer.after)) {
+      fail("player-respawn-command-receipt", "service identity disagrees with accepted player respawn receipt");
+    }
+    this.lastIdentity = frozenIdentity(validated.outer.after);
+
+    this.inFlight = true;
+    this.extractionCalls += 1;
+    let extraction: RustIntegratedRuntimeExtractionV1;
+    try { extraction = await this.service.extract(this.lastExtractionRevision, undefined, this.lastView ?? undefined); }
+    catch (error) {
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedPlayerRespawn(plan);
+      throw error;
+    } finally { this.inFlight = false; }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedPlayerRespawn(plan);
+    this.validateExtraction(extraction, this.lastIdentity, true);
+    const player = decodeRustLivePlayerViewR10(extraction, this.serviceExternalEntityId());
+    const deathRespawn = this.deathRespawnQueryConfigured
+      ? this.observeDeathRespawnAfterExtraction(worldGeneration, extraction.identity, player)
+      : null;
+    const readback = this.playerRespawnReadback(validated, player, extraction.identity);
+    validateRustLivePlayerRespawnAfterCommandV1(plan, validated, readback);
+    if (!plan.request.keepInventory) {
+      const extractedParent = player.latestDeathRespawn ?? null;
+      // Both values below are native-parent identities. BWE7 owns a separate
+      // receipt-hash domain and is joined to this parent by shared fields in
+      // playerRespawnReadback, never by comparing the two receipt hashes.
+      if (deathRespawn === null || extractedParent === null
+        || deathRespawn.parent.respawnSequence !== extractedParent.respawnSequence
+        || deathRespawn.parent.receiptHash !== extractedParent.receiptHash
+        || deathRespawn.parent.drops.some((drop) => !drop.r6Linked)) {
+        fail("player-respawn-readback", "false-policy BWE7 is not linked to one exact pending BWX0/BWR6 parent");
+      }
+    }
+    const view = this.lastView;
+    const camera = view === null ? null : this.decodeCamera(extraction, view);
+    this.commitExtraction(extraction, view, camera);
+    return Object.freeze({
+      discarded: false,
+      plan,
+      receipt,
+      validated,
+      extraction,
+      player,
+      camera,
+      view,
+      deathRespawn,
+    });
+  }
+
+  private playerRespawnReadback(
+    validated: RustLivePlayerRespawnValidatedReceiptV1,
+    player: RustLivePlayerViewR10,
+    identity: RustIntegratedRuntimeIdentityV1,
+  ): RustLivePlayerRespawnReadbackV1 {
+    if (player.respawnAuthoritySchema !== 1
+      || player.gameplaySequence === null || player.gameplaySequence === undefined
+      || player.gameplayCombatRevision === null || player.gameplayCombatRevision === undefined
+      || player.deathSequence === null || player.deathSequence === undefined
+      || player.lastRespawnSequence === null || player.lastRespawnSequence === undefined
+      || player.queuedInputsEmpty === null || player.queuedInputsEmpty === undefined
+      || player.pendingContextCommandsEmpty === null || player.pendingContextCommandsEmpty === undefined
+      || player.pendingMovementResultEmpty === null || player.pendingMovementResultEmpty === undefined
+      || player.miningStateEmpty === null || player.miningStateEmpty === undefined) {
+      fail("player-respawn-readback", "BWX0 player row does not expose the complete respawn authority schema");
+    }
+    if (player.combat.combatantRevision === null || player.combat.combatantRevision === undefined) {
+      fail("player-respawn-readback", "BWX0 combat row omits the explicit native combatant revision");
+    }
+    const receipt = validated.respawn;
+    const parent = player.latestDeathRespawn ?? null;
+    if (!receipt.keepInventory) {
+      if (parent === null
+        || !rustIntegratedPlayerRespawnParentAttestsReceiptV1(parent, receipt)) {
+        fail("player-respawn-readback", "latest BWX0 death-respawn parent does not attest the exact false-policy BWE7");
+      }
+    }
+    return Object.freeze({
+      identity,
+      externalEntityId: player.externalEntityId,
+      actorId: player.actorId,
+      playerId: player.playerId,
+      entityId: player.entityId,
+      entityRevision: player.entityRevision,
+      gameplaySequence: player.gameplaySequence,
+      gameplayCombatRevision: player.gameplayCombatRevision,
+      combatantRevision: player.combat.combatantRevision,
+      deathSequence: player.deathSequence,
+      lastRespawnSequence: player.lastRespawnSequence,
+      health: player.combat.health,
+      maximumHealth: player.combat.maxHealth,
+      alive: player.combat.alive,
+      position: exactFixedVector(player.position, "player respawn position"),
+      velocityMilliPerSecond: exactFixedVector(player.velocity, "player respawn velocity"),
+      oxygenSeconds: player.oxygenSeconds,
+      grounded: player.grounded,
+      crouching: player.crouching,
+      fallDistanceMilli: exactFixedMilli(player.fallDistance, "player respawn fall distance"),
+      drowningAccumulatorMilli: exactFixedMilli(
+        player.drowningAccumulator,
+        "player respawn drowning accumulator",
+      ),
+      buttons: player.buttons,
+      flags: player.authoritativeFlags,
+      contactFlags: player.contactFlags,
+      queuedInputsEmpty: player.queuedInputsEmpty,
+      pendingContextCommandsEmpty: player.pendingContextCommandsEmpty,
+      pendingMovementResultEmpty: player.pendingMovementResultEmpty,
+      miningStateEmpty: player.miningStateEmpty,
+      inventoryRevision: player.inventoryContainerRevision,
+      equipmentRevision: player.equipmentContainerRevision,
+      custodyHash: receipt.keepInventory ? receipt.custodyAfterHash : parent!.custodyAfterHash,
+      projectedDropCount: receipt.keepInventory ? 0 : parent!.generatedDropCount,
+    });
+  }
+
+  private observeDeathRespawnAfterExtraction(
+    worldGeneration: number,
+    identity: RustIntegratedRuntimeIdentityV1,
+    player: RustLivePlayerViewR10,
+  ) {
+    if (player.respawnAuthoritySchema !== 1) {
+      fail("death-respawn-projection", "tracked death-respawn cursor requires the updated BWX0 authority row");
+    }
+    const parent = player.latestDeathRespawn ?? null;
+    if (this.deathRespawnLegacySeedPending) {
+      this.deathRespawnCursor = parent === null
+        ? 0
+        : integer(Number(parent.respawnSequence), 1, U64_SAFE_MAX, "legacy native death-respawn seed cursor");
+      this.deathRespawnLegacySeedPending = false;
+      return null;
+    }
+    const cursorBefore = this.deathRespawnCursor;
+    if (cursorBefore === null) {
+      fail("death-respawn-cursor", "tracked native death-respawn projection has no browser cursor");
+    }
+    if (parent === null) return null;
+    const cursorAfter = integer(
+      Number(parent.respawnSequence),
+      1,
+      U64_SAFE_MAX,
+      "native death-respawn parent sequence",
+    );
+    if (cursorAfter < cursorBefore) {
+      fail("death-respawn-cursor", "native death-respawn parent sequence regressed behind the browser cursor");
+    }
+    if (cursorAfter === cursorBefore) return null;
+    if (cursorBefore === U64_SAFE_MAX || cursorAfter !== cursorBefore + 1) {
+      fail("death-respawn-cursor", "native death-respawn parent skipped the browser's exact next cursor");
+    }
+    const delivery = Object.freeze({
+      worldGeneration,
+      queryIdentity: frozenIdentity(identity),
+      cursorBefore,
+      cursorAfter,
+      parent,
+    });
+    this.validateDeathRespawnDelivery(delivery);
+    if (this.pendingDeathRespawn !== null
+      && !this.deathRespawnDeliveriesEqual(this.pendingDeathRespawn, delivery)) {
+      fail("death-respawn-projection", "native death-respawn parent changed while awaiting browser acknowledgement");
+    }
+    this.pendingDeathRespawn = delivery;
+    return delivery;
+  }
+
+  private validateDeathRespawnDelivery(delivery: RustLiveInputPumpDeathRespawnDeliveryV1) {
+    if (delivery.worldGeneration !== this.worldGeneration) {
+      fail("death-respawn-acknowledgement", "death-respawn parent belongs to another world generation");
+    }
+    integer(delivery.cursorBefore, 0, U64_SAFE_MAX, "death-respawn delivery cursor before");
+    integer(delivery.cursorAfter, 1, U64_SAFE_MAX, "death-respawn delivery cursor after");
+    if (delivery.cursorBefore === U64_SAFE_MAX
+      || delivery.cursorAfter !== delivery.cursorBefore + 1
+      || delivery.parent.respawnSequence !== BigInt(delivery.cursorAfter)
+      || !/^[0-9a-f]{32}$/u.test(delivery.parent.receiptHash)
+      || delivery.parent.receiptHash === "0".repeat(32)) {
+      fail("death-respawn-acknowledgement", "death-respawn delivery does not bind one exact contiguous parent");
+    }
+  }
+
+  private deathRespawnDeliveriesEqual(
+    left: RustLiveInputPumpDeathRespawnDeliveryV1,
+    right: RustLiveInputPumpDeathRespawnDeliveryV1,
+  ) {
+    return left.worldGeneration === right.worldGeneration
+      && left.cursorBefore === right.cursorBefore
+      && left.cursorAfter === right.cursorAfter
+      && left.parent.receiptHash === right.parent.receiptHash
+      && rustIntegratedRuntimeIdentityEqualsV1(left.queryIdentity, right.queryIdentity);
+  }
+
+  private async runCreativeSlotSet(
+    worldGeneration: number,
+    lifecycle: number,
+    intent: RustIntegratedPlayerCreativeSlotSetV1,
+  ): Promise<RustLiveInputPumpCreativeSlotSetResultV1> {
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedCreativeSlotSet();
+    const actorId = this.playerActorId;
+    const inventoryViewKey = this.playerInventoryViewKey;
+    if (actorId === null || inventoryViewKey === null) fail("creative-slot-binding", "live input status has no authoritative player inventory binding");
+    if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), this.lastIdentity)) fail("identity-drift", "Rust runtime identity moved outside the live input pump");
+    const plan = planRustLiveCreativeSlotSetV1(this.lastIdentity, actorId, intent);
+    if (plan.inventoryViewKey !== inventoryViewKey) fail("creative-slot-binding", "creative slot command inventory is not the pump's authoritative player inventory");
+    if (!this.service.command) fail("creative-slot-service", "live input service does not expose integrated creative slot commands");
+    this.inFlight = true;
+    this.commandCalls += 1;
+    this.creativeSlotSetCalls += 1;
+    let receipt: RustIntegratedRuntimeCommandReceiptV1;
+    try { receipt = await this.service.command(plan.batch); }
+    catch (error) { if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedCreativeSlotSet(plan); throw error; }
+    finally { this.inFlight = false; }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedCreativeSlotSet(plan);
+    const validated = validateRustLiveCreativeSlotSetReceiptV1(plan, receipt);
+    if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), validated.outer.after)) fail("creative-slot-command-receipt", "service identity disagrees with accepted creative slot receipt");
+    this.lastIdentity = frozenIdentity(validated.outer.after);
+    this.inFlight = true;
+    this.extractionCalls += 1;
+    let extraction: RustIntegratedRuntimeExtractionV1;
+    try { extraction = await this.service.extract(this.lastExtractionRevision, undefined, this.lastView ?? undefined); }
+    catch (error) { if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedCreativeSlotSet(plan); throw error; }
+    finally { this.inFlight = false; }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedCreativeSlotSet(plan);
+    this.validateExtraction(extraction, this.lastIdentity, true);
+    const player = decodeRustLivePlayerViewR10(extraction, this.serviceExternalEntityId());
+    validateRustLiveCreativeSlotSetAfterCommandV1(plan, validated, player);
+    const camera = this.lastView === null ? null : this.decodeCamera(extraction, this.lastView);
+    this.commitExtraction(extraction, this.lastView, camera);
+    return Object.freeze({ discarded: false, plan, receipt, validated, extraction, player });
+  }
+
+  private async runRecoveredLocatorItemConsume(
+    worldGeneration: number,
+    lifecycle: number,
+    plan: RustLiveLocatorItemConsumePlanV1,
+  ): Promise<RustLiveInputPumpLocatorItemConsumeResultV1> {
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedLocatorItemConsume(plan);
+    if (plan.batch.actorId !== this.playerActorId || plan.inventoryViewKey !== this.playerInventoryViewKey) {
+      fail("locator-consume-binding", "durable locator plan does not match the pump's authoritative player binding");
+    }
+    const current = this.service.identity();
+    if (!rustIntegratedRuntimeIdentityEqualsV1(current, this.lastIdentity)) {
+      fail("identity-drift", "Rust runtime identity moved outside the live input pump");
+    }
+    const alreadyDispatched = !rustIntegratedRuntimeIdentityEqualsV1(current, plan.batch.expected);
+    return this.dispatchLocatorItemPlan(worldGeneration, lifecycle, plan, alreadyDispatched);
+  }
+
+  private async dispatchLocatorItemPlan(
+    worldGeneration: number,
+    lifecycle: number,
+    plan: RustLiveLocatorItemConsumePlanV1,
+    recoverOnly: boolean,
+  ): Promise<RustLiveInputPumpLocatorItemConsumeResultV1> {
+    const terminalIdentity = this.lastIdentity;
+    const dispatch = recoverOnly ? this.service.recoverCommand : this.service.command;
+    if (!dispatch) fail("locator-consume-service", recoverOnly
+      ? "post-debit locator recovery requires lookup-only integrated command recovery"
+      : "live input service does not expose integrated locator item commands");
+    this.inFlight = true;
+    this.commandCalls += 1;
+    let receipt: RustIntegratedRuntimeCommandReceiptV1;
+    try { receipt = await dispatch.call(this.service, plan.batch); }
+    catch (error) {
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedLocatorItemConsume(plan);
+      throw error;
+    } finally { this.inFlight = false; }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedLocatorItemConsume(plan);
+    const validated = validateRustLiveLocatorItemConsumeReceiptV1(plan, receipt);
+    const serviceIdentity = this.service.identity();
+    if (recoverOnly) {
+      if (!rustIntegratedRuntimeIdentityEqualsV1(serviceIdentity, terminalIdentity)
+        || !identityMatchesHydratedLocatorReceipt(validated.outer.after, terminalIdentity)) {
+        fail("locator-consume-recovery", "lookup-only locator receipt does not match the exact post-hydration authority axes");
+      }
+    } else if (!rustIntegratedRuntimeIdentityEqualsV1(serviceIdentity, validated.outer.after)) {
+      fail("locator-consume-command-receipt", "service identity disagrees with accepted locator command receipt");
+    }
+    this.lastIdentity = frozenIdentity(recoverOnly ? terminalIdentity : validated.outer.after);
+
+    this.inFlight = true;
+    this.extractionCalls += 1;
+    let extraction: RustIntegratedRuntimeExtractionV1;
+    try {
+      extraction = await this.service.extract(
+        recoverOnly && this.lastExtractionRevision > 0
+          ? this.lastExtractionRevision - 1
+          : this.lastExtractionRevision,
+        undefined,
+        this.lastView ?? undefined,
+      );
+    } catch (error) {
+      if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedLocatorItemConsume(plan);
+      throw error;
+    } finally { this.inFlight = false; }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) return this.discardedLocatorItemConsume(plan);
+    // This command deliberately mutates gameplay custody without advancing the fixed-step tick.
+    // Ordinary advance still proves all tick movement in validateStep before reaching this path.
+    this.validateExtraction(extraction, this.lastIdentity, !recoverOnly);
+    const player = decodeRustLivePlayerViewR10(extraction, this.serviceExternalEntityId());
+    validateRustLiveLocatorItemConsumeAfterCommandV1(plan, validated, player);
+    const camera = this.lastView === null ? null : this.decodeCamera(extraction, this.lastView);
+    this.commitExtraction(extraction, this.lastView, camera);
+    return Object.freeze({ discarded: false, plan, receipt, validated, extraction, player });
+  }
+
+  private async runNativePersistenceCheckpoint<T>(
+    worldGeneration: number,
+    lifecycle: number,
+    checkpoint: () => Promise<T>,
+  ): Promise<RustLiveInputPumpNativeCheckpointResultV1<T>> {
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) {
+      return this.discardedNativeCheckpoint();
+    }
+    if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), this.lastIdentity)) {
+      fail("identity-drift", "Rust runtime identity moved before the serialized native checkpoint");
+    }
+    const before = frozenIdentity(this.lastIdentity);
+    let value: T;
+    try {
+      value = await checkpoint();
+    } catch (error) {
+      if (!rustIntegratedRuntimeIdentityEqualsV1(this.service.identity(), before)) {
+        const cause = error instanceof Error ? error.message : String(error);
+        fail(
+          "native-checkpoint-indeterminate",
+          `native checkpoint failed after moving the authoritative runtime identity: ${cause}`,
+        );
+      }
+      throw error;
+    }
+    const after = frozenIdentity(this.service.identity());
+    if (!identityIsExactNativePersistenceSuccessor(before, after)) {
+      fail("native-checkpoint-identity", "native checkpoint did not return the exact persistence-only authority successor");
+    }
+    if (!this.continuationIsLive(worldGeneration, lifecycle)) {
+      return this.discardedNativeCheckpoint(before, after);
+    }
+    this.lastIdentity = after;
+    return Object.freeze({ discarded: false, value, before, after });
+  }
+
   private createPendingInput(identity: RustIntegratedRuntimeIdentityV1): PendingInputR5 {
     integer(identity.tick, 0, U64_SAFE_MAX - 1, "Rust authority tick");
     integer(this.nextInputSequence, 1, U64_SAFE_MAX, "next input sequence");
@@ -912,6 +2418,376 @@ export class RustLiveInputPumpR5 {
     });
   }
 
+  private async queryNativeBlockEditAfterStep(
+    worldGeneration: number,
+    newlyAppliedInputSequence: number | null,
+  ) {
+    const command = this.service.command;
+    if (!command) fail("native-block-edit-service", "Rust runtime lost the read-only native block-edit receipt query");
+    const legacySeed = this.nativeBlockEditLegacySeedPending;
+    const cursorBefore = legacySeed
+      ? RUST_INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_SEED_CURSOR_V1
+      : this.nativeBlockEditCursor;
+    if (cursorBefore === null) {
+      fail("native-block-edit-cursor", "tracked native block-edit receipt query has no browser cursor");
+    }
+    const queryService = {
+      identity: () => this.service.identity(),
+      command: (batch: RustIntegratedRuntimeCommandBatchV1) => command.call(this.service, batch),
+    };
+    const observedV2 = this.nativeBlockEditProtocolVersion === 2
+      ? await queryRustIntegratedRuntimeNativeBlockEditReceiptV2(queryService, cursorBefore)
+      : null;
+    const observed = observedV2
+      ?? await queryRustIntegratedRuntimeNativeBlockEditReceiptV1(queryService, cursorBefore);
+    if (this.stateValue !== "ready" || worldGeneration !== this.worldGeneration) return null;
+    if (!rustIntegratedRuntimeIdentityEqualsV1(observed.identity, this.lastIdentity)) {
+      fail("native-block-edit-identity", "native block-edit receipt query moved or changed the post-step identity");
+    }
+    if (legacySeed) {
+      if (observed.receipt !== null) {
+        fail("native-block-edit-cursor", "legacy native block-edit cursor seed replayed a receipt");
+      }
+      this.nativeBlockEditCursor = observed.cursorAfter;
+      this.nativeBlockEditLegacySeedPending = false;
+      return null;
+    }
+    if (observed.receipt === null) return null;
+    const dirty = observedV2?.dirtyEvidence ?? null;
+    if (this.nativeBlockEditProtocolVersion === 2 && dirty === null
+      && observed.receipt.originInputSequence === newlyAppliedInputSequence) {
+      fail("native-block-edit-dirty-missing", "new V2 native block-edit action omitted required Rust dirty evidence");
+    }
+    if (this.pendingNativeBlockEdit !== null
+      || this.pendingBasicDirtAction !== null
+      || this.pendingDropPickup !== null
+      || this.pendingPlayerDrop !== null) {
+      fail("native-block-edit-acknowledgement", "native block-edit query collided with an unacknowledged durable receipt");
+    }
+    const delivery = Object.freeze({
+      protocolVersion: this.nativeBlockEditProtocolVersion,
+      legacyFallback: this.nativeBlockEditProtocolVersion === 1
+        ? "v1-capability" as const
+        : dirty === null ? "v2-pre-v14" as const : null,
+      worldGeneration,
+      queryIdentity: frozenIdentity(observed.identity),
+      cursorBefore,
+      cursorAfter: observed.cursorAfter,
+      requestPayloadHash: observed.requestPayloadHash,
+      projectionPayloadHash: observed.projectionPayloadHash,
+      receipt: observed.receipt,
+      dirty,
+    });
+    this.validateNativeBlockEditDelivery(delivery);
+    this.pendingNativeBlockEdit = delivery;
+    return delivery;
+  }
+
+  private validateNativeBlockEditDelivery(delivery: RustLiveInputPumpNativeBlockEditDeliveryV1) {
+    if (delivery.worldGeneration !== this.worldGeneration) {
+      fail("native-block-edit-acknowledgement", "native block-edit delivery belongs to another world generation");
+    }
+    integer(delivery.cursorBefore, 0, U64_SAFE_MAX, "native block-edit delivery cursor before");
+    integer(delivery.cursorAfter, 1, U64_SAFE_MAX, "native block-edit delivery cursor after");
+    if (delivery.cursorBefore === RUST_INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_SEED_CURSOR_V1
+      || delivery.cursorBefore === U64_SAFE_MAX
+      || delivery.cursorAfter !== delivery.cursorBefore + 1
+      || delivery.receipt.sequence !== delivery.cursorAfter) {
+      fail("native-block-edit-acknowledgement", "native block-edit delivery cursor is not exactly contiguous");
+    }
+    if (delivery.protocolVersion === 1) {
+      if (delivery.legacyFallback !== "v1-capability" || delivery.dirty !== null) {
+        fail("native-block-edit-dirty-fallback", "V1 native block-edit delivery has contradictory dirty-evidence custody");
+      }
+    } else if (delivery.dirty === null) {
+      if (delivery.legacyFallback !== "v2-pre-v14") {
+        fail("native-block-edit-dirty-fallback", "V2 legacy receipt does not explicitly identify pre-V14 fallback");
+      }
+    } else if (delivery.legacyFallback !== null) {
+      fail("native-block-edit-dirty-fallback", "V2 dirty evidence is mislabeled as a legacy fallback");
+    }
+    const packet = delivery.protocolVersion === 2
+      ? encodeRustIntegratedRuntimeNativeBlockEditProjectionReceiptV2({
+        requestPayloadHash: delivery.requestPayloadHash,
+        identity: delivery.queryIdentity,
+        cursorAfter: delivery.cursorAfter,
+        receipt: delivery.receipt,
+        dirtyEvidence: delivery.dirty,
+      }, delivery.cursorBefore)
+      : encodeRustIntegratedRuntimeNativeBlockEditProjectionReceiptV1({
+        requestPayloadHash: delivery.requestPayloadHash,
+        identity: delivery.queryIdentity,
+        cursorAfter: delivery.cursorAfter,
+        receipt: delivery.receipt,
+      }, delivery.cursorBefore);
+    if (rustIntegratedRuntimeWireChecksumV1(packet) !== delivery.projectionPayloadHash) {
+      fail("native-block-edit-acknowledgement", "native block-edit delivery payload hash is not exact");
+    }
+  }
+
+  private nativeBlockEditDeliveriesEqual(
+    left: RustLiveInputPumpNativeBlockEditDeliveryV1,
+    right: RustLiveInputPumpNativeBlockEditDeliveryV1,
+  ) {
+    return left.worldGeneration === right.worldGeneration
+      && left.protocolVersion === right.protocolVersion
+      && left.legacyFallback === right.legacyFallback
+      && left.cursorBefore === right.cursorBefore
+      && left.cursorAfter === right.cursorAfter
+      && left.requestPayloadHash === right.requestPayloadHash
+      && left.projectionPayloadHash === right.projectionPayloadHash
+      && left.receipt.sequence === right.receipt.sequence
+      && left.receipt.receiptHash === right.receipt.receiptHash
+      && left.dirty?.evidenceHash === right.dirty?.evidenceHash
+      && rustIntegratedRuntimeIdentityEqualsV1(left.queryIdentity, right.queryIdentity);
+  }
+
+  private async queryBasicDirtActionAfterStep(worldGeneration: number) {
+    const command = this.service.command;
+    if (!command) fail("basic-dirt-action-service", "Rust runtime lost the read-only basic Dirt receipt query");
+    const legacySeed = this.basicDirtActionLegacySeedPending;
+    const cursorBefore = legacySeed
+      ? RUST_INTEGRATED_RUNTIME_BASIC_DIRT_ACTION_SEED_CURSOR_V1
+      : this.basicDirtActionCursor;
+    if (cursorBefore === null) {
+      fail("basic-dirt-action-cursor", "tracked basic Dirt receipt query has no browser cursor");
+    }
+    const observed = await queryRustIntegratedRuntimeBasicDirtActionReceiptV1({
+      identity: () => this.service.identity(),
+      command: (batch) => command.call(this.service, batch),
+    }, cursorBefore);
+    if (this.stateValue !== "ready" || worldGeneration !== this.worldGeneration) return null;
+    if (!rustIntegratedRuntimeIdentityEqualsV1(observed.identity, this.lastIdentity)) {
+      fail("basic-dirt-action-identity", "basic Dirt receipt query moved or changed the post-step identity");
+    }
+    if (legacySeed) {
+      if (observed.receipt !== null) {
+        fail("basic-dirt-action-cursor", "legacy basic Dirt cursor seed replayed a native receipt");
+      }
+      this.basicDirtActionCursor = observed.cursorAfter;
+      this.basicDirtActionLegacySeedPending = false;
+      return null;
+    }
+    if (observed.receipt === null) return null;
+    if (this.pendingBasicDirtAction !== null) {
+      fail("basic-dirt-action-acknowledgement", "basic Dirt query attempted to replace an unacknowledged receipt");
+    }
+    const delivery = Object.freeze({
+      worldGeneration,
+      queryIdentity: frozenIdentity(observed.identity),
+      cursorBefore,
+      cursorAfter: observed.cursorAfter,
+      requestPayloadHash: observed.requestPayloadHash,
+      projectionPayloadHash: observed.projectionPayloadHash,
+      receipt: observed.receipt,
+    });
+    this.validateBasicDirtActionDelivery(delivery);
+    this.pendingBasicDirtAction = delivery;
+    return delivery;
+  }
+
+  private validateBasicDirtActionDelivery(delivery: RustLiveInputPumpBasicDirtActionDeliveryV1) {
+    if (delivery.worldGeneration !== this.worldGeneration) {
+      fail("basic-dirt-action-acknowledgement", "basic Dirt delivery belongs to another world generation");
+    }
+    integer(delivery.cursorBefore, 0, U64_SAFE_MAX, "basic Dirt delivery cursor before");
+    integer(delivery.cursorAfter, 1, U64_SAFE_MAX, "basic Dirt delivery cursor after");
+    if (delivery.cursorBefore === RUST_INTEGRATED_RUNTIME_BASIC_DIRT_ACTION_SEED_CURSOR_V1
+      || delivery.cursorBefore === U64_SAFE_MAX
+      || delivery.cursorAfter !== delivery.cursorBefore + 1
+      || delivery.receipt.sequence !== delivery.cursorAfter) {
+      fail("basic-dirt-action-acknowledgement", "basic Dirt delivery cursor is not exactly contiguous");
+    }
+    const packet = encodeRustIntegratedRuntimeBasicDirtActionProjectionReceiptV1({
+      requestPayloadHash: delivery.requestPayloadHash,
+      identity: delivery.queryIdentity,
+      cursorAfter: delivery.cursorAfter,
+      receipt: delivery.receipt,
+    }, delivery.cursorBefore);
+    if (rustIntegratedRuntimeWireChecksumV1(packet) !== delivery.projectionPayloadHash) {
+      fail("basic-dirt-action-acknowledgement", "basic Dirt delivery payload hash is not exact");
+    }
+  }
+
+  private basicDirtActionDeliveriesEqual(
+    left: RustLiveInputPumpBasicDirtActionDeliveryV1,
+    right: RustLiveInputPumpBasicDirtActionDeliveryV1,
+  ) {
+    return left.worldGeneration === right.worldGeneration
+      && left.cursorBefore === right.cursorBefore
+      && left.cursorAfter === right.cursorAfter
+      && left.requestPayloadHash === right.requestPayloadHash
+      && left.projectionPayloadHash === right.projectionPayloadHash
+      && left.receipt.sequence === right.receipt.sequence
+      && left.receipt.receiptHash === right.receipt.receiptHash
+      && rustIntegratedRuntimeIdentityEqualsV1(left.queryIdentity, right.queryIdentity);
+  }
+
+  private async queryDropPickupAfterStep(worldGeneration: number) {
+    const command = this.service.command;
+    if (!command) fail("drop-pickup-service", "Rust runtime lost the read-only native drop-pickup receipt query");
+    const legacySeed = this.dropPickupLegacySeedPending;
+    const cursorBefore = legacySeed
+      ? RUST_INTEGRATED_RUNTIME_DROP_PICKUP_SEED_CURSOR_V1
+      : this.dropPickupCursor;
+    if (cursorBefore === null) {
+      fail("drop-pickup-cursor", "tracked native drop-pickup receipt query has no browser cursor");
+    }
+    const observed = await queryRustIntegratedRuntimeDropPickupReceiptV1({
+      identity: () => this.service.identity(),
+      command: (batch) => command.call(this.service, batch),
+    }, cursorBefore);
+    if (this.stateValue !== "ready" || worldGeneration !== this.worldGeneration) return null;
+    if (!rustIntegratedRuntimeIdentityEqualsV1(observed.identity, this.lastIdentity)) {
+      fail("drop-pickup-identity", "drop-pickup receipt query moved or changed the post-step identity");
+    }
+    if (legacySeed) {
+      if (observed.receipt !== null) {
+        fail("drop-pickup-cursor", "legacy drop-pickup cursor seed replayed a native receipt");
+      }
+      this.dropPickupCursor = observed.cursorAfter;
+      this.dropPickupLegacySeedPending = false;
+      return null;
+    }
+    if (observed.receipt === null) return null;
+    if (this.pendingDropPickup !== null) {
+      fail("drop-pickup-acknowledgement", "drop-pickup query attempted to replace an unacknowledged receipt");
+    }
+    const delivery = Object.freeze({
+      worldGeneration,
+      queryIdentity: frozenIdentity(observed.identity),
+      cursorBefore,
+      cursorAfter: observed.cursorAfter,
+      requestPayloadHash: observed.requestPayloadHash,
+      projectionPayloadHash: observed.projectionPayloadHash,
+      receipt: observed.receipt,
+    });
+    this.validateDropPickupDelivery(delivery);
+    this.pendingDropPickup = delivery;
+    return delivery;
+  }
+
+  private validateDropPickupDelivery(delivery: RustLiveInputPumpDropPickupDeliveryV1) {
+    if (delivery.worldGeneration !== this.worldGeneration) {
+      fail("drop-pickup-acknowledgement", "drop-pickup delivery belongs to another world generation");
+    }
+    integer(delivery.cursorBefore, 0, U64_SAFE_MAX, "drop-pickup delivery cursor before");
+    integer(delivery.cursorAfter, 1, U64_SAFE_MAX, "drop-pickup delivery cursor after");
+    if (delivery.cursorBefore === RUST_INTEGRATED_RUNTIME_DROP_PICKUP_SEED_CURSOR_V1
+      || delivery.cursorBefore === U64_SAFE_MAX
+      || delivery.cursorAfter !== delivery.cursorBefore + 1
+      || delivery.receipt.sequence !== delivery.cursorAfter) {
+      fail("drop-pickup-acknowledgement", "drop-pickup delivery cursor is not exactly contiguous");
+    }
+    const packet = encodeRustIntegratedRuntimeDropPickupProjectionReceiptV1({
+      requestPayloadHash: delivery.requestPayloadHash,
+      identity: delivery.queryIdentity,
+      cursorAfter: delivery.cursorAfter,
+      receipt: delivery.receipt,
+    }, delivery.cursorBefore);
+    if (rustIntegratedRuntimeWireChecksumV1(packet) !== delivery.projectionPayloadHash) {
+      fail("drop-pickup-acknowledgement", "drop-pickup delivery payload hash is not exact");
+    }
+  }
+
+  private dropPickupDeliveriesEqual(
+    left: RustLiveInputPumpDropPickupDeliveryV1,
+    right: RustLiveInputPumpDropPickupDeliveryV1,
+  ) {
+    return left.worldGeneration === right.worldGeneration
+      && left.cursorBefore === right.cursorBefore
+      && left.cursorAfter === right.cursorAfter
+      && left.requestPayloadHash === right.requestPayloadHash
+      && left.projectionPayloadHash === right.projectionPayloadHash
+      && left.receipt.sequence === right.receipt.sequence
+      && left.receipt.receiptHash === right.receipt.receiptHash
+      && rustIntegratedRuntimeIdentityEqualsV1(left.queryIdentity, right.queryIdentity);
+  }
+
+  private async queryPlayerDropAfterStep(worldGeneration: number) {
+    const command = this.service.command;
+    if (!command) fail("player-drop-service", "Rust runtime lost the read-only native player-drop receipt query");
+    const legacySeed = this.playerDropLegacySeedPending;
+    const cursorBefore = legacySeed
+      ? RUST_INTEGRATED_RUNTIME_NATIVE_PLAYER_DROP_SEED_CURSOR_V1
+      : this.playerDropCursor;
+    if (cursorBefore === null) {
+      fail("player-drop-cursor", "tracked native player-drop receipt query has no browser cursor");
+    }
+    const observed = await queryRustIntegratedRuntimeNativePlayerDropReceiptV1({
+      identity: () => this.service.identity(),
+      command: (batch) => command.call(this.service, batch),
+    }, cursorBefore);
+    if (this.stateValue !== "ready" || worldGeneration !== this.worldGeneration) return null;
+    if (!rustIntegratedRuntimeIdentityEqualsV1(observed.identity, this.lastIdentity)) {
+      fail("player-drop-identity", "player-drop receipt query moved or changed the post-step identity");
+    }
+    if (legacySeed) {
+      if (observed.receipt !== null) {
+        fail("player-drop-cursor", "legacy player-drop cursor seed replayed a native receipt");
+      }
+      this.playerDropCursor = observed.cursorAfter;
+      this.playerDropLegacySeedPending = false;
+      return null;
+    }
+    if (observed.receipt === null) return null;
+    if (this.pendingNativeBlockEdit !== null
+      || this.pendingBasicDirtAction !== null
+      || this.pendingDropPickup !== null
+      || this.pendingPlayerDrop !== null) {
+      fail("player-drop-acknowledgement", "player-drop query collided with an unacknowledged native receipt");
+    }
+    const delivery = Object.freeze({
+      worldGeneration,
+      queryIdentity: frozenIdentity(observed.identity),
+      cursorBefore,
+      cursorAfter: observed.cursorAfter,
+      requestPayloadHash: observed.requestPayloadHash,
+      projectionPayloadHash: observed.projectionPayloadHash,
+      receipt: observed.receipt,
+    });
+    this.validatePlayerDropDelivery(delivery);
+    this.pendingPlayerDrop = delivery;
+    return delivery;
+  }
+
+  private validatePlayerDropDelivery(delivery: RustLiveInputPumpPlayerDropDeliveryV1) {
+    if (delivery.worldGeneration !== this.worldGeneration) {
+      fail("player-drop-acknowledgement", "player-drop delivery belongs to another world generation");
+    }
+    integer(delivery.cursorBefore, 0, U64_SAFE_MAX, "player-drop delivery cursor before");
+    integer(delivery.cursorAfter, 1, U64_SAFE_MAX, "player-drop delivery cursor after");
+    if (delivery.cursorBefore === RUST_INTEGRATED_RUNTIME_NATIVE_PLAYER_DROP_SEED_CURSOR_V1
+      || delivery.cursorBefore === U64_SAFE_MAX
+      || delivery.cursorAfter !== delivery.cursorBefore + 1
+      || delivery.receipt.sequence !== delivery.cursorAfter) {
+      fail("player-drop-acknowledgement", "player-drop delivery cursor is not exactly contiguous");
+    }
+    const packet = encodeRustIntegratedRuntimeNativePlayerDropProjectionReceiptV1({
+      requestPayloadHash: delivery.requestPayloadHash,
+      identity: delivery.queryIdentity,
+      cursorAfter: delivery.cursorAfter,
+      receipt: delivery.receipt,
+    }, delivery.cursorBefore);
+    if (rustIntegratedRuntimeWireChecksumV1(packet) !== delivery.projectionPayloadHash) {
+      fail("player-drop-acknowledgement", "player-drop delivery payload hash is not exact");
+    }
+  }
+
+  private playerDropDeliveriesEqual(
+    left: RustLiveInputPumpPlayerDropDeliveryV1,
+    right: RustLiveInputPumpPlayerDropDeliveryV1,
+  ) {
+    return left.worldGeneration === right.worldGeneration
+      && left.cursorBefore === right.cursorBefore
+      && left.cursorAfter === right.cursorAfter
+      && left.requestPayloadHash === right.requestPayloadHash
+      && left.projectionPayloadHash === right.projectionPayloadHash
+      && left.receipt.sequence === right.receipt.sequence
+      && left.receipt.receiptHash === right.receipt.receiptHash
+      && rustIntegratedRuntimeIdentityEqualsV1(left.queryIdentity, right.queryIdentity);
+  }
+
   private validateStep(
     before: RustIntegratedRuntimeIdentityV1,
     pending: PendingInputR5,
@@ -955,7 +2831,15 @@ export class RustLiveInputPumpR5 {
       flags = validateFlagTransition(flags, receipt);
       actionSequence = integer(actionSequence + 1, 1, U64_SAFE_MAX, "next action sequence");
     }
-    return Object.freeze({ pending, authoritativeFlags: flags, nextActionSequence: actionSequence });
+    const lastActionReceipt = step.actionReceipts.length === 0
+      ? null
+      : Object.freeze({ ...step.actionReceipts[step.actionReceipts.length - 1] });
+    return Object.freeze({
+      pending,
+      authoritativeFlags: flags,
+      nextActionSequence: actionSequence,
+      lastActionReceipt,
+    });
   }
 
   private validateContextReceipts(pending: PendingInputR5, step: RustLiveRuntimeStepResultR5) {
@@ -1012,10 +2896,13 @@ export class RustLiveInputPumpR5 {
       if (queue[0] !== transition.value) fail("input-transition", "latched action transition changed while input was pending");
       queue.shift();
     }
+    this.lastAppliedMoveX = staged.pending.frame.moveX;
+    this.lastAppliedMoveZ = staged.pending.frame.moveZ;
     this.lastAppliedButtons = staged.pending.frame.buttons;
     this.selectedSlot = staged.pending.frame.selectedSlot;
     this.authoritativeFlags = staged.authoritativeFlags;
     this.nextActionSequence = staged.nextActionSequence;
+    if (staged.lastActionReceipt !== null) this.lastActionReceipt = staged.lastActionReceipt;
     this.nextInputSequence = integer(staged.pending.frame.sequence + 1, 1, U64_SAFE_MAX, "next input sequence");
     this.appliedInputs += 1;
   }
@@ -1139,12 +3026,61 @@ export class RustLiveInputPumpR5 {
     return Object.freeze({ discarded: true, changed: false, receipt: null, extraction: null, camera: null });
   }
 
+  private discardedLocatorItemConsume(
+    plan: RustLiveLocatorItemConsumePlanV1 | null = null,
+  ): RustLiveInputPumpLocatorItemConsumeResultV1 {
+    this.discardedContinuations += 1;
+    return Object.freeze({ discarded: true, plan, receipt: null, validated: null, extraction: null, player: null });
+  }
+
+  private discardedCreativeSlotSet(
+    plan: RustLiveCreativeSlotSetPlanV1 | null = null,
+  ): RustLiveInputPumpCreativeSlotSetResultV1 {
+    this.discardedContinuations += 1;
+    return Object.freeze({ discarded: true, plan, receipt: null, validated: null, extraction: null, player: null });
+  }
+
+  private discardedPlayerRespawn(
+    plan: RustLivePlayerRespawnPlanV1 | null = null,
+  ): RustLiveInputPumpPlayerRespawnResultV1 {
+    this.discardedContinuations += 1;
+    return Object.freeze({
+      discarded: true,
+      plan,
+      receipt: null,
+      validated: null,
+      extraction: null,
+      player: null,
+      camera: null,
+      view: this.lastView,
+      deathRespawn: null,
+    });
+  }
+
+  private discardedNativeCheckpoint<T>(
+    before: RustIntegratedRuntimeIdentityV1 | null = null,
+    after: RustIntegratedRuntimeIdentityV1 | null = null,
+  ): RustLiveInputPumpNativeCheckpointResultV1<T> {
+    this.discardedContinuations += 1;
+    return Object.freeze({ discarded: true, value: null, before, after });
+  }
+
   private failClosed(error: unknown) {
     if (this.stateValue !== "ready") return;
     this.stateValue = "failed";
     this.lifecycle += 1;
     this.lastError = errorText(error);
     this.pendingInput = null;
+    this.pendingNativeBlockEdit = null;
+    this.lastAcknowledgedNativeBlockEdit = null;
+    this.pendingBasicDirtAction = null;
+    this.lastAcknowledgedBasicDirtAction = null;
+    this.pendingDropPickup = null;
+    this.lastAcknowledgedDropPickup = null;
+    this.pendingPlayerDrop = null;
+    this.lastAcknowledgedPlayerDrop = null;
+    this.pendingDeathRespawn = null;
+    this.lastAcknowledgedDeathRespawn = null;
     this.contextCommandIntents.length = 0;
     for (const queue of this.actionTransitions.values()) queue.length = 0;
   }

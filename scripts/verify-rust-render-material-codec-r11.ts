@@ -121,7 +121,10 @@ function encodeMaterial(writer: Writer, value: Material) {
 export function encodeTextureMaterialFixtureR11(value: TextureMaterialFixtureR11) {
   const writer = new Writer(); writer.raw(new TextEncoder().encode("BWRD")); writer.u16(value.schema); writer.u16(value.flags);
   writer.u64(value.epoch); writer.u64(value.revision); writer.u32(value.operations.length); writer.raw(value.hash);
-  for (const operation of value.operations) operation.kind === 4 ? encodeTexture(writer, operation) : encodeMaterial(writer, operation);
+  for (const operation of value.operations) {
+    if (operation.kind === 4) encodeTexture(writer, operation);
+    else encodeMaterial(writer, operation);
+  }
   return writer.finish();
 }
 

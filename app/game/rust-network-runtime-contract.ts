@@ -12,6 +12,12 @@ import {
   type NetworkCommandReceiptV1,
   type NetworkInterestSetV1,
 } from "./network-authority-contract";
+import {
+  decodeRustNetworkPlayerPoseProjectionV1,
+  encodeRustNetworkPlayerPoseProjectionV1,
+  RUST_NETWORK_PLAYER_POSE_PROJECTION_MAX_WIRE_BYTES_V1,
+  type RustNetworkPlayerPoseProjectionV1,
+} from "./rust-network-player-pose-v1";
 
 /** Opaque WebRTC/browser transport boundary for the Rust R9 authority. */
 export const RUST_NETWORK_BROWSER_PROTOCOL_V1 = 1 as const;
@@ -28,6 +34,7 @@ const NETWORK_MAX_AGENT_WORK_WIRE_BYTES_V1 = 132 * 1024;
 const REQUEST_MAGIC = "BWRN";
 const RESPONSE_MAGIC = "BWNA";
 const HASH_PATTERN = /^[0-9a-f]{32}$/u;
+const RECEIPT_CODES = ["unknown-peer", "connection-mismatch", "peer-kind-mismatch", "session-expired", "command-expired", "sequence", "stale-revision", "capability-denied", "lease-conflict", "interest-denied", "invalid"] as const;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -35,13 +42,15 @@ export type RustNetworkRequestV1 =
   | Readonly<{ kind: "handshake"; requestId: number; hostPacket: Uint8Array; peerPacket: Uint8Array }>
   | Readonly<{ kind: "command-batch"; requestId: number; current: NetworkAuthorityIdentityV1; now: number; commandPackets: readonly Uint8Array[] }>
   | Readonly<{ kind: "delta-delivery"; requestId: number; checkpointPacket: Uint8Array; interest: NetworkInterestSetV1; deltaPacket: Uint8Array }>
-  | Readonly<{ kind: "agent-command"; requestId: number; current: NetworkAuthorityIdentityV1; now: number; envelopePacket: Uint8Array; workPacket: Uint8Array }>;
+  | Readonly<{ kind: "agent-command"; requestId: number; current: NetworkAuthorityIdentityV1; now: number; envelopePacket: Uint8Array; workPacket: Uint8Array }>
+  | Readonly<{ kind: "guest-pose"; requestId: number; current: NetworkAuthorityIdentityV1; now: number; commandPacket: Uint8Array }>;
 
 export type RustNetworkResponseV1 =
   | Readonly<{ kind: "handshake"; requestId: number; compatible: boolean; code: string; capabilities: readonly NetworkCapabilityV1[]; maxCommandBytes: number; message: string; recordHash: string }>
   | Readonly<{ kind: "command-batch"; requestId: number; receipts: readonly NetworkCommandReceiptV1[]; authorityFingerprint: string }>
   | Readonly<{ kind: "delta-delivery"; requestId: number; code: "applied" | "duplicate" | "sequence-gap" | "session-mismatch" | "peer-mismatch" | "interest-mismatch" | "stale-from" | "command-ack-regressed"; sequence: number; stateHash: string; message: string }>
   | Readonly<{ kind: "agent-command"; requestId: number; code: "accepted" | "unknown-agent" | "connection-mismatch" | "pending" | "paused" | "revoked" | "expired" | "capability-denied" | "envelope-mismatch"; receipt: NetworkCommandReceiptV1 | null; authorityFingerprint: string }>
+  | Readonly<{ kind: "guest-pose"; requestId: number; receipt: NetworkCommandReceiptV1; projection: RustNetworkPlayerPoseProjectionV1 | null; authorityFingerprint: string }>
   | Readonly<{ kind: "error"; requestId: number; code: string; message: string }>;
 
 export class RustNetworkRuntimeContractError extends Error {
@@ -55,6 +64,43 @@ function hashBytes(value: string) {
   return Uint8Array.from({ length: 16 }, (_, index) => Number.parseInt(value.slice(index * 2, index * 2 + 2), 16));
 }
 function payloadHash(bytes: Uint8Array) { return new TypeScriptCanonicalHasher("blockwild-network-browser-runtime-v1").writeBytes(bytes).finishHex(); }
+function receiptLabel(value: unknown, maximumUtf16: number, name: string): asserts value is string {
+  if (typeof value !== "string" || value.length < 1 || value.length > maximumUtf16 || encoder.encode(value).byteLength > 4096) {
+    throw new RustNetworkRuntimeContractError("receipt", `${name} is outside its native label bound`);
+  }
+}
+function validateReceiptForWire(value: NetworkCommandReceiptV1) {
+  receiptLabel(value.commandId, 180, "receipt command id");
+  receiptLabel(value.idempotencyKey, 256, "receipt idempotency key");
+  receiptLabel(value.peerId, 180, "receipt peer id");
+  const identity = createNetworkAuthorityIdentityV1(value.identity.address, value.identity.revision);
+  if (identity.stateHash !== value.identity.stateHash) throw new RustNetworkRuntimeContractError("receipt", "receipt authority identity hash mismatch");
+  const raw = value as NetworkCommandReceiptV1 & { code?: unknown; message?: unknown };
+  if (value.status === "accepted" && ((raw.code !== undefined && raw.code !== null && raw.code !== "")
+    || (raw.message !== undefined && raw.message !== ""))) {
+    throw new RustNetworkRuntimeContractError("receipt", "accepted Rust receipt carries rejection fields");
+  }
+  const code = value.status === "rejected" ? value.code : "";
+  const message = value.status === "rejected" ? value.message : "";
+  if (value.status === "rejected" && (!RECEIPT_CODES.includes(value.code) || typeof value.message !== "string")) throw new RustNetworkRuntimeContractError("receipt", "unknown Rust receipt rejection shape");
+  if (encoder.encode(message).byteLength > 4096) throw new RustNetworkRuntimeContractError("receipt", "receipt message exceeds its wire bound");
+  const hasher = new TypeScriptCanonicalHasher("blockwild-network-receipt-v1")
+    .writeString(value.status).writeString(value.commandId).writeString(value.idempotencyKey)
+    .writeString(value.peerId).writeString(value.identity.stateHash);
+  if (value.status === "rejected") hasher.writeString(code).writeString(message);
+  if (hasher.finishHex() !== value.receiptHash) throw new RustNetworkRuntimeContractError("receipt", "Rust authority receipt hash mismatch");
+  return Object.freeze({ code, message });
+}
+function validateGuestPoseResponseBinding(receipt: NetworkCommandReceiptV1, projection: RustNetworkPlayerPoseProjectionV1 | null) {
+  if ((receipt.status === "accepted") !== (projection !== null)) {
+    throw new RustNetworkRuntimeContractError("pose", "native player pose response acceptance and projection disagree");
+  }
+  if (projection && (projection.commandId !== receipt.commandId
+    || projection.peerId !== receipt.peerId
+    || projection.authorityReceiptHash !== receipt.receiptHash)) {
+    throw new RustNetworkRuntimeContractError("pose", "native player pose response receipt and projection disagree");
+  }
+}
 
 class Writer {
   private readonly parts: Uint8Array[] = [];
@@ -82,7 +128,7 @@ class Writer {
     for (const entityId of canonical.entityIds) this.string(entityId);
     this.hash(canonical.interestHash);
   }
-  receipt(value: NetworkCommandReceiptV1) { this.u8(value.status === "accepted" ? 1 : 2); this.string(value.commandId); this.string(value.idempotencyKey); this.string(value.peerId); this.string(value.status === "rejected" ? value.code : ""); this.string(value.status === "rejected" ? value.message : ""); this.identity(value.identity); this.hash(value.receiptHash); }
+  receipt(value: NetworkCommandReceiptV1) { const { code, message } = validateReceiptForWire(value); this.u8(value.status === "accepted" ? 1 : 2); this.string(value.commandId); this.string(value.idempotencyKey); this.string(value.peerId); this.string(code); this.string(message); this.identity(value.identity); this.hash(value.receiptHash); }
   finish() { const result = new Uint8Array(this.length); let offset = 0; for (const part of this.parts) { result.set(part, offset); offset += part.byteLength; } return result; }
 }
 
@@ -115,12 +161,15 @@ class Reader {
   }
   receipt(): NetworkCommandReceiptV1 {
     const status = this.u8(); const commandId = this.string(); const idempotencyKey = this.string(); const peerId = this.string(); const code = this.string(); const message = this.string(); const identity = this.identity(); const receiptHash = this.hash();
-    const hasher = new TypeScriptCanonicalHasher("blockwild-network-receipt-v1").writeString(status === 1 ? "accepted" : "rejected").writeString(commandId).writeString(idempotencyKey).writeString(peerId).writeString(identity.stateHash);
-    if (status === 2) hasher.writeString(code).writeString(message);
-    if (hasher.finishHex() !== receiptHash) throw new RustNetworkRuntimeContractError("receipt", "Rust authority receipt hash mismatch");
-    if (status === 1) return Object.freeze({ schemaVersion: 1, status: "accepted", commandId, idempotencyKey, peerId, identity, receiptHash });
-    if (status !== 2 || !(["unknown-peer", "connection-mismatch", "peer-kind-mismatch", "session-expired", "command-expired", "sequence", "stale-revision", "capability-denied", "lease-conflict", "interest-denied", "invalid"] as const).includes(code as never)) throw new RustNetworkRuntimeContractError("receipt", "unknown Rust receipt status or code");
-    return Object.freeze({ schemaVersion: 1, status: "rejected", commandId, idempotencyKey, peerId, code: code as Extract<NetworkCommandReceiptV1, { status: "rejected" }>["code"], message, identity, receiptHash });
+    if (status !== 1 && status !== 2) throw new RustNetworkRuntimeContractError("receipt", "unknown Rust receipt status");
+    receiptLabel(commandId, 180, "receipt command id"); receiptLabel(idempotencyKey, 256, "receipt idempotency key"); receiptLabel(peerId, 180, "receipt peer id");
+    if (status === 1 && (code !== "" || message !== "")) throw new RustNetworkRuntimeContractError("receipt", "accepted Rust receipt carries rejection fields");
+    if (status === 2 && !RECEIPT_CODES.includes(code as typeof RECEIPT_CODES[number])) throw new RustNetworkRuntimeContractError("receipt", "unknown Rust receipt rejection code");
+    const receipt = status === 1
+      ? Object.freeze({ schemaVersion: 1 as const, status: "accepted" as const, commandId, idempotencyKey, peerId, identity, receiptHash })
+      : Object.freeze({ schemaVersion: 1 as const, status: "rejected" as const, commandId, idempotencyKey, peerId, code: code as Extract<NetworkCommandReceiptV1, { status: "rejected" }>["code"], message, identity, receiptHash });
+    validateReceiptForWire(receipt);
+    return receipt;
   }
   finish() { if (this.offset !== this.source.byteLength) throw new RustNetworkRuntimeContractError("trailing", "network browser message contains trailing bytes"); }
 }
@@ -147,6 +196,7 @@ export function encodeRustNetworkCommandBatchRequestV1(requestId: number, curren
 export function encodeRustNetworkHandshakeRequestV1(requestId: number, hostPacket: Uint8Array, peerPacket: Uint8Array) { const packets = boundedPackets([hostPacket, peerPacket], NETWORK_MAX_HANDSHAKE_WIRE_BYTES_V1); const payload = new Writer(); payload.bytes(packets[0]); payload.bytes(packets[1]); return wrap(REQUEST_MAGIC, 1, requestId, payload.finish()); }
 export function encodeRustNetworkDeltaDeliveryRequestV1(requestId: number, checkpointPacket: Uint8Array, interest: NetworkInterestSetV1, deltaPacket: Uint8Array) { if (checkpointPacket.byteLength > NETWORK_MAX_CHECKPOINT_WIRE_BYTES_V1) throw new RustNetworkRuntimeContractError("checkpoint", "checkpoint packet exceeds V1 budget"); if (deltaPacket.byteLength > NETWORK_MAX_DELTA_WIRE_BYTES_V1) throw new RustNetworkRuntimeContractError("delta", "delta packet exceeds V1 budget"); const payload = new Writer(); payload.bytes(checkpointPacket); payload.interest(interest); payload.bytes(deltaPacket); return wrap(REQUEST_MAGIC, 3, requestId, payload.finish()); }
 export function encodeRustNetworkAgentRequestV1(requestId: number, current: NetworkAuthorityIdentityV1, now: number, envelopePacket: Uint8Array, workPacket: Uint8Array) { if (envelopePacket.byteLength > NETWORK_MAX_COMMAND_WIRE_BYTES_V1 || workPacket.byteLength > NETWORK_MAX_AGENT_WORK_WIRE_BYTES_V1) throw new RustNetworkRuntimeContractError("agent", "agent packet exceeds its V1 budget"); const payload = new Writer(); payload.identity(current); payload.u64(now); payload.bytes(envelopePacket); payload.bytes(workPacket); return wrap(REQUEST_MAGIC, 4, requestId, payload.finish()); }
+export function encodeRustNetworkGuestPoseRequestV1(requestId: number, current: NetworkAuthorityIdentityV1, now: number, commandPacket: Uint8Array) { if (!(commandPacket instanceof Uint8Array) || commandPacket.byteLength > NETWORK_MAX_COMMAND_WIRE_BYTES_V1) throw new RustNetworkRuntimeContractError("pose", "guest pose command exceeds its V1 budget"); const payload = new Writer(); payload.identity(current); payload.u64(now); payload.bytes(commandPacket); return wrap(REQUEST_MAGIC, 5, requestId, payload.finish()); }
 
 export function decodeRustNetworkRequestV1(message: Uint8Array): RustNetworkRequestV1 {
   const outer = unwrap(message, REQUEST_MAGIC); const reader = new Reader(outer.payload); let result: RustNetworkRequestV1;
@@ -154,6 +204,7 @@ export function decodeRustNetworkRequestV1(message: Uint8Array): RustNetworkRequ
   else if (outer.kind === 2) { const current = reader.identity(); const now = reader.u64(); const count = reader.u32(); if (count < 1 || count > RUST_NETWORK_BROWSER_MAX_BATCH_PACKETS_V1) throw new RustNetworkRuntimeContractError("batch", "command batch is outside V1 bounds"); result = Object.freeze({ kind: "command-batch", requestId: outer.requestId, current, now, commandPackets: Object.freeze(Array.from({ length: count }, () => reader.bytes(NETWORK_MAX_COMMAND_WIRE_BYTES_V1))) }); }
   else if (outer.kind === 3) result = Object.freeze({ kind: "delta-delivery", requestId: outer.requestId, checkpointPacket: reader.bytes(NETWORK_MAX_CHECKPOINT_WIRE_BYTES_V1), interest: reader.interest(), deltaPacket: reader.bytes(NETWORK_MAX_DELTA_WIRE_BYTES_V1) });
   else if (outer.kind === 4) result = Object.freeze({ kind: "agent-command", requestId: outer.requestId, current: reader.identity(), now: reader.u64(), envelopePacket: reader.bytes(NETWORK_MAX_COMMAND_WIRE_BYTES_V1), workPacket: reader.bytes(NETWORK_MAX_AGENT_WORK_WIRE_BYTES_V1) });
+  else if (outer.kind === 5) result = Object.freeze({ kind: "guest-pose", requestId: outer.requestId, current: reader.identity(), now: reader.u64(), commandPacket: reader.bytes(NETWORK_MAX_COMMAND_WIRE_BYTES_V1) });
   else throw new RustNetworkRuntimeContractError("kind", "unknown network browser request"); reader.finish(); return result;
 }
 
@@ -167,6 +218,7 @@ export function encodeRustNetworkResponseV1(response: RustNetworkResponseV1) {
   else if (response.kind === "command-batch") { kind = 102; payload.u32(response.receipts.length); for (const receipt of response.receipts) payload.receipt(receipt); payload.hash(response.authorityFingerprint); }
   else if (response.kind === "delta-delivery") { kind = 103; payload.string(response.code); payload.u64(response.sequence); payload.hash(response.stateHash); payload.string(response.message); }
   else if (response.kind === "agent-command") { kind = 104; payload.string(response.code); payload.u8(response.receipt ? 1 : 0); if (response.receipt) payload.receipt(response.receipt); payload.hash(response.authorityFingerprint); }
+  else if (response.kind === "guest-pose") { kind = 105; validateGuestPoseResponseBinding(response.receipt, response.projection); payload.receipt(response.receipt); payload.u8(response.projection ? 1 : 0); if (response.projection) payload.bytes(encodeRustNetworkPlayerPoseProjectionV1(response.projection)); payload.hash(response.authorityFingerprint); }
   else { kind = 255; payload.string(response.code); payload.string(response.message); }
   return wrap(RESPONSE_MAGIC, kind, response.requestId, payload.finish());
 }
@@ -177,6 +229,7 @@ export function decodeRustNetworkResponseV1(message: Uint8Array): RustNetworkRes
   else if (outer.kind === 102) { const count = reader.u32(); if (count > RUST_NETWORK_BROWSER_MAX_BATCH_PACKETS_V1) throw new RustNetworkRuntimeContractError("batch", "receipt batch exceeds V1 bounds"); result = Object.freeze({ kind: "command-batch", requestId: outer.requestId, receipts: Object.freeze(Array.from({ length: count }, () => reader.receipt())), authorityFingerprint: reader.hash() }); }
   else if (outer.kind === 103) { const code = reader.string(); if (!DELTA_CODES.includes(code as never)) throw new RustNetworkRuntimeContractError("delta", "unknown delta delivery result"); result = Object.freeze({ kind: "delta-delivery", requestId: outer.requestId, code: code as Extract<RustNetworkResponseV1, { kind: "delta-delivery" }>["code"], sequence: reader.u64(), stateHash: reader.hash(), message: reader.string() }); }
   else if (outer.kind === 104) { const code = reader.string(); if (!AGENT_CODES.includes(code as never)) throw new RustNetworkRuntimeContractError("agent", "unknown agent authority result"); result = Object.freeze({ kind: "agent-command", requestId: outer.requestId, code: code as Extract<RustNetworkResponseV1, { kind: "agent-command" }>["code"], receipt: reader.flag() ? reader.receipt() : null, authorityFingerprint: reader.hash() }); }
+  else if (outer.kind === 105) { const receipt = reader.receipt(); const projection = reader.flag() ? decodeRustNetworkPlayerPoseProjectionV1(reader.bytes(RUST_NETWORK_PLAYER_POSE_PROJECTION_MAX_WIRE_BYTES_V1)) : null; validateGuestPoseResponseBinding(receipt, projection); result = Object.freeze({ kind: "guest-pose", requestId: outer.requestId, receipt, projection, authorityFingerprint: reader.hash() }); }
   else if (outer.kind === 255) result = Object.freeze({ kind: "error", requestId: outer.requestId, code: reader.string(), message: reader.string() });
   else throw new RustNetworkRuntimeContractError("kind", "unknown network browser response"); reader.finish(); return result;
 }
@@ -185,6 +238,7 @@ export function rustNetworkTransferListV1(request: RustNetworkRequestV1) {
   const buffers = request.kind === "handshake" ? [request.hostPacket.buffer, request.peerPacket.buffer]
     : request.kind === "command-batch" ? request.commandPackets.map((packet) => packet.buffer)
       : request.kind === "delta-delivery" ? [request.checkpointPacket.buffer, request.deltaPacket.buffer]
-        : [request.envelopePacket.buffer, request.workPacket.buffer];
+        : request.kind === "agent-command" ? [request.envelopePacket.buffer, request.workPacket.buffer]
+          : [request.commandPacket.buffer];
   return [...new Set(buffers)].filter((buffer): buffer is ArrayBuffer => buffer instanceof ArrayBuffer);
 }

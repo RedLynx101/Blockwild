@@ -7,7 +7,38 @@ use blockwild_types::CanonicalHasher;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy)]
+struct GenerationTimer;
+
+#[cfg(not(target_arch = "wasm32"))]
+type GenerationTimer = Instant;
+
+#[cfg(target_arch = "wasm32")]
+fn start_generation_timer() -> GenerationTimer {
+    GenerationTimer
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn start_generation_timer() -> GenerationTimer {
+    Instant::now()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn elapsed_generation_microseconds(_started: GenerationTimer) -> u64 {
+    // `std::time::Instant::now()` deliberately panics on
+    // wasm32-unknown-unknown. Browser-facing callers own wall-clock metrics;
+    // the platform-neutral generation service records a bounded zero here.
+    0
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn elapsed_generation_microseconds(started: GenerationTimer) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+}
 
 #[derive(Clone, Debug)]
 pub struct CancellationToken(Arc<AtomicBool>);
@@ -173,7 +204,7 @@ impl GenerationService {
         let key = cache_key(request);
         let cached = self.cache.lock().expect("cache mutex poisoned").get(&key);
         let cache_hit = cached.is_some();
-        let started = Instant::now();
+        let started = start_generation_timer();
         let chunk = if let Some(chunk) = cached {
             self.diagnostics.lock().expect("diagnostics mutex poisoned").cache_hits += 1;
             rebind(chunk, request)
@@ -182,7 +213,7 @@ impl GenerationService {
                 .lock()
                 .expect("diagnostics mutex poisoned")
                 .cache_misses += 1;
-            let generator = TerrainGeneratorV18::from_request(request);
+            let generator = TerrainGeneratorV18::from_request(request)?;
             let generated = match generator.generate(request, || cancellation.is_cancelled()) {
                 Ok(value) => value,
                 Err(GenerationError::Cancelled) => {
@@ -197,7 +228,7 @@ impl GenerationService {
                 .insert(key, generated.clone(), self.config.cache_entries);
             generated
         };
-        let elapsed = started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+        let elapsed = elapsed_generation_microseconds(started);
         self.diagnostics
             .lock()
             .expect("diagnostics mutex poisoned")

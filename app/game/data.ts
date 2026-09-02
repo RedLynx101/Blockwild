@@ -1994,6 +1994,12 @@ Object.assign(ITEMS, {
  * 103 (Iron Ingot) merely because both enums share a number.
  */
 export const BLOCK_ITEM_ALIASES: Readonly<Partial<Record<BlockId, ItemCode>>> = Object.freeze({
+  // Directional wall torches are technical world states of the single Torch
+  // inventory item, not distinct inventory codes.
+  [BlockId.TorchWallNorth]: BlockId.Torch,
+  [BlockId.TorchWallSouth]: BlockId.Torch,
+  [BlockId.TorchWallEast]: BlockId.Torch,
+  [BlockId.TorchWallWest]: BlockId.Torch,
   [BlockId.WheatMill]: Item.WheatMillItem,
   [BlockId.Brinegrass]: Item.BrinegrassCutting,
   [BlockId.Sailkelp]: Item.SailkelpFrond,

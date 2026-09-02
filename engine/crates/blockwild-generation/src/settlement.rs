@@ -42,6 +42,10 @@ impl Faction {
         }
     }
 
+    pub(crate) fn from_id(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|faction| faction.id() == value)
+    }
+
     fn enabled(options: &GenerationOptions) -> Vec<Self> {
         Self::ALL
             .into_iter()
@@ -74,7 +78,7 @@ impl Faction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SettlementBiome {
+pub(crate) enum SettlementBiome {
     Forest,
     FlowerMeadow,
     Wildwood,
@@ -86,6 +90,24 @@ enum SettlementBiome {
     SugarplumVale,
     Glimmerwood,
     SnowcapRange,
+}
+
+impl SettlementBiome {
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::Forest => "forest",
+            Self::FlowerMeadow => "flower-meadow",
+            Self::Wildwood => "wildwood",
+            Self::Highlands => "highlands",
+            Self::Badlands => "badlands",
+            Self::CloudreedGlen => "cloudreed-glen",
+            Self::DeepOcean => "deep-ocean",
+            Self::LumenTrench => "lumen-trench",
+            Self::SugarplumVale => "sugarplum-vale",
+            Self::Glimmerwood => "glimmerwood",
+            Self::SnowcapRange => "snowcap-range",
+        }
+    }
 }
 
 fn settlement_biome(biome: BiomeId) -> Option<SettlementBiome> {
@@ -107,7 +129,7 @@ fn settlement_biome(biome: BiomeId) -> Option<SettlementBiome> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Size {
     Hamlet,
     Village,
@@ -130,13 +152,35 @@ impl Size {
             Self::Town => "town",
         }
     }
+
+    pub(crate) fn from_id(value: &str) -> Option<Self> {
+        [Self::Hamlet, Self::Village, Self::Town]
+            .into_iter()
+            .find(|size| size.id() == value)
+    }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum Environment {
     Surface,
     Underwater,
     Underground,
+}
+
+impl Environment {
+    pub(crate) const fn id(self) -> &'static str {
+        match self {
+            Self::Surface => "surface",
+            Self::Underwater => "underwater",
+            Self::Underground => "underground",
+        }
+    }
+
+    pub(crate) fn from_id(value: &str) -> Option<Self> {
+        [Self::Surface, Self::Underwater, Self::Underground]
+            .into_iter()
+            .find(|environment| environment.id() == value)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -157,7 +201,7 @@ pub(crate) struct Candidate {
     pub(crate) floor_y: Option<i32>,
     pub(crate) size: Size,
     pub(crate) faction: Faction,
-    biome: SettlementBiome,
+    pub(crate) biome: SettlementBiome,
     pub(crate) environment: Environment,
 }
 
@@ -795,6 +839,105 @@ impl<'a> Planner<'a> {
         self.accepted.insert((region_x, region_z), accepted.clone());
         accepted
     }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LocatedCandidate {
+    pub(crate) candidate: Candidate,
+    pub(crate) distance_squared: u64,
+    pub(crate) guild_hall: Option<GuildHall>,
+}
+
+pub(crate) struct NearestCandidateQuery<'a> {
+    pub(crate) origin_x_millis: i64,
+    pub(crate) origin_z_millis: i64,
+    pub(crate) factions: Option<&'a BTreeSet<Faction>>,
+    pub(crate) sizes: Option<&'a BTreeSet<Size>>,
+    pub(crate) environments: Option<&'a BTreeSet<Environment>>,
+    pub(crate) excluded_ids: &'a BTreeSet<String>,
+    pub(crate) maximum_region_radius: u16,
+    pub(crate) limit: u8,
+}
+
+/// Independently selects the bounded nearest accepted settlements with the
+/// same Chebyshev shells, filters, exclusion set, distance/id ordering, and
+/// conservative early-exit proof as the browser compatibility index.
+pub(crate) fn query_nearest_candidates(
+    seed: &str,
+    generator: &TerrainGeneratorV18,
+    query: NearestCandidateQuery<'_>,
+    mut materializable: impl FnMut(&Candidate, Option<&GuildHall>) -> bool,
+) -> Vec<LocatedCandidate> {
+    let mut planner = Planner::new(seed, generator);
+    let origin_region_x = i32::try_from(query.origin_x_millis.div_euclid(i64::from(REGION_BLOCKS) * 1_000))
+        .expect("bounded settlement origin region");
+    let origin_region_z = i32::try_from(query.origin_z_millis.div_euclid(i64::from(REGION_BLOCKS) * 1_000))
+        .expect("bounded settlement origin region");
+    let maximum_region_radius = i32::from(query.maximum_region_radius.min(96));
+    let limit = usize::from(query.limit.clamp(1, 32));
+    let mut results = Vec::<LocatedCandidate>::new();
+    for radius in 0..=maximum_region_radius {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                if dx.abs().max(dz.abs()) != radius {
+                    continue;
+                }
+                let Some(candidate) = planner.candidate(origin_region_x + dx, origin_region_z + dz) else {
+                    continue;
+                };
+                if query.excluded_ids.contains(&candidate.id)
+                    || query
+                        .factions
+                        .is_some_and(|values| !values.contains(&candidate.faction))
+                    || query.sizes.is_some_and(|values| !values.contains(&candidate.size))
+                    || query
+                        .environments
+                        .is_some_and(|values| !values.contains(&candidate.environment))
+                {
+                    continue;
+                }
+                let guild_hall = hall_for_candidate(&mut planner, &candidate);
+                if !materializable(&candidate, guild_hall.as_ref()) {
+                    continue;
+                }
+                let delta_x = i64::from(candidate.x) * 1_000 - query.origin_x_millis;
+                let delta_z = i64::from(candidate.z) * 1_000 - query.origin_z_millis;
+                let distance_squared = u64::try_from(
+                    delta_x
+                        .checked_mul(delta_x)
+                        .and_then(|x| delta_z.checked_mul(delta_z).and_then(|z| x.checked_add(z)))
+                        .expect("bounded settlement query distance arithmetic"),
+                )
+                .expect("bounded settlement query distance");
+                results.push(LocatedCandidate {
+                    candidate,
+                    distance_squared,
+                    guild_hall,
+                });
+            }
+        }
+        results.sort_by(|left, right| {
+            left.distance_squared
+                .cmp(&right.distance_squared)
+                .then_with(|| left.candidate.id.cmp(&right.candidate.id))
+        });
+        if results.len() >= limit {
+            // ceil(512_000 * sqrt(2)); hard-coded and shared with the browser
+            // oracle so early exit is integer-exact even beyond f64 precision.
+            const REGION_DIAGONAL_MILLIS_CEIL: i128 = 724_078;
+            let future_minimum =
+                i128::from(radius) * i128::from(REGION_BLOCKS) * 1_000 - REGION_DIAGONAL_MILLIS_CEIL * 2;
+            if future_minimum > 0
+                && u64::try_from(future_minimum * future_minimum).expect("bounded settlement shell")
+                    > results[limit - 1].distance_squared
+            {
+                results.truncate(limit);
+                return results;
+            }
+        }
+    }
+    results.truncate(limit);
+    results
 }
 
 fn size_radius(size: Size) -> i32 {
@@ -1523,6 +1666,73 @@ mod tests {
         );
         assert_eq!(base36(-35), "-z");
         assert_eq!(base36(36), "10");
+    }
+
+    #[test]
+    fn locator_materializes_the_same_atlantian_guild_hall_as_stamping() {
+        let seed = "LOCATOR-ALL-FILTERS";
+        let generator = TerrainGeneratorV18::new(seed, GenerationOptions::default());
+        let factions = BTreeSet::from([Faction::Atlantians]);
+        let environments = BTreeSet::from([Environment::Underwater]);
+        let located = query_nearest_candidates(
+            seed,
+            &generator,
+            NearestCandidateQuery {
+                origin_x_millis: -2_484_000,
+                origin_z_millis: -5_974_000,
+                factions: Some(&factions),
+                sizes: None,
+                environments: Some(&environments),
+                excluded_ids: &BTreeSet::new(),
+                maximum_region_radius: 18,
+                limit: 1,
+            },
+            |candidate, hall| {
+                crate::settlement_layout::public_arrival(candidate, hall, seed, &generator, false).is_some()
+            },
+        );
+        assert_eq!(located.len(), 1);
+        assert_eq!(located[0].candidate.id, "tidehold--5--c-ubgd6u");
+        let hall = located[0].guild_hall.as_ref().expect("locator carries resolved hall");
+        assert_eq!(hall.placement_id, "guild-hall:settlement-cluster:-2:-3:tideglass");
+        assert_eq!(hall.guild_id, "tideglass");
+    }
+
+    #[test]
+    fn legacy_locator_candidate_matches_the_compatibility_index() {
+        let seed = "LOCATOR-LEGACY";
+        let options = GenerationOptions {
+            profile: crate::contract::GenerationProfile::LegacyV14,
+            settlement_pattern: "legacy-scattered-v1".into(),
+            ..GenerationOptions::default()
+        };
+        let generator = TerrainGeneratorV18::new(seed, options);
+        let mut planner = Planner::new(seed, &generator);
+        let raw = planner
+            .raw_candidate(-9, 8)
+            .expect("legacy candidate survives site rarity");
+        assert_eq!(
+            (
+                raw.id.as_str(),
+                raw.x,
+                raw.z,
+                raw.faction,
+                raw.size,
+                raw.biome,
+                raw.environment
+            ),
+            (
+                "bonbon-borough--9-8-uwh7rk",
+                -4_208,
+                4_153,
+                Faction::Sugarcourt,
+                Size::Hamlet,
+                SettlementBiome::SugarplumVale,
+                Environment::Surface
+            ),
+        );
+        let accepted = planner.candidate(-9, 8).expect("legacy candidate survives spacing");
+        assert_eq!(accepted.id, raw.id);
     }
 
     #[test]

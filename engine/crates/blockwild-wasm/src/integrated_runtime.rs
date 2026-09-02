@@ -10,16 +10,24 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use blockwild_authority::BlockCatalogV1;
 use blockwild_engine::{
-    CONTENT_INSTALL_PAGE_TYPE_V1, CONTENT_INSTALL_RECEIPT_TYPE_V1, CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2,
-    CONTEXT_COMMAND_CONTINUITY_TYPE_V2, ENTITY_AUTHORITY_EXPORT_TYPE_V1, ENTITY_AUTHORITY_IMPORT_RECEIPT_TYPE_V1,
-    ENTITY_AUTHORITY_IMPORT_TYPE_V2, ENTITY_AUTHORITY_SNAPSHOT_TYPE_V2, ENTITY_COMPATIBILITY_EXPORT_TYPE_V1,
-    ENTITY_COMPATIBILITY_IMPORT_TYPE_V1, ENTITY_COMPATIBILITY_RECORD_TYPE_V1,
-    INTEGRATED_RUNTIME_LEGACY_MIGRATION_SCHEMA_V1, IntegratedRuntimeBatchV2, IntegratedRuntimeConfigV2,
-    IntegratedRuntimeError, IntegratedRuntimeIdentityV2, IntegratedRuntimeLegacyMigrationV1,
-    IntegratedRuntimeReceiptV2, IntegratedRuntimeRenderPresentationBindingV1, IntegratedRuntimeV2,
+    BASIC_DIRT_ACTION_PROJECTION_RECEIPT_TYPE_V1, BASIC_DIRT_ACTION_RECEIPT_TYPE_V1, CONTENT_INSTALL_PAGE_TYPE_V1,
+    CONTENT_INSTALL_RECEIPT_TYPE_V1, CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2, CONTEXT_COMMAND_CONTINUITY_TYPE_V2,
+    ENTITY_AUTHORITY_EXPORT_TYPE_V1, ENTITY_AUTHORITY_IMPORT_RECEIPT_TYPE_V1, ENTITY_AUTHORITY_IMPORT_TYPE_V2,
+    ENTITY_AUTHORITY_SNAPSHOT_TYPE_V2, ENTITY_COMPATIBILITY_EXPORT_TYPE_V1, ENTITY_COMPATIBILITY_IMPORT_TYPE_V1,
+    ENTITY_COMPATIBILITY_RECORD_TYPE_V1, INTEGRATED_RUNTIME_LEGACY_MIGRATION_SCHEMA_V1,
+    INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_CAPABILITY_ID_V1, INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_CAPABILITY_ID_V2,
+    IntegratedRuntimeBatchV2, IntegratedRuntimeConfigV2, IntegratedRuntimeError, IntegratedRuntimeIdentityV2,
+    IntegratedRuntimeLegacyMigrationV1, IntegratedRuntimeReceiptV2, IntegratedRuntimeRenderPresentationBindingV1,
+    IntegratedRuntimeV2, NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V1, NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V2,
+    NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V1, NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V2,
+    NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_TYPE_V1, NATIVE_DROP_PICKUP_RECEIPT_TYPE_V1,
+    NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_TYPE_V1, NATIVE_PLAYER_DROP_RECEIPT_TYPE_V1,
     PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1, PLAYER_BOOTSTRAP_STATUS_TYPE_V1,
     PLAYER_COMBAT_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1, PLAYER_COMBAT_BOOTSTRAP_STATUS_TYPE_V1,
-    PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1, PLAYER_INVENTORY_IMPORT_TYPE_V1, RuntimeCommandCacheLookupV1,
+    PLAYER_CREATIVE_SLOT_SET_RECEIPT_TYPE_V1, PLAYER_CREATIVE_SLOT_SET_TYPE_V1, PLAYER_GAME_MODE_SET_RECEIPT_TYPE_V1,
+    PLAYER_GAME_MODE_SET_TYPE_V1, PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1, PLAYER_INVENTORY_IMPORT_TYPE_V1,
+    PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_TYPE_V1, PLAYER_LOCATOR_ITEM_CONSUME_TYPE_V1, PLAYER_RESPAWN_RECEIPT_TYPE_V1,
+    PLAYER_RESPAWN_TYPE_V1, PlayerDeathCustodyLaneV1, RuntimeCommandCacheLookupV1,
     SIMULATION_CAMERA_CONFIG_RECEIPT_TYPE_V1, SIMULATION_CAMERA_CONFIG_TYPE_V1,
     SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V3, SIMULATION_PLAYER_BIND_FINAL_RECEIPT_TYPE_V4,
     SIMULATION_PLAYER_BIND_TYPE_V3, SIMULATION_PLAYER_BIND_TYPE_V4, TERRAIN_RESIDENCY_BATCH_TYPE_V1,
@@ -30,13 +38,23 @@ use blockwild_engine::{
     decode_gameplay_batch_v1, decode_network_agent_grant_v1, decode_network_command_release_v1,
     decode_network_delta_build_request_v1, decode_network_peer_grant_v1, decode_network_peer_release_v1,
     decode_network_reconnect_request_v1, decode_network_replication_record_v1, decode_player_bootstrap_status_query_v1,
-    decode_player_combat_bootstrap_status_query_v1, decode_player_inventory_import_v1, decode_runtime_camera_config_v1,
-    decode_runtime_context_command_continuity_query_v2, decode_runtime_persistence_dispatch_v1,
-    decode_runtime_player_binding_v1, decode_terrain_residency_batch_v1, decode_terrain_residency_reconcile_batch_v2,
-    encode_content_install_receipt_v1, encode_entity_authority_import_receipt_v1, encode_entity_event_batch_v1,
-    encode_gameplay_receipt_v1, encode_player_bootstrap_status_v1, encode_player_combat_bootstrap_status_v1,
-    encode_player_inventory_import_receipt_v1, encode_runtime_camera_config_receipt_v1,
-    encode_runtime_context_command_continuity_receipt_v2, encode_runtime_persistence_dispatch_receipt_v1,
+    decode_player_combat_bootstrap_status_query_v1, decode_player_creative_slot_set_v1, decode_player_game_mode_set_v1,
+    decode_player_inventory_import_v1, decode_player_locator_item_consume_v1, decode_player_respawn_v1,
+    decode_runtime_basic_dirt_action_receipt_query_v1, decode_runtime_camera_config_v1,
+    decode_runtime_context_command_continuity_query_v2, decode_runtime_native_block_edit_receipt_query_v1,
+    decode_runtime_native_block_edit_receipt_query_v2, decode_runtime_native_drop_pickup_receipt_query_v1,
+    decode_runtime_native_player_drop_receipt_query_v1, decode_runtime_persistence_dispatch_v1,
+    decode_runtime_persistence_status_query_v1, decode_runtime_player_binding_v1, decode_terrain_residency_batch_v1,
+    decode_terrain_residency_reconcile_batch_v2, encode_content_install_receipt_v1,
+    encode_entity_authority_import_receipt_v1, encode_entity_event_batch_v1, encode_gameplay_receipt_v1,
+    encode_player_bootstrap_status_v1, encode_player_combat_bootstrap_status_v1,
+    encode_player_creative_slot_set_receipt_v1, encode_player_game_mode_set_receipt_v1,
+    encode_player_inventory_import_receipt_v1, encode_player_locator_item_consume_receipt_v1,
+    encode_player_respawn_receipt_v1, encode_runtime_basic_dirt_action_projection_receipt_v1,
+    encode_runtime_camera_config_receipt_v1, encode_runtime_context_command_continuity_receipt_v2,
+    encode_runtime_native_block_edit_projection_receipt_v1, encode_runtime_native_block_edit_projection_receipt_v2,
+    encode_runtime_native_drop_pickup_projection_receipt_v1, encode_runtime_native_player_drop_projection_receipt_v1,
+    encode_runtime_persistence_dispatch_receipt_v1, encode_runtime_persistence_status_receipt_v1,
     encode_terrain_residency_receipt_v1, encode_terrain_residency_reconcile_receipt_v2,
     integrated_runtime_checkpoint_hash_v1, runtime_camera_config_state_hash_v1,
 };
@@ -51,14 +69,15 @@ use blockwild_runtime_wire::{
     NETWORK_RECONNECT_TYPE_V1, NETWORK_REPLICATION_RECEIPT_TYPE_V1, NETWORK_REPLICATION_REMOVE_TYPE_V1,
     NETWORK_REPLICATION_UPSERT_TYPE_V1, NETWORK_REQUEST_TYPE_V1, NETWORK_RESPONSE_TYPE_V1,
     PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1, PERSISTENCE_DISPATCH_RECEIPT_TYPE_V1,
-    PERSISTENCE_DISPATCH_TYPE_V1, PERSISTENCE_REQUEST_TYPE_V1, RUNTIME_BULK_MAX_PENDING_V1,
-    RUNTIME_BULK_MAX_QUEUED_BYTES_V1, RuntimeBulkEncodedV1, RuntimeBulkRequestV1, RuntimeBulkResponseV1,
-    RuntimeBulkSaveStageStateV1, RuntimeBulkStateV1, RuntimeCommandBatchV1, RuntimeCommandReceiptV1, RuntimeConfigV1,
-    RuntimeDomainOperationV1, RuntimeDomainV1, RuntimeExtractionV1, RuntimeIdentityV1, RuntimeRequestV1,
-    RuntimeResponseV1, RuntimeRevisionV1, RuntimeStepResponseV2, SIMULATION_PLAYER_BIND_RECEIPT_TYPE_V2,
-    SIMULATION_PLAYER_BIND_TYPE_V2, WireHash, command_receipt_hash_v1, decode_bulk_request_v1, decode_request_v1,
-    decode_step_request_v2, encode_bulk_response_v1, encode_response_v1, encode_step_response_v2,
-    extraction_checksum_v1, seal_semantic_action_receipt_v2, wire_checksum_v1,
+    PERSISTENCE_DISPATCH_TYPE_V1, PERSISTENCE_REQUEST_TYPE_V1, PERSISTENCE_STATUS_RECEIPT_TYPE_V1,
+    RUNTIME_BULK_MAX_PENDING_V1, RUNTIME_BULK_MAX_QUEUED_BYTES_V1, RuntimeBulkEncodedV1, RuntimeBulkRequestV1,
+    RuntimeBulkResponseV1, RuntimeBulkSaveStageStateV1, RuntimeBulkStateV1, RuntimeCommandBatchV1,
+    RuntimeCommandReceiptV1, RuntimeConfigV1, RuntimeDomainOperationV1, RuntimeDomainV1, RuntimeExtractionV1,
+    RuntimeIdentityV1, RuntimeLegacyMigrationAttestationWireV1, RuntimeRequestV1, RuntimeResponseV1, RuntimeRevisionV1,
+    RuntimeStepResponseV2, SIMULATION_PLAYER_BIND_RECEIPT_TYPE_V2, SIMULATION_PLAYER_BIND_TYPE_V2, WireHash,
+    command_receipt_hash_v1, decode_bulk_request_v1, decode_request_v1, decode_step_request_v2,
+    encode_bulk_response_v1, encode_response_v1, encode_step_response_v2, extraction_checksum_v1,
+    seal_semantic_action_receipt_v2, wire_checksum_v1,
 };
 use blockwild_simulation::{CameraModeV1, CameraPoseV1, CameraProfileV1};
 use blockwild_types::{CanonicalHash, CanonicalHasher};
@@ -83,20 +102,28 @@ const AUDIO_EXTRACTION_SCHEMA_V2: u16 = 2;
 // `bounded-extraction-v1` attests the fixed, bounded extraction protocol. Live
 // BWX/BWR6 completeness remains per-envelope evidence through domain statuses
 // and `bounded-extraction-blockers-v1`; it never mutates the Ready capability set.
-const CAPABILITIES: [&str; 15] = [
+const CAPABILITIES: [&str; 23] = [
     "awaited-receipts-v1",
+    "basic-dirt-action-receipt-v1",
     "bounded-entity-extraction-v1",
     "bounded-extraction-v1",
     "bounded-extraction-blockers-v1",
     "bulk-platform-v1",
     "content-bundle-install-v1",
+    "creative-inventory-slot-v1",
     "entity-authority-snapshot-v2",
     "entity-command-v1",
     "entity-compatibility-bridge-v1",
-    "fixed-step-input-v1-pending-live-cutover",
+    "fixed-step-input-v1",
     "gameplay-command-v1",
     "integrated-runtime-v1",
     "network-authority-v1",
+    "player-game-mode-set-v1",
+    "player-respawn-v1",
+    INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_CAPABILITY_ID_V1,
+    INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_CAPABILITY_ID_V2,
+    "native-drop-pickup-receipt-v1",
+    "native-player-drop-receipt-v1",
     "terrain-residency-v1",
     "terrain-residency-reconcile-v2",
 ];
@@ -1056,6 +1083,37 @@ pub fn blockwild_runtime_bulk_v2(handle: u32, control_bytes: &[u8], attachment_b
                                 chunk_count: summary.chunk_count,
                                 total_bytes: summary.total_bytes,
                                 compatibility_hash: WireHash(summary.compatibility_hash.0),
+                                legacy_migration: summary.legacy_migration.map(|value| {
+                                    RuntimeLegacyMigrationAttestationWireV1 {
+                                        migration_id: value.migration_id,
+                                        created_at: value.created_at,
+                                        source_key: value.source_key,
+                                        source_format: value.source_format,
+                                        source_byte_length: value.source_byte_length,
+                                        source_hash: WireHash(value.source_hash.0),
+                                        projection_hash: WireHash(value.projection_hash.0),
+                                        projection_edit_count: value.projection_edit_count,
+                                        projection_facing_count: value.projection_facing_count,
+                                        native_world_semantic_hash: WireHash(value.native_world_semantic_hash.0),
+                                        native_world_edit_count: value.native_world_edit_count,
+                                        native_world_facing_count: value.native_world_facing_count,
+                                        world_id: value.world_id,
+                                        universe_id: value.universe_id,
+                                        location_id: value.location_id,
+                                        world_seed: value.world_seed,
+                                        generator_hash: WireHash(value.generator_hash.0),
+                                        content_hash: WireHash(value.content_hash.0),
+                                        terrain_content_hash: WireHash(value.terrain_content_hash.0),
+                                        generation_options_hash: WireHash(value.generation_options_hash.0),
+                                        backup_byte_length: value.backup_byte_length,
+                                        backup_hash: WireHash(value.backup_hash.0),
+                                        backup_chunks: value.backup_chunks,
+                                        native_record_set_hash: WireHash(value.native_record_set_hash.0),
+                                        descriptor_hash: WireHash(value.descriptor_hash.0),
+                                        save_set_hash: WireHash(value.save_set_hash.0),
+                                        manifest_hash: WireHash(value.manifest_hash.0),
+                                    }
+                                }),
                             },
                             Err(error) => bulk_runtime_error(request_id, client_epoch, error, runtime),
                         },
@@ -1101,6 +1159,42 @@ pub fn blockwild_runtime_bulk_v2(handle: u32, control_bytes: &[u8], attachment_b
                                 remaining_dirty_records: 0,
                             },
                             Err(error) => bulk_runtime_error(request_id, client_epoch, error, runtime),
+                        },
+                        RuntimeBulkRequestV1::PersistenceStatus {
+                            request_id,
+                            client_epoch,
+                            payload,
+                            ..
+                        } => match decode_runtime_persistence_status_query_v1(&payload) {
+                            Err(error) => RuntimeBulkResponseV1::Error {
+                                request_id,
+                                client_epoch,
+                                worker_epoch: WORKER_EPOCH,
+                                code: error.code.into(),
+                                message: error.message,
+                                current: Some(current),
+                            },
+                            Ok(()) => match runtime.persistence_status() {
+                                Err(error) => bulk_runtime_error(request_id, client_epoch, error, runtime),
+                                Ok(status) => match encode_runtime_persistence_status_receipt_v1(&status) {
+                                    Err(error) => RuntimeBulkResponseV1::Error {
+                                        request_id,
+                                        client_epoch,
+                                        worker_epoch: WORKER_EPOCH,
+                                        code: error.code.into(),
+                                        message: error.message,
+                                        current: Some(current),
+                                    },
+                                    Ok(payload) => RuntimeBulkResponseV1::PersistenceStatus {
+                                        request_id,
+                                        client_epoch,
+                                        worker_epoch: WORKER_EPOCH,
+                                        current,
+                                        type_id: PERSISTENCE_STATUS_RECEIPT_TYPE_V1.into(),
+                                        payload,
+                                    },
+                                },
+                            },
                         },
                     }
                 }
@@ -1189,6 +1283,8 @@ pub fn blockwild_runtime_migrate_legacy_v2(
     handle: u32,
     control_bytes: &[u8],
     legacy_non_world_state_flags: u32,
+    source_key: &str,
+    source_format: &str,
     world_projection_bytes: &[u8],
 ) -> Vec<u8> {
     let Ok(request) = decode_bulk_request_v1(control_bytes, &[]) else {
@@ -1240,6 +1336,8 @@ pub fn blockwild_runtime_migrate_legacy_v2(
                         schema_version: INTEGRATED_RUNTIME_LEGACY_MIGRATION_SCHEMA_V1,
                         migration_id: stage_id.clone(),
                         source_stage_id: stage_id.clone(),
+                        source_key: source_key.to_owned(),
+                        source_format: source_format.to_owned(),
                         created_at,
                         legacy_non_world_state_flags: legacy_non_world_state_flags as u16,
                         world_projection: world_projection_bytes.to_vec(),
@@ -1411,11 +1509,22 @@ fn dispatch_command(
     let mut deferred_combat_bind_receipts = Vec::<(usize, WireHash)>::new();
     for (index, operation) in batch.operations.iter().enumerate() {
         let expected_schema = match (operation.domain, operation.type_id.as_str()) {
-            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V2) => 2,
-            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V3) => 3,
-            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V4) => 4,
-            (RuntimeDomainV1::Simulation, CONTEXT_COMMAND_CONTINUITY_TYPE_V2) => 2,
+            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V2) => {
+                blockwild_engine::SIMULATION_PLAYER_BIND_V2_OPERATION_SCHEMA
+            }
+            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V3) => {
+                blockwild_engine::SIMULATION_PLAYER_BIND_V3_OPERATION_SCHEMA
+            }
+            (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V4) => {
+                blockwild_engine::SIMULATION_PLAYER_BIND_V4_OPERATION_SCHEMA
+            }
+            (RuntimeDomainV1::Simulation, CONTEXT_COMMAND_CONTINUITY_TYPE_V2) => {
+                blockwild_engine::CONTEXT_COMMAND_CONTINUITY_V2_OPERATION_SCHEMA
+            }
             (RuntimeDomainV1::World, TERRAIN_RESIDENCY_RECONCILE_BATCH_TYPE_V2) => 2,
+            (RuntimeDomainV1::Gameplay, NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V2) => {
+                blockwild_engine::NATIVE_BLOCK_EDIT_RECEIPT_V2_OPERATION_SCHEMA
+            }
             _ => 1,
         };
         if operation.schema != expected_schema {
@@ -1467,7 +1576,12 @@ fn dispatch_command(
                     RuntimeDomainV1::Simulation,
                     SIMULATION_PLAYER_BIND_RECEIPT_TYPE_V2,
                     2,
-                    domain_ack(*b"BWB6", operation, &candidate),
+                    domain_ack(
+                        blockwild_engine::SIMULATION_PLAYER_BIND_RECEIPT_V2_MAGIC,
+                        blockwild_engine::SIMULATION_PLAYER_BIND_RECEIPT_V2_INNER_SCHEMA,
+                        operation,
+                        &candidate,
+                    ),
                 )
             }
             (RuntimeDomainV1::Simulation, SIMULATION_PLAYER_BIND_TYPE_V3) => {
@@ -1511,6 +1625,43 @@ fn dispatch_command(
                         .map_err(|error| (error.code.into(), error.message))?,
                 )
             }
+            (RuntimeDomainV1::Simulation, PLAYER_GAME_MODE_SET_TYPE_V1) => {
+                let request = decode_player_game_mode_set_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                if batch.actor_id != request.actor_id {
+                    return Err((
+                        "player-game-mode-actor".into(),
+                        "outer command actor does not own the player game-mode request".into(),
+                    ));
+                }
+                let receipt = candidate
+                    .set_player_game_mode(request, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Simulation,
+                    PLAYER_GAME_MODE_SET_RECEIPT_TYPE_V1,
+                    encode_player_game_mode_set_receipt_v1(&receipt)
+                        .map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Simulation, PLAYER_RESPAWN_TYPE_V1) => {
+                let request =
+                    decode_player_respawn_v1(&operation.payload).map_err(|error| (error.code.into(), error.message))?;
+                if batch.actor_id != request.actor_id {
+                    return Err((
+                        "player-respawn-actor".into(),
+                        "outer command actor does not own the player respawn request".into(),
+                    ));
+                }
+                let receipt = candidate
+                    .respawn_player_v1(request, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Simulation,
+                    PLAYER_RESPAWN_RECEIPT_TYPE_V1,
+                    encode_player_respawn_receipt_v1(&receipt).map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
             (RuntimeDomainV1::Simulation, PLAYER_BOOTSTRAP_STATUS_TYPE_V1) => {
                 let query = decode_player_bootstrap_status_query_v1(&operation.payload)
                     .map_err(|error| (error.code.into(), error.message))?;
@@ -1547,6 +1698,72 @@ fn dispatch_command(
                     CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2,
                     2,
                     encode_runtime_context_command_continuity_receipt_v2(&status)
+                        .map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Gameplay, BASIC_DIRT_ACTION_RECEIPT_TYPE_V1) => {
+                let query = decode_runtime_basic_dirt_action_receipt_query_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let status = candidate
+                    .basic_dirt_action_projection_status_v1(&query, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    BASIC_DIRT_ACTION_PROJECTION_RECEIPT_TYPE_V1,
+                    encode_runtime_basic_dirt_action_projection_receipt_v1(&status)
+                        .map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Gameplay, NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V1) => {
+                let query = decode_runtime_native_block_edit_receipt_query_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let status = candidate
+                    .native_block_edit_projection_status_v1(&query, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V1,
+                    encode_runtime_native_block_edit_projection_receipt_v1(&status)
+                        .map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Gameplay, NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V2) => {
+                let query = decode_runtime_native_block_edit_receipt_query_v2(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let status = candidate
+                    .native_block_edit_projection_status_v2(&query, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Gameplay,
+                    NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V2,
+                    2,
+                    encode_runtime_native_block_edit_projection_receipt_v2(&status)
+                        .map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Gameplay, NATIVE_DROP_PICKUP_RECEIPT_TYPE_V1) => {
+                let query = decode_runtime_native_drop_pickup_receipt_query_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let status = candidate
+                    .native_drop_pickup_projection_status_v1(&query, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_TYPE_V1,
+                    encode_runtime_native_drop_pickup_projection_receipt_v1(&status)
+                        .map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Gameplay, NATIVE_PLAYER_DROP_RECEIPT_TYPE_V1) => {
+                let query = decode_runtime_native_player_drop_receipt_query_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let status = candidate
+                    .native_player_drop_projection_status_v1(&query, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_TYPE_V1,
+                    encode_runtime_native_player_drop_projection_receipt_v1(&status)
                         .map_err(|error| (error.code.into(), error.message))?,
                 )
             }
@@ -1627,7 +1844,12 @@ fn dispatch_command(
                 domain_operation(
                     RuntimeDomainV1::Gameplay,
                     GAMEPLAY_ACTOR_GRANT_RECEIPT_TYPE_V1,
-                    domain_ack(*b"BWK7", operation, &candidate),
+                    domain_ack(
+                        blockwild_engine::GAMEPLAY_ACTOR_GRANT_RECEIPT_V1_MAGIC,
+                        blockwild_engine::GAMEPLAY_ACTOR_GRANT_RECEIPT_V1_INNER_SCHEMA,
+                        operation,
+                        &candidate,
+                    ),
                 )
             }
             (RuntimeDomainV1::Gameplay, CONTENT_INSTALL_PAGE_TYPE_V1) => {
@@ -1653,6 +1875,32 @@ fn dispatch_command(
                     RuntimeDomainV1::Gameplay,
                     PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1,
                     encode_player_inventory_import_receipt_v1(&receipt)
+                        .map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Gameplay, PLAYER_CREATIVE_SLOT_SET_TYPE_V1) => {
+                let command = decode_player_creative_slot_set_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let receipt = candidate
+                    .set_player_creative_slot(command, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    PLAYER_CREATIVE_SLOT_SET_RECEIPT_TYPE_V1,
+                    encode_player_creative_slot_set_receipt_v1(&receipt)
+                        .map_err(|error| (error.code.into(), error.message))?,
+                )
+            }
+            (RuntimeDomainV1::Gameplay, PLAYER_LOCATOR_ITEM_CONSUME_TYPE_V1) => {
+                let command = decode_player_locator_item_consume_v1(&operation.payload)
+                    .map_err(|error| (error.code.into(), error.message))?;
+                let receipt = candidate
+                    .consume_player_locator_item(command, CanonicalHash(operation.payload_hash.0))
+                    .map_err(|error| (error.code, error.message))?;
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_TYPE_V1,
+                    encode_player_locator_item_consume_receipt_v1(&receipt)
                         .map_err(|error| (error.code.into(), error.message))?,
                 )
             }
@@ -1705,7 +1953,12 @@ fn dispatch_command(
                 domain_operation(
                     RuntimeDomainV1::Network,
                     NETWORK_GRANT_RECEIPT_TYPE_V1,
-                    domain_ack(*b"BWP9", operation, &candidate),
+                    domain_ack(
+                        blockwild_engine::NETWORK_PEER_GRANT_RECEIPT_V1_MAGIC,
+                        blockwild_engine::NETWORK_PEER_GRANT_RECEIPT_V1_INNER_SCHEMA,
+                        operation,
+                        &candidate,
+                    ),
                 )
             }
             (RuntimeDomainV1::Network, NETWORK_AGENT_GRANT_TYPE_V1) => {
@@ -1717,7 +1970,12 @@ fn dispatch_command(
                 domain_operation(
                     RuntimeDomainV1::Network,
                     NETWORK_GRANT_RECEIPT_TYPE_V1,
-                    domain_ack(*b"BWJ9", operation, &candidate),
+                    domain_ack(
+                        blockwild_engine::NETWORK_AGENT_GRANT_RECEIPT_V1_MAGIC,
+                        blockwild_engine::NETWORK_AGENT_GRANT_RECEIPT_V1_INNER_SCHEMA,
+                        operation,
+                        &candidate,
+                    ),
                 )
             }
             (RuntimeDomainV1::Network, NETWORK_REPLICATION_UPSERT_TYPE_V1) => {
@@ -1729,7 +1987,12 @@ fn dispatch_command(
                 domain_operation(
                     RuntimeDomainV1::Network,
                     NETWORK_REPLICATION_RECEIPT_TYPE_V1,
-                    domain_ack(*b"BWI9", operation, &candidate),
+                    domain_ack(
+                        blockwild_engine::NETWORK_REPLICATION_UPSERT_RECEIPT_V1_MAGIC,
+                        blockwild_engine::NETWORK_REPLICATION_UPSERT_RECEIPT_V1_INNER_SCHEMA,
+                        operation,
+                        &candidate,
+                    ),
                 )
             }
             (RuntimeDomainV1::Network, NETWORK_REPLICATION_REMOVE_TYPE_V1) => {
@@ -1744,7 +2007,12 @@ fn dispatch_command(
                 domain_operation(
                     RuntimeDomainV1::Network,
                     NETWORK_REPLICATION_RECEIPT_TYPE_V1,
-                    domain_ack(*b"BWR9", operation, &candidate),
+                    domain_ack(
+                        blockwild_engine::NETWORK_REPLICATION_REMOVE_RECEIPT_V1_MAGIC,
+                        blockwild_engine::NETWORK_REPLICATION_REMOVE_RECEIPT_V1_INNER_SCHEMA,
+                        operation,
+                        &candidate,
+                    ),
                 )
             }
             (RuntimeDomainV1::Network, NETWORK_DELTA_BUILD_TYPE_V1) => {
@@ -1787,7 +2055,12 @@ fn dispatch_command(
                 domain_operation(
                     RuntimeDomainV1::Network,
                     NETWORK_PEER_RELEASE_RECEIPT_TYPE_V1,
-                    domain_ack(*b"BWL9", operation, &candidate),
+                    domain_ack(
+                        blockwild_engine::NETWORK_PEER_RELEASE_RECEIPT_V1_MAGIC,
+                        blockwild_engine::NETWORK_PEER_RELEASE_RECEIPT_V1_INNER_SCHEMA,
+                        operation,
+                        &candidate,
+                    ),
                 )
             }
             (RuntimeDomainV1::Network, NETWORK_COMMAND_RELEASE_TYPE_V1) => {
@@ -1799,7 +2072,12 @@ fn dispatch_command(
                 domain_operation(
                     RuntimeDomainV1::Network,
                     NETWORK_COMMAND_RELEASE_RECEIPT_TYPE_V1,
-                    domain_ack(*b"BWM9", operation, &candidate),
+                    domain_ack(
+                        blockwild_engine::NETWORK_COMMAND_RELEASE_RECEIPT_V1_MAGIC,
+                        blockwild_engine::NETWORK_COMMAND_RELEASE_RECEIPT_V1_INNER_SCHEMA,
+                        operation,
+                        &candidate,
+                    ),
                 )
             }
             (RuntimeDomainV1::Network, NETWORK_REQUEST_TYPE_V1) => {
@@ -1866,37 +2144,44 @@ fn domain_operation_with_schema(
     }
 }
 
-fn domain_ack(magic: [u8; 4], operation: &RuntimeDomainOperationV1, runtime: &IntegratedRuntimeV2) -> Vec<u8> {
+fn domain_ack(
+    magic: [u8; 4],
+    inner_schema: u16,
+    operation: &RuntimeDomainOperationV1,
+    runtime: &IntegratedRuntimeV2,
+) -> Vec<u8> {
     let mut payload = Vec::with_capacity(38);
     payload.extend_from_slice(&magic);
-    payload.extend_from_slice(&1_u16.to_le_bytes());
+    payload.extend_from_slice(&inner_schema.to_le_bytes());
     payload.extend_from_slice(&operation.payload_hash.0);
     payload.extend_from_slice(runtime.state_hash().as_bytes());
     payload
 }
 
 fn final_bind_ack(request_hash: WireHash, runtime: &IntegratedRuntimeV2) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(38);
-    payload.extend_from_slice(b"BWF6");
-    payload.extend_from_slice(&1_u16.to_le_bytes());
-    payload.extend_from_slice(&request_hash.0);
-    payload.extend_from_slice(runtime.state_hash().as_bytes());
-    payload
+    blockwild_engine::encode_runtime_player_final_bind_receipt_v1(
+        blockwild_engine::RuntimePlayerFinalBindVersionV1::InventoryV3,
+        blockwild_engine::RuntimePlayerFinalBindReceiptWireV1 {
+            request_payload_hash: CanonicalHash(request_hash.0),
+            terminal_state_hash: runtime.state_hash(),
+        },
+    )
 }
 
 fn final_combat_bind_ack(request_hash: WireHash, runtime: &IntegratedRuntimeV2) -> Vec<u8> {
-    let mut payload = Vec::with_capacity(38);
-    payload.extend_from_slice(b"BWF7");
-    payload.extend_from_slice(&1_u16.to_le_bytes());
-    payload.extend_from_slice(&request_hash.0);
-    payload.extend_from_slice(runtime.state_hash().as_bytes());
-    payload
+    blockwild_engine::encode_runtime_player_final_bind_receipt_v1(
+        blockwild_engine::RuntimePlayerFinalBindVersionV1::CombatV4,
+        blockwild_engine::RuntimePlayerFinalBindReceiptWireV1 {
+            request_payload_hash: CanonicalHash(request_hash.0),
+            terminal_state_hash: runtime.state_hash(),
+        },
+    )
 }
 
 fn encode_delta_build_response(packet: &[u8], stats: &InterestSelectionStatsV1) -> Vec<u8> {
     let mut payload = Vec::with_capacity(22 + packet.len());
-    payload.extend_from_slice(b"BWH9");
-    payload.extend_from_slice(&1_u16.to_le_bytes());
+    payload.extend_from_slice(&blockwild_engine::NETWORK_DELTA_BUILD_RESPONSE_V1_MAGIC);
+    payload.extend_from_slice(&blockwild_engine::NETWORK_DELTA_BUILD_RESPONSE_V1_INNER_SCHEMA.to_le_bytes());
     payload.extend_from_slice(&(stats.scope_probes as u32).to_le_bytes());
     payload.extend_from_slice(&(stats.candidate_records as u32).to_le_bytes());
     payload.extend_from_slice(&(stats.emitted_records as u32).to_le_bytes());
@@ -1907,8 +2192,8 @@ fn encode_delta_build_response(packet: &[u8], stats: &InterestSelectionStatsV1) 
 
 fn encode_reconnect_response(packet: Option<&[u8]>) -> Vec<u8> {
     let mut payload = Vec::with_capacity(11 + packet.map_or(0, <[u8]>::len));
-    payload.extend_from_slice(b"BWC9");
-    payload.extend_from_slice(&1_u16.to_le_bytes());
+    payload.extend_from_slice(&blockwild_engine::NETWORK_RECONNECT_RESPONSE_V1_MAGIC);
+    payload.extend_from_slice(&blockwild_engine::NETWORK_RECONNECT_RESPONSE_V1_INNER_SCHEMA.to_le_bytes());
     payload.push(u8::from(packet.is_some()));
     if let Some(packet) = packet {
         payload.extend_from_slice(&(packet.len() as u32).to_le_bytes());
@@ -2561,6 +2846,11 @@ fn option_u64_field(row: &mut DomainViewRowV1, key: impl Into<String>, value: Op
     }
 }
 
+fn canonical_player_sequence_marker_v1(value: &str) -> Option<u64> {
+    let parsed = value.parse::<u64>().ok()?;
+    (parsed > 0 && parsed <= MAX_SAFE_U64 && value == parsed.to_string()).then_some(parsed)
+}
+
 fn encode_domain_value(output: &mut Vec<u8>, value: &DomainViewValueV1) {
     match value {
         DomainViewValueV1::Bool(value) => {
@@ -3003,6 +3293,7 @@ fn player_domain_view(
     camera: Option<&CameraExtractionV1>,
 ) -> DomainViewV1 {
     let mut rows = Vec::new();
+    let mut blockers = Vec::new();
     if let Some(player) = runtime.player() {
         let body = &player.body;
         let mut row = domain_row(1, &player.binding.external_entity_id, player.last_input_sequence);
@@ -3032,6 +3323,7 @@ fn player_domain_view(
             ("crouching", body.crouching),
             ("swimSurfaceBreachReady", body.swim_surface_breach_ready),
             ("swimSurfaceBobActive", body.swim_surface_bob_active),
+            ("swimShoreExitReady", body.swim_shore_exit_ready),
         ] {
             bool_field(&mut row, key, value);
         }
@@ -3041,6 +3333,205 @@ fn player_domain_view(
         u64_field(&mut row, "buttons", u64::from(player.buttons));
         u64_field(&mut row, "flags", u64::from(player.flags));
         u64_field(&mut row, "lastInputSequence", player.last_input_sequence);
+        u64_field(&mut row, "gameplaySequence", runtime.gameplay().state.revision.sequence);
+        u64_field(
+            &mut row,
+            "gameplayCombatRevision",
+            runtime.gameplay().state.revision.combat,
+        );
+        let respawn_readiness = runtime.player_respawn_readiness_v1();
+        bool_field(&mut row, "queuedInputsEmpty", respawn_readiness.queued_inputs_empty);
+        bool_field(
+            &mut row,
+            "pendingContextCommandsEmpty",
+            respawn_readiness.pending_context_commands_empty,
+        );
+        bool_field(
+            &mut row,
+            "pendingMovementResultEmpty",
+            respawn_readiness.pending_movement_result_empty,
+        );
+        bool_field(&mut row, "miningStateEmpty", respawn_readiness.mining_state_empty);
+        if let Some(record) = runtime.entities().compatibility_record(player.entity_id) {
+            let death_raw = record.custom.get("player.deathSequenceV1");
+            let last_respawn_raw = record.custom.get("player.lastRespawnSequenceV1");
+            let death_sequence = death_raw.and_then(|value| canonical_player_sequence_marker_v1(value));
+            let last_respawn_sequence = last_respawn_raw.and_then(|value| canonical_player_sequence_marker_v1(value));
+            bool_field(&mut row, "deathSequence.present", death_raw.is_some());
+            if let Some(value) = death_sequence {
+                u64_field(&mut row, "deathSequence.value", value);
+            }
+            bool_field(&mut row, "lastRespawnSequence.present", last_respawn_raw.is_some());
+            if let Some(value) = last_respawn_sequence {
+                u64_field(&mut row, "lastRespawnSequence.value", value);
+            }
+            let marker_shapes_valid = death_raw.is_none() == death_sequence.is_none()
+                && last_respawn_raw.is_none() == last_respawn_sequence.is_none();
+            let dead = record.health.to_bits() == 0.0_f32.to_bits();
+            let live = record.health.is_finite() && record.health > 0.0;
+            let lifecycle_valid = if dead {
+                death_sequence.is_some_and(|death| death > last_respawn_sequence.unwrap_or(0))
+            } else if live {
+                match death_sequence {
+                    None => last_respawn_sequence.is_none(),
+                    Some(death) => last_respawn_sequence == Some(death),
+                }
+            } else {
+                false
+            };
+            if !marker_shapes_valid || !lifecycle_valid {
+                blockers.push("player-death-respawn-sequence-not-authoritative".into());
+            }
+        } else {
+            option_u64_field(&mut row, "deathSequence", None);
+            option_u64_field(&mut row, "lastRespawnSequence", None);
+            blockers.push("player-death-respawn-sequence-not-authoritative".into());
+        }
+        let latest_death_respawn = runtime.native_player_death_respawn_receipt_for_player_v1(
+            &player.binding.external_entity_id,
+            player.binding.player_id,
+        );
+        bool_field(&mut row, "latestDeathRespawn.present", latest_death_respawn.is_some());
+        if let Some(receipt) = latest_death_respawn {
+            u64_field(&mut row, "latestDeathRespawn.respawnSequence", receipt.sequence);
+            hash_field(&mut row, "latestDeathRespawn.receiptHash", receipt.receipt_hash);
+            u64_field(
+                &mut row,
+                "latestDeathRespawn.generatedDropCount",
+                receipt.drops.len() as u64,
+            );
+            u64_field(&mut row, "latestDeathRespawn.playerId", receipt.player_id.packed());
+            u64_field(
+                &mut row,
+                "latestDeathRespawn.entityId",
+                receipt.player_entity_id.packed(),
+            );
+            u64_field(&mut row, "latestDeathRespawn.deathSequence", receipt.death_sequence);
+            string_field(
+                &mut row,
+                "latestDeathRespawn.inventoryContainer",
+                container_view_key!(&receipt.inventory_container),
+            );
+            u64_field(
+                &mut row,
+                "latestDeathRespawn.inventoryBeforeRevision",
+                receipt.inventory_before_revision,
+            );
+            u64_field(
+                &mut row,
+                "latestDeathRespawn.inventoryAfterRevision",
+                receipt.inventory_after_revision,
+            );
+            string_field(
+                &mut row,
+                "latestDeathRespawn.equipmentContainer",
+                container_view_key!(&receipt.equipment_container),
+            );
+            u64_field(
+                &mut row,
+                "latestDeathRespawn.equipmentBeforeRevision",
+                receipt.equipment_before_revision,
+            );
+            u64_field(
+                &mut row,
+                "latestDeathRespawn.equipmentAfterRevision",
+                receipt.equipment_after_revision,
+            );
+            hash_field(
+                &mut row,
+                "latestDeathRespawn.custodyAfterHash",
+                receipt.custody_after_hash,
+            );
+            for (index, drop) in receipt.drops.iter().enumerate() {
+                let prefix = format!("latestDeathRespawn.drop.{index:04}");
+                u64_field(
+                    &mut row,
+                    format!("{prefix}.sourceLane"),
+                    match drop.source_lane {
+                        PlayerDeathCustodyLaneV1::Inventory => 0,
+                        PlayerDeathCustodyLaneV1::Equipment => 1,
+                    },
+                );
+                u64_field(&mut row, format!("{prefix}.sourceSlot"), u64::from(drop.source_slot));
+                u64_field(
+                    &mut row,
+                    format!("{prefix}.stack.itemCode"),
+                    u64::from(drop.stack.item_code),
+                );
+                u64_field(&mut row, format!("{prefix}.stack.count"), u64::from(drop.stack.count));
+                option_u64_field(
+                    &mut row,
+                    format!("{prefix}.stack.durability"),
+                    drop.stack.durability_millionths.map(u64::from),
+                );
+                hash_field(
+                    &mut row,
+                    format!("{prefix}.stack.metadataHash"),
+                    drop.stack.metadata_hash,
+                );
+                string_field(&mut row, format!("{prefix}.dropId"), &drop.drop_id);
+                u64_field(&mut row, format!("{prefix}.entityId"), drop.entity_id.packed());
+                string_field(
+                    &mut row,
+                    format!("{prefix}.custodyContainer"),
+                    container_view_key!(&drop.custody_container),
+                );
+                u64_field(&mut row, format!("{prefix}.custodySlot"), u64::from(drop.custody_slot));
+                u64_field(&mut row, format!("{prefix}.custodyRevision"), drop.custody_revision);
+                u64_field(&mut row, format!("{prefix}.spatialRevision"), drop.spatial_revision);
+                for (suffix, value) in [
+                    ("position.xMilli", drop.position.x_milli),
+                    ("position.yMilli", drop.position.y_milli),
+                    ("position.zMilli", drop.position.z_milli),
+                    ("velocity.xMilliPerSecond", drop.velocity_milli_per_second.x_milli),
+                    ("velocity.yMilliPerSecond", drop.velocity_milli_per_second.y_milli),
+                    ("velocity.zMilliPerSecond", drop.velocity_milli_per_second.z_milli),
+                ] {
+                    i64_field(&mut row, format!("{prefix}.{suffix}"), value);
+                }
+                for (suffix, value) in [
+                    ("rotation.yaw", drop.rotation.yaw),
+                    ("rotation.pitch", drop.rotation.pitch),
+                    ("rotation.roll", drop.rotation.roll),
+                ] {
+                    u64_field(&mut row, format!("{prefix}.{suffix}"), u64::from(value));
+                }
+                u64_field(&mut row, format!("{prefix}.createdTick"), drop.created_tick);
+                option_u64_field(&mut row, format!("{prefix}.expiresTick"), drop.expires_tick);
+                option_string_field(
+                    &mut row,
+                    format!("{prefix}.pickupLockActorId"),
+                    drop.pickup_lock_actor_id.as_deref(),
+                );
+                u64_field(&mut row, format!("{prefix}.pickupUnlockTick"), drop.pickup_unlock_tick);
+                hash_field(&mut row, format!("{prefix}.originHash"), drop.origin_hash);
+                hash_field(
+                    &mut row,
+                    format!("{prefix}.content.configuredManifestHash"),
+                    drop.content.configured_manifest_hash,
+                );
+                hash_field(
+                    &mut row,
+                    format!("{prefix}.content.installedManifestHash"),
+                    drop.content.installed_manifest_hash,
+                );
+                hash_field(
+                    &mut row,
+                    format!("{prefix}.content.installedRegistryHash"),
+                    drop.content.installed_registry_hash,
+                );
+                hash_field(
+                    &mut row,
+                    format!("{prefix}.content.itemContentHash"),
+                    drop.content.item_content_hash,
+                );
+                u64_field(
+                    &mut row,
+                    format!("{prefix}.content.itemContentVersion"),
+                    u64::from(drop.content.item_content_version),
+                );
+            }
+        }
         if let Some(input) = runtime.last_applied_input() {
             u64_field(&mut row, "input.targetTick", input.target_tick);
             i64_field(&mut row, "input.moveX", i64::from(input.move_x));
@@ -3090,7 +3581,6 @@ fn player_domain_view(
             rows.push(row);
         }
     }
-    let mut blockers = Vec::new();
     if let Some(camera) = camera {
         rows.push(camera_domain_row(camera));
     } else {
@@ -3358,7 +3848,37 @@ fn combat_domain_view(runtime: &IntegratedRuntimeV2) -> DomainViewV1 {
     ];
     for (record_id, combatant) in &state.combatants {
         let mut row = domain_row(1, format!("combatant:{record_id}"), combatant.revision);
+        u64_field(&mut row, "combatantRevision", combatant.revision);
         option_string_field(&mut row, "ownerId", combatant.owner_id.as_deref());
+        if let Some(entity_id) = combatant.entity_id {
+            u64_field(&mut row, "entityId", entity_id.packed());
+        }
+        string_field(
+            &mut row,
+            "vitalUnits",
+            match combatant.vital_units as u8 {
+                0 => "legacy-whole-hearts-v1",
+                1 => "millihearts-v1",
+                _ => unreachable!("CombatVitalUnits is a closed native enum"),
+            },
+        );
+        let cross_domain_parity = runtime.player().is_some_and(|player| {
+            player.binding.actor_id == *record_id
+                && combatant.entity_id == Some(player.entity_id)
+                && runtime
+                    .player_combat_bootstrap_status_v1(
+                        &blockwild_engine::PlayerBootstrapStatusQueryWireV1 {
+                            external_entity_id: player.binding.external_entity_id.clone(),
+                            actor_id: player.binding.actor_id.clone(),
+                            player_id: player.binding.player_id,
+                        },
+                        CanonicalHash::default(),
+                    )
+                    .ok()
+                    .and_then(|status| status.combatant)
+                    .is_some_and(|status| status.cross_domain_parity)
+        });
+        bool_field(&mut row, "crossDomainParity", cross_domain_parity);
         for (key, value) in [
             ("position.xMilli", combatant.position.x_milli),
             ("position.yMilli", combatant.position.y_milli),
@@ -4378,20 +4898,38 @@ fn encode_bulk_control(
 #[cfg(test)]
 mod tests {
     use blockwild_authority::{
-        BlockCatalogV1, WorldAddressV1, WorldAuthorityRevisionV1, WorldAuthorityStoreR4V1,
-        encode_compatibility_save_binary_v1,
+        BlockCatalogV1, CellPositionV1, LiquidMetadataV1, SectionInstallV1, WORLD_SECTION_CELL_COUNT_V1,
+        WorldAddressV1, WorldAuthorityRevisionV1, WorldAuthorityStoreR4V1, WorldCellReadV1, WorldCellV1,
+        WorldLiquidKindV1, WorldSectionAddressV1, encode_compatibility_save_binary_v1,
     };
     use blockwild_engine::{
-        ContainerKey, EntityAuthorityExportWireV1, EntityAuthorityImportWireV2, EntityCompatibilityExportWireV1,
-        EntityCompatibilityImportWireV1, ImportPlayerInventoryV1, ItemStack, LEGACY_STATE_PLAYER_V1,
-        PlayerBootstrapStatusQueryWireV1, PlayerInventoryImportWireV1, RuntimeCameraConfigWireV1,
-        RuntimePersistenceDispatchWireV1, RuntimePlayerBindingWireV1, decode_entity_authority_import_receipt_v1,
+        ActorRole, ContainerKey, ContainerKind, ContentArtifact, ContentDomain, ContentInstallPageWireV1,
+        EntityAuthorityExportWireV1, EntityAuthorityImportWireV2, EntityCompatibilityExportWireV1,
+        EntityCompatibilityImportWireV1, GameplayActor, GameplayBatch, GameplayCommand, ImportPlayerInventoryV1,
+        InventoryCommand, ItemStack, LEGACY_STATE_PLAYER_V1, PlayerBootstrapStatusQueryWireV1,
+        PlayerCreativeSlotSetWireV1, PlayerGameModeSetWireV1, PlayerInventoryImportWireV1,
+        PlayerLocatorItemConsumeWireV1, PlayerLocatorItemPurposeV1, PlayerRespawnWireV1,
+        RuntimeBasicDirtActionReceiptQueryWireV1, RuntimeCameraConfigWireV1, RuntimeNativeBlockEditReceiptQueryWireV1,
+        RuntimeNativeBlockEditReceiptQueryWireV2, RuntimeNativeDropPickupReceiptQueryWireV1,
+        RuntimeNativePlayerDropReceiptQueryWireV1, RuntimePersistenceDispatchWireV1, RuntimePlayerBindingWireV1,
+        SlotRef, TransferCommand, compile_content_bundle, decode_entity_authority_import_receipt_v1,
         decode_entity_event_batch_v1, decode_player_bootstrap_status_v1, decode_player_combat_bootstrap_status_v1,
-        decode_player_inventory_import_receipt_v1, decode_runtime_camera_config_receipt_v1,
-        encode_entity_authority_export_v1, encode_entity_authority_import_v2, encode_entity_command_batch_v1,
-        encode_entity_compatibility_export_v1, encode_entity_compatibility_import_v1,
+        decode_player_creative_slot_set_receipt_v1, decode_player_game_mode_set_receipt_v1,
+        decode_player_inventory_import_receipt_v1, decode_player_locator_item_consume_receipt_v1,
+        decode_player_respawn_receipt_v1, decode_runtime_basic_dirt_action_projection_receipt_v1,
+        decode_runtime_camera_config_receipt_v1, decode_runtime_native_block_edit_projection_receipt_v1,
+        decode_runtime_native_block_edit_projection_receipt_v2,
+        decode_runtime_native_drop_pickup_projection_receipt_v1,
+        decode_runtime_native_player_drop_projection_receipt_v1, decode_runtime_persistence_status_receipt_v1,
+        encode_content_install_page_v1, encode_entity_authority_export_v1, encode_entity_authority_import_v2,
+        encode_entity_command_batch_v1, encode_entity_compatibility_export_v1, encode_entity_compatibility_import_v1,
         encode_player_bootstrap_status_query_v1, encode_player_combat_bootstrap_status_query_v1,
-        encode_player_inventory_import_v1, encode_runtime_camera_config_v1, encode_runtime_persistence_dispatch_v1,
+        encode_player_creative_slot_set_v1, encode_player_game_mode_set_v1, encode_player_inventory_import_v1,
+        encode_player_locator_item_consume_v1, encode_player_respawn_v1,
+        encode_runtime_basic_dirt_action_receipt_query_v1, encode_runtime_camera_config_v1,
+        encode_runtime_native_block_edit_receipt_query_v1, encode_runtime_native_block_edit_receipt_query_v2,
+        encode_runtime_native_drop_pickup_receipt_query_v1, encode_runtime_native_player_drop_receipt_query_v1,
+        encode_runtime_persistence_dispatch_v1, encode_runtime_persistence_status_query_v1,
         encode_runtime_player_binding_v1,
     };
     use blockwild_entity::{
@@ -4401,10 +4939,11 @@ mod tests {
     };
     use blockwild_runtime_wire::{
         DEFAULT_GENERATION_OPTIONS_JSON_V1, DEFAULT_TERRAIN_CONTENT_HASH_V2, MAX_EXTRACTION_BYTES,
-        RuntimeBulkRequestV1, RuntimeBulkResponseV1, RuntimeBulkStateV1, RuntimeContextCommandActionV2,
-        RuntimeContextCommandV2, RuntimeInputFrameV1, RuntimeRequestV1, RuntimeRevisionV1,
-        RuntimeSemanticActionReasonV2, RuntimeStepRequestV2, decode_bulk_response_v1, decode_response_v1,
-        decode_step_response_v2, encode_bulk_request_v1, encode_request_v1, encode_step_request_v2,
+        RUNTIME_INPUT_BUTTON_DROP_V1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1, RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1,
+        RUNTIME_INPUT_FLAG_CREATIVE_V1, RuntimeBulkRequestV1, RuntimeBulkResponseV1, RuntimeBulkStateV1,
+        RuntimeContextCommandActionV2, RuntimeContextCommandV2, RuntimeInputFrameV1, RuntimeRequestV1,
+        RuntimeRevisionV1, RuntimeSemanticActionReasonV2, RuntimeStepRequestV2, decode_bulk_response_v1,
+        decode_response_v1, decode_step_response_v2, encode_bulk_request_v1, encode_request_v1, encode_step_request_v2,
         seal_context_command_v2, seal_runtime_command_batch_v1,
     };
     use blockwild_simulation::CameraProfileV1;
@@ -4528,10 +5067,951 @@ mod tests {
         }
     }
 
+    fn checked_r9_fixture_hex_v1(section: &str, field: &str) -> Vec<u8> {
+        const FIXTURE: &str =
+            include_str!("../../../../tests/fixtures/rust-engine/integrated-runtime-v1/r9-network-wire-fixture.json");
+        let section_marker = format!("\"{section}\": {{");
+        let section_start = FIXTURE.find(&section_marker).expect("checked R9 fixture section") + section_marker.len();
+        let field_marker = format!("\"{field}\": \"");
+        let field_start = FIXTURE[section_start..]
+            .find(&field_marker)
+            .expect("checked R9 fixture field")
+            + section_start
+            + field_marker.len();
+        let hex = &FIXTURE[field_start..field_start + FIXTURE[field_start..].find('"').expect("fixture terminator")];
+        assert!(hex.len().is_multiple_of(2), "R9 fixture must contain complete bytes");
+        hex.as_bytes()
+            .chunks_exact(2)
+            .map(|pair| {
+                u8::from_str_radix(std::str::from_utf8(pair).expect("fixture hex is ASCII"), 16)
+                    .expect("fixture contains canonical hex")
+            })
+            .collect()
+    }
+
+    fn r9_network_operation(type_id: &str, payload: Vec<u8>) -> RuntimeDomainOperationV1 {
+        RuntimeDomainOperationV1 {
+            domain: RuntimeDomainV1::Network,
+            type_id: type_id.into(),
+            schema: 1,
+            payload_hash: WireHash(wire_checksum_v1(&payload)),
+            payload,
+        }
+    }
+
+    fn r9_command_batch(
+        command_id: &str,
+        expected: RuntimeIdentityV1,
+        operation: RuntimeDomainOperationV1,
+    ) -> RuntimeCommandBatchV1 {
+        seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: command_id.into(),
+            idempotency_key: command_id.into(),
+            actor_id: "platform:r9-wire-fixture".into(),
+            expected,
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        })
+        .expect("seal checked R9 fixture command")
+    }
+
+    fn dispatch_checked_r9_operation(
+        runtime_handle: u32,
+        request_id: u32,
+        expected: RuntimeIdentityV1,
+        command_id: &str,
+        type_id: &str,
+        payload: Vec<u8>,
+    ) -> (RuntimeIdentityV1, RuntimeDomainOperationV1) {
+        let operation = r9_network_operation(type_id, payload);
+        let request = RuntimeRequestV1::Command {
+            request_id,
+            client_epoch: 1,
+            batch: r9_command_batch(command_id, expected.clone(), operation),
+        };
+        let request_wire = encode_request_v1(&request).unwrap();
+        assert_eq!(&request_wire[..4], b"BWRQ");
+        let response_wire = blockwild_runtime_command_v2(runtime_handle, &request_wire);
+        assert_eq!(&response_wire[..4], b"BWRS");
+        let RuntimeResponseV1::CommandReceipt {
+            request_id: actual_request_id,
+            client_epoch,
+            worker_epoch,
+            receipt,
+        } = decode_response_v1(&response_wire).unwrap()
+        else {
+            panic!("expected checked R9 command receipt")
+        };
+        assert_eq!(
+            (actual_request_id, client_epoch, worker_epoch),
+            (request_id, 1, WORKER_EPOCH)
+        );
+        let receipt_hash = match &receipt {
+            RuntimeCommandReceiptV1::Accepted { receipt_hash, .. }
+            | RuntimeCommandReceiptV1::Rejected { receipt_hash, .. } => *receipt_hash,
+        };
+        assert_eq!(receipt_hash, command_receipt_hash_v1(&receipt));
+        let RuntimeCommandReceiptV1::Accepted {
+            before,
+            after,
+            mut domain_receipts,
+            ..
+        } = receipt
+        else {
+            panic!("checked R9 lifecycle request must be accepted")
+        };
+        assert_eq!(before, expected);
+        assert_eq!(domain_receipts.len(), 1);
+        let domain_receipt = domain_receipts.remove(0);
+        assert_eq!(domain_receipt.domain, RuntimeDomainV1::Network);
+        assert_eq!(domain_receipt.schema, 1);
+        assert_eq!(
+            domain_receipt.payload_hash,
+            WireHash(wire_checksum_v1(&domain_receipt.payload))
+        );
+        (after, domain_receipt)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_rejected_r9_operation(
+        runtime_handle: u32,
+        request_id: u32,
+        expected: RuntimeIdentityV1,
+        command_id: &str,
+        type_id: &str,
+        payload: Vec<u8>,
+        expected_code: &str,
+    ) {
+        let request = RuntimeRequestV1::Command {
+            request_id,
+            client_epoch: 1,
+            batch: r9_command_batch(command_id, expected.clone(), r9_network_operation(type_id, payload)),
+        };
+        let request_wire = encode_request_v1(&request).unwrap();
+        assert_eq!(&request_wire[..4], b"BWRQ");
+        let response_wire = blockwild_runtime_command_v2(runtime_handle, &request_wire);
+        assert_eq!(&response_wire[..4], b"BWRS");
+        let RuntimeResponseV1::CommandReceipt {
+            request_id: actual_request_id,
+            client_epoch,
+            worker_epoch,
+            receipt,
+        } = decode_response_v1(&response_wire).unwrap()
+        else {
+            panic!("expected checked rejected R9 command receipt")
+        };
+        assert_eq!(
+            (actual_request_id, client_epoch, worker_epoch),
+            (request_id, 1, WORKER_EPOCH)
+        );
+        assert_eq!(
+            match &receipt {
+                RuntimeCommandReceiptV1::Accepted { receipt_hash, .. }
+                | RuntimeCommandReceiptV1::Rejected { receipt_hash, .. } => *receipt_hash,
+            },
+            command_receipt_hash_v1(&receipt)
+        );
+        let RuntimeCommandReceiptV1::Rejected { code, current, .. } = receipt else {
+            panic!("checked R9 failure must reject")
+        };
+        assert_eq!(code, expected_code);
+        assert_eq!(current, expected);
+    }
+
+    fn assert_r9_ack(
+        receipt: &RuntimeDomainOperationV1,
+        type_id: &str,
+        magic: &[u8; 4],
+        request: &[u8],
+        after: &RuntimeIdentityV1,
+        fixture_field: &str,
+    ) {
+        assert_eq!(receipt.type_id, type_id);
+        let mut expected = Vec::with_capacity(38);
+        expected.extend_from_slice(magic);
+        expected.extend_from_slice(&1_u16.to_le_bytes());
+        expected.extend_from_slice(&wire_checksum_v1(request));
+        expected.extend_from_slice(&after.state_hash.0);
+        assert_eq!(receipt.payload, expected);
+        assert_eq!(
+            receipt.payload,
+            checked_r9_fixture_hex_v1("wasmDispatchReceipts", fixture_field)
+        );
+    }
+
+    fn assert_only_network_revision_advanced(before: &RuntimeIdentityV1, after: &RuntimeIdentityV1) {
+        assert_eq!(
+            after.revision,
+            RuntimeRevisionV1 {
+                network: before.revision.network + 1,
+                ..before.revision
+            }
+        );
+        assert_eq!(after.tick, before.tick);
+        assert_ne!(after.state_hash, before.state_hash);
+    }
+
     fn insert_test_runtime(runtime: IntegratedRuntimeV2) -> (u32, RuntimeIdentityV1) {
         let identity = wire_identity(&runtime.identity());
         let handle = INTEGRATED_RUNTIMES.with(|store| store.borrow_mut().insert(runtime));
         (handle, identity)
+    }
+
+    fn checked_r9_fixture_runtime(session_id: &str) -> IntegratedRuntimeV2 {
+        let RuntimeRequestV1::Create { config, .. } = create_request(0) else {
+            unreachable!()
+        };
+        IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2 {
+            world_seed: config.world_seed,
+            universe_id: config.universe_id,
+            location_id: config.location_id,
+            session_id: session_id.into(),
+            terrain_content_hash: CanonicalHash(config.terrain_content_hash.0),
+            generation_options_json: config.generation_options_json,
+            content_hash: CanonicalHash(config.content_hash.0),
+            generator_hash: CanonicalHash(config.generator_hash.0),
+            block_catalog: BlockCatalogV1 {
+                directional_blocks: BTreeSet::new(),
+                waterlogged_blocks: BTreeSet::new(),
+                water_block_id: config.water_block_id,
+            },
+        })
+        .expect("create checked R9 fixture runtime")
+    }
+
+    fn shutdown_checked_r9_runtime(runtime_handle: u32, request_id: u32) {
+        let shutdown = RuntimeRequestV1::Shutdown {
+            request_id,
+            client_epoch: 1,
+            expected: None,
+        };
+        let request = encode_request_v1(&shutdown).unwrap();
+        assert_eq!(&request[..4], b"BWRQ");
+        let response = blockwild_runtime_destroy_v2(runtime_handle, &request);
+        assert_eq!(&response[..4], b"BWRS");
+        assert!(matches!(
+            decode_response_v1(&response).unwrap(),
+            RuntimeResponseV1::Shutdown { .. }
+        ));
+    }
+
+    fn runtime_with_bound_locator_item_count_v1(creative_mode: bool, held_count: u32) -> IntegratedRuntimeV2 {
+        let item = ContentArtifact {
+            domain: ContentDomain::Item,
+            id: "603".into(),
+            schema_id: "item-definition".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["item:603".into()],
+            canonical_bytes:
+                br#"{"id":603,"maxStack":8,"name":"Hearthroads Route Folio","useKind":"settlement-chart"}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let artifacts = vec![item];
+        let bundle = compile_content_bundle("wasm-locator-content-v1", artifacts.clone()).unwrap();
+        let mut config = create_request(1);
+        let RuntimeRequestV1::Create { config: wire, .. } = &mut config else {
+            unreachable!()
+        };
+        wire.content_hash = WireHash(bundle.manifest.manifest_hash.0);
+        let runtime_config = IntegratedRuntimeConfigV2 {
+            world_seed: wire.world_seed.clone(),
+            universe_id: wire.universe_id.clone(),
+            location_id: wire.location_id.clone(),
+            session_id: wire.session_id.clone(),
+            terrain_content_hash: CanonicalHash(wire.terrain_content_hash.0),
+            generation_options_json: wire.generation_options_json.clone(),
+            content_hash: CanonicalHash(wire.content_hash.0),
+            generator_hash: CanonicalHash(wire.generator_hash.0),
+            block_catalog: BlockCatalogV1::default(),
+        };
+        let mut runtime = IntegratedRuntimeV2::new(runtime_config).unwrap();
+        let page = ContentInstallPageWireV1 {
+            install_id: "wasm-locator-content-install".into(),
+            manifest_schema: bundle.manifest.schema_version,
+            source_revision: bundle.manifest.source_revision,
+            manifest_hash: bundle.manifest.manifest_hash,
+            domains: bundle.manifest.domains,
+            page_index: 0,
+            page_count: 1,
+            artifacts,
+        };
+        let page_bytes = encode_content_install_page_v1(&page).unwrap();
+        runtime
+            .install_content_page(page, CanonicalHash(wire_checksum_v1(&page_bytes)))
+            .unwrap();
+
+        let mut record = EntityCompatibilityRecord::new("player:locator", "player:locator", "player");
+        record.class = EntityClass::Player;
+        record.position = EntityVec3::new(8.0, 64.0, 8.0);
+        record.health = 20.0;
+        record.maximum_health = 20.0;
+        let entity_payload = encode_entity_compatibility_import_v1(&EntityCompatibilityImportWireV1 {
+            sequence: 1,
+            expected_revision: 0,
+            tick: 0,
+            desired_id: None,
+            residency: EntityResidency::Hot,
+            record,
+        })
+        .unwrap();
+        let binding_payload = encode_runtime_player_binding_v1(&RuntimePlayerBindingWireV1 {
+            external_entity_id: "player:locator".into(),
+            actor_id: "player:locator".into(),
+            player_id: blockwild_types::PlayerId::new(7, 1),
+            creative_mode,
+            radius: 0.35,
+            standing_height: 1.8,
+            crouching_height: 1.35,
+            mass: 80.0,
+            walk_speed: 4.3,
+            sprint_speed: 6.2,
+            creative_flight_speed: 8.0,
+            maximum_oxygen_seconds: 15.0,
+        })
+        .unwrap();
+        let mut slots = vec![None; 9];
+        if held_count > 0 {
+            slots[0] = Some(ItemStack::simple(603, held_count));
+        }
+        let inventory_payload = encode_player_inventory_import_v1(&PlayerInventoryImportWireV1 {
+            import: ImportPlayerInventoryV1 {
+                inventory: ContainerKey::player("player:locator"),
+                expected_revision: 0,
+                slots,
+                metadata: Vec::new(),
+            },
+            selected_slot: 0,
+        })
+        .unwrap();
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-locator-bootstrap".into(),
+            idempotency_key: "wasm-locator-bootstrap".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![
+                domain_operation(
+                    RuntimeDomainV1::Entities,
+                    ENTITY_COMPATIBILITY_IMPORT_TYPE_V1,
+                    entity_payload,
+                ),
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_PLAYER_BIND_TYPE_V3,
+                    3,
+                    binding_payload,
+                ),
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    PLAYER_INVENTORY_IMPORT_TYPE_V1,
+                    inventory_payload,
+                ),
+            ],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        dispatch_command(&runtime, &batch).unwrap().0
+    }
+
+    fn runtime_with_bound_locator_item_v1(creative_mode: bool) -> IntegratedRuntimeV2 {
+        runtime_with_bound_locator_item_count_v1(creative_mode, 2)
+    }
+
+    fn runtime_with_dead_bound_combat_player_with_count_v1(
+        held_count: u32,
+        split_one_into_equipment: bool,
+    ) -> IntegratedRuntimeV2 {
+        let mut runtime = runtime_with_bound_locator_item_count_v1(false, held_count);
+        let entity_id = runtime.player().expect("bound player").entity_id;
+        if split_one_into_equipment {
+            assert!(held_count >= 2, "split custody fixture requires two inventory units");
+            let inventory = ContainerKey::player("player:locator");
+            let equipment = ContainerKey {
+                kind: ContainerKind::Equipment,
+                id: "player:locator:equipment".into(),
+                owner_id: Some("player:locator".into()),
+            };
+            let inventory_revision = runtime.gameplay().state.inventory.containers[&inventory].revision;
+            let equipment_revision = runtime.gameplay().state.inventory.containers[&equipment].revision;
+            let gameplay = GameplayBatch::new(
+                "wasm-respawn-split-custody",
+                "wasm-respawn-split-custody",
+                GameplayActor {
+                    actor_id: "player:locator".into(),
+                    player_id: Some(blockwild_types::PlayerId::new(7, 1)),
+                    entity_id: Some(entity_id),
+                    role: ActorRole::Host,
+                },
+                runtime.gameplay().state.identity(),
+                vec![GameplayCommand::Inventory(InventoryCommand::Transfer(
+                    TransferCommand {
+                        from: SlotRef {
+                            container: inventory,
+                            slot: 0,
+                            expected_container_revision: Some(inventory_revision),
+                        },
+                        to: SlotRef {
+                            container: equipment,
+                            slot: 0,
+                            expected_container_revision: Some(equipment_revision),
+                        },
+                        count: 1,
+                        expected: None,
+                    },
+                ))],
+            );
+            let mut root = IntegratedRuntimeBatchV2::empty("wasm-respawn-split-custody", runtime.identity());
+            root.gameplay.push(gameplay);
+            assert!(runtime.commit(root).accepted());
+        }
+        let mut record = runtime
+            .entities()
+            .compatibility_record(entity_id)
+            .expect("bound R6 player")
+            .clone();
+        record.health = 1.0;
+        record.maximum_health = 1.0;
+        let mut vitals_batch = IntegratedRuntimeBatchV2::empty("wasm-respawn-prime-vitals", runtime.identity());
+        vitals_batch.entities.push(EntityCommandBatch {
+            schema: ENTITY_COMMAND_SCHEMA,
+            sequence: 2,
+            expected_revision: runtime.entities().revision(),
+            tick: runtime.identity().tick,
+            commands: vec![EntityCommand::ReplaceCompatibilityRecord {
+                id: entity_id,
+                value: record,
+            }],
+        });
+        assert!(runtime.commit(vitals_batch).accepted());
+        runtime.install_bound_player_combatant_v1().unwrap();
+
+        let address = runtime.world().active_address().clone();
+        for section_y in [7_i16, 8_i16] {
+            let mut cells = vec![WorldCellV1::default(); WORLD_SECTION_CELL_COUNT_V1];
+            if section_y == 7 {
+                for z in 7_usize..=8 {
+                    for x in 7_usize..=8 {
+                        cells[x + 16 * (z + 16 * 15)] = WorldCellV1 {
+                            block_id: 1,
+                            ..WorldCellV1::default()
+                        };
+                    }
+                }
+            } else {
+                for local_y in 0_usize..=2 {
+                    for z in 7_usize..=8 {
+                        for x in 7_usize..=8 {
+                            cells[x + 16 * (z + 16 * local_y)].liquid = LiquidMetadataV1 {
+                                kind: WorldLiquidKindV1::Water,
+                                level: 0,
+                                source: true,
+                                falling: false,
+                                contains_water: true,
+                                waterlogged: false,
+                            };
+                        }
+                    }
+                }
+            }
+            runtime
+                .world_mut_for_platform_install()
+                .install_section_for_replay(SectionInstallV1 {
+                    address: WorldSectionAddressV1 {
+                        world: address.clone(),
+                        chunk_x: 0,
+                        chunk_z: 0,
+                        section_y,
+                    },
+                    cells,
+                    source_revision: u64::from(section_y as u16),
+                    source_hash: format!("{:032x}", 0x7000_u64 + u64::from(section_y as u16)),
+                })
+                .unwrap();
+        }
+        let submerged_cell = runtime.world().read_cell(CellPositionV1 { x: 8, y: 66, z: 8 });
+        assert!(
+            matches!(
+                submerged_cell,
+                WorldCellReadV1::Loaded {
+                    cell: WorldCellV1 {
+                        liquid: LiquidMetadataV1 {
+                            kind: WorldLiquidKindV1::Water,
+                            ..
+                        },
+                        ..
+                    },
+                    ..
+                }
+            ),
+            "unexpected submerged fixture cell: {submerged_cell:?}"
+        );
+
+        for step in 0_u64..100 {
+            runtime
+                .step_context_v2(1_000_000 + step * 250_000, 8_000, &[], &[])
+                .unwrap();
+            if !runtime.gameplay().state.combat.combatants["player:locator"].alive {
+                break;
+            }
+        }
+        let combatant = &runtime.gameplay().state.combat.combatants["player:locator"];
+        let player = runtime.player().unwrap();
+        assert_eq!(
+            combatant.health, 0,
+            "player body after drowning fixture: {:?}",
+            player.body
+        );
+        assert!(!combatant.alive);
+        assert_eq!(
+            runtime.entities().compatibility_record(entity_id).unwrap().custom["player.deathSequenceV1"],
+            "1"
+        );
+        runtime
+    }
+
+    fn runtime_with_dead_bound_combat_player_v1() -> IntegratedRuntimeV2 {
+        runtime_with_dead_bound_combat_player_with_count_v1(2, false)
+    }
+
+    fn respawn_request_v1(runtime: &IntegratedRuntimeV2) -> PlayerRespawnWireV1 {
+        let player = runtime.player().expect("bound player");
+        let entity = runtime
+            .entities()
+            .hot()
+            .get(&player.entity_id)
+            .expect("bound R6 player");
+        let combatant = &runtime.gameplay().state.combat.combatants[&player.binding.actor_id];
+        PlayerRespawnWireV1 {
+            expected: runtime.identity(),
+            external_entity_id: player.binding.external_entity_id.clone(),
+            actor_id: player.binding.actor_id.clone(),
+            player_id: player.binding.player_id,
+            entity_id: player.entity_id,
+            expected_entity_revision: entity.entity_revision,
+            expected_gameplay_sequence: runtime.gameplay().state.revision.sequence,
+            expected_gameplay_combat_revision: runtime.gameplay().state.revision.combat,
+            expected_combatant_revision: combatant.revision,
+            expected_death_sequence: entity.record.custom["player.deathSequenceV1"].parse().unwrap(),
+            expected_max_health: combatant.max_health,
+            respawn_position: Default::default(),
+            keep_inventory: true,
+        }
+    }
+
+    fn runtime_with_basic_dirt_actions_v1(creative_mode: bool, held_count: u32) -> IntegratedRuntimeV2 {
+        let mut artifacts = vec![
+            ContentArtifact {
+                domain: ContentDomain::Item,
+                id: "2".into(),
+                schema_id: "item-definition".into(),
+                schema_version: 1,
+                content_version: 1,
+                aliases: vec!["item:2".into()],
+                canonical_bytes: br#"{"id":2,"maxStack":64,"name":"Dirt","placeBlock":2}"#.to_vec(),
+                unknown_extension_bytes: Vec::new(),
+            },
+            ContentArtifact {
+                domain: ContentDomain::Item,
+                id: "block-actions".into(),
+                schema_id: "block-action-catalog".into(),
+                schema_version: 2,
+                content_version: 1,
+                aliases: vec!["item:block-actions".into()],
+                canonical_bytes: br#"{"authorityBlockers":["authoritative-rng-context-unbound","dynamic-session-dispatch-runtime","game-mode-host-custody-runtime","legacy-computed-loot-source-runtime","world-support-collision-runtime"],"profiles":[{"breakProfile":{"contextualOverride":"none","durabilityCost":{"kind":"none"},"loot":{"mode":"none","rules":[],"selfDropMode":"absent","silkTouch":"not-authored"},"replacement":"blocked","wrongTool":"break-no-loot"},"hardness":0,"id":0,"placementIntent":"none","preferredTool":"hand","replaceable":true,"requiredTier":0,"solid":false,"topologyFlags":[]},{"authorityBlockers":["authoritative-rng-context-unbound"],"breakProfile":{"contextualOverride":"none","durabilityCost":{"amount":1,"kind":"constant"},"loot":{"mode":"all","rules":[{"chanceMillionths":1000000,"chanceModifier":"none","count":{"kind":"constant","value":1},"id":"dirt","item":2,"ordinal":0,"rollScope":"random-drop-v1"}],"selfDropMode":"absent","silkTouch":"not-authored"},"replacement":"air","wrongTool":"break-no-loot"},"hardness":0.1,"id":2,"item":2,"placementIntent":"direct","placementItems":[2],"preferredTool":"hand","replaceable":false,"requiredTier":0,"solid":true,"topologyFlags":[]}],"rngSemantics":{"algorithm":"xorshift32","exclusiveSelection":"less-than-cumulative-v1","ordering":"stable-profile-rule-order-v1","plantYieldClampMaximumMillionths":999900,"randomDropGate":"less-than-or-equal-v1","seedDerivation":"blockwild-seed-stream-v1","stream":"block-action-loot-v1","unit":"u32-open-upper-v1"},"schema":2}"#.to_vec(),
+                unknown_extension_bytes: Vec::new(),
+            },
+        ];
+        artifacts.sort_by(|left, right| (left.domain, left.id.as_str()).cmp(&(right.domain, right.id.as_str())));
+        let bundle = compile_content_bundle("wasm-basic-dirt-actions-v1", artifacts.clone()).unwrap();
+        let mut runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2 {
+            content_hash: bundle.manifest.manifest_hash,
+            ..IntegratedRuntimeConfigV2::default()
+        })
+        .unwrap();
+        let address = runtime.world().active_address().clone();
+        for section_y in [4_i16, 7_i16, 8_i16] {
+            let mut cells = vec![WorldCellV1::default(); WORLD_SECTION_CELL_COUNT_V1];
+            if section_y == 7 {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        cells[x + 16 * (z + 16 * 15)] = WorldCellV1 {
+                            block_id: 2,
+                            ..WorldCellV1::default()
+                        };
+                    }
+                }
+            }
+            if section_y == 8 {
+                cells[8 + 16 * (5 + 16)] = WorldCellV1 {
+                    block_id: 2,
+                    ..WorldCellV1::default()
+                };
+            }
+            runtime
+                .world_mut_for_platform_install()
+                .install_section_for_replay(SectionInstallV1 {
+                    address: WorldSectionAddressV1 {
+                        world: address.clone(),
+                        chunk_x: 0,
+                        chunk_z: 0,
+                        section_y,
+                    },
+                    cells,
+                    source_revision: u64::from(section_y as u16),
+                    source_hash: format!("{section_y:032x}"),
+                })
+                .unwrap();
+        }
+        let page = ContentInstallPageWireV1 {
+            install_id: "wasm-basic-dirt-actions-install".into(),
+            manifest_schema: bundle.manifest.schema_version,
+            source_revision: bundle.manifest.source_revision,
+            manifest_hash: bundle.manifest.manifest_hash,
+            domains: bundle.manifest.domains,
+            page_index: 0,
+            page_count: 1,
+            artifacts,
+        };
+        let page_bytes = encode_content_install_page_v1(&page).unwrap();
+        runtime
+            .install_content_page(page, CanonicalHash(wire_checksum_v1(&page_bytes)))
+            .unwrap();
+
+        let mut record = EntityCompatibilityRecord::new("player:dirt", "player:dirt", "player");
+        record.class = EntityClass::Player;
+        record.position = EntityVec3::new(8.0, 63.5, 8.0);
+        record.health = 20.0;
+        record.maximum_health = 20.0;
+        record.custom.insert("physics.grounded".into(), "true".into());
+        let entity_payload = encode_entity_compatibility_import_v1(&EntityCompatibilityImportWireV1 {
+            sequence: 1,
+            expected_revision: 0,
+            tick: 0,
+            desired_id: None,
+            residency: EntityResidency::Hot,
+            record,
+        })
+        .unwrap();
+        let binding_payload = encode_runtime_player_binding_v1(&RuntimePlayerBindingWireV1 {
+            external_entity_id: "player:dirt".into(),
+            actor_id: "player:dirt".into(),
+            player_id: blockwild_types::PlayerId::new(1, 1),
+            creative_mode,
+            radius: 0.35,
+            standing_height: 1.8,
+            crouching_height: 1.35,
+            mass: 80.0,
+            walk_speed: 4.3,
+            sprint_speed: 6.2,
+            creative_flight_speed: 8.0,
+            maximum_oxygen_seconds: 15.0,
+        })
+        .unwrap();
+        let mut slots = vec![None; 9];
+        slots[0] = Some(ItemStack::simple(2, held_count));
+        let inventory_payload = encode_player_inventory_import_v1(&PlayerInventoryImportWireV1 {
+            import: ImportPlayerInventoryV1 {
+                inventory: ContainerKey::player("player:dirt"),
+                expected_revision: 0,
+                slots,
+                metadata: Vec::new(),
+            },
+            selected_slot: 0,
+        })
+        .unwrap();
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-basic-dirt-bootstrap".into(),
+            idempotency_key: "wasm-basic-dirt-bootstrap".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![
+                domain_operation(
+                    RuntimeDomainV1::Entities,
+                    ENTITY_COMPATIBILITY_IMPORT_TYPE_V1,
+                    entity_payload,
+                ),
+                domain_operation_with_schema(
+                    RuntimeDomainV1::Simulation,
+                    SIMULATION_PLAYER_BIND_TYPE_V3,
+                    3,
+                    binding_payload,
+                ),
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    PLAYER_INVENTORY_IMPORT_TYPE_V1,
+                    inventory_payload,
+                ),
+            ],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        dispatch_command(&runtime, &batch).unwrap().0
+    }
+
+    fn basic_dirt_query_operation_v1(runtime: &IntegratedRuntimeV2, after_sequence: u64) -> RuntimeDomainOperationV1 {
+        domain_operation(
+            RuntimeDomainV1::Gameplay,
+            BASIC_DIRT_ACTION_RECEIPT_TYPE_V1,
+            encode_runtime_basic_dirt_action_receipt_query_v1(&RuntimeBasicDirtActionReceiptQueryWireV1 {
+                expected: runtime.identity(),
+                after_sequence,
+            })
+            .unwrap(),
+        )
+    }
+
+    fn dispatch_basic_dirt_query_v1(
+        runtime: &IntegratedRuntimeV2,
+        after_sequence: u64,
+        command_id: &str,
+    ) -> Result<blockwild_engine::RuntimeBasicDirtActionProjectionReceiptWireV1, (String, String)> {
+        let operation = basic_dirt_query_operation_v1(runtime, after_sequence);
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: command_id.into(),
+            idempotency_key: command_id.into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (candidate, receipts) = dispatch_command(runtime, &batch)?;
+        assert_eq!(candidate.identity(), runtime.identity());
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].domain, RuntimeDomainV1::Gameplay);
+        assert_eq!(receipts[0].type_id, BASIC_DIRT_ACTION_PROJECTION_RECEIPT_TYPE_V1);
+        assert_eq!(receipts[0].schema, 1);
+        decode_runtime_basic_dirt_action_projection_receipt_v1(&receipts[0].payload)
+            .map_err(|error| (error.code.into(), error.message))
+    }
+
+    fn dispatch_native_block_edit_query_v1(
+        runtime: &IntegratedRuntimeV2,
+        after_sequence: u64,
+        command_id: &str,
+    ) -> Result<blockwild_engine::RuntimeNativeBlockEditProjectionReceiptWireV1, (String, String)> {
+        let query = encode_runtime_native_block_edit_receipt_query_v1(&RuntimeNativeBlockEditReceiptQueryWireV1 {
+            expected: runtime.identity(),
+            after_sequence,
+        })
+        .unwrap();
+        assert_eq!(&query[..4], b"BWZ7");
+        let operation = domain_operation(RuntimeDomainV1::Gameplay, NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V1, query);
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: command_id.into(),
+            idempotency_key: command_id.into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (candidate, receipts) = dispatch_command(runtime, &batch)?;
+        assert_eq!(candidate.identity(), runtime.identity());
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].domain, RuntimeDomainV1::Gameplay);
+        assert_eq!(receipts[0].type_id, NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V1);
+        assert_eq!(receipts[0].schema, 1);
+        assert_eq!(&receipts[0].payload[..4], b"BWY7");
+        decode_runtime_native_block_edit_projection_receipt_v1(&receipts[0].payload)
+            .map_err(|error| (error.code.into(), error.message))
+    }
+
+    fn dispatch_native_block_edit_query_v2(
+        runtime: &IntegratedRuntimeV2,
+        after_sequence: u64,
+        command_id: &str,
+    ) -> Result<blockwild_engine::RuntimeNativeBlockEditProjectionReceiptWireV2, (String, String)> {
+        let query = encode_runtime_native_block_edit_receipt_query_v2(&RuntimeNativeBlockEditReceiptQueryWireV2 {
+            expected: runtime.identity(),
+            after_sequence,
+        })
+        .unwrap();
+        assert_eq!(&query[..4], b"BWZ8");
+        let operation =
+            domain_operation_with_schema(RuntimeDomainV1::Gameplay, NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V2, 2, query);
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: command_id.into(),
+            idempotency_key: command_id.into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (candidate, receipts) = dispatch_command(runtime, &batch)?;
+        assert_eq!(candidate.identity(), runtime.identity());
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].domain, RuntimeDomainV1::Gameplay);
+        assert_eq!(receipts[0].type_id, NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V2);
+        assert_eq!(receipts[0].schema, 2);
+        assert_eq!(&receipts[0].payload[..4], b"BWY8");
+        decode_runtime_native_block_edit_projection_receipt_v2(&receipts[0].payload)
+            .map_err(|error| (error.code.into(), error.message))
+    }
+
+    fn dispatch_native_drop_pickup_query_v1(
+        runtime: &IntegratedRuntimeV2,
+        after_sequence: u64,
+        command_id: &str,
+    ) -> Result<blockwild_engine::RuntimeNativeDropPickupProjectionReceiptWireV1, (String, String)> {
+        let operation = domain_operation(
+            RuntimeDomainV1::Gameplay,
+            NATIVE_DROP_PICKUP_RECEIPT_TYPE_V1,
+            encode_runtime_native_drop_pickup_receipt_query_v1(&RuntimeNativeDropPickupReceiptQueryWireV1 {
+                expected: runtime.identity(),
+                after_sequence,
+            })
+            .unwrap(),
+        );
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: command_id.into(),
+            idempotency_key: command_id.into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (candidate, receipts) = dispatch_command(runtime, &batch)?;
+        assert_eq!(candidate.identity(), runtime.identity());
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].domain, RuntimeDomainV1::Gameplay);
+        assert_eq!(receipts[0].type_id, NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_TYPE_V1);
+        assert_eq!(receipts[0].schema, 1);
+        decode_runtime_native_drop_pickup_projection_receipt_v1(&receipts[0].payload)
+            .map_err(|error| (error.code.into(), error.message))
+    }
+
+    fn dispatch_native_player_drop_query_v1(
+        runtime: &IntegratedRuntimeV2,
+        after_sequence: u64,
+        command_id: &str,
+    ) -> Result<blockwild_engine::RuntimeNativePlayerDropProjectionReceiptWireV1, (String, String)> {
+        let operation = domain_operation(
+            RuntimeDomainV1::Gameplay,
+            NATIVE_PLAYER_DROP_RECEIPT_TYPE_V1,
+            encode_runtime_native_player_drop_receipt_query_v1(&RuntimeNativePlayerDropReceiptQueryWireV1 {
+                expected: runtime.identity(),
+                after_sequence,
+            })
+            .unwrap(),
+        );
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: command_id.into(),
+            idempotency_key: command_id.into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (candidate, receipts) = dispatch_command(runtime, &batch)?;
+        assert_eq!(candidate.identity(), runtime.identity());
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].domain, RuntimeDomainV1::Gameplay);
+        assert_eq!(receipts[0].type_id, NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_TYPE_V1);
+        assert_eq!(receipts[0].schema, 1);
+        decode_runtime_native_player_drop_projection_receipt_v1(&receipts[0].payload)
+            .map_err(|error| (error.code.into(), error.message))
+    }
+
+    fn step_runtime_through_wasm_v1(
+        runtime_handle: u32,
+        request_id: u32,
+        expected: RuntimeIdentityV1,
+        monotonic_time_us: u64,
+        inputs: Vec<RuntimeInputFrameV1>,
+    ) -> (RuntimeIdentityV1, u16) {
+        let response = decode_response_v1(&blockwild_runtime_step_v2(
+            runtime_handle,
+            &encode_request_v1(&RuntimeRequestV1::Step {
+                request_id,
+                client_epoch: 1,
+                expected,
+                monotonic_time_us,
+                budget_us: 2_000,
+                inputs,
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        let RuntimeResponseV1::StepResult {
+            identity, fixed_steps, ..
+        } = response
+        else {
+            panic!("expected fixed-step response: {response:?}")
+        };
+        (identity, fixed_steps)
+    }
+
+    fn poll_runtime_platform_through_wasm_v1(
+        runtime_handle: u32,
+        request_id: u32,
+        expected: RuntimeBulkStateV1,
+    ) -> (RuntimeBulkStateV1, u64, String, Vec<u8>) {
+        let wire = encode_bulk_request_v1(&RuntimeBulkRequestV1::Poll {
+            request_id,
+            client_epoch: 1,
+            expected,
+            max_bytes: 128 * 1024 * 1024,
+        })
+        .unwrap();
+        let control = blockwild_runtime_bulk_v2(runtime_handle, &wire.control, &wire.attachment);
+        let transfer_token = u64::from_le_bytes(
+            control
+                .get(144..152)
+                .expect("bulk platform response carries transfer metadata")
+                .try_into()
+                .unwrap(),
+        );
+        let attachment = blockwild_runtime_bulk_take_attachment_v2(runtime_handle, transfer_token as f64);
+        let response = decode_bulk_response_v1(&control, &attachment).unwrap();
+        let RuntimeBulkResponseV1::PlatformRequest {
+            current,
+            transfer_token: response_token,
+            type_id,
+            payload,
+            ..
+        } = response
+        else {
+            panic!("expected persistence platform request: {response:?}")
+        };
+        assert_eq!(response_token, transfer_token);
+        (current, transfer_token, type_id, payload)
+    }
+
+    fn complete_runtime_platform_through_wasm_v1(
+        runtime_handle: u32,
+        request_id: u32,
+        expected: RuntimeBulkStateV1,
+        transfer_token: u64,
+        payload: Vec<u8>,
+    ) -> RuntimeBulkStateV1 {
+        let wire = encode_bulk_request_v1(&RuntimeBulkRequestV1::Complete {
+            request_id,
+            client_epoch: 1,
+            expected,
+            transfer_token,
+            type_id: blockwild_runtime_wire::PERSISTENCE_RESPONSE_TYPE_V1.into(),
+            payload,
+        })
+        .unwrap();
+        let response = decode_bulk_response_v1(
+            &blockwild_runtime_bulk_v2(runtime_handle, &wire.control, &wire.attachment),
+            &[],
+        )
+        .unwrap();
+        let RuntimeBulkResponseV1::Completed {
+            current,
+            transfer_token: response_token,
+            ..
+        } = response
+        else {
+            panic!("expected persistence platform completion: {response:?}")
+        };
+        assert_eq!(response_token, transfer_token);
+        current
     }
 
     fn extract_view_request(
@@ -4590,6 +6070,33 @@ mod tests {
     }
 
     #[test]
+    fn player_sequence_markers_require_nonzero_canonical_js_safe_u64() {
+        assert_eq!(canonical_player_sequence_marker_v1("1"), Some(1));
+        assert_eq!(
+            canonical_player_sequence_marker_v1(&MAX_SAFE_U64.to_string()),
+            Some(MAX_SAFE_U64)
+        );
+        for malformed in [
+            "",
+            "0",
+            "00",
+            "01",
+            "+1",
+            "-1",
+            " 1",
+            "1 ",
+            "9007199254740992",
+            "18446744073709551616",
+        ] {
+            assert_eq!(
+                canonical_player_sequence_marker_v1(malformed),
+                None,
+                "marker {malformed:?} must fail closed"
+            );
+        }
+    }
+
+    #[test]
     fn create_extract_and_destroy_use_one_live_generational_handle() {
         let request = create_request(1);
         let response = decode_response_v1(&blockwild_runtime_create_v2(&encode_request_v1(&request).unwrap())).unwrap();
@@ -4603,10 +6110,17 @@ mod tests {
             panic!("expected ready")
         };
         let has_capability = |expected: &str| capabilities.iter().any(|capability| capability == expected);
-        assert!(has_capability("fixed-step-input-v1-pending-live-cutover"));
+        assert!(has_capability("fixed-step-input-v1"));
+        assert!(has_capability("basic-dirt-action-receipt-v1"));
+        assert!(has_capability("native-block-edit-receipt-v1"));
+        assert!(has_capability("native-block-edit-receipt-v2"));
+        assert!(has_capability("native-drop-pickup-receipt-v1"));
+        assert!(has_capability("native-player-drop-receipt-v1"));
+        assert!(has_capability("player-game-mode-set-v1"));
+        assert!(has_capability("player-respawn-v1"));
         assert!(has_capability("bounded-extraction-v1"));
         assert!(has_capability("bounded-extraction-blockers-v1"));
-        assert!(!has_capability("fixed-step-input-v1"));
+        assert!(!has_capability("fixed-step-input-v1-pending-live-cutover"));
         assert!(has_capability("bounded-entity-extraction-v1"));
         assert!(has_capability("bulk-platform-v1"));
         assert!(has_capability("content-bundle-install-v1"));
@@ -4646,6 +6160,604 @@ mod tests {
         ))
         .unwrap();
         assert!(matches!(missing, RuntimeResponseV1::Error { .. }));
+    }
+
+    #[test]
+    fn checked_r9_network_requests_cross_real_bwrq_bwrs_dispatch() {
+        let mut create = create_request(12_001);
+        let RuntimeRequestV1::Create { config, .. } = &mut create else {
+            unreachable!()
+        };
+        config.session_id = "session:雪:🦀".into();
+        let create_wire = encode_request_v1(&create).unwrap();
+        assert_eq!(&create_wire[..4], b"BWRQ");
+        let ready_wire = blockwild_runtime_create_v2(&create_wire);
+        assert_eq!(&ready_wire[..4], b"BWRS");
+        let RuntimeResponseV1::Ready {
+            request_id,
+            client_epoch,
+            worker_epoch,
+            runtime_handle,
+            identity: ready_identity,
+            capabilities,
+            ..
+        } = decode_response_v1(&ready_wire).unwrap()
+        else {
+            panic!("expected ready response")
+        };
+        assert_eq!((request_id, client_epoch, worker_epoch), (12_001, 1, WORKER_EPOCH));
+        assert!(
+            capabilities
+                .iter()
+                .any(|capability| capability == "network-authority-v1")
+        );
+
+        let peer_grant = checked_r9_fixture_hex_v1("requests", "peerGrant");
+        let agent_grant = checked_r9_fixture_hex_v1("requests", "agentGrant");
+        let replication_record = checked_r9_fixture_hex_v1("requests", "replicationRecord");
+        let delta_build = checked_r9_fixture_hex_v1("requests", "deltaBuild");
+        let reconnect = checked_r9_fixture_hex_v1("requests", "reconnect");
+        let command_release = checked_r9_fixture_hex_v1("requests", "commandRelease");
+        let peer_release = checked_r9_fixture_hex_v1("requests", "peerRelease");
+        let browser_handshake = checked_r9_fixture_hex_v1("browserHandshake", "outerRequestHex");
+        let browser_host = checked_r9_fixture_hex_v1("browserHandshake", "nestedHostBwn1Hex");
+        let browser_peer = checked_r9_fixture_hex_v1("browserHandshake", "nestedPeerBwn1Hex");
+        let browser_command_batch = checked_r9_fixture_hex_v1("browserCommandBatch", "outerRequestHex");
+        let browser_command = checked_r9_fixture_hex_v1("browserCommandBatch", "nestedCommandBwn1Hex");
+        let browser_delta_delivery = checked_r9_fixture_hex_v1("browserDeltaDelivery", "outerRequestHex");
+        let browser_delta_checkpoint = checked_r9_fixture_hex_v1("browserDeltaDelivery", "nestedCheckpointBwn1Hex");
+        let browser_delta = checked_r9_fixture_hex_v1("browserDeltaDelivery", "nestedDeltaBwn1Hex");
+        let browser_agent_command = checked_r9_fixture_hex_v1("browserAgentCommand", "outerRequestHex");
+        let browser_agent_envelope = checked_r9_fixture_hex_v1("browserAgentCommand", "nestedEnvelopeBwn1Hex");
+        let browser_agent_work = checked_r9_fixture_hex_v1("browserAgentCommand", "nestedWorkBwa1Hex");
+        let browser_guest_pose = checked_r9_fixture_hex_v1("browserGuestPose", "outerRequestHex");
+        let browser_pose_command = checked_r9_fixture_hex_v1("browserGuestPose", "nestedCommandBwn1Hex");
+        let browser_pose = checked_r9_fixture_hex_v1("browserGuestPose", "nestedPoseBwnpHex");
+        assert_eq!(&peer_grant[..4], b"BWP9");
+        assert_eq!(&agent_grant[..4], b"BWJ9");
+        assert_eq!(&replication_record[..4], b"BWI9");
+        assert_eq!(&delta_build[..4], b"BWD9");
+        assert_eq!(&reconnect[..4], b"BWC9");
+        assert_eq!(&command_release[..4], b"BWM9");
+        assert_eq!(&peer_release[..4], b"BWL9");
+        assert_eq!(&browser_handshake[..4], b"BWRN");
+        assert_eq!(&browser_host[..4], b"BWN1");
+        assert_eq!(&browser_peer[..4], b"BWN1");
+        assert_eq!(&browser_command_batch[..4], b"BWRN");
+        assert_eq!(&browser_command[..4], b"BWN1");
+        assert_eq!(&browser_delta_delivery[..4], b"BWRN");
+        assert_eq!(&browser_delta_checkpoint[..4], b"BWN1");
+        assert_eq!(&browser_delta[..4], b"BWN1");
+        assert_eq!(&browser_agent_command[..4], b"BWRN");
+        assert_eq!(&browser_agent_envelope[..4], b"BWN1");
+        assert_eq!(&browser_agent_work[..4], b"BWA1");
+        assert_eq!(&browser_guest_pose[..4], b"BWRN");
+        assert_eq!(&browser_pose_command[..4], b"BWN1");
+        assert_eq!(&browser_pose[..4], b"BWNP");
+        let blockwild_network::NetworkBrowserRequestV1::Handshake { request_id, host, peer } =
+            blockwild_network::decode_network_browser_request_v1(&browser_handshake).unwrap()
+        else {
+            panic!("checked outer BWRN must contain a handshake")
+        };
+        assert_eq!(request_id, 9_007_199_254_740_987);
+        assert_eq!(
+            blockwild_network::encode_network_handshake_v1(&host).unwrap(),
+            browser_host
+        );
+        assert_eq!(
+            blockwild_network::encode_network_handshake_v1(&peer).unwrap(),
+            browser_peer
+        );
+        let blockwild_network::NetworkBrowserRequestV1::CommandBatch {
+            request_id, commands, ..
+        } = blockwild_network::decode_network_browser_request_v1(&browser_command_batch).unwrap()
+        else {
+            panic!("checked outer BWRN must contain a command batch")
+        };
+        assert_eq!(request_id, 9_007_199_254_740_986);
+        assert_eq!(commands.len(), 1);
+        assert_eq!(
+            blockwild_network::encode_network_command_v1(&commands[0]).unwrap(),
+            browser_command
+        );
+        let blockwild_network::NetworkBrowserRequestV1::DeltaDelivery {
+            request_id,
+            checkpoint,
+            delta,
+            ..
+        } = blockwild_network::decode_network_browser_request_v1(&browser_delta_delivery).unwrap()
+        else {
+            panic!("checked outer BWRN must contain a delta delivery")
+        };
+        assert_eq!(request_id, 9_007_199_254_740_985);
+        assert_eq!(
+            blockwild_network::encode_network_checkpoint_v1(&checkpoint).unwrap(),
+            browser_delta_checkpoint
+        );
+        assert_eq!(
+            blockwild_network::encode_network_delta_v1(&delta).unwrap(),
+            browser_delta
+        );
+        let blockwild_network::NetworkBrowserRequestV1::AgentCommand {
+            request_id,
+            envelope,
+            work,
+            ..
+        } = blockwild_network::decode_network_browser_request_v1(&browser_agent_command).unwrap()
+        else {
+            panic!("checked outer BWRN must contain an agent command")
+        };
+        assert_eq!(request_id, 9_007_199_254_740_984);
+        assert_eq!(
+            blockwild_network::encode_network_command_v1(&envelope).unwrap(),
+            browser_agent_envelope
+        );
+        assert_eq!(
+            blockwild_network::encode_agent_work_command_v1(&work).unwrap(),
+            browser_agent_work
+        );
+        let blockwild_network::NetworkBrowserRequestV1::GuestPose {
+            request_id,
+            command,
+            pose,
+            ..
+        } = blockwild_network::decode_network_browser_request_v1(&browser_guest_pose).unwrap()
+        else {
+            panic!("checked outer BWRN must contain a guest pose")
+        };
+        assert_eq!(request_id, 9_007_199_254_740_983);
+        assert_eq!(
+            blockwild_network::encode_network_command_v1(&command).unwrap(),
+            browser_pose_command
+        );
+        assert_eq!(
+            blockwild_network::encode_network_player_pose_v1(&pose).unwrap(),
+            browser_pose
+        );
+
+        let (after_peer_grant, peer_grant_receipt) = dispatch_checked_r9_operation(
+            runtime_handle,
+            12_002,
+            ready_identity.clone(),
+            "r9-fixture:peer-grant",
+            NETWORK_PEER_GRANT_TYPE_V1,
+            peer_grant.clone(),
+        );
+        assert_only_network_revision_advanced(&ready_identity, &after_peer_grant);
+        assert_r9_ack(
+            &peer_grant_receipt,
+            NETWORK_GRANT_RECEIPT_TYPE_V1,
+            b"BWP9",
+            &peer_grant,
+            &after_peer_grant,
+            "peerGrant",
+        );
+
+        let (after_agent_grant, agent_grant_receipt) = dispatch_checked_r9_operation(
+            runtime_handle,
+            12_003,
+            after_peer_grant.clone(),
+            "r9-fixture:agent-grant",
+            NETWORK_AGENT_GRANT_TYPE_V1,
+            agent_grant.clone(),
+        );
+        assert_only_network_revision_advanced(&after_peer_grant, &after_agent_grant);
+        assert_r9_ack(
+            &agent_grant_receipt,
+            NETWORK_GRANT_RECEIPT_TYPE_V1,
+            b"BWJ9",
+            &agent_grant,
+            &after_agent_grant,
+            "agentGrant",
+        );
+
+        let (after_replication, replication_receipt) = dispatch_checked_r9_operation(
+            runtime_handle,
+            12_004,
+            after_agent_grant.clone(),
+            "r9-fixture:replication-upsert",
+            NETWORK_REPLICATION_UPSERT_TYPE_V1,
+            replication_record.clone(),
+        );
+        assert_only_network_revision_advanced(&after_agent_grant, &after_replication);
+        assert_r9_ack(
+            &replication_receipt,
+            NETWORK_REPLICATION_RECEIPT_TYPE_V1,
+            b"BWI9",
+            &replication_record,
+            &after_replication,
+            "replicationRecord",
+        );
+
+        let (after_delta, delta_receipt) = dispatch_checked_r9_operation(
+            runtime_handle,
+            12_005,
+            after_replication.clone(),
+            "r9-fixture:delta-build",
+            NETWORK_DELTA_BUILD_TYPE_V1,
+            delta_build.clone(),
+        );
+        assert_only_network_revision_advanced(&after_replication, &after_delta);
+        assert_eq!(delta_receipt.type_id, NETWORK_DELTA_BUILD_RESPONSE_TYPE_V1);
+        assert_eq!(
+            delta_receipt.payload,
+            checked_r9_fixture_hex_v1("wasmDispatchReceipts", "deltaBuild")
+        );
+
+        let (after_reconnect, reconnect_receipt) = dispatch_checked_r9_operation(
+            runtime_handle,
+            12_006,
+            after_delta.clone(),
+            "r9-fixture:reconnect",
+            NETWORK_RECONNECT_TYPE_V1,
+            reconnect.clone(),
+        );
+        assert_eq!(
+            after_reconnect, after_delta,
+            "missing reconnect checkpoint is read-only"
+        );
+        assert_eq!(reconnect_receipt.type_id, NETWORK_RECONNECT_RESPONSE_TYPE_V1);
+        assert_eq!(
+            reconnect_receipt.payload,
+            checked_r9_fixture_hex_v1("wasmDispatchReceipts", "reconnect")
+        );
+
+        let (after_replication_remove, replication_remove_receipt) = dispatch_checked_r9_operation(
+            runtime_handle,
+            12_007,
+            after_reconnect.clone(),
+            "r9-fixture:replication-remove",
+            NETWORK_REPLICATION_REMOVE_TYPE_V1,
+            replication_record.clone(),
+        );
+        assert_only_network_revision_advanced(&after_reconnect, &after_replication_remove);
+        assert_r9_ack(
+            &replication_remove_receipt,
+            NETWORK_REPLICATION_RECEIPT_TYPE_V1,
+            b"BWR9",
+            &replication_record,
+            &after_replication_remove,
+            "replicationRemove",
+        );
+        dispatch_rejected_r9_operation(
+            runtime_handle,
+            12_008,
+            after_replication_remove.clone(),
+            "r9-fixture:replication-remove:missing",
+            NETWORK_REPLICATION_REMOVE_TYPE_V1,
+            replication_record.clone(),
+            "network-record-missing",
+        );
+
+        let (after_command_release, command_release_receipt) = dispatch_checked_r9_operation(
+            runtime_handle,
+            12_009,
+            after_replication_remove.clone(),
+            "r9-fixture:command-release",
+            NETWORK_COMMAND_RELEASE_TYPE_V1,
+            command_release.clone(),
+        );
+        assert_only_network_revision_advanced(&after_replication_remove, &after_command_release);
+        assert_r9_ack(
+            &command_release_receipt,
+            NETWORK_COMMAND_RELEASE_RECEIPT_TYPE_V1,
+            b"BWM9",
+            &command_release,
+            &after_command_release,
+            "commandRelease",
+        );
+
+        let (after_peer_release, peer_release_receipt) = dispatch_checked_r9_operation(
+            runtime_handle,
+            12_010,
+            after_command_release.clone(),
+            "r9-fixture:peer-release",
+            NETWORK_PEER_RELEASE_TYPE_V1,
+            peer_release.clone(),
+        );
+        assert_only_network_revision_advanced(&after_command_release, &after_peer_release);
+        assert_r9_ack(
+            &peer_release_receipt,
+            NETWORK_PEER_RELEASE_RECEIPT_TYPE_V1,
+            b"BWL9",
+            &peer_release,
+            &after_peer_release,
+            "peerRelease",
+        );
+
+        let (after_browser_handshake, browser_handshake_receipt) = dispatch_checked_r9_operation(
+            runtime_handle,
+            12_011,
+            after_peer_release.clone(),
+            "r9-fixture:browser-handshake",
+            NETWORK_REQUEST_TYPE_V1,
+            browser_handshake.clone(),
+        );
+        assert_only_network_revision_advanced(&after_peer_release, &after_browser_handshake);
+        assert_eq!(browser_handshake_receipt.type_id, NETWORK_RESPONSE_TYPE_V1);
+        assert_eq!(&browser_handshake_receipt.payload[..4], b"BWNA");
+        assert_eq!(
+            browser_handshake_receipt.payload,
+            checked_r9_fixture_hex_v1("wasmDispatchReceipts", "browserHandshake")
+        );
+        let blockwild_network::NetworkBrowserResponseV1::Handshake {
+            request_id,
+            compatibility,
+        } = blockwild_network::decode_network_browser_response_v1(&browser_handshake_receipt.payload).unwrap()
+        else {
+            panic!("checked BWNA must contain a handshake response")
+        };
+        assert_eq!(request_id, 9_007_199_254_740_987);
+        assert!(compatibility.decision.compatible);
+
+        let mut malformed_browser_handshake = browser_handshake;
+        *malformed_browser_handshake.last_mut().unwrap() ^= 1;
+        dispatch_rejected_r9_operation(
+            runtime_handle,
+            12_012,
+            after_browser_handshake.clone(),
+            "r9-fixture:browser-handshake:checksum",
+            NETWORK_REQUEST_TYPE_V1,
+            malformed_browser_handshake,
+            "network-error",
+        );
+
+        let mut malformed_peer_grant = peer_grant.clone();
+        *malformed_peer_grant.last_mut().unwrap() ^= 1;
+        dispatch_rejected_r9_operation(
+            runtime_handle,
+            12_013,
+            after_browser_handshake.clone(),
+            "r9-fixture:peer-grant:checksum",
+            NETWORK_PEER_GRANT_TYPE_V1,
+            malformed_peer_grant,
+            "domain-checksum",
+        );
+
+        let stale = RuntimeRequestV1::Command {
+            request_id: 12_014,
+            client_epoch: 1,
+            batch: r9_command_batch(
+                "r9-fixture:peer-grant:stale",
+                ready_identity,
+                r9_network_operation(NETWORK_PEER_GRANT_TYPE_V1, peer_grant),
+            ),
+        };
+        let stale_wire = encode_request_v1(&stale).unwrap();
+        assert_eq!(&stale_wire[..4], b"BWRQ");
+        let stale_response_wire = blockwild_runtime_command_v2(runtime_handle, &stale_wire);
+        assert_eq!(&stale_response_wire[..4], b"BWRS");
+        let RuntimeResponseV1::CommandReceipt {
+            receipt: RuntimeCommandReceiptV1::Rejected { code, current, .. },
+            ..
+        } = decode_response_v1(&stale_response_wire).unwrap()
+        else {
+            panic!("stale BWP9 command must reject before dispatch")
+        };
+        assert_eq!(code, "stale-runtime");
+        assert_eq!(current, after_browser_handshake);
+
+        let shutdown = RuntimeRequestV1::Shutdown {
+            request_id: 12_015,
+            client_epoch: 1,
+            expected: None,
+        };
+        let shutdown_wire = encode_request_v1(&shutdown).unwrap();
+        assert_eq!(&shutdown_wire[..4], b"BWRQ");
+        let shutdown_response = blockwild_runtime_destroy_v2(runtime_handle, &shutdown_wire);
+        assert_eq!(&shutdown_response[..4], b"BWRS");
+        assert!(matches!(
+            decode_response_v1(&shutdown_response).unwrap(),
+            RuntimeResponseV1::Shutdown { .. }
+        ));
+
+        let canonical = blockwild_network::canonical_network_fixture_v1().unwrap();
+
+        let mut command_runtime = checked_r9_fixture_runtime("session-r9");
+        command_runtime
+            .upsert_network_peer_grant(canonical.human_grant.clone())
+            .unwrap();
+        let (command_handle, before_command_batch) = insert_test_runtime(command_runtime);
+        let (after_command_batch, command_batch_receipt) = dispatch_checked_r9_operation(
+            command_handle,
+            12_020,
+            before_command_batch.clone(),
+            "r9-fixture:browser-command-batch",
+            NETWORK_REQUEST_TYPE_V1,
+            browser_command_batch.clone(),
+        );
+        assert_only_network_revision_advanced(&before_command_batch, &after_command_batch);
+        assert_eq!(command_batch_receipt.type_id, NETWORK_RESPONSE_TYPE_V1);
+        assert_eq!(
+            command_batch_receipt.payload,
+            checked_r9_fixture_hex_v1("wasmDispatchReceipts", "browserCommandBatch")
+        );
+        let blockwild_network::NetworkBrowserResponseV1::CommandBatch {
+            request_id, receipts, ..
+        } = blockwild_network::decode_network_browser_response_v1(&command_batch_receipt.payload).unwrap()
+        else {
+            panic!("checked BWNA must contain a command-batch response")
+        };
+        assert_eq!(request_id, 9_007_199_254_740_986);
+        assert_eq!(receipts.len(), 1);
+        assert!(receipts[0].accepted());
+        let mut malformed_command_batch = browser_command_batch;
+        *malformed_command_batch.last_mut().unwrap() ^= 1;
+        dispatch_rejected_r9_operation(
+            command_handle,
+            12_021,
+            after_command_batch,
+            "r9-fixture:browser-command-batch:checksum",
+            NETWORK_REQUEST_TYPE_V1,
+            malformed_command_batch,
+            "network-error",
+        );
+        shutdown_checked_r9_runtime(command_handle, 12_022);
+
+        let delta_runtime = checked_r9_fixture_runtime("session-r9");
+        let (delta_handle, before_delta_delivery) = insert_test_runtime(delta_runtime);
+        let (after_delta_delivery, delta_delivery_receipt) = dispatch_checked_r9_operation(
+            delta_handle,
+            12_023,
+            before_delta_delivery.clone(),
+            "r9-fixture:browser-delta-delivery",
+            NETWORK_REQUEST_TYPE_V1,
+            browser_delta_delivery.clone(),
+        );
+        assert_only_network_revision_advanced(&before_delta_delivery, &after_delta_delivery);
+        assert_eq!(delta_delivery_receipt.type_id, NETWORK_RESPONSE_TYPE_V1);
+        assert_eq!(
+            delta_delivery_receipt.payload,
+            checked_r9_fixture_hex_v1("wasmDispatchReceipts", "browserDeltaDelivery")
+        );
+        let blockwild_network::NetworkBrowserResponseV1::DeltaDelivery {
+            request_id,
+            code,
+            sequence,
+            ..
+        } = blockwild_network::decode_network_browser_response_v1(&delta_delivery_receipt.payload).unwrap()
+        else {
+            panic!("checked BWNA must contain a delta-delivery response")
+        };
+        assert_eq!(
+            (request_id, code, sequence),
+            (9_007_199_254_740_985, blockwild_network::DeltaApplyCodeV1::Applied, 1)
+        );
+        let mut malformed_delta_delivery = browser_delta_delivery;
+        *malformed_delta_delivery.last_mut().unwrap() ^= 1;
+        dispatch_rejected_r9_operation(
+            delta_handle,
+            12_024,
+            after_delta_delivery,
+            "r9-fixture:browser-delta-delivery:checksum",
+            NETWORK_REQUEST_TYPE_V1,
+            malformed_delta_delivery,
+            "network-error",
+        );
+        shutdown_checked_r9_runtime(delta_handle, 12_025);
+
+        let mut agent_runtime = checked_r9_fixture_runtime("session-r9");
+        agent_runtime
+            .upsert_network_peer_grant(canonical.agent_grant.clone())
+            .unwrap();
+        agent_runtime
+            .upsert_network_agent_grant(canonical.agent_capability_grant.clone())
+            .unwrap();
+        let (agent_handle, before_agent_command) = insert_test_runtime(agent_runtime);
+        let (after_agent_command, agent_command_receipt) = dispatch_checked_r9_operation(
+            agent_handle,
+            12_026,
+            before_agent_command.clone(),
+            "r9-fixture:browser-agent-command",
+            NETWORK_REQUEST_TYPE_V1,
+            browser_agent_command.clone(),
+        );
+        assert_only_network_revision_advanced(&before_agent_command, &after_agent_command);
+        assert_eq!(agent_command_receipt.type_id, NETWORK_RESPONSE_TYPE_V1);
+        assert_eq!(
+            agent_command_receipt.payload,
+            checked_r9_fixture_hex_v1("wasmDispatchReceipts", "browserAgentCommand")
+        );
+        let blockwild_network::NetworkBrowserResponseV1::AgentCommand {
+            request_id,
+            code,
+            receipt,
+            ..
+        } = blockwild_network::decode_network_browser_response_v1(&agent_command_receipt.payload).unwrap()
+        else {
+            panic!("checked BWNA must contain an agent-command response")
+        };
+        assert_eq!(request_id, 9_007_199_254_740_984);
+        assert_eq!(code, blockwild_network::AgentAuthorityCodeV1::Accepted);
+        assert!(receipt.is_some_and(|value| value.accepted()));
+        let mut malformed_agent_command = browser_agent_command;
+        *malformed_agent_command.last_mut().unwrap() ^= 1;
+        dispatch_rejected_r9_operation(
+            agent_handle,
+            12_027,
+            after_agent_command,
+            "r9-fixture:browser-agent-command:checksum",
+            NETWORK_REQUEST_TYPE_V1,
+            malformed_agent_command,
+            "network-error",
+        );
+        shutdown_checked_r9_runtime(agent_handle, 12_028);
+
+        let mut pose_runtime = checked_r9_fixture_runtime("session-r9");
+        pose_runtime
+            .upsert_network_peer_grant(blockwild_network::NetworkPeerGrantV1 {
+                actor_id: "peer-1".into(),
+                ..canonical.human_grant.clone()
+            })
+            .unwrap();
+        pose_runtime
+            .upsert_network_replication_record(blockwild_network::ScopedDeltaRecordV1 {
+                scope: blockwild_network::ReplicationScopeV1::Entity("player:peer-1".into()),
+                record: canonical.delta.records[0].clone(),
+            })
+            .unwrap();
+        let (presented, _) = pose_runtime
+            .build_network_delta(
+                blockwild_network::InterestDeltaBuildSourceV1 {
+                    session_id: canonical.delta.session_id.clone(),
+                    delta_id: canonical.delta.delta_id.clone(),
+                    peer_id: canonical.delta.peer_id.clone(),
+                    keyframe: canonical.delta.keyframe,
+                    sequence: canonical.delta.sequence,
+                    acknowledged_command_sequence: canonical.delta.acknowledged_command_sequence,
+                    from: canonical.delta.from.clone(),
+                    to: canonical.delta.to.clone(),
+                },
+                &canonical.interest,
+            )
+            .unwrap();
+        assert_eq!(presented, canonical.delta);
+        let (pose_handle, before_guest_pose) = insert_test_runtime(pose_runtime);
+        let (after_guest_pose, guest_pose_receipt) = dispatch_checked_r9_operation(
+            pose_handle,
+            12_029,
+            before_guest_pose.clone(),
+            "r9-fixture:browser-guest-pose",
+            NETWORK_REQUEST_TYPE_V1,
+            browser_guest_pose.clone(),
+        );
+        assert_only_network_revision_advanced(&before_guest_pose, &after_guest_pose);
+        assert_eq!(guest_pose_receipt.type_id, NETWORK_RESPONSE_TYPE_V1);
+        assert_eq!(
+            guest_pose_receipt.payload,
+            checked_r9_fixture_hex_v1("wasmDispatchReceipts", "browserGuestPose")
+        );
+        let blockwild_network::NetworkBrowserResponseV1::GuestPose {
+            request_id,
+            receipt,
+            projection,
+            ..
+        } = blockwild_network::decode_network_browser_response_v1(&guest_pose_receipt.payload).unwrap()
+        else {
+            panic!("checked BWNA must contain a guest-pose response")
+        };
+        assert_eq!(request_id, 9_007_199_254_740_983);
+        assert!(receipt.accepted());
+        let projection = projection.expect("accepted guest pose projection");
+        assert_eq!(projection.command_hash, command.command_hash);
+        assert_eq!(projection.receipt_hash, receipt.receipt_hash);
+        assert_eq!(projection.presented_delta_sequence, canonical.delta.sequence);
+        assert_eq!(projection.presented_identity_hash, canonical.delta.to.state_hash);
+        assert_eq!(projection.record_revision, 1);
+        assert_eq!(projection.previous_record_hash, CanonicalHash::default());
+        assert_eq!(projection.pose, pose);
+        let mut malformed_guest_pose = browser_guest_pose;
+        *malformed_guest_pose.last_mut().unwrap() ^= 1;
+        dispatch_rejected_r9_operation(
+            pose_handle,
+            12_030,
+            after_guest_pose,
+            "r9-fixture:browser-guest-pose:checksum",
+            NETWORK_REQUEST_TYPE_V1,
+            malformed_guest_pose,
+            "network-error",
+        );
+        shutdown_checked_r9_runtime(pose_handle, 12_031);
     }
 
     #[test]
@@ -4726,6 +6838,913 @@ mod tests {
             assert_eq!(runtime.camera_state().revision, 0);
             assert_eq!(runtime.camera_state().mode, CameraModeV1::FirstPerson);
         });
+    }
+
+    #[test]
+    fn basic_dirt_query_dispatch_is_read_only_cursor_exact_and_projects_held_mining_drop() {
+        let empty = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        let empty_identity = empty.identity();
+        let empty_receipt = dispatch_basic_dirt_query_v1(&empty, 0, "basic-dirt-query:empty").unwrap();
+        assert_eq!(empty.identity(), empty_identity);
+        assert_eq!(empty_receipt.identity, empty_identity);
+        assert_eq!(empty_receipt.cursor_after, 0);
+        assert!(empty_receipt.receipt.is_none());
+        let empty_seed = dispatch_basic_dirt_query_v1(&empty, MAX_SAFE_U64, "basic-dirt-query:empty-seed").unwrap();
+        assert_eq!(empty_seed.cursor_after, 0);
+        assert!(empty_seed.receipt.is_none());
+        let empty_native = dispatch_native_block_edit_query_v1(&empty, 0, "native-block-edit-query:empty").unwrap();
+        assert_eq!(empty_native.identity, empty_identity);
+        assert_eq!(empty_native.cursor_after, 0);
+        assert!(empty_native.receipt.is_none());
+        let empty_native_v2 =
+            dispatch_native_block_edit_query_v2(&empty, 0, "native-block-edit-v2-query:empty").unwrap();
+        assert_eq!(empty_native_v2.identity, empty_identity);
+        assert_eq!(empty_native_v2.cursor_after, 0);
+        assert!(empty_native_v2.receipt.is_none());
+        assert!(empty_native_v2.dirty_evidence.is_none());
+
+        let mut runtime = runtime_with_basic_dirt_actions_v1(false, 2);
+        runtime.step_context_v2(1, 2_000, &[], &[]).unwrap();
+        let placement_input = RuntimeInputFrameV1 {
+            sequence: 1,
+            target_tick: 1,
+            buttons: RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1,
+            selected_slot: 0,
+            ..RuntimeInputFrameV1::default()
+        };
+        let placement_step = runtime.step_context_v2(50_001, 2_000, &[placement_input], &[]).unwrap();
+        assert_eq!(placement_step.fixed_steps, 1);
+        assert_eq!(runtime.next_basic_dirt_action_sequence_v1(), Some(2));
+
+        let placement_identity = runtime.identity();
+        let placement = dispatch_basic_dirt_query_v1(&runtime, 0, "basic-dirt-query:placement").unwrap();
+        assert_eq!(runtime.identity(), placement_identity);
+        assert_eq!(placement.identity, placement_identity);
+        assert_eq!(placement.cursor_after, 1);
+        let placement = placement.receipt.unwrap();
+        assert_eq!(placement.sequence, 1);
+        assert_eq!(
+            placement.action,
+            blockwild_engine::IntegratedRuntimeBasicDirtActionKindV1::Place
+        );
+        assert_eq!(placement.inventory.before_stack, Some(ItemStack::simple(2, 2)));
+        assert_eq!(placement.inventory.after_stack, Some(ItemStack::simple(2, 1)));
+        assert!(placement.generated_drops.is_empty());
+        let native_placement =
+            dispatch_native_block_edit_query_v1(&runtime, 0, "native-block-edit-query:placement").unwrap();
+        assert_eq!(runtime.identity(), placement_identity);
+        assert_eq!(native_placement.identity, placement_identity);
+        assert_eq!(native_placement.cursor_after, 1);
+        let native_placement = native_placement.receipt.unwrap();
+        assert_eq!(native_placement.sequence, 1);
+        assert_eq!(
+            native_placement.action,
+            blockwild_engine::IntegratedRuntimeNativeBlockEditActionKindV1::Place
+        );
+        assert_eq!(native_placement.prior_block_id, 0);
+        assert_eq!(native_placement.replacement_block_id, 2);
+        assert_eq!(native_placement.inventory.before_stack, Some(ItemStack::simple(2, 2)));
+        assert_eq!(native_placement.inventory.after_stack, Some(ItemStack::simple(2, 1)));
+        let native_placement_v2 =
+            dispatch_native_block_edit_query_v2(&runtime, 0, "native-block-edit-v2-query:placement").unwrap();
+        assert_eq!(native_placement_v2.cursor_after, 1);
+        assert_eq!(native_placement_v2.receipt.as_ref(), Some(&native_placement));
+        let placement_dirty = native_placement_v2.dirty_evidence.unwrap();
+        assert_eq!(placement_dirty.sequence, native_placement.sequence);
+        assert_eq!(placement_dirty.receipt_hash, native_placement.receipt_hash);
+        assert_eq!(
+            placement_dirty.columns,
+            vec![(native_placement.position.x, native_placement.position.z)]
+        );
+        assert_eq!(placement_dirty.subsystem_seeds.len(), 7);
+
+        let placement_retry = dispatch_basic_dirt_query_v1(&runtime, 0, "basic-dirt-query:placement").unwrap();
+        assert_eq!(placement_retry.cursor_after, 1);
+        assert_eq!(placement_retry.receipt.unwrap(), placement);
+        assert_eq!(runtime.identity(), placement_identity);
+
+        let release = RuntimeInputFrameV1 {
+            sequence: 2,
+            target_tick: 2,
+            selected_slot: 0,
+            ..RuntimeInputFrameV1::default()
+        };
+        runtime.step_context_v2(100_001, 2_000, &[release], &[]).unwrap();
+        let held_mine = RuntimeInputFrameV1 {
+            sequence: 3,
+            target_tick: 3,
+            buttons: RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1,
+            selected_slot: 0,
+            ..RuntimeInputFrameV1::default()
+        };
+        runtime.step_context_v2(150_001, 2_000, &[held_mine], &[]).unwrap();
+        assert_eq!(runtime.next_basic_dirt_action_sequence_v1(), Some(2));
+        runtime.step_context_v2(200_001, 2_000, &[], &[]).unwrap();
+        runtime.step_context_v2(250_001, 2_000, &[], &[]).unwrap();
+        let before_completion = dispatch_basic_dirt_query_v1(&runtime, 1, "basic-dirt-query:still-held").unwrap();
+        assert_eq!(before_completion.cursor_after, 1);
+        assert!(before_completion.receipt.is_none());
+        runtime.step_context_v2(300_001, 2_000, &[], &[]).unwrap();
+        assert_eq!(runtime.next_basic_dirt_action_sequence_v1(), Some(3));
+
+        let mined_identity = runtime.identity();
+        let mined = dispatch_basic_dirt_query_v1(&runtime, 1, "basic-dirt-query:mined").unwrap();
+        assert_eq!(runtime.identity(), mined_identity);
+        assert_eq!(mined.identity, mined_identity);
+        assert_eq!(mined.cursor_after, 2);
+        let mined = mined.receipt.unwrap();
+        assert_eq!(mined.sequence, 2);
+        assert_eq!(mined.origin_input_sequence, 3);
+        assert_eq!(mined.completion_tick, 6);
+        assert_eq!(
+            mined.action,
+            blockwild_engine::IntegratedRuntimeBasicDirtActionKindV1::Mine
+        );
+        assert_eq!(mined.inventory.before_stack, Some(ItemStack::simple(2, 1)));
+        assert_eq!(mined.inventory.after_stack, Some(ItemStack::simple(2, 1)));
+        assert_eq!(mined.generated_drops.len(), 1);
+        let drop = &mined.generated_drops[0];
+        assert_eq!(drop.stack, ItemStack::simple(2, 1));
+        assert_ne!(drop.entity_id.packed(), 0);
+        assert_eq!(drop.provenance.origin_input_sequence, 3);
+        assert_eq!(drop.provenance.block_id, 2);
+        assert_ne!(drop.provenance.loot_plan_hash, CanonicalHash::default());
+        assert_ne!(
+            (drop.position.x_milli, drop.position.y_milli, drop.position.z_milli),
+            (0, 0, 0)
+        );
+        assert!(drop.rotation.yaw < 1_000_000);
+        assert_eq!(mined.native_receipt_v1().receipt_hash, mined.receipt_hash);
+        let native_mined = dispatch_native_block_edit_query_v1(&runtime, 1, "native-block-edit-query:mined").unwrap();
+        assert_eq!(runtime.identity(), mined_identity);
+        assert_eq!(native_mined.identity, mined_identity);
+        assert_eq!(native_mined.cursor_after, 2);
+        let native_mined = native_mined.receipt.unwrap();
+        assert_eq!(native_mined.sequence, 2);
+        assert_eq!(native_mined.origin_input_sequence, 3);
+        assert_eq!(
+            native_mined.action,
+            blockwild_engine::IntegratedRuntimeNativeBlockEditActionKindV1::Mine
+        );
+        assert_eq!(native_mined.prior_block_id, 2);
+        assert_eq!(native_mined.replacement_block_id, 0);
+        assert_eq!(native_mined.generated_drops.len(), 1);
+        assert_eq!(native_mined.generated_drops[0].provenance, drop.provenance);
+        assert_eq!(native_mined.generated_drops[0].entity_id, drop.entity_id);
+        assert_eq!(native_mined.generated_drops[0].stack, drop.stack);
+        let native_mined_v2 =
+            dispatch_native_block_edit_query_v2(&runtime, 1, "native-block-edit-v2-query:mined").unwrap();
+        assert_eq!(native_mined_v2.cursor_after, 2);
+        assert_eq!(native_mined_v2.receipt.as_ref(), Some(&native_mined));
+        assert_eq!(
+            native_mined_v2
+                .dirty_evidence
+                .as_ref()
+                .map(|evidence| evidence.sequence),
+            Some(2)
+        );
+
+        let seed = dispatch_basic_dirt_query_v1(&runtime, MAX_SAFE_U64, "basic-dirt-query:seed").unwrap();
+        assert_eq!(seed.cursor_after, 2);
+        assert!(seed.receipt.is_none());
+        let native_seed =
+            dispatch_native_block_edit_query_v1(&runtime, MAX_SAFE_U64, "native-block-edit-query:seed").unwrap();
+        assert_eq!(native_seed.cursor_after, 2);
+        assert!(native_seed.receipt.is_none());
+        let native_seed_v2 =
+            dispatch_native_block_edit_query_v2(&runtime, MAX_SAFE_U64, "native-block-edit-v2-query:seed").unwrap();
+        assert_eq!(native_seed_v2.cursor_after, 2);
+        assert!(native_seed_v2.receipt.is_none());
+        assert!(native_seed_v2.dirty_evidence.is_none());
+        assert_eq!(
+            dispatch_native_block_edit_query_v2(&runtime, 3, "native-block-edit-v2-query:future")
+                .unwrap_err()
+                .0,
+            "native-block-edit-cursor-future"
+        );
+        assert_eq!(
+            dispatch_native_block_edit_query_v1(&runtime, 3, "native-block-edit-query:future")
+                .unwrap_err()
+                .0,
+            "native-block-edit-cursor-future"
+        );
+        assert_eq!(
+            dispatch_basic_dirt_query_v1(&runtime, 3, "basic-dirt-query:future")
+                .unwrap_err()
+                .0,
+            "basic-dirt-action-cursor-future"
+        );
+
+        let mut stale_expected = runtime.identity();
+        stale_expected.tick = stale_expected.tick.saturating_add(1);
+        let stale_operation = domain_operation(
+            RuntimeDomainV1::Gameplay,
+            BASIC_DIRT_ACTION_RECEIPT_TYPE_V1,
+            encode_runtime_basic_dirt_action_receipt_query_v1(&RuntimeBasicDirtActionReceiptQueryWireV1 {
+                expected: stale_expected,
+                after_sequence: 2,
+            })
+            .unwrap(),
+        );
+        let stale_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "basic-dirt-query:stale-identity".into(),
+            idempotency_key: "basic-dirt-query:stale-identity".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![stale_operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let Err(stale_error) = dispatch_command(&runtime, &stale_batch) else {
+            panic!("stale Basic Dirt query unexpectedly dispatched")
+        };
+        assert_eq!(stale_error.0, "basic-dirt-action-query-stale");
+        assert_eq!(runtime.identity(), mined_identity);
+    }
+
+    #[test]
+    fn native_drop_pickup_query_dispatch_is_read_only_seedable_and_identity_bound() {
+        let runtime = IntegratedRuntimeV2::new(IntegratedRuntimeConfigV2::default()).unwrap();
+        let identity = runtime.identity();
+        let query_bytes =
+            encode_runtime_native_drop_pickup_receipt_query_v1(&RuntimeNativeDropPickupReceiptQueryWireV1 {
+                expected: identity.clone(),
+                after_sequence: 0,
+            })
+            .unwrap();
+        let current = dispatch_native_drop_pickup_query_v1(&runtime, 0, "native-drop-pickup-query:empty").unwrap();
+        assert_eq!(runtime.identity(), identity);
+        assert_eq!(current.identity, identity);
+        assert_eq!(
+            current.request_payload_hash,
+            CanonicalHash(wire_checksum_v1(&query_bytes))
+        );
+        assert_eq!(current.cursor_after, 0);
+        assert!(current.receipt.is_none());
+
+        let retry = dispatch_native_drop_pickup_query_v1(&runtime, 0, "native-drop-pickup-query:retry").unwrap();
+        assert_eq!(retry.cursor_after, 0);
+        assert!(retry.receipt.is_none());
+        let seed =
+            dispatch_native_drop_pickup_query_v1(&runtime, MAX_SAFE_U64, "native-drop-pickup-query:seed").unwrap();
+        assert_eq!(seed.cursor_after, 0);
+        assert!(seed.receipt.is_none());
+        assert_eq!(
+            dispatch_native_drop_pickup_query_v1(&runtime, 1, "native-drop-pickup-query:future")
+                .unwrap_err()
+                .0,
+            "native-drop-pickup-cursor-future"
+        );
+
+        let mut stale_expected = runtime.identity();
+        stale_expected.tick = stale_expected.tick.saturating_add(1);
+        let stale_operation = domain_operation(
+            RuntimeDomainV1::Gameplay,
+            NATIVE_DROP_PICKUP_RECEIPT_TYPE_V1,
+            encode_runtime_native_drop_pickup_receipt_query_v1(&RuntimeNativeDropPickupReceiptQueryWireV1 {
+                expected: stale_expected,
+                after_sequence: 0,
+            })
+            .unwrap(),
+        );
+        let stale_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "native-drop-pickup-query:stale".into(),
+            idempotency_key: "native-drop-pickup-query:stale".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![stale_operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let Err(stale) = dispatch_command(&runtime, &stale_batch) else {
+            panic!("stale native drop pickup query unexpectedly dispatched")
+        };
+        assert_eq!(stale.0, "native-drop-pickup-query-stale");
+        assert_eq!(runtime.identity(), identity);
+    }
+
+    #[test]
+    fn native_player_drop_query_dispatch_is_read_only_cursor_exact_and_bws9_bound() {
+        let mut runtime = runtime_with_basic_dirt_actions_v1(false, 2);
+        let empty_identity = runtime.identity();
+        let empty = dispatch_native_player_drop_query_v1(&runtime, 0, "native-player-drop-query:empty").unwrap();
+        assert_eq!(runtime.identity(), empty_identity);
+        assert_eq!(empty.identity, empty_identity);
+        assert_eq!(empty.cursor_after, 0);
+        assert!(empty.receipt.is_none());
+
+        let seed = dispatch_native_player_drop_query_v1(&runtime, MAX_SAFE_U64, "native-player-drop-query:empty-seed")
+            .unwrap();
+        assert_eq!(seed.cursor_after, 0);
+        assert!(seed.receipt.is_none());
+
+        runtime.step_context_v2(1, 2_000, &[], &[]).unwrap();
+        let step = runtime
+            .step_context_v2(
+                50_001,
+                2_000,
+                &[RuntimeInputFrameV1 {
+                    sequence: 1,
+                    target_tick: 1,
+                    buttons: RUNTIME_INPUT_BUTTON_DROP_V1,
+                    selected_slot: 0,
+                    ..RuntimeInputFrameV1::default()
+                }],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(step.fixed_steps, 1);
+        assert_eq!(runtime.next_native_player_drop_sequence_v1(), Some(2));
+
+        let projected_identity = runtime.identity();
+        let projected =
+            dispatch_native_player_drop_query_v1(&runtime, 0, "native-player-drop-query:projected").unwrap();
+        assert_eq!(runtime.identity(), projected_identity);
+        assert_eq!(projected.identity, projected_identity);
+        assert_eq!(projected.cursor_after, 1);
+        let receipt = projected.receipt.unwrap();
+        assert_eq!(receipt.sequence, 1);
+        assert_eq!(receipt.origin_input_sequence, 1);
+        assert_eq!(receipt.inventory.selected_slot, 0);
+        assert_eq!(receipt.inventory.before_stack, Some(ItemStack::simple(2, 2)));
+        assert_eq!(receipt.inventory.after_stack, Some(ItemStack::simple(2, 1)));
+        assert_eq!(receipt.drop.stack, ItemStack::simple(2, 1));
+        assert_ne!(receipt.drop.origin_hash, CanonicalHash::default());
+        assert_ne!(receipt.receipt_hash, CanonicalHash::default());
+
+        let retry = dispatch_native_player_drop_query_v1(&runtime, 0, "native-player-drop-query:retry").unwrap();
+        assert_eq!(retry.cursor_after, 1);
+        assert_eq!(retry.receipt.unwrap(), receipt);
+        let seeded =
+            dispatch_native_player_drop_query_v1(&runtime, MAX_SAFE_U64, "native-player-drop-query:seed").unwrap();
+        assert_eq!(seeded.cursor_after, 1);
+        assert!(seeded.receipt.is_none());
+        assert_eq!(
+            dispatch_native_player_drop_query_v1(&runtime, 2, "native-player-drop-query:future")
+                .unwrap_err()
+                .0,
+            "native-player-drop-cursor-future"
+        );
+
+        let mut stale_expected = runtime.identity();
+        stale_expected.tick = stale_expected.tick.saturating_add(1);
+        let stale_operation = domain_operation(
+            RuntimeDomainV1::Gameplay,
+            NATIVE_PLAYER_DROP_RECEIPT_TYPE_V1,
+            encode_runtime_native_player_drop_receipt_query_v1(&RuntimeNativePlayerDropReceiptQueryWireV1 {
+                expected: stale_expected,
+                after_sequence: 1,
+            })
+            .unwrap(),
+        );
+        let stale_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "native-player-drop-query:stale".into(),
+            idempotency_key: "native-player-drop-query:stale".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![stale_operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let Err(stale) = dispatch_command(&runtime, &stale_batch) else {
+            panic!("stale native player-drop query unexpectedly dispatched")
+        };
+        assert_eq!(stale.0, "native-player-drop-query-stale");
+        assert_eq!(runtime.identity(), projected_identity);
+    }
+
+    #[test]
+    fn basic_dirt_receipt_survives_finalized_native_save_and_fresh_paged_hydration() {
+        let source = runtime_with_basic_dirt_actions_v1(false, 2);
+        let source_config = source.config().clone();
+        let (source_handle, mut source_identity) = insert_test_runtime(source);
+
+        let (next, fixed_steps) = step_runtime_through_wasm_v1(source_handle, 8_100, source_identity, 1, Vec::new());
+        assert_eq!(fixed_steps, 0);
+        source_identity = next;
+        let (next, fixed_steps) = step_runtime_through_wasm_v1(
+            source_handle,
+            8_101,
+            source_identity,
+            50_001,
+            vec![RuntimeInputFrameV1 {
+                sequence: 1,
+                target_tick: 1,
+                buttons: RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1,
+                selected_slot: 0,
+                ..RuntimeInputFrameV1::default()
+            }],
+        );
+        assert_eq!(fixed_steps, 1);
+        source_identity = next;
+        let (next, fixed_steps) = step_runtime_through_wasm_v1(
+            source_handle,
+            8_102,
+            source_identity,
+            100_001,
+            vec![RuntimeInputFrameV1 {
+                sequence: 2,
+                target_tick: 2,
+                selected_slot: 0,
+                ..RuntimeInputFrameV1::default()
+            }],
+        );
+        assert_eq!(fixed_steps, 1);
+        source_identity = next;
+        let (next, fixed_steps) = step_runtime_through_wasm_v1(
+            source_handle,
+            8_103,
+            source_identity,
+            150_001,
+            vec![RuntimeInputFrameV1 {
+                sequence: 3,
+                target_tick: 3,
+                buttons: RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1,
+                selected_slot: 0,
+                ..RuntimeInputFrameV1::default()
+            }],
+        );
+        assert_eq!(fixed_steps, 1);
+        source_identity = next;
+        for (request_id, monotonic_time_us) in [(8_104, 200_001), (8_105, 250_001), (8_106, 300_001)] {
+            let (next, fixed_steps) = step_runtime_through_wasm_v1(
+                source_handle,
+                request_id,
+                source_identity,
+                monotonic_time_us,
+                Vec::new(),
+            );
+            assert_eq!(fixed_steps, 1);
+            source_identity = next;
+        }
+        INTEGRATED_RUNTIMES.with(|store| {
+            assert_eq!(
+                store.borrow().runtimes[&source_handle].next_basic_dirt_action_sequence_v1(),
+                Some(3)
+            );
+        });
+
+        let source_query_identity = INTEGRATED_RUNTIMES.with(|store| {
+            let identity = store.borrow().runtimes[&source_handle].identity();
+            assert_eq!(wire_identity(&identity), source_identity);
+            identity
+        });
+        let source_query_operation = domain_operation(
+            RuntimeDomainV1::Gameplay,
+            BASIC_DIRT_ACTION_RECEIPT_TYPE_V1,
+            encode_runtime_basic_dirt_action_receipt_query_v1(&RuntimeBasicDirtActionReceiptQueryWireV1 {
+                expected: source_query_identity,
+                after_sequence: 1,
+            })
+            .unwrap(),
+        );
+        let (source_after_query, source_query_receipt) = dispatch_single_operation(
+            source_handle,
+            8_107,
+            source_identity.clone(),
+            "basic-dirt-durable:source-query",
+            source_query_operation,
+        );
+        assert_eq!(source_after_query, source_identity);
+        assert_eq!(
+            source_query_receipt.type_id,
+            BASIC_DIRT_ACTION_PROJECTION_RECEIPT_TYPE_V1
+        );
+        let source_projection =
+            decode_runtime_basic_dirt_action_projection_receipt_v1(&source_query_receipt.payload).unwrap();
+        assert_eq!(source_projection.cursor_after, 2);
+        let expected_mined = source_projection.receipt.expect("held mining receipt before save");
+        assert_eq!(
+            expected_mined.action,
+            blockwild_engine::IntegratedRuntimeBasicDirtActionKindV1::Mine
+        );
+        assert_eq!(expected_mined.inventory.before_stack, Some(ItemStack::simple(2, 1)));
+        assert_eq!(expected_mined.inventory.after_stack, Some(ItemStack::simple(2, 1)));
+        assert_eq!(expected_mined.generated_drops.len(), 1);
+        let expected_drop = expected_mined.generated_drops[0].clone();
+
+        let finalize_wire = encode_bulk_request_v1(&RuntimeBulkRequestV1::FinalizeSave {
+            request_id: 8_108,
+            client_epoch: 1,
+            expected: RuntimeBulkStateV1::from(&source_identity),
+            stage_id: "basic-dirt-durable-save".into(),
+            created_at: 8_108,
+        })
+        .unwrap();
+        let finalized = decode_bulk_response_v1(
+            &blockwild_runtime_initialize_native_save_v2(source_handle, &finalize_wire.control),
+            &[],
+        )
+        .unwrap();
+        let RuntimeBulkResponseV1::SaveProgress {
+            current: finalized_current,
+            state: RuntimeBulkSaveStageStateV1::Finalized,
+            dispatcher_request_id,
+            ..
+        } = finalized
+        else {
+            panic!("expected finalized native save: {finalized:?}")
+        };
+        assert_ne!(dispatcher_request_id, 0);
+
+        let (commit_current, commit_token, commit_type, commit_payload) =
+            poll_runtime_platform_through_wasm_v1(source_handle, 8_109, finalized_current);
+        assert_eq!(commit_type, PERSISTENCE_REQUEST_TYPE_V1);
+        let commit_request = blockwild_persistence::decode_persistence_browser_request_v1(&commit_payload).unwrap();
+        let blockwild_persistence::PersistenceBrowserRequestV1::Commit {
+            request_id: commit_request_id,
+            transaction,
+            checkpoint,
+        } = commit_request
+        else {
+            panic!("expected durable native commit")
+        };
+        let durable_checkpoint = checkpoint.clone();
+        let mut durable_payloads = BTreeMap::new();
+        for mutation in &transaction.mutations {
+            match mutation {
+                blockwild_persistence::Mutation::Put { address, payload, .. } => {
+                    assert!(durable_payloads.insert(address.clone(), payload.clone()).is_none());
+                }
+                blockwild_persistence::Mutation::Delete { address, .. } => {
+                    durable_payloads.remove(address);
+                }
+            }
+        }
+        assert_eq!(durable_payloads.len(), durable_checkpoint.records.len());
+        assert!(
+            durable_checkpoint
+                .records
+                .iter()
+                .all(|descriptor| durable_payloads.contains_key(&descriptor.address))
+        );
+        let commit_response = blockwild_persistence::encode_persistence_browser_response_v1(
+            &blockwild_persistence::PersistenceBrowserResponseV1::Commit(
+                blockwild_persistence::PersistenceBrowserCommitResultV1 {
+                    request_id: commit_request_id,
+                    code: blockwild_persistence::PersistenceBrowserCommitCodeV1::Committed,
+                    transaction_id: transaction.transaction_id,
+                    journal_sequence: transaction.next_journal_sequence,
+                    durable_hash: CanonicalHash([0x81; 16]),
+                    checkpoint_hash: durable_checkpoint.checkpoint_hash,
+                    verified_readback: true,
+                    message: "Basic Dirt durable roundtrip fixture".into(),
+                },
+            ),
+        )
+        .unwrap();
+        let committed_current = complete_runtime_platform_through_wasm_v1(
+            source_handle,
+            8_110,
+            commit_current,
+            commit_token,
+            commit_response,
+        );
+        let idle_wire = encode_bulk_request_v1(&RuntimeBulkRequestV1::Poll {
+            request_id: 8_111,
+            client_epoch: 1,
+            expected: committed_current,
+            max_bytes: 128 * 1024 * 1024,
+        })
+        .unwrap();
+        let idle = decode_bulk_response_v1(
+            &blockwild_runtime_bulk_v2(source_handle, &idle_wire.control, &idle_wire.attachment),
+            &[],
+        )
+        .unwrap();
+        let RuntimeBulkResponseV1::Empty {
+            current: idle_current, ..
+        } = idle
+        else {
+            panic!("expected durable save dispatcher to drain: {idle:?}")
+        };
+        let source_saved_identity = INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let runtime = &store.runtimes[&source_handle];
+            let identity = wire_identity(&runtime.identity());
+            assert_eq!(RuntimeBulkStateV1::from(&identity), idle_current);
+            assert!(runtime.persistence_status().unwrap().terminal_checkpoint.is_some());
+            identity
+        });
+
+        let shutdown = decode_response_v1(&blockwild_runtime_destroy_v2(
+            source_handle,
+            &encode_request_v1(&RuntimeRequestV1::Shutdown {
+                request_id: 8_112,
+                client_epoch: 1,
+                expected: Some(source_saved_identity),
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        assert!(matches!(shutdown, RuntimeResponseV1::Shutdown { .. }));
+
+        let (restored_handle, fresh_identity) = insert_test_runtime(IntegratedRuntimeV2::new(source_config).unwrap());
+        let recover_payload = encode_runtime_persistence_dispatch_v1(&RuntimePersistenceDispatchWireV1::Recover {
+            world_id: durable_checkpoint.world_id.clone(),
+            checkpoint_id: Some(durable_checkpoint.checkpoint_id.clone()),
+        })
+        .unwrap();
+        let (recover_queued_identity, recover_receipt) = dispatch_single_operation(
+            restored_handle,
+            8_113,
+            fresh_identity,
+            "basic-dirt-durable:recover-head",
+            domain_operation(
+                RuntimeDomainV1::Persistence,
+                PERSISTENCE_DISPATCH_TYPE_V1,
+                recover_payload,
+            ),
+        );
+        assert_eq!(recover_receipt.type_id, PERSISTENCE_DISPATCH_RECEIPT_TYPE_V1);
+        let (recover_current, recover_token, recover_type, recover_request_bytes) =
+            poll_runtime_platform_through_wasm_v1(
+                restored_handle,
+                8_114,
+                RuntimeBulkStateV1::from(&recover_queued_identity),
+            );
+        assert_eq!(recover_type, PERSISTENCE_REQUEST_TYPE_V1);
+        let recover_request =
+            blockwild_persistence::decode_persistence_platform_request_v1(&recover_request_bytes).unwrap();
+        assert_eq!(
+            recover_request.operation,
+            blockwild_persistence::PersistencePlatformOperationV1::RecoverHead
+        );
+        assert_eq!(recover_request.world_id, durable_checkpoint.world_id);
+        assert_eq!(recover_request.object_id, durable_checkpoint.checkpoint_id);
+        let recover_response = blockwild_persistence::encode_persistence_platform_response_v1(
+            &blockwild_persistence::PersistencePlatformResponseV1 {
+                request_id: recover_request.request_id,
+                operation: recover_request.operation,
+                code: blockwild_persistence::PersistencePlatformResultCodeV1::Accepted,
+                storage_revision: durable_checkpoint.journal_sequence,
+                durable_hash: durable_checkpoint.checkpoint_hash,
+                next_cursor: None,
+                payload: blockwild_persistence::encode_paged_recovery_head_v1(
+                    &blockwild_persistence::PagedRecoveryHeadV1::from_checkpoint(&durable_checkpoint),
+                )
+                .unwrap(),
+                message: "exact native recovery head".into(),
+            },
+        )
+        .unwrap();
+        let _ = complete_runtime_platform_through_wasm_v1(
+            restored_handle,
+            8_115,
+            recover_current,
+            recover_token,
+            recover_response,
+        );
+
+        let recovery_records = durable_checkpoint
+            .records
+            .iter()
+            .map(|descriptor| blockwild_persistence::PagedRecoveryRecordV1 {
+                descriptor: descriptor.clone(),
+                payload: Some(
+                    durable_payloads
+                        .get(&descriptor.address)
+                        .expect("durable checkpoint payload")
+                        .clone(),
+                ),
+            })
+            .collect::<Vec<_>>();
+        let recovery_page = blockwild_persistence::PagedRecoveryPageV1 {
+            checkpoint_id: durable_checkpoint.checkpoint_id.clone(),
+            start_record: 0,
+            records: recovery_records,
+            next_record: None,
+        };
+        let recovery_page_bytes = blockwild_persistence::encode_paged_recovery_page_v1(&recovery_page).unwrap();
+        let after_head_identity =
+            INTEGRATED_RUNTIMES.with(|store| wire_identity(&store.borrow().runtimes[&restored_handle].identity()));
+        let read_page_payload =
+            encode_runtime_persistence_dispatch_v1(&RuntimePersistenceDispatchWireV1::ReadRecoveryPage {
+                world_id: durable_checkpoint.world_id.clone(),
+                checkpoint_id: durable_checkpoint.checkpoint_id.clone(),
+                start_record: 0,
+                max_records: u32::try_from(durable_checkpoint.records.len()).unwrap(),
+                max_bytes: u32::try_from(blockwild_persistence::PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1).unwrap(),
+            })
+            .unwrap();
+        let (page_queued_identity, page_receipt) = dispatch_single_operation(
+            restored_handle,
+            8_116,
+            after_head_identity,
+            "basic-dirt-durable:recover-page",
+            domain_operation(
+                RuntimeDomainV1::Persistence,
+                PERSISTENCE_DISPATCH_TYPE_V1,
+                read_page_payload,
+            ),
+        );
+        assert_eq!(page_receipt.type_id, PERSISTENCE_DISPATCH_RECEIPT_TYPE_V1);
+        let (page_current, page_token, page_type, page_request_bytes) = poll_runtime_platform_through_wasm_v1(
+            restored_handle,
+            8_117,
+            RuntimeBulkStateV1::from(&page_queued_identity),
+        );
+        assert_eq!(page_type, PERSISTENCE_REQUEST_TYPE_V1);
+        let page_request = blockwild_persistence::decode_persistence_platform_request_v1(&page_request_bytes).unwrap();
+        assert_eq!(
+            page_request.operation,
+            blockwild_persistence::PersistencePlatformOperationV1::ReadRecoveryPage
+        );
+        assert_eq!(page_request.cursor, 0);
+        assert_eq!(
+            page_request.limit,
+            u32::try_from(durable_checkpoint.records.len()).unwrap()
+        );
+        assert!(recovery_page_bytes.len() <= usize::try_from(page_request.total_bytes).unwrap());
+        let page_response = blockwild_persistence::encode_persistence_platform_response_v1(
+            &blockwild_persistence::PersistencePlatformResponseV1 {
+                request_id: page_request.request_id,
+                operation: page_request.operation,
+                code: blockwild_persistence::PersistencePlatformResultCodeV1::Accepted,
+                storage_revision: durable_checkpoint.journal_sequence,
+                durable_hash: durable_checkpoint.checkpoint_hash,
+                next_cursor: None,
+                payload: recovery_page_bytes,
+                message: "exact native recovery page".into(),
+            },
+        )
+        .unwrap();
+        let _ =
+            complete_runtime_platform_through_wasm_v1(restored_handle, 8_118, page_current, page_token, page_response);
+
+        let before_hydration_identity =
+            INTEGRATED_RUNTIMES.with(|store| wire_identity(&store.borrow().runtimes[&restored_handle].identity()));
+        let hydrate_wire = encode_bulk_request_v1(&RuntimeBulkRequestV1::HydrateRecovery {
+            request_id: 8_119,
+            client_epoch: 1,
+            expected: RuntimeBulkStateV1::from(&before_hydration_identity),
+            recovery_id: durable_checkpoint.checkpoint_id.clone(),
+        })
+        .unwrap();
+        let hydrated = decode_bulk_response_v1(
+            &blockwild_runtime_bulk_v2(restored_handle, &hydrate_wire.control, &hydrate_wire.attachment),
+            &[],
+        )
+        .unwrap();
+        let RuntimeBulkResponseV1::Hydration {
+            current: hydrated_current,
+            recovery_id,
+            native_domains,
+            ..
+        } = hydrated
+        else {
+            panic!("expected native durable hydration: {hydrated:?}")
+        };
+        assert_eq!(recovery_id, durable_checkpoint.checkpoint_id);
+        assert_eq!(native_domains, 6);
+        let (hydrated_identity, hydrated_query_identity) = INTEGRATED_RUNTIMES.with(|store| {
+            let identity = store.borrow().runtimes[&restored_handle].identity();
+            (wire_identity(&identity), identity)
+        });
+        assert_eq!(RuntimeBulkStateV1::from(&hydrated_identity), hydrated_current);
+
+        let restored_query_operation = domain_operation(
+            RuntimeDomainV1::Gameplay,
+            BASIC_DIRT_ACTION_RECEIPT_TYPE_V1,
+            encode_runtime_basic_dirt_action_receipt_query_v1(&RuntimeBasicDirtActionReceiptQueryWireV1 {
+                expected: hydrated_query_identity.clone(),
+                after_sequence: 1,
+            })
+            .unwrap(),
+        );
+        let (after_query, restored_query_receipt) = dispatch_single_operation(
+            restored_handle,
+            8_120,
+            hydrated_identity.clone(),
+            "basic-dirt-durable:restored-query",
+            restored_query_operation,
+        );
+        assert_eq!(after_query, hydrated_identity);
+        assert_eq!(
+            restored_query_receipt.type_id,
+            BASIC_DIRT_ACTION_PROJECTION_RECEIPT_TYPE_V1
+        );
+        let restored_projection =
+            decode_runtime_basic_dirt_action_projection_receipt_v1(&restored_query_receipt.payload).unwrap();
+        assert_eq!(restored_projection.identity, hydrated_query_identity);
+        assert_eq!(restored_projection.cursor_after, 2);
+        let restored_mined = restored_projection.receipt.expect("restored held mining receipt");
+        assert_eq!(restored_mined, expected_mined);
+        assert_eq!(restored_mined.generated_drops[0], expected_drop);
+
+        INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let runtime = &store.runtimes[&restored_handle];
+            assert_eq!(runtime.identity(), hydrated_query_identity);
+            assert_eq!(runtime.next_basic_dirt_action_sequence_v1(), Some(3));
+            let blockwild_authority::WorldCellReadV1::Loaded { cell, .. } =
+                runtime.world().read_cell(restored_mined.position)
+            else {
+                panic!("restored Basic Dirt receipt cell must be resident")
+            };
+            assert_eq!(cell.block_id, restored_mined.replacement_block_id);
+            let inventory = &runtime.gameplay().state.inventory.containers[&restored_mined.inventory.container];
+            assert_eq!(inventory.revision, restored_mined.inventory.after_revision);
+            assert_eq!(
+                inventory.slots[usize::from(restored_mined.inventory.slot)],
+                restored_mined.inventory.after_stack
+            );
+            let extraction = runtime.world_view_extraction().unwrap();
+            let live_drop = extraction
+                .dropped_items
+                .iter()
+                .find(|drop| drop.spatial.entity_id == expected_drop.entity_id)
+                .expect("restored generated drop remains in native world-view custody");
+            assert_eq!(live_drop.stack, expected_drop.stack);
+            assert_eq!(live_drop.spatial.position, expected_drop.position);
+            assert_eq!(
+                live_drop.spatial.velocity_milli_per_second,
+                expected_drop.velocity_milli_per_second
+            );
+            assert_eq!(live_drop.spatial.rotation, expected_drop.rotation);
+        });
+
+        let cleanup = decode_response_v1(&blockwild_runtime_destroy_v2(
+            restored_handle,
+            &encode_request_v1(&RuntimeRequestV1::Shutdown {
+                request_id: 8_121,
+                client_epoch: 1,
+                expected: Some(hydrated_identity),
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        assert!(matches!(cleanup, RuntimeResponseV1::Shutdown { .. }));
+    }
+
+    #[test]
+    fn basic_dirt_query_dispatch_rejects_a_cursor_before_the_retained_tail() {
+        let mut runtime = runtime_with_basic_dirt_actions_v1(true, 1);
+        let mut monotonic_time_us = 1_u64;
+        let mut input_sequence = 0_u64;
+        let mut target_tick = 0_u64;
+        runtime.step_context_v2(monotonic_time_us, 2_000, &[], &[]).unwrap();
+        for cycle in 0_u64..129 {
+            input_sequence += 1;
+            target_tick += 1;
+            monotonic_time_us += 50_000;
+            runtime
+                .step_context_v2(
+                    monotonic_time_us,
+                    2_000,
+                    &[RuntimeInputFrameV1 {
+                        sequence: input_sequence,
+                        target_tick,
+                        buttons: RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1,
+                        selected_slot: 0,
+                        ..RuntimeInputFrameV1::default()
+                    }],
+                    &[],
+                )
+                .unwrap();
+            input_sequence += 1;
+            target_tick += 1;
+            monotonic_time_us += 50_000;
+            runtime
+                .step_context_v2(
+                    monotonic_time_us,
+                    2_000,
+                    &[RuntimeInputFrameV1 {
+                        sequence: input_sequence,
+                        target_tick,
+                        buttons: RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1,
+                        selected_slot: 0,
+                        ..RuntimeInputFrameV1::default()
+                    }],
+                    &[],
+                )
+                .unwrap();
+            let expected_after_mine = cycle * 2 + 3;
+            for _ in 0..3 {
+                target_tick += 1;
+                monotonic_time_us += 50_000;
+                runtime.step_context_v2(monotonic_time_us, 2_000, &[], &[]).unwrap();
+                if runtime.next_basic_dirt_action_sequence_v1() == Some(expected_after_mine) {
+                    break;
+                }
+            }
+            assert_eq!(runtime.next_basic_dirt_action_sequence_v1(), Some(expected_after_mine));
+        }
+        assert_eq!(runtime.next_basic_dirt_action_sequence_v1(), Some(259));
+        assert_eq!(runtime.basic_dirt_action_receipts_v1().len(), 256);
+        assert_eq!(runtime.basic_dirt_action_receipts_v1().front().unwrap().sequence, 3);
+        let identity = runtime.identity();
+        let Err(error) = dispatch_basic_dirt_query_v1(&runtime, 0, "basic-dirt-query:stale-tail") else {
+            panic!("stale Basic Dirt cursor unexpectedly dispatched")
+        };
+        assert_eq!(error.0, "basic-dirt-action-cursor-stale");
+        assert_eq!(runtime.identity(), identity);
+        let current = dispatch_basic_dirt_query_v1(&runtime, 2, "basic-dirt-query:retained-tail").unwrap();
+        assert_eq!(current.cursor_after, 3);
+        assert_eq!(current.receipt.unwrap().sequence, 3);
+        let seed = dispatch_basic_dirt_query_v1(&runtime, MAX_SAFE_U64, "basic-dirt-query:retained-seed").unwrap();
+        assert_eq!(seed.cursor_after, 258);
+        assert!(seed.receipt.is_none());
     }
 
     #[test]
@@ -4884,6 +7903,1020 @@ mod tests {
         .unwrap();
         assert!(dispatch_command(&runtime, &rollback_batch).is_err());
         assert_eq!(runtime.identity(), initial);
+    }
+
+    #[test]
+    fn creative_slot_outer_dispatch_is_exact_and_rejects_stale_or_noncreative_atomically() {
+        let runtime = runtime_with_bound_locator_item_v1(true);
+        assert!(
+            capabilities(&runtime)
+                .iter()
+                .any(|value| value == "creative-inventory-slot-v1")
+        );
+        let inventory = ContainerKey::player("player:locator");
+        let request = PlayerCreativeSlotSetWireV1 {
+            inventory: inventory.clone(),
+            selected_slot: 0,
+            expected_inventory_revision: 1,
+            expected_stack: Some(ItemStack::simple(603, 2)),
+            replacement_stack: ItemStack::simple(603, 8),
+        };
+        let payload = encode_player_creative_slot_set_v1(&request).unwrap();
+        let generic_before = runtime.identity();
+        let generic = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-creative-slot-generic-rejected".into(),
+            idempotency_key: "wasm-creative-slot-generic-rejected".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&generic_before),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Gameplay,
+                GAMEPLAY_COMMAND_TYPE_V1,
+                payload.clone(),
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        assert!(dispatch_command(&runtime, &generic).is_err());
+        assert_eq!(runtime.identity(), generic_before);
+
+        let operation = domain_operation(RuntimeDomainV1::Gameplay, PLAYER_CREATIVE_SLOT_SET_TYPE_V1, payload);
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-creative-slot-set".into(),
+            idempotency_key: "wasm-creative-slot-set".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (applied, receipts) = dispatch_command(&runtime, &batch).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].type_id, PLAYER_CREATIVE_SLOT_SET_RECEIPT_TYPE_V1);
+        let receipt = decode_player_creative_slot_set_receipt_v1(&receipts[0].payload).unwrap();
+        assert_eq!(receipt.prior_stack, request.expected_stack);
+        assert_eq!(receipt.replacement_stack, request.replacement_stack);
+        assert_eq!(receipt.previous_inventory_revision, 1);
+        assert_eq!(receipt.resulting_inventory_revision, 2);
+        assert_eq!(
+            applied.gameplay().state.inventory.containers[&inventory].slots[0],
+            Some(ItemStack::simple(603, 8))
+        );
+
+        let mut stale_request = request.clone();
+        stale_request.replacement_stack = ItemStack::simple(603, 7);
+        let stale_payload = encode_player_creative_slot_set_v1(&stale_request).unwrap();
+        let stale = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-creative-slot-stale".into(),
+            idempotency_key: "wasm-creative-slot-stale".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&applied.identity()),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Gameplay,
+                PLAYER_CREATIVE_SLOT_SET_TYPE_V1,
+                stale_payload,
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        assert!(dispatch_command(&applied, &stale).is_err());
+        assert_eq!(
+            applied.gameplay().state.inventory.containers[&inventory].slots[0],
+            Some(ItemStack::simple(603, 8))
+        );
+
+        let noncreative = runtime_with_bound_locator_item_v1(false);
+        let noncreative_before = noncreative.identity();
+        let payload = encode_player_creative_slot_set_v1(&request).unwrap();
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-creative-slot-noncreative".into(),
+            idempotency_key: "wasm-creative-slot-noncreative".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&noncreative_before),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Gameplay,
+                PLAYER_CREATIVE_SLOT_SET_TYPE_V1,
+                payload,
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        assert!(dispatch_command(&noncreative, &batch).is_err());
+        assert_eq!(noncreative.identity(), noncreative_before);
+    }
+
+    #[test]
+    fn player_game_mode_outer_dispatch_is_simulation_only_actor_bound_and_atomic() {
+        let runtime = runtime_with_bound_locator_item_v1(true);
+        assert!(
+            capabilities(&runtime)
+                .iter()
+                .any(|value| value == "player-game-mode-set-v1")
+        );
+        let request = PlayerGameModeSetWireV1 {
+            external_entity_id: "player:locator".into(),
+            actor_id: "player:locator".into(),
+            player_id: blockwild_types::PlayerId::new(7, 1),
+            expected_creative_mode: true,
+            expected_flags: RUNTIME_INPUT_FLAG_CREATIVE_V1,
+            requested_creative_mode: false,
+        };
+        let payload = encode_player_game_mode_set_v1(&request).unwrap();
+        let before = runtime.identity();
+
+        for (domain, type_id) in [
+            (RuntimeDomainV1::Gameplay, GAMEPLAY_COMMAND_TYPE_V1),
+            (RuntimeDomainV1::Gameplay, PLAYER_GAME_MODE_SET_TYPE_V1),
+            (RuntimeDomainV1::Simulation, SIMULATION_CAMERA_CONFIG_TYPE_V1),
+        ] {
+            let generic = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+                command_id: format!("wasm-player-mode-generic-{domain:?}-{type_id}"),
+                idempotency_key: format!("wasm-player-mode-generic-{domain:?}-{type_id}"),
+                actor_id: request.actor_id.clone(),
+                expected: wire_identity(&before),
+                operations: vec![domain_operation(domain, type_id, payload.clone())],
+                command_hash: WireHash::default(),
+            })
+            .unwrap();
+            assert!(dispatch_command(&runtime, &generic).is_err());
+            assert_eq!(runtime.identity(), before);
+        }
+
+        let wrong_actor = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-mode-wrong-actor".into(),
+            idempotency_key: "wasm-player-mode-wrong-actor".into(),
+            actor_id: "player:other".into(),
+            expected: wire_identity(&before),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Simulation,
+                PLAYER_GAME_MODE_SET_TYPE_V1,
+                payload.clone(),
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let Err(error) = dispatch_command(&runtime, &wrong_actor) else {
+            panic!("mismatched outer actor unexpectedly changed player game mode")
+        };
+        assert_eq!(error.0, "player-game-mode-actor");
+        assert_eq!(runtime.identity(), before);
+
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-mode-survival".into(),
+            idempotency_key: "wasm-player-mode-survival".into(),
+            actor_id: request.actor_id.clone(),
+            expected: wire_identity(&before),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Simulation,
+                PLAYER_GAME_MODE_SET_TYPE_V1,
+                payload.clone(),
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (survival, receipts) = dispatch_command(&runtime, &batch).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].domain, RuntimeDomainV1::Simulation);
+        assert_eq!(receipts[0].type_id, PLAYER_GAME_MODE_SET_RECEIPT_TYPE_V1);
+        let receipt = decode_player_game_mode_set_receipt_v1(&receipts[0].payload).unwrap();
+        assert_eq!(receipt.before, before);
+        assert_eq!(receipt.after, survival.identity());
+        assert!(!receipt.resulting_creative_mode);
+        assert_eq!(receipt.resulting_flags, 0);
+        assert_eq!(
+            receipt.after.revision.simulation,
+            receipt.before.revision.simulation + 1
+        );
+        assert_eq!(receipt.after.revision.gameplay, receipt.before.revision.gameplay);
+
+        let stale_before = survival.identity();
+        let stale = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-mode-stale".into(),
+            idempotency_key: "wasm-player-mode-stale".into(),
+            actor_id: request.actor_id.clone(),
+            expected: wire_identity(&stale_before),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Simulation,
+                PLAYER_GAME_MODE_SET_TYPE_V1,
+                payload,
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        assert!(dispatch_command(&survival, &stale).is_err());
+        assert_eq!(survival.identity(), stale_before);
+
+        let to_builder = PlayerGameModeSetWireV1 {
+            expected_creative_mode: false,
+            expected_flags: 0,
+            requested_creative_mode: true,
+            ..request
+        };
+        let payload = encode_player_game_mode_set_v1(&to_builder).unwrap();
+        let builder_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-mode-builder".into(),
+            idempotency_key: "wasm-player-mode-builder".into(),
+            actor_id: to_builder.actor_id,
+            expected: wire_identity(&survival.identity()),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Simulation,
+                PLAYER_GAME_MODE_SET_TYPE_V1,
+                payload,
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (builder, receipts) = dispatch_command(&survival, &builder_batch).unwrap();
+        let receipt = decode_player_game_mode_set_receipt_v1(&receipts[0].payload).unwrap();
+        assert!(receipt.resulting_creative_mode);
+        assert_eq!(receipt.resulting_flags, RUNTIME_INPUT_FLAG_CREATIVE_V1);
+        assert!(builder.player().unwrap().binding.creative_mode);
+        assert_eq!(builder.player().unwrap().flags, RUNTIME_INPUT_FLAG_CREATIVE_V1);
+    }
+
+    #[test]
+    fn player_respawn_outer_dispatch_is_malformed_actor_stale_and_replay_safe() {
+        let runtime = runtime_with_dead_bound_combat_player_v1();
+        let request = respawn_request_v1(&runtime);
+        let before = runtime.identity();
+        let before_inventory =
+            runtime.gameplay().state.inventory.containers[&ContainerKey::player(request.actor_id.clone())].clone();
+        let dead_world_view = runtime.world_view_extraction().unwrap();
+        let dead_views = domain_views_with_world_view(&runtime, Some(&dead_world_view));
+        let dead_player = dead_views[1]
+            .rows
+            .iter()
+            .find(|row| row.kind == 1)
+            .expect("dead native player runtime row");
+        assert!(matches!(
+            dead_player.fields.get("deathSequence.present"),
+            Some(DomainViewValueV1::Bool(true))
+        ));
+        assert!(matches!(
+            dead_player.fields.get("deathSequence.value"),
+            Some(DomainViewValueV1::U64(1))
+        ));
+        assert!(matches!(
+            dead_player.fields.get("lastRespawnSequence.present"),
+            Some(DomainViewValueV1::Bool(false))
+        ));
+        assert!(!dead_player.fields.contains_key("lastRespawnSequence.value"));
+        assert!(
+            !dead_views[1]
+                .blockers
+                .iter()
+                .any(|blocker| blocker == "player-death-respawn-sequence-not-authoritative")
+        );
+
+        let malformed = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-respawn-malformed".into(),
+            idempotency_key: "wasm-player-respawn-malformed".into(),
+            actor_id: request.actor_id.clone(),
+            expected: wire_identity(&before),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Simulation,
+                PLAYER_RESPAWN_TYPE_V1,
+                b"not-a-respawn".to_vec(),
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        assert!(dispatch_command(&runtime, &malformed).is_err());
+        assert_eq!(runtime.identity(), before);
+
+        let payload = encode_player_respawn_v1(&request).unwrap();
+        let operation = domain_operation(RuntimeDomainV1::Simulation, PLAYER_RESPAWN_TYPE_V1, payload);
+        let wrong_actor = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-respawn-wrong-actor".into(),
+            idempotency_key: "wasm-player-respawn-wrong-actor".into(),
+            actor_id: "player:other".into(),
+            expected: wire_identity(&before),
+            operations: vec![operation.clone()],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let Err(wrong_actor_error) = dispatch_command(&runtime, &wrong_actor) else {
+            panic!("wrong outer actor unexpectedly respawned the player");
+        };
+        assert_eq!(wrong_actor_error.0, "player-respawn-actor");
+        assert_eq!(runtime.identity(), before);
+
+        let mut stale_request = request.clone();
+        stale_request.expected.tick = stale_request.expected.tick.saturating_sub(1);
+        let stale = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-respawn-stale".into(),
+            idempotency_key: "wasm-player-respawn-stale".into(),
+            actor_id: request.actor_id.clone(),
+            expected: wire_identity(&before),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Simulation,
+                PLAYER_RESPAWN_TYPE_V1,
+                encode_player_respawn_v1(&stale_request).unwrap(),
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let Err(stale_error) = dispatch_command(&runtime, &stale) else {
+            panic!("stale inner respawn identity unexpectedly committed");
+        };
+        assert_eq!(stale_error.0, "player-respawn-stale");
+        assert_eq!(runtime.identity(), before);
+
+        let mut clear_inventory_request = request.clone();
+        clear_inventory_request.keep_inventory = false;
+        let clear_inventory = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-respawn-clear-inventory".into(),
+            idempotency_key: "wasm-player-respawn-clear-inventory".into(),
+            actor_id: request.actor_id.clone(),
+            expected: wire_identity(&before),
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Simulation,
+                PLAYER_RESPAWN_TYPE_V1,
+                encode_player_respawn_v1(&clear_inventory_request).unwrap(),
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (cleared, clear_receipts) = dispatch_command(&runtime, &clear_inventory).unwrap();
+        let clear_receipt = decode_player_respawn_receipt_v1(&clear_receipts[0].payload).unwrap();
+        assert!(!clear_receipt.keep_inventory);
+        assert_eq!(clear_receipt.generated_drop_count, 1);
+        assert_eq!(
+            clear_receipt.inventory_after_revision,
+            clear_receipt.inventory_before_revision + 1
+        );
+        assert_eq!(
+            clear_receipt.equipment_after_revision,
+            clear_receipt.equipment_before_revision
+        );
+        assert_ne!(clear_receipt.custody_before_hash, clear_receipt.custody_after_hash);
+        assert_eq!(cleared.world_view().state.dropped_items.len(), 1);
+        assert_eq!(runtime.identity(), before);
+
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-respawn".into(),
+            idempotency_key: "wasm-player-respawn".into(),
+            actor_id: request.actor_id.clone(),
+            expected: wire_identity(&before),
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (handle, _) = insert_test_runtime(runtime);
+        let command_bytes = encode_request_v1(&RuntimeRequestV1::Command {
+            request_id: 9_101,
+            client_epoch: 72,
+            batch: batch.clone(),
+        })
+        .unwrap();
+        let first_bytes = blockwild_runtime_command_v2(handle, &command_bytes);
+        let retry_bytes = blockwild_runtime_command_v2(handle, &command_bytes);
+        assert_eq!(
+            retry_bytes, first_bytes,
+            "transport retry must replay the exact receipt bytes"
+        );
+        let RuntimeResponseV1::CommandReceipt { receipt: accepted, .. } = decode_response_v1(&first_bytes).unwrap()
+        else {
+            panic!("expected accepted player respawn command");
+        };
+        let RuntimeCommandReceiptV1::Accepted { domain_receipts, .. } = &accepted else {
+            panic!("expected accepted player respawn receipt");
+        };
+        assert_eq!(domain_receipts.len(), 1);
+        assert_eq!(domain_receipts[0].type_id, PLAYER_RESPAWN_RECEIPT_TYPE_V1);
+        let receipt = decode_player_respawn_receipt_v1(&domain_receipts[0].payload).unwrap();
+        assert_eq!((receipt.prior_health, receipt.resulting_health), (0, 1_000));
+        assert_eq!((receipt.prior_alive, receipt.resulting_alive), (false, true));
+        assert!(receipt.keep_inventory);
+        assert_eq!(receipt.generated_drop_count, 0);
+        assert_eq!(receipt.inventory_before_revision, receipt.inventory_after_revision);
+        assert_eq!(receipt.equipment_before_revision, receipt.equipment_after_revision);
+        assert_eq!(receipt.custody_before_hash, receipt.custody_after_hash);
+
+        let recovery = decode_response_v1(&blockwild_runtime_command_v2(
+            handle,
+            &encode_request_v1(&RuntimeRequestV1::RecoverCommand {
+                request_id: 9_102,
+                client_epoch: 72,
+                batch,
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        assert!(matches!(
+            recovery,
+            RuntimeResponseV1::CommandReceipt { receipt, .. } if receipt == accepted
+        ));
+
+        INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let applied = &store.runtimes[&handle];
+            let combatant = &applied.gameplay().state.combat.combatants["player:locator"];
+            assert_eq!(combatant.health, 1_000);
+            assert!(combatant.alive);
+            assert_eq!(
+                applied.gameplay().state.inventory.containers[&ContainerKey::player("player:locator")],
+                before_inventory
+            );
+            let live_world_view = applied.world_view_extraction().unwrap();
+            let live_views = domain_views_with_world_view(applied, Some(&live_world_view));
+            let live_player = live_views[1]
+                .rows
+                .iter()
+                .find(|row| row.kind == 1)
+                .expect("respawned native player runtime row");
+            assert!(matches!(
+                live_player.fields.get("deathSequence.value"),
+                Some(DomainViewValueV1::U64(1))
+            ));
+            assert!(matches!(
+                live_player.fields.get("lastRespawnSequence.value"),
+                Some(DomainViewValueV1::U64(1))
+            ));
+            assert!(
+                !live_views[1]
+                    .blockers
+                    .iter()
+                    .any(|blocker| blocker == "player-death-respawn-sequence-not-authoritative")
+            );
+        });
+    }
+
+    #[test]
+    fn player_respawn_false_empty_custody_is_exact_and_checkpoint_stable() {
+        let mut runtime = runtime_with_dead_bound_combat_player_with_count_v1(0, false);
+        let bound_player = runtime.player().expect("dead bound player");
+        let bootstrap_query = PlayerBootstrapStatusQueryWireV1 {
+            external_entity_id: bound_player.binding.external_entity_id.clone(),
+            actor_id: bound_player.binding.actor_id.clone(),
+            player_id: bound_player.binding.player_id,
+        };
+        let dead_status = runtime
+            .player_bootstrap_status(&bootstrap_query, CanonicalHash([0xc1; 16]))
+            .unwrap();
+        let neutral = RuntimeInputFrameV1 {
+            sequence: 1,
+            target_tick: runtime.identity().tick.checked_add(1).unwrap(),
+            look_yaw: 1_234,
+            look_pitch: -567,
+            ..RuntimeInputFrameV1::default()
+        };
+        let summary = runtime
+            .step_context_v2(
+                dead_status.last_monotonic_time_us.checked_add(50_000).unwrap(),
+                8_000,
+                &[neutral],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(summary.inputs_applied, 1);
+        assert_eq!(runtime.last_applied_input(), Some(neutral));
+        assert_eq!(runtime.player().unwrap().last_input_sequence, neutral.sequence);
+
+        let mut request = respawn_request_v1(&runtime);
+        request.keep_inventory = false;
+        let before = runtime.identity();
+        let operation = domain_operation(
+            RuntimeDomainV1::Simulation,
+            PLAYER_RESPAWN_TYPE_V1,
+            encode_player_respawn_v1(&request).unwrap(),
+        );
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-respawn-empty-custody".into(),
+            idempotency_key: "wasm-player-respawn-empty-custody".into(),
+            actor_id: request.actor_id.clone(),
+            expected: wire_identity(&before),
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (applied, receipts) = dispatch_command(&runtime, &batch).unwrap();
+        assert_eq!(receipts.len(), 1);
+        let receipt = decode_player_respawn_receipt_v1(&receipts[0].payload).unwrap();
+        assert!(!receipt.keep_inventory);
+        assert_eq!(receipt.generated_drop_count, 0);
+        assert_eq!(receipt.after.revision.entities, before.revision.entities + 1);
+        assert_eq!(receipt.after.revision.gameplay, before.revision.gameplay + 1);
+        assert_eq!(receipt.after.revision.simulation, before.revision.simulation + 1);
+        assert_eq!(receipt.inventory_before_revision, receipt.inventory_after_revision);
+        assert_eq!(receipt.equipment_before_revision, receipt.equipment_after_revision);
+        assert_eq!(receipt.custody_before_hash, receipt.custody_after_hash);
+
+        let parent = applied
+            .native_player_death_respawn_receipt_for_player_v1(&request.external_entity_id, request.player_id)
+            .expect("empty false-policy respawn retains its durable parent");
+        assert_eq!(parent.sequence, 1);
+        assert_eq!(parent.death_sequence, request.expected_death_sequence);
+        assert!(parent.drops.is_empty());
+        assert_eq!(parent.receipt_hash, parent.calculate_hash_v1());
+        assert_eq!(applied.next_native_player_death_respawn_sequence_v1(), Some(2));
+
+        let world_view = applied.world_view_extraction().unwrap();
+        let views = domain_views_with_world_view(&applied, Some(&world_view));
+        let player = views[1]
+            .rows
+            .iter()
+            .find(|row| row.kind == 1)
+            .expect("respawned player runtime row");
+        assert!(matches!(
+            player.fields.get("latestDeathRespawn.present"),
+            Some(DomainViewValueV1::Bool(true))
+        ));
+        assert!(matches!(
+            player.fields.get("latestDeathRespawn.respawnSequence"),
+            Some(DomainViewValueV1::U64(1))
+        ));
+        assert!(matches!(
+            player.fields.get("latestDeathRespawn.generatedDropCount"),
+            Some(DomainViewValueV1::U64(0))
+        ));
+        assert!(matches!(
+            player.fields.get("latestDeathRespawn.inventoryContainer"),
+            Some(DomainViewValueV1::String(value))
+                if value == &container_view_key!(&parent.inventory_container)
+        ));
+        assert!(matches!(
+            player.fields.get("latestDeathRespawn.equipmentContainer"),
+            Some(DomainViewValueV1::String(value))
+                if value == &container_view_key!(&parent.equipment_container)
+        ));
+        assert!(matches!(
+            player.fields.get("deathSequence.value"),
+            Some(DomainViewValueV1::U64(value)) if *value == request.expected_death_sequence
+        ));
+        assert!(matches!(
+            player.fields.get("lastRespawnSequence.value"),
+            Some(DomainViewValueV1::U64(value)) if *value == request.expected_death_sequence
+        ));
+        assert!(matches!(
+            player.fields.get("lastInputSequence"),
+            Some(DomainViewValueV1::U64(value)) if *value == neutral.sequence
+        ));
+        assert!(matches!(
+            player.fields.get("input.targetTick"),
+            Some(DomainViewValueV1::U64(value)) if *value == neutral.target_tick
+        ));
+        assert!(matches!(
+            player.fields.get("input.lookYaw"),
+            Some(DomainViewValueV1::I64(value)) if *value == i64::from(neutral.look_yaw)
+        ));
+        assert!(matches!(
+            player.fields.get("input.lookPitch"),
+            Some(DomainViewValueV1::I64(value)) if *value == i64::from(neutral.look_pitch)
+        ));
+        assert!(matches!(
+            player.fields.get("pendingMovementResultEmpty"),
+            Some(DomainViewValueV1::Bool(true))
+        ));
+
+        let before_checkpoint = applied.identity();
+        let before_bwx0 = encode_hud_extraction(&applied);
+        let checkpoint = applied.export_runtime_checkpoint().unwrap();
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint),
+        )
+        .unwrap();
+        assert_eq!(restored.identity(), before_checkpoint);
+        assert_eq!(encode_hud_extraction(&restored), before_bwx0);
+        assert_eq!(restored.last_applied_input(), Some(neutral));
+        assert_eq!(restored.player().unwrap().last_input_sequence, neutral.sequence);
+        let restored_status = restored
+            .player_bootstrap_status(&bootstrap_query, CanonicalHash([0xc2; 16]))
+            .unwrap();
+        assert_eq!(restored_status.last_input_sequence, Some(neutral.sequence));
+        assert_eq!(restored_status.next_input_sequence, neutral.sequence.checked_add(1));
+        assert_eq!(restored_status.last_applied_input, Some(neutral));
+        assert_eq!(
+            restored.native_player_death_respawn_receipt_for_player_v1(&request.external_entity_id, request.player_id,),
+            Some(parent)
+        );
+    }
+
+    #[test]
+    fn player_respawn_false_full_custody_retries_restores_and_preserves_pickup_provenance() {
+        let runtime = runtime_with_dead_bound_combat_player_with_count_v1(2, true);
+        let mut request = respawn_request_v1(&runtime);
+        request.keep_inventory = false;
+        let dead_record = runtime.entities().compatibility_record(request.entity_id).unwrap();
+        request.respawn_position.x_milli = (f64::from(dead_record.position.x) * 1_000.0).round() as i64;
+        request.respawn_position.y_milli = (f64::from(dead_record.position.y) * 1_000.0).round() as i64;
+        request.respawn_position.z_milli = (f64::from(dead_record.position.z) * 1_000.0).round() as i64;
+        let before = runtime.identity();
+        let operation = domain_operation(
+            RuntimeDomainV1::Simulation,
+            PLAYER_RESPAWN_TYPE_V1,
+            encode_player_respawn_v1(&request).unwrap(),
+        );
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-player-respawn-full-custody".into(),
+            idempotency_key: "wasm-player-respawn-full-custody".into(),
+            actor_id: request.actor_id.clone(),
+            expected: wire_identity(&before),
+            operations: vec![operation],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (handle, _) = insert_test_runtime(runtime);
+        let command_bytes = encode_request_v1(&RuntimeRequestV1::Command {
+            request_id: 9_201,
+            client_epoch: 73,
+            batch: batch.clone(),
+        })
+        .unwrap();
+        let first_bytes = blockwild_runtime_command_v2(handle, &command_bytes);
+        assert_eq!(blockwild_runtime_command_v2(handle, &command_bytes), first_bytes);
+        let RuntimeResponseV1::CommandReceipt { receipt: accepted, .. } = decode_response_v1(&first_bytes).unwrap()
+        else {
+            panic!("expected accepted false-policy respawn command");
+        };
+        let RuntimeCommandReceiptV1::Accepted { domain_receipts, .. } = &accepted else {
+            panic!("expected accepted false-policy respawn receipt");
+        };
+        let receipt = decode_player_respawn_receipt_v1(&domain_receipts[0].payload).unwrap();
+        assert!(!receipt.keep_inventory);
+        assert_eq!(receipt.generated_drop_count, 2);
+        assert_eq!(receipt.after.revision.entities, before.revision.entities + 1);
+        assert_eq!(receipt.after.revision.gameplay, before.revision.gameplay + 2);
+        assert_eq!(receipt.after.revision.simulation, before.revision.simulation + 1);
+        assert_eq!(receipt.inventory_after_revision, receipt.inventory_before_revision + 1);
+        assert_eq!(receipt.equipment_after_revision, receipt.equipment_before_revision + 1);
+        assert_ne!(receipt.custody_after_hash, receipt.custody_before_hash);
+
+        let recovery = decode_response_v1(&blockwild_runtime_command_v2(
+            handle,
+            &encode_request_v1(&RuntimeRequestV1::RecoverCommand {
+                request_id: 9_202,
+                client_epoch: 73,
+                batch,
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        assert!(matches!(
+            recovery,
+            RuntimeResponseV1::CommandReceipt { receipt, .. } if receipt == accepted
+        ));
+
+        let (parent, checkpoint, checkpoint_bwx0) = INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let applied = &store.runtimes[&handle];
+            let parent = applied
+                .native_player_death_respawn_receipt_for_player_v1(&request.external_entity_id, request.player_id)
+                .expect("full false-policy respawn parent");
+            // The durable native parent and BWE7 wire receipt seal different
+            // canonical domains. Their shared transaction fields join them;
+            // their hashes must never be treated as interchangeable.
+            assert_ne!(parent.receipt_hash, CanonicalHash::default());
+            assert_ne!(receipt.receipt_hash, CanonicalHash::default());
+            assert_ne!(parent.receipt_hash, receipt.receipt_hash);
+            assert_eq!(parent.player_id, receipt.player_id);
+            assert_eq!(parent.player_entity_id, receipt.entity_id);
+            assert_eq!(parent.death_sequence, receipt.death_sequence);
+            assert_eq!(parent.inventory_before_revision, receipt.inventory_before_revision);
+            assert_eq!(parent.inventory_after_revision, receipt.inventory_after_revision);
+            assert_eq!(parent.equipment_before_revision, receipt.equipment_before_revision);
+            assert_eq!(parent.equipment_after_revision, receipt.equipment_after_revision);
+            assert_eq!(parent.custody_after_hash, receipt.custody_after_hash);
+            assert_eq!(parent.drops.len(), receipt.generated_drop_count as usize);
+            assert_eq!(parent.drops.len(), 2);
+            assert_eq!(parent.drops[0].source_lane, PlayerDeathCustodyLaneV1::Inventory);
+            assert_eq!(parent.drops[0].source_slot, 0);
+            assert_eq!(parent.drops[1].source_lane, PlayerDeathCustodyLaneV1::Equipment);
+            assert_eq!(parent.drops[1].source_slot, 0);
+            assert_eq!(parent.drops[0].stack, ItemStack::simple(603, 1));
+            assert_eq!(parent.drops[1].stack, ItemStack::simple(603, 1));
+            assert_eq!(parent.receipt_hash, parent.calculate_hash_v1());
+            for drop in &parent.drops {
+                assert_eq!(drop.origin_hash, parent.calculate_drop_origin_hash_v1(drop));
+                assert_eq!(drop.custody_revision, 0);
+                assert_eq!(drop.spatial_revision, 0);
+                assert_eq!(
+                    applied.gameplay().state.inventory.containers[&drop.custody_container].slots[0],
+                    Some(drop.stack.clone())
+                );
+                assert_eq!(
+                    applied.world_view().state.dropped_items[&drop.drop_id].entity_id,
+                    drop.entity_id
+                );
+                assert_eq!(
+                    applied.entities().compatibility_record(drop.entity_id).unwrap().custom
+                        ["playerDeathDrop.originHash"],
+                    drop.origin_hash.to_hex()
+                );
+            }
+            let player_inventory = &applied.gameplay().state.inventory.containers[&parent.inventory_container];
+            let player_equipment = &applied.gameplay().state.inventory.containers[&parent.equipment_container];
+            assert!(player_inventory.slots.iter().all(Option::is_none));
+            assert!(player_equipment.slots.iter().all(Option::is_none));
+
+            let world_view = applied.world_view_extraction().unwrap();
+            let views = domain_views_with_world_view(applied, Some(&world_view));
+            let player = views[1].rows.iter().find(|row| row.kind == 1).unwrap();
+            assert!(matches!(
+                player.fields.get("latestDeathRespawn.generatedDropCount"),
+                Some(DomainViewValueV1::U64(2))
+            ));
+            assert!(matches!(
+                player.fields.get("latestDeathRespawn.inventoryContainer"),
+                Some(DomainViewValueV1::String(value))
+                    if value == &container_view_key!(&parent.inventory_container)
+            ));
+            assert!(matches!(
+                player.fields.get("latestDeathRespawn.equipmentContainer"),
+                Some(DomainViewValueV1::String(value))
+                    if value == &container_view_key!(&parent.equipment_container)
+            ));
+            assert!(matches!(
+                player.fields.get("latestDeathRespawn.drop.0000.sourceLane"),
+                Some(DomainViewValueV1::U64(0))
+            ));
+            assert!(matches!(
+                player.fields.get("latestDeathRespawn.drop.0001.sourceLane"),
+                Some(DomainViewValueV1::U64(1))
+            ));
+            assert!(matches!(
+                player.fields.get("latestDeathRespawn.drop.0000.entityId"),
+                Some(DomainViewValueV1::U64(value)) if *value == parent.drops[0].entity_id.packed()
+            ));
+            assert!(matches!(
+                player.fields.get("latestDeathRespawn.drop.0001.originHash"),
+                Some(DomainViewValueV1::Hash(value)) if *value == parent.drops[1].origin_hash
+            ));
+            assert!(matches!(
+                player.fields.get("latestDeathRespawn.drop.0000.custodySlot"),
+                Some(DomainViewValueV1::U64(value)) if *value == u64::from(parent.drops[0].custody_slot)
+            ));
+            assert!(matches!(
+                player.fields.get("latestDeathRespawn.drop.0001.custodySlot"),
+                Some(DomainViewValueV1::U64(value)) if *value == u64::from(parent.drops[1].custody_slot)
+            ));
+            let checkpoint = applied.export_runtime_checkpoint().unwrap();
+            (parent, checkpoint, encode_hud_extraction(applied))
+        });
+
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint),
+        )
+        .unwrap();
+        assert_eq!(
+            restored.native_player_death_respawn_receipt_for_player_v1(&request.external_entity_id, request.player_id,),
+            Some(parent.clone())
+        );
+        assert_eq!(encode_hud_extraction(&restored), checkpoint_bwx0);
+
+        INTEGRATED_RUNTIMES.with(|store| {
+            let mut store = store.borrow_mut();
+            let applied = store.runtimes.get_mut(&handle).unwrap();
+            let query = PlayerBootstrapStatusQueryWireV1 {
+                external_entity_id: request.external_entity_id.clone(),
+                actor_id: request.actor_id.clone(),
+                player_id: request.player_id,
+            };
+            let mut now = applied
+                .player_bootstrap_status(&query, CanonicalHash([0xd1; 16]))
+                .unwrap()
+                .last_monotonic_time_us;
+            for _ in 0..64 {
+                now = now.saturating_add(50_000);
+                applied.step_context_v2(now, 8_000, &[], &[]).unwrap();
+                if applied.native_drop_pickup_receipts_v1().len() == parent.drops.len() {
+                    break;
+                }
+            }
+            assert_eq!(applied.native_drop_pickup_receipts_v1().len(), 2);
+            assert!(applied.world_view().state.dropped_items.is_empty());
+            for (pickup, child) in applied.native_drop_pickup_receipts_v1().iter().zip(&parent.drops) {
+                assert!(matches!(
+                    &pickup.source.origin,
+                    blockwild_engine::IntegratedRuntimeNativeDropPickupOriginV1::PlayerDeathDrop {
+                        respawn_sequence,
+                        respawn_receipt_hash,
+                        source_lane,
+                        source_slot,
+                    } if *respawn_sequence == parent.sequence
+                        && *respawn_receipt_hash == parent.receipt_hash
+                        && *source_lane == child.source_lane
+                        && *source_slot == child.source_slot
+                ));
+                assert_eq!(pickup.source.custody_slot, child.custody_slot);
+            }
+            let pickup_checkpoint = applied.export_runtime_checkpoint().unwrap();
+            let pickup_restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+                &pickup_checkpoint,
+                integrated_runtime_checkpoint_hash_v1(&pickup_checkpoint),
+            )
+            .unwrap();
+            assert_eq!(
+                pickup_restored.native_drop_pickup_receipts_v1(),
+                applied.native_drop_pickup_receipts_v1()
+            );
+            assert_eq!(
+                pickup_restored
+                    .native_player_death_respawn_receipt_for_player_v1(&request.external_entity_id, request.player_id,),
+                Some(parent.clone())
+            );
+        });
+    }
+
+    #[test]
+    fn locator_item_outer_dispatch_retries_recovers_and_rolls_back_later_failure() {
+        let runtime = runtime_with_bound_locator_item_v1(true);
+        let inventory = ContainerKey::player("player:locator");
+        let request = PlayerLocatorItemConsumeWireV1 {
+            inventory: inventory.clone(),
+            selected_slot: 0,
+            expected_inventory_revision: 1,
+            expected_stack: ItemStack::simple(603, 2),
+            purpose: PlayerLocatorItemPurposeV1::SettlementChart,
+            locator_result_hash: CanonicalHash([0x71; 16]),
+        };
+        let payload = encode_player_locator_item_consume_v1(&request).unwrap();
+        let operation = domain_operation(RuntimeDomainV1::Gameplay, PLAYER_LOCATOR_ITEM_CONSUME_TYPE_V1, payload);
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-locator-consume".into(),
+            idempotency_key: "wasm-locator-consume".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![operation.clone()],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let (applied, receipts) = dispatch_command(&runtime, &batch).unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].type_id, PLAYER_LOCATOR_ITEM_CONSUME_RECEIPT_TYPE_V1);
+        let receipt = decode_player_locator_item_consume_receipt_v1(&receipts[0].payload).unwrap();
+        assert_eq!(receipt.consumed_stack, ItemStack::simple(603, 1));
+        assert_eq!(receipt.remaining_stack, Some(ItemStack::simple(603, 1)));
+        assert_eq!(receipt.previous_inventory_revision, 1);
+        assert_eq!(receipt.resulting_inventory_revision, 2);
+
+        let checkpoint = applied.export_runtime_checkpoint().unwrap();
+        let checkpoint_hash = integrated_runtime_checkpoint_hash_v1(&checkpoint);
+        let restored = IntegratedRuntimeV2::restore_runtime_checkpoint(&checkpoint, checkpoint_hash).unwrap();
+        assert_eq!(restored.identity(), applied.identity());
+        assert_eq!(restored.replay_hash(), applied.replay_hash());
+        assert_eq!(
+            restored.gameplay().state.inventory.containers[&inventory],
+            applied.gameplay().state.inventory.containers[&inventory]
+        );
+
+        let (handle, expected) = insert_test_runtime(runtime.clone());
+        let request_bytes = encode_request_v1(&RuntimeRequestV1::Command {
+            request_id: 9_001,
+            client_epoch: 71,
+            batch: batch.clone(),
+        })
+        .unwrap();
+        let first = blockwild_runtime_command_v2(handle, &request_bytes);
+        let retry = blockwild_runtime_command_v2(handle, &request_bytes);
+        assert_eq!(retry, first);
+        let first = decode_response_v1(&first).unwrap();
+        let RuntimeResponseV1::CommandReceipt { receipt: accepted, .. } = first else {
+            panic!("expected accepted locator item command")
+        };
+        let RuntimeCommandReceiptV1::Accepted { after, .. } = &accepted else {
+            panic!("expected accepted locator item command")
+        };
+        assert_ne!(after, &expected);
+        let terminal = after.clone();
+        let inventory_after_first = INTEGRATED_RUNTIMES
+            .with(|store| store.borrow().runtimes[&handle].gameplay().state.inventory.containers[&inventory].clone());
+
+        let recovery = decode_response_v1(&blockwild_runtime_command_v2(
+            handle,
+            &encode_request_v1(&RuntimeRequestV1::RecoverCommand {
+                request_id: 9_002,
+                client_epoch: 71,
+                batch: batch.clone(),
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        assert!(matches!(
+            recovery,
+            RuntimeResponseV1::CommandReceipt { receipt, .. } if receipt == accepted
+        ));
+
+        let mut conflicting = batch.clone();
+        conflicting.command_id = "wasm-locator-consume-conflict".into();
+        conflicting.command_hash = WireHash::default();
+        let conflicting = seal_runtime_command_batch_v1(conflicting).unwrap();
+        assert!(matches!(
+            decode_response_v1(&blockwild_runtime_command_v2(
+                handle,
+                &encode_request_v1(&RuntimeRequestV1::RecoverCommand {
+                    request_id: 9_003,
+                    client_epoch: 71,
+                    batch: conflicting,
+                })
+                .unwrap(),
+            ))
+            .unwrap(),
+            RuntimeResponseV1::Error { code, .. } if code == "idempotency-conflict"
+        ));
+
+        let queued = decode_response_v1(&blockwild_runtime_step_v2(
+            handle,
+            &encode_request_v1(&RuntimeRequestV1::Step {
+                request_id: 9_004,
+                client_epoch: 71,
+                expected: terminal,
+                monotonic_time_us: 1_000_000,
+                budget_us: 8_000,
+                inputs: Vec::new(),
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        let RuntimeResponseV1::StepResult {
+            identity: queued_identity,
+            ..
+        } = queued
+        else {
+            panic!("expected queued locator recovery step")
+        };
+        let advanced = decode_response_v1(&blockwild_runtime_step_v2(
+            handle,
+            &encode_request_v1(&RuntimeRequestV1::Step {
+                request_id: 9_005,
+                client_epoch: 71,
+                expected: queued_identity,
+                monotonic_time_us: 1_050_000,
+                budget_us: 8_000,
+                inputs: Vec::new(),
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        let RuntimeResponseV1::StepResult {
+            identity: advanced_identity,
+            ..
+        } = advanced
+        else {
+            panic!("expected advanced locator recovery step")
+        };
+        assert_ne!(&advanced_identity, after);
+
+        let historical = decode_response_v1(&blockwild_runtime_command_v2(
+            handle,
+            &encode_request_v1(&RuntimeRequestV1::Command {
+                request_id: 9_006,
+                client_epoch: 71,
+                batch: batch.clone(),
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        assert!(matches!(
+            historical,
+            RuntimeResponseV1::CommandReceipt { receipt, .. } if receipt == accepted
+        ));
+        let stale_recovery = decode_response_v1(&blockwild_runtime_command_v2(
+            handle,
+            &encode_request_v1(&RuntimeRequestV1::RecoverCommand {
+                request_id: 9_007,
+                client_epoch: 71,
+                batch: batch.clone(),
+            })
+            .unwrap(),
+        ))
+        .unwrap();
+        assert!(matches!(
+            stale_recovery,
+            RuntimeResponseV1::Error { code, current: Some(current), .. }
+                if code == "idempotency-recovery-stale" && current == advanced_identity
+        ));
+        INTEGRATED_RUNTIMES.with(|store| {
+            assert_eq!(
+                store.borrow().runtimes[&handle].gameplay().state.inventory.containers[&inventory],
+                inventory_after_first,
+                "historical cache hits and exact-stale recovery must not debit a second locator item"
+            );
+        });
+
+        let rollback_batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "wasm-locator-rollback".into(),
+            idempotency_key: "wasm-locator-rollback".into(),
+            actor_id: "platform:test".into(),
+            expected: wire_identity(&runtime.identity()),
+            operations: vec![
+                operation,
+                domain_operation(
+                    RuntimeDomainV1::Gameplay,
+                    "blockwild.gameplay.unsupported-after-locator.v1",
+                    Vec::new(),
+                ),
+            ],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        assert!(dispatch_command(&runtime, &rollback_batch).is_err());
+        assert_eq!(runtime.gameplay().state.inventory.containers[&inventory].revision, 1);
+        assert_eq!(
+            runtime.gameplay().state.inventory.containers[&inventory].slots[0],
+            Some(ItemStack::simple(603, 2))
+        );
     }
 
     #[test]
@@ -5674,6 +9707,9 @@ mod tests {
             chunk_count,
             received_bytes,
             dispatcher_request_id,
+            set_hash,
+            manifest_hash,
+            mut current,
             ..
         } = initialized
         else {
@@ -5684,6 +9720,147 @@ mod tests {
         assert_eq!(chunk_count, 0);
         assert_eq!(received_bytes, 0);
         assert_ne!(dispatcher_request_id, 0);
+
+        for request_id in 162..180 {
+            let poll = RuntimeBulkRequestV1::Poll {
+                request_id,
+                client_epoch: 1,
+                expected: current.clone(),
+                max_bytes: 128 * 1024 * 1024,
+            };
+            let wire = encode_bulk_request_v1(&poll).unwrap();
+            let control = blockwild_runtime_bulk_v2(runtime_handle, &wire.control, &wire.attachment);
+            let attachment_metadata = if control.len() >= 152 {
+                u64::from_le_bytes(control[144..152].try_into().unwrap())
+            } else {
+                0
+            };
+            let attachment = if attachment_metadata == 0 {
+                Vec::new()
+            } else {
+                blockwild_runtime_bulk_take_attachment_v2(runtime_handle, attachment_metadata as f64)
+            };
+            match decode_bulk_response_v1(&control, &attachment).unwrap() {
+                RuntimeBulkResponseV1::Empty { current: idle, .. } => {
+                    current = idle;
+                    break;
+                }
+                RuntimeBulkResponseV1::PlatformRequest {
+                    current: in_flight,
+                    transfer_token,
+                    payload,
+                    ..
+                } => {
+                    let request = blockwild_persistence::decode_persistence_browser_request_v1(&payload).unwrap();
+                    let blockwild_persistence::PersistenceBrowserRequestV1::Commit {
+                        request_id: commit_request_id,
+                        transaction,
+                        checkpoint,
+                    } = request
+                    else {
+                        panic!("expected native authority commit")
+                    };
+                    let response = blockwild_persistence::encode_persistence_browser_response_v1(
+                        &blockwild_persistence::PersistenceBrowserResponseV1::Commit(
+                            blockwild_persistence::PersistenceBrowserCommitResultV1 {
+                                request_id: commit_request_id,
+                                code: blockwild_persistence::PersistenceBrowserCommitCodeV1::Committed,
+                                transaction_id: transaction.transaction_id,
+                                journal_sequence: transaction.next_journal_sequence,
+                                durable_hash: CanonicalHash([0x77; 16]),
+                                checkpoint_hash: checkpoint.checkpoint_hash,
+                                verified_readback: true,
+                                message: "durable status fixture".into(),
+                            },
+                        ),
+                    )
+                    .unwrap();
+                    let complete = RuntimeBulkRequestV1::Complete {
+                        request_id: request_id + 100,
+                        client_epoch: 1,
+                        expected: in_flight,
+                        transfer_token,
+                        type_id: blockwild_runtime_wire::PERSISTENCE_RESPONSE_TYPE_V1.into(),
+                        payload: response,
+                    };
+                    let wire = encode_bulk_request_v1(&complete).unwrap();
+                    let response = decode_bulk_response_v1(
+                        &blockwild_runtime_bulk_v2(runtime_handle, &wire.control, &wire.attachment),
+                        &[],
+                    )
+                    .unwrap();
+                    let RuntimeBulkResponseV1::Completed { current: completed, .. } = response else {
+                        panic!("expected native commit completion: {response:?}")
+                    };
+                    current = completed;
+                }
+                response => panic!("unexpected native save drain response: {response:?}"),
+            }
+        }
+
+        let before = INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let runtime = &store.runtimes[&runtime_handle];
+            (
+                wire_identity(&runtime.identity()),
+                runtime.export_runtime_checkpoint().unwrap(),
+                runtime.persistence_status().unwrap(),
+            )
+        });
+        assert_eq!(RuntimeBulkStateV1::from(&before.0), current);
+        let query = encode_runtime_persistence_status_query_v1().unwrap();
+        let read_status = |request_id| {
+            let request = RuntimeBulkRequestV1::PersistenceStatus {
+                request_id,
+                client_epoch: 1,
+                expected: current.clone(),
+                type_id: blockwild_runtime_wire::PERSISTENCE_STATUS_TYPE_V1.into(),
+                payload: query.clone(),
+            };
+            let wire = encode_bulk_request_v1(&request).unwrap();
+            decode_bulk_response_v1(
+                &blockwild_runtime_bulk_v2(runtime_handle, &wire.control, &wire.attachment),
+                &[],
+            )
+            .unwrap()
+        };
+        let first = read_status(190);
+        let RuntimeBulkResponseV1::PersistenceStatus {
+            current: first_current,
+            type_id,
+            payload: first_payload,
+            ..
+        } = first
+        else {
+            panic!("expected persistence status response: {first:?}")
+        };
+        assert_eq!(first_current, current);
+        assert_eq!(type_id, PERSISTENCE_STATUS_RECEIPT_TYPE_V1);
+        let attestation = decode_runtime_persistence_status_receipt_v1(&first_payload).unwrap();
+        let terminal = attestation.terminal_checkpoint.unwrap();
+        assert_eq!(terminal.save_set_hash, canonical_hash(set_hash));
+        assert_eq!(terminal.manifest_hash, canonical_hash(manifest_hash));
+        let second = read_status(191);
+        let RuntimeBulkResponseV1::PersistenceStatus {
+            current: second_current,
+            payload: second_payload,
+            ..
+        } = second
+        else {
+            panic!("expected repeated persistence status response: {second:?}")
+        };
+        assert_eq!(second_current, current);
+        assert_eq!(second_payload, first_payload);
+        let after = INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let runtime = &store.runtimes[&runtime_handle];
+            (
+                wire_identity(&runtime.identity()),
+                runtime.export_runtime_checkpoint().unwrap(),
+                runtime.persistence_status().unwrap(),
+            )
+        });
+        assert_eq!(after, before, "repeat status reads are exact and identity-neutral");
     }
 
     #[test]
@@ -5737,6 +9914,8 @@ mod tests {
                 runtime_handle,
                 &finalize_wire.control,
                 u32::from(LEGACY_STATE_PLAYER_V1),
+                "blockwild-world-data-v1:test",
+                "blockwild-world-save-canonical-v1",
                 &projection,
             ),
             &[],
@@ -5749,7 +9928,14 @@ mod tests {
         ));
 
         let migrated = decode_bulk_response_v1(
-            &blockwild_runtime_migrate_legacy_v2(runtime_handle, &finalize_wire.control, 0, &projection),
+            &blockwild_runtime_migrate_legacy_v2(
+                runtime_handle,
+                &finalize_wire.control,
+                0,
+                "blockwild-world-data-v1:test",
+                "blockwild-world-save-canonical-v1",
+                &projection,
+            ),
             &[],
         )
         .unwrap();
@@ -6163,6 +10349,238 @@ mod tests {
             decode_bulk_response_v1(&control, &[]).unwrap(),
             RuntimeBulkResponseV1::Completed { transfer_token: completed, .. } if completed == transfer_token
         ));
+    }
+
+    #[test]
+    fn bulk_dispatcher_preserves_oversized_poll_and_transfers_exact_packet_once() {
+        const ONE_MIB: usize = 1024 * 1024;
+
+        let response = decode_response_v1(&blockwild_runtime_create_v2(
+            &encode_request_v1(&create_request(111)).unwrap(),
+        ))
+        .unwrap();
+        let RuntimeResponseV1::Ready {
+            runtime_handle,
+            identity,
+            ..
+        } = response
+        else {
+            panic!("expected ready")
+        };
+
+        let world_id = "world:wasm-bulk-limit".to_string();
+        let import_id = "import:wasm-bulk-limit".to_string();
+        let empty_dispatch = encode_runtime_persistence_dispatch_v1(&RuntimePersistenceDispatchWireV1::ImportChunk {
+            world_id: world_id.clone(),
+            import_id: import_id.clone(),
+            offset: 0,
+            total_bytes: 0,
+            bytes: Vec::new(),
+        })
+        .unwrap();
+        let chunk_len = blockwild_runtime_wire::MAX_DOMAIN_PAYLOAD_BYTES
+            .checked_sub(empty_dispatch.len())
+            .unwrap();
+        let chunk = vec![0xa7; chunk_len];
+        let dispatch_payload = encode_runtime_persistence_dispatch_v1(&RuntimePersistenceDispatchWireV1::ImportChunk {
+            world_id: world_id.clone(),
+            import_id: import_id.clone(),
+            offset: 0,
+            total_bytes: chunk_len as u64,
+            bytes: chunk.clone(),
+        })
+        .unwrap();
+        assert_eq!(dispatch_payload.len(), blockwild_runtime_wire::MAX_DOMAIN_PAYLOAD_BYTES);
+
+        let (queued_identity, receipt) = dispatch_single_operation(
+            runtime_handle,
+            112,
+            identity,
+            "persistence-import-near-bulk-limit",
+            domain_operation(
+                RuntimeDomainV1::Persistence,
+                PERSISTENCE_DISPATCH_TYPE_V1,
+                dispatch_payload,
+            ),
+        );
+        assert_eq!(receipt.type_id, PERSISTENCE_DISPATCH_RECEIPT_TYPE_V1);
+        let dispatch_receipt =
+            blockwild_engine::decode_runtime_persistence_dispatch_receipt_v1(&receipt.payload).unwrap();
+        let dispatcher_request_id = dispatch_receipt.request_id.unwrap();
+        let expected_request = blockwild_persistence::PersistencePlatformRequestV1::chunk(
+            dispatcher_request_id,
+            blockwild_persistence::PersistencePlatformOperationV1::ImportChunk,
+            &world_id,
+            &import_id,
+            0,
+            chunk_len as u64,
+            chunk,
+        )
+        .unwrap();
+        let expected_packet = blockwild_persistence::encode_persistence_platform_request_v1(&expected_request).unwrap();
+        let encoded_len = expected_packet.len();
+        assert!(encoded_len > ONE_MIB);
+        assert!(encoded_len < 4 * ONE_MIB);
+        assert_eq!(dispatch_receipt.persistence_revision, 0);
+        assert_eq!(dispatch_receipt.pending, 1);
+        assert_eq!(dispatch_receipt.queued_bytes, encoded_len as u64);
+        assert!(!dispatch_receipt.closed);
+
+        let before = INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let runtime = &store.runtimes[&runtime_handle];
+            (
+                wire_identity(&runtime.identity()),
+                runtime.persistence_dispatcher().diagnostics(),
+                runtime.persistence_dispatcher_checkpoint(),
+            )
+        });
+        assert_eq!(before.0, queued_identity);
+        assert_eq!(before.1.persistence_revision, 0);
+        assert_eq!(before.1.queued, 1);
+        assert_eq!(before.1.in_flight, 0);
+        assert_eq!(before.1.retryable, 0);
+        assert_eq!(before.1.queued_bytes, encoded_len);
+        assert_eq!(before.1.completed_receipts, 0);
+        assert!(!before.1.closed);
+        assert_eq!(before.1.state_hash, dispatch_receipt.state_hash);
+
+        let limited_poll = RuntimeBulkRequestV1::Poll {
+            request_id: 113,
+            client_epoch: 1,
+            expected: RuntimeBulkStateV1::from(&before.0),
+            max_bytes: ONE_MIB as u32,
+        };
+        let limited_wire = encode_bulk_request_v1(&limited_poll).unwrap();
+        let limited = decode_bulk_response_v1(
+            &blockwild_runtime_bulk_v2(runtime_handle, &limited_wire.control, &limited_wire.attachment),
+            &[],
+        )
+        .unwrap();
+        let RuntimeBulkResponseV1::Error {
+            request_id,
+            client_epoch,
+            worker_epoch,
+            code,
+            message,
+            current: Some(error_current),
+        } = limited
+        else {
+            panic!("expected bounded poll error: {limited:?}")
+        };
+        assert_eq!((request_id, client_epoch, worker_epoch), (113, 1, WORKER_EPOCH));
+        assert_eq!(code, "persistence-dispatch-error");
+        assert_eq!(
+            message,
+            format!("dispatch-packet-too-large: next BWPR requires {encoded_len} bytes")
+        );
+        assert_eq!(error_current, RuntimeBulkStateV1::from(&before.0));
+        let after_limited = INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let runtime = &store.runtimes[&runtime_handle];
+            (
+                wire_identity(&runtime.identity()),
+                runtime.persistence_dispatcher().diagnostics(),
+                runtime.persistence_dispatcher_checkpoint(),
+            )
+        });
+        assert_eq!(
+            after_limited, before,
+            "undersized poll must be byte-exactly non-mutating"
+        );
+
+        let exact_poll = RuntimeBulkRequestV1::Poll {
+            request_id: 114,
+            client_epoch: 1,
+            expected: RuntimeBulkStateV1::from(&before.0),
+            max_bytes: u32::try_from(encoded_len).unwrap(),
+        };
+        let exact_wire = encode_bulk_request_v1(&exact_poll).unwrap();
+        let control = blockwild_runtime_bulk_v2(runtime_handle, &exact_wire.control, &exact_wire.attachment);
+        let attachment_token = u64::from_le_bytes(control[144..152].try_into().unwrap());
+        let attachment = blockwild_runtime_bulk_take_attachment_v2(runtime_handle, attachment_token as f64);
+        assert_eq!(attachment, expected_packet);
+        let platform = decode_bulk_response_v1(&control, &attachment).unwrap();
+        let RuntimeBulkResponseV1::PlatformRequest {
+            request_id,
+            client_epoch,
+            worker_epoch,
+            current,
+            transfer_token,
+            type_id,
+            payload,
+        } = platform
+        else {
+            panic!("expected exact near-limit dispatcher BWPR: {platform:?}")
+        };
+        assert_eq!((request_id, client_epoch, worker_epoch), (114, 1, WORKER_EPOCH));
+        assert_eq!(transfer_token, attachment_token);
+        assert_eq!(type_id, PERSISTENCE_REQUEST_TYPE_V1);
+        assert_eq!(payload, expected_packet);
+        assert_eq!(
+            blockwild_persistence::decode_persistence_platform_request_v1(&payload).unwrap(),
+            expected_request
+        );
+
+        let after_transfer = INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let runtime = &store.runtimes[&runtime_handle];
+            (
+                wire_identity(&runtime.identity()),
+                runtime.persistence_dispatcher().diagnostics(),
+            )
+        });
+        assert_eq!(current, RuntimeBulkStateV1::from(&after_transfer.0));
+        assert_eq!(after_transfer.0.universe_id, before.0.universe_id);
+        assert_eq!(after_transfer.0.location_id, before.0.location_id);
+        assert_eq!(after_transfer.0.revision, before.0.revision);
+        assert_eq!(after_transfer.0.tick, before.0.tick);
+        assert_ne!(after_transfer.0.state_hash, before.0.state_hash);
+        assert_eq!(after_transfer.1.persistence_revision, before.1.persistence_revision);
+        assert_eq!(after_transfer.1.queued, 0);
+        assert_eq!(after_transfer.1.in_flight, 1);
+        assert_eq!(after_transfer.1.retryable, before.1.retryable);
+        assert_eq!(after_transfer.1.queued_bytes, before.1.queued_bytes);
+        assert_eq!(after_transfer.1.completed_receipts, before.1.completed_receipts);
+        assert_eq!(after_transfer.1.closed, before.1.closed);
+        assert_ne!(after_transfer.1.state_hash, before.1.state_hash);
+
+        let empty_poll = RuntimeBulkRequestV1::Poll {
+            request_id: 115,
+            client_epoch: 1,
+            expected: current.clone(),
+            max_bytes: u32::try_from(encoded_len).unwrap(),
+        };
+        let empty_wire = encode_bulk_request_v1(&empty_poll).unwrap();
+        let empty = decode_bulk_response_v1(
+            &blockwild_runtime_bulk_v2(runtime_handle, &empty_wire.control, &empty_wire.attachment),
+            &[],
+        )
+        .unwrap();
+        let RuntimeBulkResponseV1::Empty {
+            request_id,
+            client_epoch,
+            worker_epoch,
+            current: empty_current,
+        } = empty
+        else {
+            panic!("expected empty poll after exact transfer: {empty:?}")
+        };
+        assert_eq!((request_id, client_epoch, worker_epoch), (115, 1, WORKER_EPOCH));
+        assert_eq!(empty_current, current);
+        assert!(blockwild_runtime_bulk_take_attachment_v2(runtime_handle, transfer_token as f64).is_empty());
+        let after_empty = INTEGRATED_RUNTIMES.with(|store| {
+            let store = store.borrow();
+            let runtime = &store.runtimes[&runtime_handle];
+            (
+                wire_identity(&runtime.identity()),
+                runtime.persistence_dispatcher().diagnostics(),
+            )
+        });
+        assert_eq!(
+            after_empty, after_transfer,
+            "the exact BWPR remains in flight and is not reissued"
+        );
     }
 
     #[test]
@@ -7197,6 +11615,21 @@ mod tests {
             })
             .unwrap();
         runtime
+            .import_player_inventory(
+                PlayerInventoryImportWireV1 {
+                    import: ImportPlayerInventoryV1 {
+                        inventory: ContainerKey::player("player:extraction"),
+                        expected_revision: 0,
+                        slots: vec![None; 9],
+                        metadata: Vec::new(),
+                    },
+                    selected_slot: 0,
+                },
+                CanonicalHash([0x6e; 16]),
+            )
+            .unwrap();
+        runtime.install_bound_player_combatant_v1().unwrap();
+        runtime
     }
 
     #[test]
@@ -7727,6 +12160,47 @@ mod tests {
         let extraction = runtime.world_view_extraction().unwrap();
         assert_eq!(extraction.players.len(), 1);
         let views = domain_views_with_world_view(&runtime, Some(&extraction));
+        let runtime_player = views[1]
+            .rows
+            .iter()
+            .find(|row| row.kind == 1)
+            .expect("native player runtime row");
+        assert!(matches!(
+            runtime_player.fields.get("deathSequence.present"),
+            Some(DomainViewValueV1::Bool(false))
+        ));
+        assert!(!runtime_player.fields.contains_key("deathSequence.value"));
+        assert!(matches!(
+            runtime_player.fields.get("lastRespawnSequence.present"),
+            Some(DomainViewValueV1::Bool(false))
+        ));
+        assert!(!runtime_player.fields.contains_key("lastRespawnSequence.value"));
+        assert!(matches!(
+            runtime_player.fields.get("latestDeathRespawn.present"),
+            Some(DomainViewValueV1::Bool(false))
+        ));
+        assert!(!runtime_player.fields.contains_key("latestDeathRespawn.respawnSequence"));
+        assert!(matches!(
+            runtime_player.fields.get("gameplaySequence"),
+            Some(DomainViewValueV1::U64(value))
+                if *value == runtime.gameplay().state.revision.sequence
+        ));
+        assert!(matches!(
+            runtime_player.fields.get("gameplayCombatRevision"),
+            Some(DomainViewValueV1::U64(value))
+                if *value == runtime.gameplay().state.revision.combat
+        ));
+        for key in [
+            "queuedInputsEmpty",
+            "pendingContextCommandsEmpty",
+            "pendingMovementResultEmpty",
+            "miningStateEmpty",
+        ] {
+            assert!(matches!(
+                runtime_player.fields.get(key),
+                Some(DomainViewValueV1::Bool(true))
+            ));
+        }
         let binding = views[1]
             .rows
             .iter()
@@ -7753,6 +12227,42 @@ mod tests {
         assert!(matches!(
             binding.fields.get("backSlot.value"),
             Some(DomainViewValueV1::U64(7))
+        ));
+
+        let combatant = views[4]
+            .rows
+            .iter()
+            .find(|row| row.kind == 1 && row.key == "combatant:player:extraction")
+            .expect("exact linked player combatant row");
+        let native_combatant_revision = runtime.gameplay().state.combat.combatants["player:extraction"].revision;
+        assert!(matches!(
+            combatant.fields.get("combatantRevision"),
+            Some(DomainViewValueV1::U64(value)) if *value == native_combatant_revision
+        ));
+        let entity_id = runtime.player().unwrap().entity_id.packed();
+        assert!(matches!(
+            combatant.fields.get("entityId"),
+            Some(DomainViewValueV1::U64(value)) if *value == entity_id
+        ));
+        assert!(matches!(
+            combatant.fields.get("vitalUnits"),
+            Some(DomainViewValueV1::String(value)) if value == "millihearts-v1"
+        ));
+        assert!(matches!(
+            combatant.fields.get("crossDomainParity"),
+            Some(DomainViewValueV1::Bool(true))
+        ));
+        assert!(matches!(
+            combatant.fields.get("health"),
+            Some(DomainViewValueV1::U64(20_000))
+        ));
+        assert!(matches!(
+            combatant.fields.get("maxHealth"),
+            Some(DomainViewValueV1::U64(20_000))
+        ));
+        assert!(matches!(
+            combatant.fields.get("alive"),
+            Some(DomainViewValueV1::Bool(true))
         ));
 
         let environment = &views[7];

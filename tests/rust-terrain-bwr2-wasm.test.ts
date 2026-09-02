@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { BLOCKS, BlockId } from "../app/game/data.ts";
@@ -17,6 +18,10 @@ import {
   encodeTerrainMaterialRegistryWireV2,
 } from "../app/game/rust-terrain-mesh-codec.ts";
 import { canonicalTerrainMaterialRegistryV2 } from "../app/game/terrain-material-registry.ts";
+import {
+  resolveRustEngineTestDefaultArtifact,
+  resolveRustEngineTestIndexRoot,
+} from "./helpers/rust-engine-test-artifact.ts";
 
 type WasmTerrainModule = Readonly<{
   default(input: { module_or_path: Uint8Array }): Promise<unknown>;
@@ -25,12 +30,10 @@ type WasmTerrainModule = Readonly<{
 
 async function loadPublishedTerrainWasm() {
   const root = resolve(import.meta.dirname, "..");
-  const index = JSON.parse(await readFile(resolve(root, "public/engine/manifest.json"), "utf8"));
-  const hash = index.artifacts[index.defaultVariant].hash as string;
-  const directory = resolve(root, "public/engine", hash);
-  const module = await import(`${pathToFileURL(resolve(directory, "engine.js")).href}?test=${Date.now()}`) as WasmTerrainModule;
-  await module.default({ module_or_path: new Uint8Array(await readFile(resolve(directory, "engine_bg.wasm"))) });
-  return { module, hash };
+  const { artifactDirectory, hash } = await resolveRustEngineTestDefaultArtifact(root);
+  const wasmModule = await import(`${pathToFileURL(resolve(artifactDirectory, "engine.js")).href}?test=${Date.now()}`) as WasmTerrainModule;
+  await wasmModule.default({ module_or_path: new Uint8Array(await readFile(resolve(artifactDirectory, "engine_bg.wasm"))) });
+  return { wasmModule, hash };
 }
 
 function currentContentSnapshot(contentHash: string) {
@@ -65,9 +68,9 @@ function currentContentSnapshot(contentHash: string) {
 test("published Wasm accepts one BWR2 section containing every current block and fails unknown IDs closed", async () => {
   const registry = canonicalTerrainMaterialRegistryV2();
   const registryBytes = encodeTerrainMaterialRegistryWireV2(registry);
-  const { module, hash } = await loadPublishedTerrainWasm();
+  const { wasmModule, hash } = await loadPublishedTerrainWasm();
   const snapshot = currentContentSnapshot(registry.contentHash);
-  const response = decodeRustTerrainWireResponseV1(module.blockwild_world_mesh_section_v1(
+  const response = decodeRustTerrainWireResponseV1(wasmModule.blockwild_world_mesh_section_v1(
     encodeSectionSnapshotWireV1(snapshot), registryBytes,
   ));
   assert.equal(response.kind, "mesh", `artifact ${hash} did not accept current BWR2 content`);
@@ -86,9 +89,37 @@ test("published Wasm accepts one BWR2 section containing every current block and
     revision: { section: 2, halo: 2, lighting: 2 },
     streams: unknown.streams,
   });
-  const fallback = decodeRustTerrainWireResponseV1(module.blockwild_world_mesh_section_v1(
+  const fallback = decodeRustTerrainWireResponseV1(wasmModule.blockwild_world_mesh_section_v1(
     encodeSectionSnapshotWireV1(refreshed), registryBytes,
   ));
   assert.equal(fallback.kind, "ineligible");
   if (fallback.kind === "ineligible") assert.equal(fallback.blockId, 601);
+});
+
+test("Wasm candidate override admits only the isolated locator and schema candidate indexes", async () => {
+  const root = resolve(import.meta.dirname, "..");
+  assert.deepEqual(await resolveRustEngineTestIndexRoot(root, null), {
+    directory: await realpath(resolve(root, "public/engine")),
+    overridden: false,
+  });
+  await assert.rejects(() => resolveRustEngineTestIndexRoot(root, ""), /non-empty directory/);
+  await assert.rejects(() => resolveRustEngineTestIndexRoot(root, "public/engine"), /engine-locator-candidate/);
+  await assert.rejects(() => resolveRustEngineTestIndexRoot(root, "public"), /engine-locator-candidate/);
+  await assert.rejects(() => resolveRustEngineTestIndexRoot(root, "tests"), /engine-locator-candidate/);
+  await assert.rejects(
+    () => resolveRustEngineTestIndexRoot(root, "public/engine-locator-candidate/../engine"),
+    /engine-locator-candidate/,
+  );
+  for (const rejected of ["public/engine-schema-candidate/../engine", "public/engine-schema-candidate/nested", "public/engine-unlisted-candidate"]) {
+    await assert.rejects(() => resolveRustEngineTestIndexRoot(root, rejected), /engine-schema-candidate/);
+  }
+  for (const name of ["engine-locator-candidate", "engine-schema-candidate"]) {
+    if (existsSync(resolve(root, "public", name))) {
+      assert.deepEqual(await resolveRustEngineTestIndexRoot(root, `public/${name}`), {
+        directory: await realpath(resolve(root, "public", name)), overridden: true,
+      });
+    } else {
+      await assert.rejects(() => resolveRustEngineTestIndexRoot(root, `public/${name}`), /existing directory/);
+    }
+  }
 });

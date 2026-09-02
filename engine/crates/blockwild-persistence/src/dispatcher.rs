@@ -66,6 +66,14 @@ pub struct PersistenceDispatchPacketV1 {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PersistenceDispatchRetryV1 {
+    pub request_id: u64,
+    /// `None` is the commit lane; platform retries retain their exact
+    /// operation so the integrated runtime can bind retry custody correctly.
+    pub operation: Option<PersistencePlatformOperationV1>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PersistenceRetryDirectiveV1 {
     None,
     RetryAfterBackoff { delay_milliseconds: u32 },
@@ -157,7 +165,7 @@ impl PersistenceDispatcherV1 {
 
     #[must_use]
     pub fn pending_count(&self) -> usize {
-        self.queue.len() + self.in_flight.len()
+        self.queue.len() + self.in_flight.len() + self.retryable.len()
     }
 
     #[must_use]
@@ -167,7 +175,7 @@ impl PersistenceDispatcherV1 {
 
     #[must_use]
     pub fn is_idle(&self) -> bool {
-        self.queue.is_empty() && self.in_flight.is_empty()
+        self.queue.is_empty() && self.in_flight.is_empty() && self.retryable.is_empty()
     }
 
     #[must_use]
@@ -369,7 +377,13 @@ impl PersistenceDispatcherV1 {
             ));
         }
         let Some(front) = self.queue.front() else {
-            return Ok(None);
+            if self.retryable.is_empty() {
+                return Ok(None);
+            }
+            return Err(PersistenceError::new(
+                "dispatch-retry-pending",
+                "persistence dispatcher cannot report empty while Rust-approved retry work is pending",
+            ));
         };
         if front.bytes.len() > max_bytes {
             return Err(PersistenceError::new(
@@ -446,9 +460,10 @@ impl PersistenceDispatcherV1 {
         Ok(outcome)
     }
 
-    pub fn retry(&mut self, previous_request_id: u64) -> Result<u64, PersistenceError> {
+    pub fn retry(&mut self, previous_request_id: u64) -> Result<PersistenceDispatchRetryV1, PersistenceError> {
         self.require_open()?;
-        let mut item = self
+        let mut candidate = self.clone();
+        let mut item = candidate
             .retryable
             .remove(&previous_request_id)
             .ok_or_else(|| PersistenceError::new("dispatch-retry", "request has no Rust-approved retry plan"))?;
@@ -458,7 +473,11 @@ impl PersistenceDispatcherV1 {
                 "request exhausted its retry budget",
             ));
         }
-        let request_id = self.allocate_request_id()?;
+        let operation = match &item.expectation {
+            DispatchExpectationV1::Commit { .. } => None,
+            DispatchExpectationV1::Platform(request) => Some(request.operation),
+        };
+        let request_id = candidate.allocate_request_id()?;
         item.attempt = item.attempt.saturating_add(1);
         item.request_id = request_id;
         match &mut item.expectation {
@@ -468,8 +487,9 @@ impl PersistenceDispatcherV1 {
                 item.bytes = encode_persistence_platform_request_v1(request)?;
             }
         }
-        self.enqueue(item)?;
-        Ok(request_id)
+        candidate.enqueue(item)?;
+        *self = candidate;
+        Ok(PersistenceDispatchRetryV1 { request_id, operation })
     }
 
     pub fn close(&mut self) {
@@ -573,6 +593,16 @@ impl PersistenceDispatcherV1 {
             }
         }
         let retryable_count = reader.count(limits.max_pending)?;
+        if queue_count
+            .saturating_add(in_flight_count)
+            .saturating_add(retryable_count)
+            > limits.max_pending
+        {
+            return Err(PersistenceError::new(
+                "dispatcher-state-capacity",
+                "restored pending count exceeds its bound",
+            ));
+        }
         let mut retryable = BTreeMap::new();
         for _ in 0..retryable_count {
             let item = reader.item(limits.max_packet_bytes)?;
@@ -635,6 +665,10 @@ impl PersistenceDispatcherV1 {
         hasher.write_u32(self.in_flight.len() as u32);
         for (token, item) in &self.in_flight {
             hasher.write_u64(*token);
+            hash_item(&mut hasher, item);
+        }
+        hasher.write_u32(self.retryable.len() as u32);
+        for item in self.retryable.values() {
             hash_item(&mut hasher, item);
         }
         hasher.finish()
@@ -1299,7 +1333,17 @@ mod tests {
         let outcome = dispatcher.complete(packet.transfer_token, &response).unwrap();
         assert_eq!(outcome.persistence_revision, 0);
         assert_eq!(outcome.retry, PersistenceRetryDirectiveV1::CompactBeforeRetry);
-        assert!(dispatcher.retry(request_id).is_ok());
+        assert_eq!(dispatcher.pending_count(), 1);
+        assert!(!dispatcher.is_idle());
+        assert_eq!(dispatcher.poll(1024).unwrap_err().code, "dispatch-retry-pending");
+        assert_eq!(
+            dispatcher.retry(request_id).unwrap(),
+            PersistenceDispatchRetryV1 {
+                request_id: request_id + 1,
+                operation: Some(PersistencePlatformOperationV1::Estimate),
+            }
+        );
+        assert_eq!(dispatcher.pending_count(), 1);
     }
 
     #[test]

@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { BLOCKS, POLLINATOR_FLOWERS, BlockId, type ItemCode, type Weather } from "./data";
 import { BUTTERFLY_ANTENNA_CONTRACT } from "./model-specs";
 import { BUTTERFLY_ORDER, MOB_DEFS, type ButterflyKind } from "./mobs";
-import { BiomeId, type ChunkWorld } from "./world";
+import { BiomeId, CHUNK_SIZE, type ChunkWorld } from "./world";
 
 export type ButterflySnapshot = {
   id: number;
@@ -300,7 +300,12 @@ export class ButterflySystem {
   }
 
   private flowerAt(x: number, z: number) {
-    const ground = this.world.surfaceAt(x, z);
+    const column = this.world.installedColumn(x, z);
+    if (!column || this.world.getBlock(x, column.height, z) === undefined) {
+      this.world.requestChunkForResidency(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+      return null;
+    }
+    const ground = column.height;
     const y = ground + 1;
     const type = this.world.getBlock(x, y, z);
     return type !== undefined && FLOWERS.has(type) ? new THREE.Vector3(x, y, z) : null;
@@ -334,7 +339,12 @@ export class ButterflySystem {
     const distance = 7 + Math.random() * 25;
     const x = Math.round(environment.player.x + Math.cos(angle) * distance);
     const z = Math.round(environment.player.z + Math.sin(angle) * distance);
-    const biome = this.world.biomeAt(x, z);
+    const column = this.world.installedColumn(x, z);
+    if (!column || this.world.getBlock(x, column.height, z) === undefined) {
+      this.world.requestChunkForResidency(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+      return;
+    }
+    const biome = column.biome;
     if (!BUTTERFLY_BIOMES.has(biome)) return;
     const flower = this.findFlowerNear(x, z, 7);
     if (!flower || this.world.skyVisibilityAt(flower.x, flower.y + 0.7, flower.z) < 0.72) return;

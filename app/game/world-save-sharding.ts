@@ -30,6 +30,7 @@ const PLAYER_PROPERTIES = new Set([
   "player", "spawn", "startingSettlementId", "inventory", "cursor", "trash", "craftGrid", "equipment", "offhand", "bestiary", "selected",
   "health", "hunger", "xp", "level", "playerVariant", "skillState", "magicState", "spellWorldState", "potionBuffs", "rangedLoaded", "plantBestiary",
   "blueprints", "goldWallet", "bankAccount", "stockMarket", "digitalItemVault", "digitalCreatureArchive", "summonContracts",
+  "rustNativePlayerDeathRespawnProjection", "rustNativePlayerRespawnPlan",
 ]);
 const SETTINGS_PROPERTIES = new Set(["options", "mode"]);
 
@@ -71,6 +72,10 @@ export type WorldSaveShardJournalPlanV1 = Readonly<{
 
 function compareOrdinal(left: string, right: string) { return left === right ? 0 : left < right ? -1 : 1; }
 
+function defineEnumerableDataProperty(output: Record<string, unknown>, key: string, value: unknown) {
+  Object.defineProperty(output, key, { configurable: true, enumerable: true, value, writable: true });
+}
+
 function canonicalJsonValue(value: unknown): unknown {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isFinite(value) ? Object.is(value, -0) ? 0 : value : null;
@@ -79,7 +84,9 @@ function canonicalJsonValue(value: unknown): unknown {
   const output: Record<string, unknown> = {};
   for (const key of Object.keys(value as Record<string, unknown>).sort(compareOrdinal)) {
     const entry = (value as Record<string, unknown>)[key];
-    if (entry !== undefined && typeof entry !== "function" && typeof entry !== "symbol") output[key] = canonicalJsonValue(entry);
+    if (entry !== undefined && typeof entry !== "function" && typeof entry !== "symbol") {
+      defineEnumerableDataProperty(output, key, canonicalJsonValue(entry));
+    }
   }
   return output;
 }
@@ -188,9 +195,9 @@ export function restoreWorldSaveV1(set: Pick<WorldSaveShardSetV1, "manifest" | "
     });
     if (property.container === "scalar") {
       if (decoded.length !== 1 || decoded[0][0] !== null) throw new Error(`scalar property ${property.property} has an invalid manifest`);
-      output[property.property] = decoded[0][1];
+      defineEnumerableDataProperty(output, property.property, decoded[0][1]);
     } else if (property.container === "map") {
-      output[property.property] = Object.fromEntries(decoded.map(([key, value]) => [key ?? "", value]));
+      defineEnumerableDataProperty(output, property.property, Object.fromEntries(decoded.map(([key, value]) => [key ?? "", value])));
     } else {
       const array: unknown[] = [];
       for (const [key, value] of decoded) {
@@ -198,7 +205,7 @@ export function restoreWorldSaveV1(set: Pick<WorldSaveShardSetV1, "manifest" | "
         if (!Number.isSafeInteger(index) || index < 0) throw new Error(`array property ${property.property} has an invalid index`);
         array[index] = value;
       }
-      output[property.property] = array;
+      defineEnumerableDataProperty(output, property.property, array);
     }
   }
   return output as unknown as WorldSave;

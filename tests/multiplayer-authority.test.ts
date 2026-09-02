@@ -160,6 +160,8 @@ test("two furnace viewers receive the same atomic semantic slot commit", () => {
     },
     chests: new Map(),
     furnaces: new Map([["7,8,9", { input: null, fuel: null, output: null, progress: 2, burn: 4, burnMax: 8 }]]), boats: new Map(), mobs: [],
+    remotePlayers: new Map([[PLAYER_ID, { target: { x: 7, y: 8, z: 9 } }]]),
+    world: { terrainGenerationAuthority: { mode: "typescript" }, getBlock: () => BlockId.Furnace },
     multiplayerContainerRevisions: new Map([[containerId, 0]]), multiplayerContainerSignatures: new Map(),
     multiplayerPeerActiveContainers: new Map([[PLAYER_ID, containerId], ["player_observer_002", containerId]]),
     multiplayerPeerContainerSignatures: new Map(), multiplayerPlayerStates: new Map([[PLAYER_ID, actor]]),

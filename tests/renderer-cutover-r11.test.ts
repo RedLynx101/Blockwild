@@ -55,6 +55,27 @@ test("wgpu primary fails closed until policy and every promotion gate pass", () 
   assert.equal(promoted.primary, "wgpu"); assert.equal(promoted.compatibilityRole, "isolated-fallback");
 });
 
+test("renderer selector matrix is deterministic across requests, capabilities, and closed policy", () => {
+  const cases = [
+    { request: "three", capability: CAPABLE, shadow: true, primary: true, expected: ["three", null, null] },
+    { request: "wgpu-shadow", capability: CAPABLE, shadow: true, primary: false, expected: ["three", "wgpu", null] },
+    { request: "wgpu-shadow", capability: CAPABLE, shadow: false, primary: false, expected: ["three", null, "shadow-policy"] },
+    { request: "wgpu", capability: CAPABLE, shadow: true, primary: false, expected: ["three", null, "primary-policy"] },
+    { request: "wgpu", capability: { supported: false, reason: "worker-unavailable" } as const, shadow: true, primary: true, expected: ["three", null, "capability"] },
+    { request: "wgpu", capability: { supported: false, reason: "offscreen-canvas-unavailable" } as const, shadow: true, primary: true, expected: ["three", null, "capability"] },
+    { request: "wgpu", capability: { supported: false, reason: "webgpu-unavailable" } as const, shadow: true, primary: true, expected: ["three", null, "capability"] },
+  ] as const;
+  for (const entry of cases) {
+    const result = resolveRendererCutoverR11(entry.request, {
+      capability: entry.capability,
+      allowWgpuShadow: entry.shadow,
+      allowWgpuPrimary: entry.primary,
+      promotionGates: ALL_GATES,
+    });
+    assert.deepEqual([result.primary, result.shadow, result.fallback?.code ?? null], entry.expected);
+  }
+});
+
 test("compatibility selection performs no artifact or backend work", async () => {
   let loads = 0;
   const runtime = new RendererCutoverRuntimeR11({
@@ -67,8 +88,11 @@ test("compatibility selection performs no artifact or backend work", async () =>
   assert.equal(runtime.diagnostics().state, "compatibility");
 });
 
-test("wgpu primary remains selected but inactive until ready and after backend failure", async () => {
+test("wgpu primary keeps Three visible until a real frame presents and restores it on failure", async () => {
   let backendState: "starting" | "ready" | "failed" = "starting";
+  let lastPresentedSequence: bigint | null = null;
+  let replacementSurfaceRequired = false;
+  let emitBackendDiagnostics: (value: unknown) => void = (value) => { void value; throw new Error("backend diagnostics subscriber is not installed"); };
   let resolveReady!: () => void;
   let signalCreated!: () => void;
   const created = new Promise<void>((resolve) => { signalCreated = resolve; });
@@ -81,8 +105,13 @@ test("wgpu primary remains selected but inactive until ready and after backend f
     resize: () => undefined,
     requestRecovery: () => undefined,
     switchEpoch: () => undefined,
+    subscribe: (listener) => {
+      emitBackendDiagnostics = (value) => { listener(value as never); };
+      listener({ state: backendState, lastPresentedSequence, latestSkipReason: null, replacementSurfaceRequired } as never);
+      return () => { emitBackendDiagnostics = () => undefined; };
+    },
     dispose: () => undefined,
-    diagnostics: () => ({ state: backendState, replacementSurfaceRequired: false }) as never,
+    diagnostics: () => ({ state: backendState, lastPresentedSequence, latestSkipReason: null, replacementSurfaceRequired }) as never,
   };
   const runtime = new RendererCutoverRuntimeR11({
     request: "wgpu", canvas: {} as HTMLCanvasElement, canvasRole: "primary", epoch: BigInt(3), width: 640, height: 360,
@@ -94,17 +123,23 @@ test("wgpu primary remains selected but inactive until ready and after backend f
   const starting = runtime.start();
   await created;
   assert.deepEqual({ state: runtime.diagnostics().state, selected: runtime.diagnostics().selectedPrimary, active: runtime.diagnostics().activePrimary }, {
-    state: "starting", selected: "wgpu", active: null,
+    state: "starting", selected: "wgpu", active: "three",
   });
   backendState = "ready";
+  emitBackendDiagnostics({ state: backendState, lastPresentedSequence, latestSkipReason: null, replacementSurfaceRequired });
   resolveReady();
   await starting;
-  assert.deepEqual({ state: runtime.diagnostics().state, active: runtime.diagnostics().activePrimary }, { state: "ready", active: "wgpu" });
+  assert.deepEqual({ state: runtime.diagnostics().state, active: runtime.diagnostics().activePrimary }, { state: "ready", active: "three" });
+  lastPresentedSequence = BigInt(1);
+  emitBackendDiagnostics({ state: backendState, lastPresentedSequence, latestSkipReason: null, replacementSurfaceRequired });
+  assert.equal(runtime.diagnostics().activePrimary, "wgpu");
   backendState = "failed";
-  assert.deepEqual({ state: runtime.diagnostics().state, active: runtime.diagnostics().activePrimary }, { state: "failed", active: null });
+  replacementSurfaceRequired = true;
+  emitBackendDiagnostics({ state: backendState, lastPresentedSequence, latestSkipReason: null, replacementSurfaceRequired });
+  assert.deepEqual({ state: runtime.diagnostics().state, active: runtime.diagnostics().activePrimary }, { state: "failed", active: "three" });
 });
 
-test("wgpu startup transfer failure never claims an automatic Three fallback", async () => {
+test("wgpu startup transfer failure keeps the rendered Three fallback without claiming replacement", async () => {
   const runtime = new RendererCutoverRuntimeR11({
     request: "wgpu", canvas: {} as HTMLCanvasElement, canvasRole: "primary", epoch: BigInt(4), width: 640, height: 360,
     capability: CAPABLE, allowWgpuPrimary: true, promotionGates: ALL_GATES,
@@ -118,7 +153,8 @@ test("wgpu startup transfer failure never claims an automatic Three fallback", a
     active: runtime.diagnostics().activePrimary,
     replacement: runtime.diagnostics().replacementSurfaceRequired,
     automatic: runtime.diagnostics().automaticSurfaceReplacement,
-  }, { state: "failed", selected: "wgpu", active: null, replacement: true, automatic: false });
+    exhausted: runtime.diagnostics().surfaceReplacementExhausted,
+  }, { state: "failed", selected: "wgpu", active: "three", replacement: true, automatic: false, exhausted: false });
 });
 
 test("shadow runtime queues immutable extraction until its distinct backend is ready", async () => {

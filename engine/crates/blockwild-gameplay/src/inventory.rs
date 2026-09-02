@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use blockwild_types::{CanonicalHash, CanonicalHasher};
+use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId, PlayerId};
 
 use crate::{
     BlockActionLootErrorCodeV1, GeneratedDropProvenanceV1, MAX_ITEM_STACK, Rejection, RejectionCode, ResourceDelta,
@@ -14,9 +14,16 @@ pub const MAX_PLAYER_INVENTORY_IMPORT_METADATA_BYTES_V1: usize = 256 * 1024;
 pub const INVENTORY_COMMAND_IMPORT_PLAYER_V1_TAG: u16 = 6;
 pub const INVENTORY_COMMAND_APPLY_BLOCK_ACTION_V1_TAG: u16 = 7;
 pub const INVENTORY_COMMAND_CREATE_GENERATED_DROP_CUSTODY_V1_TAG: u16 = 8;
+pub const INVENTORY_COMMAND_CONSUME_UNIT_V1_TAG: u16 = 9;
+pub const INVENTORY_COMMAND_SET_CREATIVE_SLOT_V1_TAG: u16 = 10;
 pub const MAX_INVENTORY_CONTAINERS_V1: usize = 65_536;
 pub const MAX_GENERATED_DROP_CUSTODY_CONTAINERS_V1: usize = 4_096;
 pub const GENERATED_DROP_RESOURCE_REASON_V1: &str = "block-loot-v1";
+pub const PLAYER_LOCATOR_ITEM_CONSUME_REASON_V1: &str = "player-locator-item-consume-v1";
+pub const PLAYER_CREATIVE_SLOT_SET_REASON_V1: &str = "player-creative-slot-set-v1";
+pub const MAX_PLAYER_DEATH_CUSTODY_RELEASES_V1: usize = 17;
+pub const PLAYER_DEATH_INVENTORY_SLOTS_V1: usize = 9;
+pub const PLAYER_DEATH_EQUIPMENT_SLOTS_V1: usize = 8;
 
 pub type ItemCode = u32;
 
@@ -368,6 +375,12 @@ impl ItemInstanceMetadataV1 {
         hasher.finish()
     }
 
+    /// Validate a descriptor received across a native/browser wire boundary
+    /// using the same canonical rules as gameplay custody installation.
+    pub fn validate_wire(&self) -> Result<(), Rejection> {
+        self.validate()
+    }
+
     pub(crate) fn validate(&self) -> Result<(), Rejection> {
         validate_id("item metadata type", &self.type_id)?;
         validate_id("item metadata schema", &self.schema_id)?;
@@ -434,6 +447,154 @@ pub struct ApplyBlockActionV1 {
     pub reason: String,
 }
 
+/// Consumes exactly one unit from an actor-owned player inventory slot after
+/// comparing both the complete stack and its containing revision. Locator
+/// evidence is bound by the enclosing runtime request; this gameplay command
+/// owns only the atomic custody transition.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConsumeInventoryUnitV1 {
+    pub inventory: ContainerKey,
+    pub slot: u16,
+    pub expected_container_revision: u64,
+    pub expected_stack: ItemStack,
+}
+
+/// Replaces one exact selected player-inventory slot for an already-authorized
+/// Creative player. Creative eligibility and selected-slot binding are owned
+/// by the integrated runtime; this command owns only the exact atomic custody
+/// compare-and-set.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetCreativeInventorySlotV1 {
+    pub inventory: ContainerKey,
+    pub slot: u16,
+    pub expected_container_revision: u64,
+    pub expected_stack: Option<ItemStack>,
+    pub replacement_stack: ItemStack,
+}
+
+/// Canonical player-custody lane used by a Survival death release. Ordering is
+/// protocol-significant: all occupied inventory slots precede all occupied
+/// equipment slots, with ascending slot indices inside each lane.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum PlayerDeathCustodyLaneV1 {
+    Inventory,
+    Equipment,
+}
+
+impl PlayerDeathCustodyLaneV1 {
+    const fn canonical_tag(self) -> u16 {
+        match self {
+            Self::Inventory => 0,
+            Self::Equipment => 1,
+        }
+    }
+
+    const fn id_segment(self) -> &'static str {
+        match self {
+            Self::Inventory => "inventory",
+            Self::Equipment => "equipment",
+        }
+    }
+}
+
+/// One complete source stack and its deterministic, unowned one-slot custody.
+/// The runtime may later materialize a corresponding R6/WorldView drop, but
+/// this record deliberately owns no entity or presentation allocation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerDeathCustodyReleaseV1 {
+    pub source_lane: PlayerDeathCustodyLaneV1,
+    pub source_slot: u16,
+    pub expected_stack: ItemStack,
+    pub custody: ContainerKey,
+}
+
+/// Exact R7 plan for the false-keep-inventory half of a player respawn. Every
+/// occupied stack must appear once, in canonical source order; empty slots are
+/// omitted. The combat fields bind this custody plan to the sibling respawn
+/// compare-and-set performed by [`crate::GameplayAuthority`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerDeathRespawnCustodyPlanV1 {
+    pub record_id: String,
+    pub player_id: PlayerId,
+    pub entity_id: EntityId,
+    pub expected_combatant_revision: u64,
+    pub expected_max_health: u32,
+    pub death_sequence: u64,
+    pub inventory: ContainerKey,
+    pub expected_inventory_revision: u64,
+    pub equipment: ContainerKey,
+    pub expected_equipment_revision: u64,
+    pub releases: Vec<PlayerDeathCustodyReleaseV1>,
+}
+
+impl PlayerDeathRespawnCustodyPlanV1 {
+    #[must_use]
+    pub fn calculate_command_hash_v1(&self) -> CanonicalHash {
+        let mut hasher = CanonicalHasher::new("blockwild.gameplay.player-death-respawn-custody.command.v1");
+        hasher.write_u16(1);
+        hasher.write_str(&self.record_id);
+        hasher.write_u64(self.player_id.packed());
+        hasher.write_u64(self.entity_id.packed());
+        hasher.write_u64(self.expected_combatant_revision);
+        hasher.write_u32(self.expected_max_health);
+        hasher.write_u64(self.death_sequence);
+        self.inventory.hash_into(&mut hasher);
+        hasher.write_u64(self.expected_inventory_revision);
+        self.equipment.hash_into(&mut hasher);
+        hasher.write_u64(self.expected_equipment_revision);
+        hasher.write_u64(self.releases.len() as u64);
+        for release in &self.releases {
+            hasher.write_u16(release.source_lane.canonical_tag());
+            hasher.write_u16(release.source_slot);
+            release.expected_stack.hash_into(&mut hasher);
+            release.custody.hash_into(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    #[must_use]
+    pub fn idempotency_key_v1(&self) -> String {
+        format!(
+            "player-death-respawn-custody-v1:{}:{}",
+            self.player_id.packed(),
+            self.death_sequence
+        )
+    }
+}
+
+/// Gameplay receipt for the combined combat restore and custody release. The
+/// ordered release records are sufficient for a later runtime transaction to
+/// allocate matching R6 and WorldView drop representations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PlayerDeathRespawnCustodyReceiptV1 {
+    pub player_id: PlayerId,
+    pub death_sequence: u64,
+    pub gameplay_sequence: u64,
+    pub combatant_revision: u64,
+    pub inventory_changed: bool,
+    pub releases: Vec<PlayerDeathCustodyReleaseV1>,
+    pub command_hash: CanonicalHash,
+    pub before_state_hash: CanonicalHash,
+    pub after_state_hash: CanonicalHash,
+    pub receipt_hash: CanonicalHash,
+}
+
+/// Canonical unowned R7 custody identifier. R6 drop ids/entities are allocated
+/// separately by the integrated runtime and are intentionally absent here.
+#[must_use]
+pub fn player_death_custody_id_v1(
+    player_id: PlayerId,
+    death_sequence: u64,
+    lane: PlayerDeathCustodyLaneV1,
+    source_slot: u16,
+) -> String {
+    format!(
+        "player-death-custody-v1:{}:{death_sequence}:{}:{source_slot}",
+        player_id.packed(),
+        lane.id_segment()
+    )
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InventoryCommand {
     Transfer(TransferCommand),
@@ -445,6 +606,8 @@ pub enum InventoryCommand {
     ImportPlayerInventoryV1(ImportPlayerInventoryV1),
     ApplyBlockActionV1(ApplyBlockActionV1),
     CreateGeneratedDropCustodyV1(CreateGeneratedDropCustodyV1),
+    ConsumeInventoryUnitV1(ConsumeInventoryUnitV1),
+    SetCreativeInventorySlotV1(SetCreativeInventorySlotV1),
 }
 
 impl InventoryCommand {
@@ -566,6 +729,27 @@ impl InventoryCommand {
                 hasher.write_bytes(command.provenance.canonical_hash_v1().as_bytes());
                 hasher.write_bytes(command.request_hash.as_bytes());
             }
+            Self::ConsumeInventoryUnitV1(command) => {
+                hasher.write_u16(INVENTORY_COMMAND_CONSUME_UNIT_V1_TAG);
+                command.inventory.hash_into(hasher);
+                hasher.write_u16(command.slot);
+                hasher.write_u64(command.expected_container_revision);
+                command.expected_stack.hash_into(hasher);
+            }
+            Self::SetCreativeInventorySlotV1(command) => {
+                hasher.write_u16(INVENTORY_COMMAND_SET_CREATIVE_SLOT_V1_TAG);
+                command.inventory.hash_into(hasher);
+                hasher.write_u16(command.slot);
+                hasher.write_u64(command.expected_container_revision);
+                match &command.expected_stack {
+                    Some(stack) => {
+                        hasher.write_u16(1);
+                        stack.hash_into(hasher);
+                    }
+                    None => hasher.write_u16(0),
+                }
+                command.replacement_stack.hash_into(hasher);
+            }
         }
     }
 }
@@ -580,6 +764,269 @@ pub struct InventoryState {
 }
 
 impl InventoryState {
+    /// Releases every occupied player inventory/equipment stack into its own
+    /// deterministic unowned custody. Validation and mutation are staged on a
+    /// clone so even an internal insertion failure cannot expose a partial
+    /// death release.
+    pub fn release_player_death_custody_v1(&mut self, plan: &PlayerDeathRespawnCustodyPlanV1) -> Result<(), Rejection> {
+        let staged = self.stage_player_death_custody_v1(plan, None)?;
+        *self = staged;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_player_death_custody_with_injected_failure_for_test(
+        &mut self,
+        plan: &PlayerDeathRespawnCustodyPlanV1,
+        fail_after_releases: usize,
+    ) -> Result<(), Rejection> {
+        let staged = self.stage_player_death_custody_v1(plan, Some(fail_after_releases))?;
+        *self = staged;
+        Ok(())
+    }
+
+    fn stage_player_death_custody_v1(
+        &self,
+        plan: &PlayerDeathRespawnCustodyPlanV1,
+        fail_after_releases: Option<usize>,
+    ) -> Result<Self, Rejection> {
+        validate_id("death-custody combat record", &plan.record_id)?;
+        if plan.player_id.packed() == 0
+            || plan.entity_id.packed() == 0
+            || plan.death_sequence == 0
+            || plan.expected_max_health == 0
+        {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "death custody requires nonzero player, entity, death, and health identities",
+            ));
+        }
+        plan.inventory.validate()?;
+        plan.equipment.validate()?;
+        let canonical_inventory = ContainerKey::player(plan.record_id.clone());
+        let canonical_equipment = ContainerKey {
+            kind: ContainerKind::Equipment,
+            id: format!("{}:equipment", plan.record_id),
+            owner_id: Some(plan.record_id.clone()),
+        };
+        canonical_equipment.validate()?;
+        if plan.inventory != canonical_inventory || plan.equipment != canonical_equipment {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "death custody source keys are not the canonical player custody pair",
+            ));
+        }
+        let actor_custodies = self
+            .containers
+            .keys()
+            .filter(|key| {
+                key.owner_id.as_deref() == Some(plan.record_id.as_str())
+                    && matches!(key.kind, ContainerKind::Player | ContainerKind::Equipment)
+            })
+            .count();
+        if actor_custodies != 2 {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "death custody requires exactly one player inventory and equipment container",
+            ));
+        }
+
+        let inventory = self.containers.get(&plan.inventory).ok_or_else(|| {
+            Rejection::new(
+                RejectionCode::InvalidTarget,
+                "death custody player inventory does not exist",
+            )
+        })?;
+        let equipment = self.containers.get(&plan.equipment).ok_or_else(|| {
+            Rejection::new(
+                RejectionCode::InvalidTarget,
+                "death custody player equipment does not exist",
+            )
+        })?;
+        if inventory.key != plan.inventory
+            || equipment.key != plan.equipment
+            || inventory.slots.len() != PLAYER_DEATH_INVENTORY_SLOTS_V1
+            || equipment.slots.len() != PLAYER_DEATH_EQUIPMENT_SLOTS_V1
+        {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "death custody source container shape or identity is not canonical",
+            ));
+        }
+        inventory.validate(&self.items)?;
+        equipment.validate(&self.items)?;
+        check_container_revision(inventory, Some(plan.expected_inventory_revision))?;
+        check_container_revision(equipment, Some(plan.expected_equipment_revision))?;
+
+        let expected_releases = inventory
+            .slots
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, stack)| {
+                stack
+                    .as_ref()
+                    .map(|stack| (PlayerDeathCustodyLaneV1::Inventory, slot, stack))
+            })
+            .chain(equipment.slots.iter().enumerate().filter_map(|(slot, stack)| {
+                stack
+                    .as_ref()
+                    .map(|stack| (PlayerDeathCustodyLaneV1::Equipment, slot, stack))
+            }))
+            .collect::<Vec<_>>();
+        if expected_releases.len() > MAX_PLAYER_DEATH_CUSTODY_RELEASES_V1
+            || plan.releases.len() != expected_releases.len()
+        {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "death custody plan does not cover the exact occupied source set",
+            ));
+        }
+        let next_container_count = self
+            .containers
+            .len()
+            .checked_add(plan.releases.len())
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "death custody container count overflow"))?;
+        if next_container_count > MAX_INVENTORY_CONTAINERS_V1 {
+            return Err(Rejection::new(
+                RejectionCode::Capacity,
+                "death custody container capacity is exhausted",
+            ));
+        }
+
+        let inventory_changed = expected_releases
+            .iter()
+            .any(|(lane, _, _)| *lane == PlayerDeathCustodyLaneV1::Inventory);
+        let equipment_changed = expected_releases
+            .iter()
+            .any(|(lane, _, _)| *lane == PlayerDeathCustodyLaneV1::Equipment);
+        let next_inventory_revision = if inventory_changed {
+            inventory
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "death inventory revision overflow"))?
+        } else {
+            inventory.revision
+        };
+        let next_equipment_revision = if equipment_changed {
+            equipment
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "death equipment revision overflow"))?
+        } else {
+            equipment.revision
+        };
+
+        let mut custody_keys = BTreeSet::new();
+        for (release, (expected_lane, expected_slot, expected_stack)) in plan.releases.iter().zip(&expected_releases) {
+            let expected_slot = u16::try_from(*expected_slot)
+                .map_err(|_| Rejection::new(RejectionCode::Capacity, "death custody slot exceeds u16"))?;
+            if release.source_lane != *expected_lane
+                || release.source_slot != expected_slot
+                || release.expected_stack != **expected_stack
+            {
+                return Err(Rejection::new(
+                    RejectionCode::Conflict,
+                    "death custody release order, source slot, or stack is stale",
+                ));
+            }
+            release.custody.validate()?;
+            let expected_custody_id = player_death_custody_id_v1(
+                plan.player_id,
+                plan.death_sequence,
+                release.source_lane,
+                release.source_slot,
+            );
+            if release.custody.kind != ContainerKind::Container
+                || release.custody.owner_id.is_some()
+                || release.custody.id != expected_custody_id
+                || !custody_keys.insert(release.custody.clone())
+            {
+                return Err(Rejection::new(
+                    RejectionCode::InvalidCommand,
+                    "death custody release does not use one unique canonical unowned container",
+                ));
+            }
+            if self.containers.contains_key(&release.custody) {
+                return Err(Rejection::new(
+                    RejectionCode::Conflict,
+                    "death custody destination already exists",
+                ));
+            }
+            let definition = self.items.get(&release.expected_stack.item_code).ok_or_else(|| {
+                Rejection::new(
+                    RejectionCode::InvalidCommand,
+                    "death custody stack item definition is missing",
+                )
+            })?;
+            release.expected_stack.validate(definition.max_stack)?;
+            if release.expected_stack.metadata_hash != CanonicalHash::default() {
+                let metadata = self
+                    .item_instance_metadata
+                    .get(&release.expected_stack.metadata_hash)
+                    .ok_or_else(|| {
+                        Rejection::new(
+                            RejectionCode::InvalidCommand,
+                            "death custody stack metadata descriptor is missing",
+                        )
+                    })?;
+                if metadata.hash != release.expected_stack.metadata_hash {
+                    return Err(Rejection::new(
+                        RejectionCode::Conflict,
+                        "death custody metadata key does not match its immutable descriptor",
+                    ));
+                }
+                metadata.validate()?;
+            }
+        }
+
+        let before_totals = self.resource_totals();
+        let mut staged = self.clone();
+        for (index, release) in plan.releases.iter().enumerate() {
+            let source_key = match release.source_lane {
+                PlayerDeathCustodyLaneV1::Inventory => &plan.inventory,
+                PlayerDeathCustodyLaneV1::Equipment => &plan.equipment,
+            };
+            let moved = staged
+                .containers
+                .get_mut(source_key)
+                .expect("validated death custody source remains installed")
+                .slots[usize::from(release.source_slot)]
+            .take();
+            if moved.as_ref() != Some(&release.expected_stack) {
+                return Err(Rejection::new(
+                    RejectionCode::Conflict,
+                    "death custody staged source changed unexpectedly",
+                ));
+            }
+            let mut custody = Container::new(release.custody.clone(), 1);
+            custody.slots[0] = moved;
+            staged.insert_container(custody)?;
+            if fail_after_releases.is_some_and(|count| count == index + 1) {
+                return Err(Rejection::new(
+                    RejectionCode::Conflict,
+                    "injected death custody staging failure",
+                ));
+            }
+        }
+        staged
+            .containers
+            .get_mut(&plan.inventory)
+            .expect("validated death inventory remains installed")
+            .revision = next_inventory_revision;
+        staged
+            .containers
+            .get_mut(&plan.equipment)
+            .expect("validated death equipment remains installed")
+            .revision = next_equipment_revision;
+        if staged.resource_totals() != before_totals || staged.item_instance_metadata != self.item_instance_metadata {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "death custody staging violated resource or metadata conservation",
+            ));
+        }
+        Ok(staged)
+    }
+
     /// Plan an all-or-nothing canonical transfer of a complete drop-custody
     /// stack. Compatible partial stacks are filled before empty slots,
     /// matching [`Self::add_stack`], and no state is mutated while the caller
@@ -827,6 +1274,170 @@ impl InventoryState {
             });
         }
         *self = staged;
+        Ok(deltas)
+    }
+
+    /// Applies one exact locator-item custody debit. All comparisons and the
+    /// revision increment happen against a clone so stale, malformed, empty,
+    /// or overflowed requests leave the complete inventory unchanged.
+    pub fn consume_inventory_unit_v1(
+        &mut self,
+        command: &ConsumeInventoryUnitV1,
+    ) -> Result<Vec<ResourceDelta>, Rejection> {
+        command.inventory.validate()?;
+        if command.inventory.kind != ContainerKind::Player || command.inventory.owner_id.is_none() {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "inventory unit consumption requires an owned player inventory",
+            ));
+        }
+        let mut staged = self.clone();
+        let definition = staged.items.get(&command.expected_stack.item_code).ok_or_else(|| {
+            Rejection::new(
+                RejectionCode::InvalidCommand,
+                "inventory unit consumption references an unknown item",
+            )
+        })?;
+        command.expected_stack.validate(definition.max_stack)?;
+        let container = staged.containers.get(&command.inventory).ok_or_else(|| {
+            Rejection::new(
+                RejectionCode::InvalidTarget,
+                "inventory unit consumption target does not exist",
+            )
+        })?;
+        check_container_revision(container, Some(command.expected_container_revision))?;
+        let actual = container
+            .slots
+            .get(usize::from(command.slot))
+            .ok_or_else(|| {
+                Rejection::new(
+                    RejectionCode::InvalidTarget,
+                    "inventory unit consumption slot is outside inventory",
+                )
+            })?
+            .as_ref()
+            .ok_or_else(|| {
+                Rejection::new(
+                    RejectionCode::InsufficientResource,
+                    "inventory unit consumption slot is empty",
+                )
+            })?;
+        if actual != &command.expected_stack {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "inventory unit consumption stack changed",
+            ));
+        }
+        let next_revision = command
+            .expected_container_revision
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "inventory unit consumption revision overflow"))?;
+        let container = staged
+            .containers
+            .get_mut(&command.inventory)
+            .expect("inventory unit consumption target was validated");
+        let slot = container
+            .slots
+            .get_mut(usize::from(command.slot))
+            .expect("inventory unit consumption slot was validated");
+        let stack = slot.as_mut().expect("inventory unit consumption stack was validated");
+        stack.count -= 1;
+        if stack.count == 0 {
+            *slot = None;
+        }
+        container.revision = next_revision;
+        *self = staged;
+        Ok(vec![ResourceDelta {
+            item_code: command.expected_stack.item_code,
+            metadata_hash: command.expected_stack.metadata_hash,
+            amount: -1,
+            reason: PLAYER_LOCATOR_ITEM_CONSUME_REASON_V1.into(),
+        }])
+    }
+
+    /// Applies one exact Creative selected-slot replacement. Validation and
+    /// mutation happen on a clone so stale revisions, slot drift, unknown
+    /// items, invalid stack bounds, missing metadata, and revision overflow
+    /// leave the complete inventory unchanged.
+    pub fn set_creative_inventory_slot_v1(
+        &mut self,
+        command: &SetCreativeInventorySlotV1,
+    ) -> Result<Vec<ResourceDelta>, Rejection> {
+        command.inventory.validate()?;
+        if command.inventory.kind != ContainerKind::Player || command.inventory.owner_id.is_none() {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "creative slot replacement requires an owned player inventory",
+            ));
+        }
+        let mut staged = self.clone();
+        let validate_stack = |state: &InventoryState, stack: &ItemStack| -> Result<(), Rejection> {
+            let definition = state.items.get(&stack.item_code).ok_or_else(|| {
+                Rejection::new(
+                    RejectionCode::InvalidCommand,
+                    "creative slot replacement references an unknown item",
+                )
+            })?;
+            stack.validate(definition.max_stack)?;
+            if stack.metadata_hash != CanonicalHash::default()
+                && !state.item_instance_metadata.contains_key(&stack.metadata_hash)
+            {
+                return Err(Rejection::new(
+                    RejectionCode::InvalidCommand,
+                    "creative slot replacement metadata descriptor is missing",
+                ));
+            }
+            Ok(())
+        };
+        if let Some(expected) = &command.expected_stack {
+            validate_stack(&staged, expected)?;
+        }
+        validate_stack(&staged, &command.replacement_stack)?;
+        let container = staged.containers.get(&command.inventory).ok_or_else(|| {
+            Rejection::new(
+                RejectionCode::InvalidTarget,
+                "creative slot replacement inventory does not exist",
+            )
+        })?;
+        check_container_revision(container, Some(command.expected_container_revision))?;
+        let actual = container.slots.get(usize::from(command.slot)).ok_or_else(|| {
+            Rejection::new(
+                RejectionCode::InvalidTarget,
+                "creative slot replacement selected slot is outside inventory",
+            )
+        })?;
+        if actual != &command.expected_stack {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "creative slot replacement expected stack changed",
+            ));
+        }
+        let next_revision = command
+            .expected_container_revision
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "creative slot replacement revision overflow"))?;
+        let container = staged
+            .containers
+            .get_mut(&command.inventory)
+            .expect("creative slot replacement inventory was validated");
+        container.slots[usize::from(command.slot)] = Some(command.replacement_stack.clone());
+        container.revision = next_revision;
+        *self = staged;
+        let mut deltas = Vec::with_capacity(2);
+        if let Some(prior) = &command.expected_stack {
+            deltas.push(ResourceDelta {
+                item_code: prior.item_code,
+                metadata_hash: prior.metadata_hash,
+                amount: -i64::from(prior.count),
+                reason: PLAYER_CREATIVE_SLOT_SET_REASON_V1.into(),
+            });
+        }
+        deltas.push(ResourceDelta {
+            item_code: command.replacement_stack.item_code,
+            metadata_hash: command.replacement_stack.metadata_hash,
+            amount: i64::from(command.replacement_stack.count),
+            reason: PLAYER_CREATIVE_SLOT_SET_REASON_V1.into(),
+        });
         Ok(deltas)
     }
 

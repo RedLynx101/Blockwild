@@ -110,6 +110,14 @@ struct Layout {
     lights: Vec<Light>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PublicArrival {
+    pub x: i32,
+    pub y_millis: i32,
+    pub z: i32,
+    pub anchor_kind: &'static str,
+}
+
 #[derive(Clone, Copy)]
 struct Tile {
     x: i32,
@@ -525,12 +533,17 @@ fn standard_roles(faction: Faction) -> (&'static [&'static str], &'static [&'sta
 }
 
 fn role_plan(faction: Faction, size: Size, seed: &str) -> Vec<&'static str> {
+    // The browser oracle chooses the footprint from `${candidate.id}|${worldSeed}`
+    // but chooses filler roles from candidate.id alone. Keep those two hash
+    // domains separate: combining them made layouts with >18 cells silently
+    // diverge even when their connected tile graph was otherwise identical.
+    let candidate_id = seed.split_once('|').map_or(seed, |(id, _)| id);
     let target = tile_count(size, seed);
     let (authored, fillers) = standard_roles(faction);
     (0..target)
         .map(|index| {
             authored.get(index).copied().unwrap_or_else(|| {
-                let pick = ((unit(seed, &format!("role-{index}")) * fillers.len() as f64).floor() as usize)
+                let pick = ((unit(candidate_id, &format!("role-{index}")) * fillers.len() as f64).floor() as usize)
                     .min(fillers.len() - 1);
                 fillers[pick]
             })
@@ -2060,6 +2073,8 @@ fn professions(candidate: &Candidate, count: usize) -> Vec<&'static str> {
         .map(|index| {
             if candidate.faction == Faction::Goblins && index >= 6 {
                 ["miner", "blacksmith", "alchemist", "warrior", "general", "miner"][(index - 6) % 6]
+            } else if candidate.faction == Faction::Hobbits && index >= 6 {
+                values[6 + (index - 6) % 6]
             } else {
                 values[index % values.len()]
             }
@@ -2814,15 +2829,13 @@ fn resident_markers(
     rows
 }
 
-/// Extracts one accepted candidate into a chunk-independent plan. Callers
-/// filter placements and marker ownership by chunk after all feature families
-/// have been ordered.
-pub(crate) fn extract(
+/** The single pre-stamp materialization order used by extraction and locators. */
+fn materialized_layout(
     candidate: &Candidate,
     hall: Option<&GuildHall>,
     seed: &str,
     generator: &TerrainGeneratorV18,
-) -> Option<Extraction> {
+) -> Option<Layout> {
     let mut layout = if matches!(candidate.faction, Faction::WoodElves | Faction::Dwarves) {
         v1_layout(candidate, seed)
     } else {
@@ -2832,6 +2845,19 @@ pub(crate) fn extract(
     if candidate.environment == Environment::Underwater && !clamp_underwater(&mut layout, generator) {
         return None;
     }
+    Some(layout)
+}
+
+/// Extracts one accepted candidate into a chunk-independent plan. Callers
+/// filter placements and marker ownership by chunk after all feature families
+/// have been ordered.
+pub(crate) fn extract(
+    candidate: &Candidate,
+    hall: Option<&GuildHall>,
+    seed: &str,
+    generator: &TerrainGeneratorV18,
+) -> Option<Extraction> {
+    let layout = materialized_layout(candidate, hall, seed, generator)?;
     let mut placements = Vec::new();
     let mut markers = Vec::new();
     let deepgear_path = if candidate.environment == Environment::Underground
@@ -2924,9 +2950,102 @@ pub(crate) fn extract(
     Some((placements, markers, layout.radius))
 }
 
+/// Canonical public arrival from the same Rust layout that stamps the
+/// settlement. Fixed-point Y preserves the legacy half-block player offset
+/// without introducing a float wire representation.
+pub(crate) fn public_arrival(
+    candidate: &Candidate,
+    hall: Option<&GuildHall>,
+    seed: &str,
+    generator: &TerrainGeneratorV18,
+    breathes_water: bool,
+) -> Option<PublicArrival> {
+    let layout = materialized_layout(candidate, hall, seed, generator)?;
+    let gate = layout.gates.first().copied();
+    let public_anchor = gate.map_or_else(
+        || layout.approaches.first().copied().unwrap_or(layout.center),
+        |value| value.position,
+    );
+    let (offset_x, offset_z) = gate.map_or((0, 0), |value| match value.facing {
+        0 => (0, -4),
+        1 => (4, 0),
+        2 => (0, 4),
+        _ => (-4, 0),
+    });
+    let arrival_x = public_anchor.x + offset_x;
+    let arrival_z = public_anchor.z + offset_z;
+    let column = generator.sample_column(arrival_x, arrival_z);
+    let (y_millis, anchor_kind) = match candidate.environment {
+        Environment::Underwater if breathes_water => {
+            let floor = candidate.floor_y.unwrap_or(column.height) + 2;
+            let anchor = public_anchor.y.unwrap_or(column.height + 2);
+            (floor.max(anchor).max(column.height + 2) * 1_000, "public-approach")
+        }
+        Environment::Underwater => (column.waterline * 1_000 + 1_510, "reef-air-arrival"),
+        Environment::Underground => (column.height * 1_000 + 1_510, "surface-entry"),
+        Environment::Surface => (column.height * 1_000 + 1_510, "public-approach"),
+    };
+    Some(PublicArrival {
+        x: arrival_x,
+        y_millis,
+        z: arrival_z,
+        anchor_kind,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract::GenerationOptions;
+    use crate::settlement::SettlementBiome;
+
+    #[test]
+    fn hobbit_population_repeats_professions_without_repeating_civic_leaders() {
+        let candidate = Candidate {
+            id: "freehold--3-1-vxnce6".into(),
+            region_x: -3,
+            region_z: 1,
+            x: -1_117,
+            z: 819,
+            floor_y: None,
+            size: Size::Village,
+            faction: Faction::Hobbits,
+            biome: SettlementBiome::FlowerMeadow,
+            environment: Environment::Surface,
+        };
+
+        assert_eq!(
+            professions(&candidate, 26),
+            vec![
+                "mayor",
+                "warrior",
+                "farmer",
+                "general",
+                "warrior",
+                "general",
+                "brewer",
+                "banker",
+                "farmer",
+                "alchemist",
+                "blacksmith",
+                "general",
+                "brewer",
+                "banker",
+                "farmer",
+                "alchemist",
+                "blacksmith",
+                "general",
+                "brewer",
+                "banker",
+                "farmer",
+                "alchemist",
+                "blacksmith",
+                "general",
+                "brewer",
+                "banker",
+            ]
+        );
+    }
 
     #[test]
     fn connected_tiles_are_stable_and_connected() {
@@ -2944,5 +3063,58 @@ mod tests {
         );
         assert_eq!(first.len(), 16);
         assert!(first.iter().all(|tile| tile.x.abs() <= 3 && tile.z.abs() <= 3));
+    }
+
+    #[test]
+    fn underwater_materialization_rejects_shallow_workshop_at_exact_oracle_extrema() {
+        let seed = "LOCATOR-ALL-FILTERS";
+        let generator = TerrainGeneratorV18::new(seed, GenerationOptions::default());
+        let candidate = Candidate {
+            id: "tidehold--f--d-1hoh2dk".into(),
+            region_x: -15,
+            region_z: -13,
+            x: -7_607,
+            z: -6_478,
+            floor_y: Some(16),
+            size: Size::Village,
+            faction: Faction::Atlantians,
+            biome: SettlementBiome::DeepOcean,
+            environment: Environment::Underwater,
+        };
+        let mut layout = standard_layout(&candidate, seed);
+        let workshop = layout
+            .buildings
+            .iter()
+            .find(|building| building.id == "tidehold--f--d-1hoh2dk-tile-21")
+            .expect("exact shallow workshop exists");
+        assert_eq!(
+            (
+                workshop.role,
+                workshop.position.x,
+                workshop.position.z,
+                workshop.position.y,
+                workshop.width,
+                workshop.depth,
+                workshop.floors
+            ),
+            ("coral-workshop", -7_574, -6_500, Some(24), 7, 6, 1),
+        );
+        let mut highest = (i32::MIN, 0, 0);
+        let mut lowest_waterline = i32::MAX;
+        for x in -7_577..=-7_571 {
+            for z in -6_503..=-6_497 {
+                let column = generator.sample_column(x, z);
+                if column.height > highest.0 {
+                    highest = (column.height, x, z);
+                }
+                lowest_waterline = lowest_waterline.min(column.waterline);
+            }
+        }
+        assert_eq!(highest, (30, -7_571, -6_503));
+        assert_eq!(lowest_waterline, 32);
+        assert_eq!(highest.0 + 2, 32);
+        assert_eq!(lowest_waterline - (workshop.floors * 3 + 1).min(5), 28);
+        assert!(!clamp_underwater(&mut layout, &generator));
+        assert_eq!(public_arrival(&candidate, None, seed, &generator, false), None);
     }
 }

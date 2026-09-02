@@ -111,7 +111,12 @@ class FakeRtcNetwork {
   private sequence = 0;
   readonly connections = new Map<string, FakePeerConnection>();
 
-  constructor(readonly nativeDescriptionPrototype = false, readonly deliveryDelayMs: () => number = () => 0) {}
+  constructor(
+    readonly nativeDescriptionPrototype = false,
+    readonly deliveryDelayMs: () => number = () => 0,
+    readonly autoConnect = true,
+    readonly beforeRemoteDescription: ((connection: FakePeerConnection, description: RTCSessionDescriptionInit) => Promise<void>) | null = null,
+  ) {}
 
   factory: PeerConnectionFactory = () => {
     const connection = new FakePeerConnection(this, `rtc_${++this.sequence}`);
@@ -156,6 +161,7 @@ class FakePeerConnection implements PeerConnectionLike {
   }
 
   async setRemoteDescription(description: RTCSessionDescriptionInit) {
+    await this.network.beforeRemoteDescription?.(this, description);
     this.remoteDescription = { type: description.type, sdp: description.sdp };
     if (description.type === "offer") {
       this.remoteOfferId = description.sdp?.split(":")[1] ?? null;
@@ -164,7 +170,7 @@ class FakePeerConnection implements PeerConnectionLike {
     const [, guestId, hostId] = description.sdp?.split(":") ?? [];
     const guest = this.network.connections.get(guestId);
     if (!guest || hostId !== this.id) throw new Error("fake answer points to an unknown connection");
-    this.connectToGuest(guest);
+    if (this.network.autoConnect) this.connectToGuest(guest);
   }
 
   private connectToGuest(guest: FakePeerConnection) {
@@ -190,7 +196,13 @@ class FakePeerConnection implements PeerConnectionLike {
   }
 }
 
-function makeSession(identity: PeerIdentity, network: FakeRtcNetwork, now: () => number, events: MultiplayerEvent[]) {
+function makeSession(
+  identity: PeerIdentity,
+  network: FakeRtcNetwork,
+  now: () => number,
+  events: MultiplayerEvent[],
+  timeouts: { inviteTimeoutMs?: number; connectionTimeoutMs?: number } = {},
+) {
   return new MultiplayerSession({
     identity,
     authorityMode: "legacy-compatibility",
@@ -199,7 +211,8 @@ function makeSession(identity: PeerIdentity, network: FakeRtcNetwork, now: () =>
     now,
     heartbeatIntervalMs: 1_000,
     peerTimeoutMs: 4_000,
-    connectionTimeoutMs: 10_000,
+    inviteTimeoutMs: timeouts.inviteTimeoutMs ?? 10 * 60_000,
+    connectionTimeoutMs: timeouts.connectionTimeoutMs ?? 10_000,
     iceGatheringTimeoutMs: 500,
     autoMaintenance: false,
     onEvent: (event) => events.push(event),
@@ -337,6 +350,132 @@ test("browser-native local descriptions survive the automatic offer and answer e
   assert.equal(guest.state, "connected");
   assert.equal(hostEvents.some((event) => event.type === "error"), false);
   assert.equal(guestEvents.some((event) => event.type === "error"), false);
+});
+
+test("unused host invites outlive the connection window and consume an exact late answer once", async () => {
+  const network = new FakeRtcNetwork();
+  let clock = 1_000;
+  const host = makeSession(HOST, network, () => clock, [], { inviteTimeoutMs: 10 * 60_000, connectionTimeoutMs: 90_000 });
+  const guest = makeSession(GUEST_A, network, () => clock, [], { inviteTimeoutMs: 10 * 60_000, connectionTimeoutMs: 90_000 });
+  const offer = await host.createHostInvite();
+
+  clock += 120_000;
+  host.maintenanceTick();
+  assert.equal(host.getPeers()[0]?.state, "invited", "an unused invite does not inherit the 90-second connection deadline");
+
+  const answer = await guest.createGuestAnswer(offer.inviteCode);
+  await host.acceptGuestAnswer(answer.answerCode);
+  await flushMessages();
+  assert.equal(host.state, "connected");
+  assert.equal(guest.state, "connected");
+  await assert.rejects(host.acceptGuestAnswer(answer.answerCode), /already used/iu);
+
+  guest.dispose();
+  host.dispose();
+});
+
+test("unused host invites expire at their independent ten-minute deadline", async () => {
+  const network = new FakeRtcNetwork();
+  let clock = 1_000;
+  const hostEvents: MultiplayerEvent[] = [];
+  const host = makeSession(HOST, network, () => clock, hostEvents, { inviteTimeoutMs: 10 * 60_000, connectionTimeoutMs: 90_000 });
+  const guest = makeSession(GUEST_A, network, () => clock, [], { inviteTimeoutMs: 10 * 60_000, connectionTimeoutMs: 90_000 });
+  const offer = await host.createHostInvite();
+  const answer = await guest.createGuestAnswer(offer.inviteCode);
+
+  clock += 10 * 60_000;
+  host.maintenanceTick();
+  assert.equal(host.getPeers().length, 0);
+  assert.equal(hostEvents.some((event) => event.type === "peer" && event.reason === "invite-timeout"), true);
+  await assert.rejects(host.acceptGuestAnswer(answer.answerCode), /unknown or expired/iu);
+
+  guest.dispose();
+  host.dispose();
+});
+
+test("a late accepted answer starts a fresh bounded connection clock after SDP commits", async () => {
+  let releaseAnswer!: () => void;
+  const answerGate = new Promise<void>((resolve) => { releaseAnswer = resolve; });
+  const network = new FakeRtcNetwork(false, () => 0, false, async (_connection, description) => {
+    if (description.type === "answer") await answerGate;
+  });
+  let clock = 1_000;
+  const host = makeSession(HOST, network, () => clock, [], { inviteTimeoutMs: 10 * 60_000, connectionTimeoutMs: 90_000 });
+  const guest = makeSession(GUEST_A, network, () => clock, [], { inviteTimeoutMs: 10 * 60_000, connectionTimeoutMs: 90_000 });
+  const offer = await host.createHostInvite();
+
+  clock = 121_000;
+  host.maintenanceTick();
+  const answer = await guest.createGuestAnswer(offer.inviteCode);
+  clock = 301_000;
+  host.maintenanceTick();
+  assert.equal(host.getPeers()[0]?.state, "invited");
+  const acceptance = host.acceptGuestAnswer(answer.answerCode);
+  await flushMessages();
+  assert.equal(host.getPeers()[0]?.state, "negotiating");
+  clock += 120_000;
+  host.maintenanceTick();
+  assert.equal(host.getPeers()[0]?.state, "negotiating", "bounded answer negotiation does not spend the connection window");
+  releaseAnswer();
+  await acceptance;
+  assert.equal(host.getPeers()[0]?.state, "connecting");
+
+  clock += 89_999;
+  host.maintenanceTick();
+  assert.equal(host.getPeers()[0]?.state, "connecting", "the accepted peer receives the full connection window");
+  clock += 1;
+  host.maintenanceTick();
+  assert.equal(host.getPeers().length, 0, "a genuinely dead connection still closes at 90 seconds");
+
+  guest.dispose();
+  host.dispose();
+});
+
+test("guest answer negotiation starts its connection clock only after the answer is ready", async () => {
+  let releaseOffer!: () => void;
+  const offerGate = new Promise<void>((resolve) => { releaseOffer = resolve; });
+  const network = new FakeRtcNetwork(false, () => 0, false, async (_connection, description) => {
+    if (description.type === "offer") await offerGate;
+  });
+  let clock = 1_000;
+  const host = makeSession(HOST, network, () => clock, [], { connectionTimeoutMs: 90_000 });
+  const guest = makeSession(GUEST_A, network, () => clock, [], { connectionTimeoutMs: 90_000 });
+  const offer = await host.createHostInvite();
+  const answer = guest.createGuestAnswer(offer.inviteCode);
+  await flushMessages();
+  assert.equal(guest.getPeers()[0]?.state, "negotiating");
+
+  clock += 120_000;
+  guest.maintenanceTick();
+  assert.equal(guest.getPeers()[0]?.state, "negotiating");
+  releaseOffer();
+  await answer;
+  assert.equal(guest.getPeers()[0]?.state, "connecting");
+  clock += 89_999;
+  guest.maintenanceTick();
+  assert.equal(guest.getPeers()[0]?.state, "connecting");
+  clock += 1;
+  guest.maintenanceTick();
+  assert.equal(guest.getPeers().length, 0);
+
+  guest.dispose();
+  host.dispose();
+});
+
+test("manual invite lifetime rejects values outside one to ten minutes", () => {
+  const network = new FakeRtcNetwork();
+  const options = {
+    identity: HOST,
+    authorityMode: "legacy-compatibility" as const,
+    peerConnectionFactory: network.factory,
+    autoMaintenance: false,
+  };
+  assert.throws(() => new MultiplayerSession({ ...options, inviteTimeoutMs: 59_999 }), /Invalid multiplayer timeout configuration/u);
+  assert.throws(() => new MultiplayerSession({ ...options, inviteTimeoutMs: 600_001 }), /Invalid multiplayer timeout configuration/u);
+  const minimum = new MultiplayerSession({ ...options, inviteTimeoutMs: 60_000 });
+  const maximum = new MultiplayerSession({ ...options, inviteTimeoutMs: 600_000 });
+  minimum.dispose();
+  maximum.dispose();
 });
 
 test("manual offer/answer creates gameplay, movement, and voice lanes and carries host-authoritative messages", async () => {

@@ -64,6 +64,9 @@ export type MapPlayerMarker = Readonly<{
   position: WorldPoint;
   headingRadians?: number;
   color?: string;
+  /** Native R9 custody proof for receipt-derived multiplayer positions. */
+  authorityReceiptHash?: string;
+  authorityRecordHash?: string;
 }>;
 export type MapMarkerKind = "natural-poi" | "manual" | "bed-spawn" | "wayshrine" | "settlement";
 export type MapMarkerLayer = "surface" | "underground" | "underwater" | "sky";

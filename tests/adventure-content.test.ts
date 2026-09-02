@@ -156,12 +156,15 @@ test("legacy Lantern Piehouse saves narrowly re-anchor Merry and repair brewer s
   assert.equal(migrated.merchants.get(unrelated.id), unrelated, "other merchants must remain byte-for-byte untouched");
 
   const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
-  let generatedChunk: readonly [number, number] | null = null;
+  const requestedChunks: Array<readonly [number, number]> = [];
   let restoredPosition: { x: number; y: number; z: number } | null = null;
   let restoredProfession: string | null | undefined;
   engine.world = {
-    generateChunk: (cx: number, cz: number) => { generatedChunk = [cx, cz]; },
-    sampleColumn: () => ({ height: 48 }),
+    requestChunk: (cx: number, cz: number) => {
+      requestedChunks.push([cx, cz]);
+      return { cx, cz };
+    },
+    installedColumn: () => ({ height: 48 }),
     getBlock: (x: number, y: number, z: number) => x === -24 && y === 48 && z === 37 ? BlockId.Moss : BlockId.Air,
     findWalkableY: () => { throw new Error("migrated Merry must use the authored interior anchor"); },
   } as never;
@@ -171,7 +174,7 @@ test("legacy Lantern Piehouse saves narrowly re-anchor Merry and repair brewer s
     return {};
   }) as never;
   engine.restoreCreature(merry);
-  assert.deepEqual(generatedChunk, [-2, 2], "a far-away saved Piehouse should load only its anchor chunk for exact grounding");
+  assert.deepEqual(requestedChunks, [[-2, 2]], "a far-away saved Piehouse should request only its resident anchor chunk for exact grounding");
   assert.deepEqual(restoredPosition, { x: -24, y: 48 + MOB_DEFS["hobbit-merchant"].footOffset, z: 37 });
   assert.equal(restoredProfession, "brewer");
 

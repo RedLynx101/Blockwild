@@ -1,13 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use blockwild_types::{CanonicalHash, CanonicalHasher};
+use blockwild_types::{CanonicalHash, CanonicalHasher, EntityId};
 
 use crate::{
     AcceptedReceipt, ActorGrant, AuthorityIdentity, CardforgeCommand, CardforgeState, CombatCommand, CombatState,
     CombatVitalUnits, CombatantState, ContainerKey, Domain, GameplayActor, GameplayBatch, GameplayCommand,
     GameplayEvent, GameplayReceipt, GameplayRevision, GameplayScheduleAdvanceV1, IDEMPOTENCY_WINDOW, InventoryCommand,
-    InventoryState, MAX_SCHEDULE_MACHINE_ADVANCES_V1, MachineCommand, MachineStateSet, OpaquePayload, ProgressionState,
-    Rejection, RejectionCode, ResourceDelta, Scope, StatDelta, WorldKey, validate_id,
+    InventoryState, MAX_SCHEDULE_MACHINE_ADVANCES_V1, MachineCommand, MachineStateSet, OpaquePayload,
+    PlayerDeathRespawnCustodyPlanV1, PlayerDeathRespawnCustodyReceiptV1, ProgressionState, Rejection, RejectionCode,
+    ResourceDelta, Scope, StatDelta, WorldKey, validate_id,
 };
 
 #[derive(Clone, Debug, PartialEq)]
@@ -228,6 +229,359 @@ impl GameplayAuthority {
             receipt_hash: receipt_hasher.finish(),
         });
         Ok(true)
+    }
+
+    /// Applies one exact milliheart environmental-damage transition to the
+    /// linked player combatant. The integrated runtime stages this R7 mutation
+    /// beside the matching R6 vitals replacement and commits both authorities
+    /// together, so this seam deliberately accepts only an already-linked,
+    /// precision player record and preserves every non-vital combat field.
+    ///
+    /// A zero-damage call is an exact, replay-free assertion. Positive damage
+    /// advances the combatant, gameplay sequence, combat revision, and replay
+    /// exactly once while health remains above zero. Repeated damage after
+    /// death is replay-neutral, and `alive` always follows the resulting health.
+    pub fn apply_linked_combatant_environmental_damage_v1(
+        &mut self,
+        record_id: &str,
+        entity_id: EntityId,
+        expected_revision: u64,
+        expected_health: u32,
+        expected_max_health: u32,
+        damage_millihearts: u32,
+    ) -> Result<bool, Rejection> {
+        validate_id("linked environmental-damage combatant", record_id)?;
+        if entity_id.packed() == 0 {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "linked environmental damage uses the reserved zero R6 entity",
+            ));
+        }
+        let combatant = self
+            .state
+            .combat
+            .combatants
+            .get(record_id)
+            .ok_or_else(|| Rejection::new(RejectionCode::InvalidTarget, "linked combatant does not exist"))?;
+        if combatant.record_id != record_id
+            || combatant.owner_id.as_deref() != Some(record_id)
+            || combatant.entity_id != Some(entity_id)
+            || combatant.vital_units != CombatVitalUnits::MilliheartsV1
+            || combatant.max_health == 0
+            || combatant.health > combatant.max_health
+            || combatant.alive != (combatant.health > 0)
+        {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "environmental damage requires one exact linked milliheart player combatant",
+            ));
+        }
+        if combatant.revision != expected_revision
+            || combatant.health != expected_health
+            || combatant.max_health != expected_max_health
+        {
+            return Err(Rejection::new(
+                RejectionCode::StaleRevision,
+                "linked combatant vitals or revision are stale",
+            ));
+        }
+        if damage_millihearts == 0 || combatant.health == 0 {
+            return Ok(false);
+        }
+
+        let next_sequence = self
+            .state
+            .revision
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "gameplay sequence is exhausted"))?;
+        let next_combat = self
+            .state
+            .revision
+            .combat
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "combat revision is exhausted"))?;
+        let next_revision = combatant
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "linked combatant revision is exhausted"))?;
+        let next_health = combatant.health.saturating_sub(damage_millihearts);
+        let before_hash = self.state.state_hash();
+        let mut command_hasher = CanonicalHasher::new("blockwild.gameplay.player-environmental-damage.command.v1");
+        command_hasher.write_str(record_id);
+        command_hasher.write_u64(entity_id.packed());
+        command_hasher.write_u64(expected_revision);
+        command_hasher.write_u32(expected_health);
+        command_hasher.write_u32(expected_max_health);
+        command_hasher.write_u32(damage_millihearts);
+        command_hasher.write_u32(next_health);
+        let command_hash = command_hasher.finish();
+
+        let combatant = self
+            .state
+            .combat
+            .combatants
+            .get_mut(record_id)
+            .expect("validated linked combatant remains installed");
+        combatant.health = next_health;
+        combatant.alive = next_health > 0;
+        combatant.revision = next_revision;
+        self.state.revision.sequence = next_sequence;
+        self.state.revision.combat = next_combat;
+
+        let after_hash = self.state.state_hash();
+        let mut receipt_hasher = CanonicalHasher::new("blockwild.gameplay.player-environmental-damage.receipt.v1");
+        receipt_hasher.write_bytes(before_hash.as_bytes());
+        receipt_hasher.write_bytes(after_hash.as_bytes());
+        receipt_hasher.write_bytes(command_hash.as_bytes());
+        self.replay.push(ReplayEntry {
+            sequence: next_sequence,
+            actor_id: "system:player-environmental-damage".into(),
+            idempotency_key: format!("player-environmental-damage:{next_sequence}"),
+            command_hash,
+            before_hash,
+            after_hash,
+            receipt_hash: receipt_hasher.finish(),
+        });
+        Ok(true)
+    }
+
+    /// Restores one exact dead, linked player combatant to its canonical
+    /// maximum health. The integrated runtime performs the matching R6 body
+    /// and vitals replacement on the same staged candidate, so this seam owns
+    /// only the R7 half of the atomic respawn transition.
+    ///
+    /// Respawn is intentionally stricter than healing: the source must be the
+    /// sole precision player link, its complete revision/vitals must match the
+    /// request, and it must already be dead. A retry after commit therefore
+    /// cannot apply the effect twice; the enclosing durable command-receipt
+    /// cache returns an exact prior receipt, while an evicted replay fails this
+    /// dead-state compare-and-set.
+    pub fn restore_linked_combatant_after_death_v1(
+        &mut self,
+        record_id: &str,
+        entity_id: EntityId,
+        expected_revision: u64,
+        expected_max_health: u32,
+        death_sequence: u64,
+    ) -> Result<(), Rejection> {
+        validate_id("linked respawn combatant", record_id)?;
+        if entity_id.packed() == 0 || death_sequence == 0 {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "linked respawn requires nonzero R6 and death identities",
+            ));
+        }
+        let combatant =
+            self.state.combat.combatants.get(record_id).ok_or_else(|| {
+                Rejection::new(RejectionCode::InvalidTarget, "linked respawn combatant does not exist")
+            })?;
+        if combatant.record_id != record_id
+            || combatant.owner_id.as_deref() != Some(record_id)
+            || combatant.entity_id != Some(entity_id)
+            || combatant.vital_units != CombatVitalUnits::MilliheartsV1
+            || combatant.max_health == 0
+            || combatant.health != 0
+            || combatant.alive
+        {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "respawn requires one exact dead linked milliheart player combatant",
+            ));
+        }
+        if combatant.revision != expected_revision || combatant.max_health != expected_max_health {
+            return Err(Rejection::new(
+                RejectionCode::StaleRevision,
+                "linked respawn combatant revision or maximum health is stale",
+            ));
+        }
+
+        let next_sequence = self
+            .state
+            .revision
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "gameplay sequence is exhausted"))?;
+        let next_combat = self
+            .state
+            .revision
+            .combat
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "combat revision is exhausted"))?;
+        let next_revision = combatant
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "linked combatant revision is exhausted"))?;
+        let before_hash = self.state.state_hash();
+        let mut command_hasher = CanonicalHasher::new("blockwild.gameplay.player-respawn.command.v1");
+        command_hasher.write_str(record_id);
+        command_hasher.write_u64(entity_id.packed());
+        command_hasher.write_u64(expected_revision);
+        command_hasher.write_u32(expected_max_health);
+        command_hasher.write_u64(death_sequence);
+        let command_hash = command_hasher.finish();
+
+        let combatant = self
+            .state
+            .combat
+            .combatants
+            .get_mut(record_id)
+            .expect("validated linked respawn combatant remains installed");
+        combatant.health = expected_max_health;
+        combatant.alive = true;
+        combatant.revision = next_revision;
+        self.state.revision.sequence = next_sequence;
+        self.state.revision.combat = next_combat;
+
+        let after_hash = self.state.state_hash();
+        let mut receipt_hasher = CanonicalHasher::new("blockwild.gameplay.player-respawn.receipt.v1");
+        receipt_hasher.write_bytes(before_hash.as_bytes());
+        receipt_hasher.write_bytes(after_hash.as_bytes());
+        receipt_hasher.write_bytes(command_hash.as_bytes());
+        self.replay.push(ReplayEntry {
+            sequence: next_sequence,
+            actor_id: "system:player-respawn".into(),
+            idempotency_key: format!("player-respawn:{record_id}:{death_sequence}"),
+            command_hash,
+            before_hash,
+            after_hash,
+            receipt_hash: receipt_hasher.finish(),
+        });
+        Ok(())
+    }
+
+    /// Atomically restores one exact dead linked combatant and, for the
+    /// Survival false-keep-inventory policy, moves every inventory/equipment
+    /// stack into deterministic unowned R7 custody. The enclosing runtime can
+    /// stage the returned ordered releases beside R6 and WorldView drop
+    /// materialization before installing this Gameplay candidate.
+    ///
+    /// This is deliberately a sibling of the existing keep-inventory restore
+    /// seam: it uses one Gameplay sequence and replay entry for both domains,
+    /// while exact retries are recovered from replay without mutating state a
+    /// second time (including after a snapshot roundtrip).
+    pub fn respawn_linked_combatant_with_death_custody_v1(
+        &mut self,
+        plan: &PlayerDeathRespawnCustodyPlanV1,
+    ) -> Result<PlayerDeathRespawnCustodyReceiptV1, Rejection> {
+        validate_id("death-custody respawn combatant", &plan.record_id)?;
+        if plan.player_id.packed() == 0
+            || plan.entity_id.packed() == 0
+            || plan.death_sequence == 0
+            || plan.expected_max_health == 0
+        {
+            return Err(Rejection::new(
+                RejectionCode::InvalidCommand,
+                "death-custody respawn requires nonzero player, entity, death, and health identities",
+            ));
+        }
+        let command_hash = plan.calculate_command_hash_v1();
+        let idempotency_key = plan.idempotency_key_v1();
+        validate_id("death-custody respawn idempotency", &idempotency_key)?;
+        if let Some(replay) = self.replay.iter().find(|entry| {
+            entry.actor_id == "system:player-death-respawn-custody" && entry.idempotency_key == idempotency_key
+        }) {
+            if replay.command_hash != command_hash {
+                return Err(Rejection::new(
+                    RejectionCode::Conflict,
+                    "death-custody respawn identity was reused for a different plan",
+                ));
+            }
+            return death_custody_receipt_from_replay_v1(plan, replay);
+        }
+
+        let combatant =
+            self.state.combat.combatants.get(&plan.record_id).ok_or_else(|| {
+                Rejection::new(RejectionCode::InvalidTarget, "death-custody combatant does not exist")
+            })?;
+        if combatant.record_id != plan.record_id
+            || combatant.owner_id.as_deref() != Some(plan.record_id.as_str())
+            || combatant.entity_id != Some(plan.entity_id)
+            || combatant.vital_units != CombatVitalUnits::MilliheartsV1
+            || combatant.max_health == 0
+            || combatant.health != 0
+            || combatant.alive
+        {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "death-custody respawn requires one exact dead linked milliheart player combatant",
+            ));
+        }
+        if combatant.revision != plan.expected_combatant_revision || combatant.max_health != plan.expected_max_health {
+            return Err(Rejection::new(
+                RejectionCode::StaleRevision,
+                "death-custody combatant revision or maximum health is stale",
+            ));
+        }
+
+        let next_sequence = self
+            .state
+            .revision
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "gameplay sequence is exhausted"))?;
+        let next_combat = self
+            .state
+            .revision
+            .combat
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "combat revision is exhausted"))?;
+        let next_combatant_revision = combatant
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "linked combatant revision is exhausted"))?;
+        let inventory_changed = !plan.releases.is_empty();
+        let next_inventory = if inventory_changed {
+            self.state
+                .revision
+                .inventory
+                .checked_add(1)
+                .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "inventory revision is exhausted"))?
+        } else {
+            self.state.revision.inventory
+        };
+
+        let before_hash = self.state.state_hash();
+        let before_totals = self.state.item_totals();
+        let mut staged = self.state.clone();
+        staged.inventory.release_player_death_custody_v1(plan)?;
+        let combatant = staged
+            .combat
+            .combatants
+            .get_mut(&plan.record_id)
+            .expect("validated death-custody combatant remains installed");
+        combatant.health = plan.expected_max_health;
+        combatant.alive = true;
+        combatant.revision = next_combatant_revision;
+        staged.revision.sequence = next_sequence;
+        staged.revision.combat = next_combat;
+        staged.revision.inventory = next_inventory;
+        if staged.item_totals() != before_totals {
+            return Err(Rejection::new(
+                RejectionCode::Conflict,
+                "death-custody respawn violated item resource conservation",
+            ));
+        }
+        let after_hash = staged.state_hash();
+        let mut receipt_hasher = CanonicalHasher::new("blockwild.gameplay.player-death-respawn-custody.receipt.v1");
+        receipt_hasher.write_u16(1);
+        receipt_hasher.write_u64(next_sequence);
+        receipt_hasher.write_bytes(command_hash.as_bytes());
+        receipt_hasher.write_bytes(before_hash.as_bytes());
+        receipt_hasher.write_bytes(after_hash.as_bytes());
+        let receipt_hash = receipt_hasher.finish();
+        let replay = ReplayEntry {
+            sequence: next_sequence,
+            actor_id: "system:player-death-respawn-custody".into(),
+            idempotency_key,
+            command_hash,
+            before_hash,
+            after_hash,
+            receipt_hash,
+        };
+        self.state = staged;
+        self.replay.push(replay.clone());
+        death_custody_receipt_from_replay_v1(plan, &replay)
     }
 
     #[must_use]
@@ -561,6 +915,46 @@ impl GameplayAuthority {
     }
 }
 
+fn death_custody_receipt_from_replay_v1(
+    plan: &PlayerDeathRespawnCustodyPlanV1,
+    replay: &ReplayEntry,
+) -> Result<PlayerDeathRespawnCustodyReceiptV1, Rejection> {
+    if replay.sequence == 0 || replay.command_hash != plan.calculate_command_hash_v1() {
+        return Err(Rejection::new(
+            RejectionCode::Conflict,
+            "death-custody replay does not match its exact command",
+        ));
+    }
+    let mut receipt_hasher = CanonicalHasher::new("blockwild.gameplay.player-death-respawn-custody.receipt.v1");
+    receipt_hasher.write_u16(1);
+    receipt_hasher.write_u64(replay.sequence);
+    receipt_hasher.write_bytes(replay.command_hash.as_bytes());
+    receipt_hasher.write_bytes(replay.before_hash.as_bytes());
+    receipt_hasher.write_bytes(replay.after_hash.as_bytes());
+    if receipt_hasher.finish() != replay.receipt_hash {
+        return Err(Rejection::new(
+            RejectionCode::Conflict,
+            "death-custody replay receipt hash is invalid",
+        ));
+    }
+    let combatant_revision = plan
+        .expected_combatant_revision
+        .checked_add(1)
+        .ok_or_else(|| Rejection::new(RejectionCode::Capacity, "linked combatant revision is exhausted"))?;
+    Ok(PlayerDeathRespawnCustodyReceiptV1 {
+        player_id: plan.player_id,
+        death_sequence: plan.death_sequence,
+        gameplay_sequence: replay.sequence,
+        combatant_revision,
+        inventory_changed: !plan.releases.is_empty(),
+        releases: plan.releases.clone(),
+        command_hash: replay.command_hash,
+        before_state_hash: replay.before_hash,
+        after_state_hash: replay.after_hash,
+        receipt_hash: replay.receipt_hash,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch(
     state: &mut GameplayState,
@@ -591,6 +985,12 @@ fn dispatch(
                 InventoryCommand::CreateGeneratedDropCustodyV1(command) => {
                     state.inventory.create_generated_drop_custody_v1(command)?
                 }
+                InventoryCommand::ConsumeInventoryUnitV1(command) => {
+                    state.inventory.consume_inventory_unit_v1(command)?
+                }
+                InventoryCommand::SetCreativeInventorySlotV1(command) => {
+                    state.inventory.set_creative_inventory_slot_v1(command)?
+                }
             };
             resource_deltas.extend(deltas);
             touched.insert(Domain::Inventory);
@@ -600,6 +1000,8 @@ fn dispatch(
                 InventoryCommand::CreateGeneratedDropCustodyV1(command) => {
                     ("generated-drop-custody-v1", Some(command.custody.id.clone()))
                 }
+                InventoryCommand::ConsumeInventoryUnitV1(_) => ("player-locator-item-consumed-v1", None),
+                InventoryCommand::SetCreativeInventorySlotV1(_) => ("player-creative-slot-set-v1", None),
                 _ => ("inventory", None),
             };
             push_event(events, batch_id, command_index, &actor.actor_id, event_kind, record_id);
@@ -863,6 +1265,8 @@ fn authorize_command(
                 InventoryCommand::ImportPlayerInventoryV1(_) => false,
                 InventoryCommand::ApplyBlockActionV1(command) => owns(&command.inventory),
                 InventoryCommand::CreateGeneratedDropCustodyV1(_) => false,
+                InventoryCommand::ConsumeInventoryUnitV1(command) => owns(&command.inventory),
+                InventoryCommand::SetCreativeInventorySlotV1(command) => owns(&command.inventory),
             };
             if !allowed {
                 return Err(Rejection::new(
@@ -1023,7 +1427,7 @@ fn push_event(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn receipt_hash(
+pub(crate) fn receipt_hash(
     batch_id: &str,
     before: &AuthorityIdentity,
     after: &AuthorityIdentity,

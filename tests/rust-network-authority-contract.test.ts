@@ -86,6 +86,16 @@ test("human and agent commands share idempotency, revisions, capabilities, inter
   const humanAccepted = authority.authorize(human, identity, 100);
   assert.equal(humanAccepted.status, "accepted");
   assert.equal(authority.authorize(human, identity, 100), humanAccepted, "duplicate delivery returns the exact cached final receipt");
+  const beforeIdempotencyConflict = authority.authorityFingerprint();
+  const conflictingReplay = authority.authorize(createNetworkCommandV1({
+    ...human,
+    commandId: "command:conflicting-reuse",
+    payload: Uint8Array.from([9, 8, 7]),
+  }), identity, 100);
+  assert.equal(conflictingReplay.status, "rejected");
+  if (conflictingReplay.status === "rejected") assert.equal(conflictingReplay.code, "invalid");
+  assert.equal(authority.authorityFingerprint(), beforeIdempotencyConflict, "a conflicting reuse cannot mutate or replace the receipt cache");
+  assert.equal(authority.authorize(human, identity, 100), humanAccepted, "the original exact command remains replayable after a conflicting reuse");
   assert.equal(authority.activeLeaseCount(), 2);
 
   const agent = command({ commandId: "command:agent", idempotencyKey: "peer:agent:sequence:0", peerId: "peer:agent", connectionId: "connection:agent", actorId: "actor:agent", peerKind: "agent", kind: "agent", requiredCapability: "agent-work", leaseKeys: ["machine:a"] });
@@ -107,6 +117,104 @@ test("human and agent commands share idempotency, revisions, capabilities, inter
   const denied = authority.authorize(outside, identity, 100);
   assert.equal(denied.status, "rejected");
   if (denied.status === "rejected") assert.equal(denied.code, "interest-denied");
+});
+
+test("pose parity follows the latest connection-bound native presentation cursor", () => {
+  const liveB = createNetworkAuthorityIdentityV1(ADDRESS, { ...identity.revision, world: identity.revision.world + 1 });
+  const missing = new TypeScriptNetworkAuthorityV1("session:fixture");
+  missing.upsertGrant(grant());
+  const missingReceipt = missing.authorize(command({
+    kind: "pose", commandId: "pose:missing", idempotencyKey: "pose:missing:0", expected: identity, leaseKeys: [],
+  }), liveB, 100);
+  assert.equal(missingReceipt.status, "rejected");
+  if (missingReceipt.status === "rejected") assert.equal(missingReceipt.code, "stale-revision");
+
+  const authority = new TypeScriptNetworkAuthorityV1("session:fixture");
+  authority.upsertGrant(grant());
+  const beforePresentation = authority.authorityFingerprint();
+  assert.equal(authority.recordPeerPresentation("peer:human", 1, identity), true);
+  const afterPresentation = authority.authorityFingerprint();
+  assert.notEqual(afterPresentation, beforePresentation);
+  assert.equal(authority.recordPeerPresentation("peer:human", 1, identity), false);
+  assert.equal(authority.authorityFingerprint(), afterPresentation);
+
+  assert.equal(authority.authorize(command({
+    kind: "pose", commandId: "pose:a", idempotencyKey: "pose:a:0", expected: identity, leaseKeys: [],
+  }), liveB, 100).status, "accepted");
+  const strictGameplay = authority.authorize(command({
+    commandId: "gameplay:a", idempotencyKey: "gameplay:a:1", sequence: 1, expected: identity, leaseKeys: [],
+  }), liveB, 100);
+  assert.equal(strictGameplay.status, "rejected");
+  if (strictGameplay.status === "rejected") assert.equal(strictGameplay.code, "stale-revision");
+
+  assert.equal(authority.recordPeerPresentation("peer:human", 2, liveB), true);
+  assert.throws(() => authority.recordPeerPresentation("peer:human", 3, identity), /does not extend/u);
+  const stalePose = authority.authorize(command({
+    kind: "pose", commandId: "pose:stale-a", idempotencyKey: "pose:stale-a:1", sequence: 1, expected: identity, leaseKeys: [],
+  }), liveB, 100);
+  assert.equal(stalePose.status, "rejected");
+  if (stalePose.status === "rejected") assert.equal(stalePose.code, "stale-revision");
+  assert.equal(authority.authorize(command({
+    kind: "pose", commandId: "pose:b", idempotencyKey: "pose:b:1", sequence: 1, expected: liveB, leaseKeys: [],
+  }), liveB, 100).status, "accepted");
+
+  authority.upsertGrant(grant({ connectionId: "connection:replacement", nextSequence: 2 }));
+  const oldConnection = authority.authorize(command({
+    kind: "pose", commandId: "pose:old-connection", idempotencyKey: "pose:old-connection:2", sequence: 2,
+    expected: liveB, leaseKeys: [],
+  }), liveB, 100);
+  assert.equal(oldConnection.status, "rejected");
+  if (oldConnection.status === "rejected") assert.equal(oldConnection.code, "connection-mismatch");
+  const replacementWithoutCursor = authority.authorize(command({
+    kind: "pose", commandId: "pose:replacement-missing", idempotencyKey: "pose:replacement-missing:2", sequence: 2,
+    connectionId: "connection:replacement", expected: liveB, leaseKeys: [],
+  }), liveB, 100);
+  assert.equal(replacementWithoutCursor.status, "rejected");
+  if (replacementWithoutCursor.status === "rejected") assert.equal(replacementWithoutCursor.code, "stale-revision");
+  authority.recordPeerPresentation("peer:human", 3, liveB);
+  authority.releasePeer("peer:human");
+  authority.upsertGrant(grant({ connectionId: "connection:replacement", nextSequence: 2 }));
+  const releasedCursor = authority.authorize(command({
+    kind: "pose", commandId: "pose:released", idempotencyKey: "pose:released:2", sequence: 2,
+    connectionId: "connection:replacement", expected: liveB, leaseKeys: [],
+  }), liveB, 100);
+  assert.equal(releasedCursor.status, "rejected");
+  if (releasedCursor.status === "rejected") assert.equal(releasedCursor.code, "stale-revision");
+});
+
+test("presentation-state parity follows the latest reachable connection-bound cursor", () => {
+  const liveB = createNetworkAuthorityIdentityV1(ADDRESS, { ...identity.revision, entities: identity.revision.entities + 1 });
+  const missing = new TypeScriptNetworkAuthorityV1("session:fixture");
+  missing.upsertGrant(grant());
+  const missingReceipt = missing.authorize(command({
+    kind: "presentation-state", commandId: "player-state:missing", idempotencyKey: "player-state:missing:0",
+    expected: identity, leaseKeys: [],
+  }), liveB, 100);
+  assert.equal(missingReceipt.status, "rejected");
+  if (missingReceipt.status === "rejected") {
+    assert.equal(missingReceipt.code, "stale-revision");
+    assert.equal(missingReceipt.message, "Player-state command does not match the latest connection-bound authority presentation.");
+  }
+
+  const authority = new TypeScriptNetworkAuthorityV1("session:fixture");
+  authority.upsertGrant(grant());
+  assert.equal(authority.recordPeerPresentation("peer:human", 1, identity), true);
+  assert.equal(authority.authorize(command({
+    kind: "presentation-state", commandId: "player-state:a", idempotencyKey: "player-state:a:0",
+    expected: identity, leaseKeys: [],
+  }), liveB, 100).status, "accepted");
+
+  assert.equal(authority.recordPeerPresentation("peer:human", 2, liveB), true);
+  const staleA = authority.authorize(command({
+    kind: "presentation-state", commandId: "player-state:stale-a", idempotencyKey: "player-state:stale-a:1",
+    sequence: 1, expected: identity, leaseKeys: [],
+  }), liveB, 100);
+  assert.equal(staleA.status, "rejected");
+  if (staleA.status === "rejected") assert.equal(staleA.code, "stale-revision");
+  assert.equal(authority.authorize(command({
+    kind: "presentation-state", commandId: "player-state:b", idempotencyKey: "player-state:b:1",
+    sequence: 1, expected: liveB, leaseKeys: [],
+  }), liveB, 100).status, "accepted");
 });
 
 test("delta records are canonical, bounded, interest-scoped, and transfer coarse buffers", () => {

@@ -206,6 +206,47 @@ export type RenderPresentationProfileIdBindingV1 =
     presentationId: string;
   }>;
 
+/**
+ * Audit surface for the complete set of renderer-facing presentation families.
+ * `exact-contract` means the TypeScript adapter can emit a typed, attested
+ * record when the corresponding authoritative row is present. It is not a
+ * claim that Rust currently exports that row in production. Source/export gaps
+ * are represented by separate `blocked` entries in the same inventory.
+ */
+export type RenderPresentationCoverageFamilyR10 =
+  | RenderPresentationRoleV1
+  | "particle"
+  | "weather"
+  | "sky"
+  | "celestial";
+
+export type RenderPresentationCoverageEntryR10 = Readonly<{
+  id: string;
+  family: RenderPresentationCoverageFamilyR10;
+  status: "exact-contract" | "blocked";
+  profileId: string | null;
+  modelId: string | null;
+  sourcePresentationIds: readonly string[];
+  extractionProtocol: "BWX0+BWR6" | "BWX0+BWR7" | "BWRD+BWRF" | null;
+  blockerId: string | null;
+  reason: string | null;
+}>;
+
+export type RenderPresentationCoverageInventoryR10 = Readonly<{
+  schema: 1;
+  catalogId: typeof RENDER_PRESENTATION_CATALOG_ID_V1;
+  profileCatalogSchema: 1 | 2;
+  profileCatalogRevision: number;
+  modelCatalogHash: string;
+  coverageHash: string;
+  entries: readonly RenderPresentationCoverageEntryR10[];
+  families: readonly Readonly<{
+    family: RenderPresentationCoverageFamilyR10;
+    exactContracts: number;
+    blockers: number;
+  }>[];
+}>;
+
 const itemRef = (item: ItemCode): RenderPresentationContentRefV1 => Object.freeze({ domain: "item", id: String(item) });
 const machineRef = (id: string): RenderPresentationContentRefV1 => Object.freeze({ domain: "machine-profile", id });
 const creatureRef = (id: string): RenderPresentationContentRefV1 => Object.freeze({ domain: "creature-profile", id });
@@ -771,6 +812,207 @@ function validateProfileShape(profileCatalog: AnyRenderPresentationCatalog) {
   invariant(profileCatalog.integrationBlockers.every((value, index, values) => index === 0 || values[index - 1] < value),
     "render presentation integration blockers are not canonical and unique");
 }
+
+const PRESENTATION_COVERAGE_FAMILIES_R10 = Object.freeze([
+  "celestial", "dropped-item", "held-item", "machine", "particle", "projectile",
+  "sky", "summon", "vehicle", "weather", "world-prop",
+] satisfies readonly RenderPresentationCoverageFamilyR10[]);
+
+const EXACT_PRESENTATION_PROTOCOLS_R10: Readonly<Partial<Record<
+  RenderPresentationRoleV1,
+  NonNullable<RenderPresentationCoverageEntryR10["extractionProtocol"]>
+>>> = Object.freeze({
+  "dropped-item": "BWX0+BWR6",
+  "held-item": "BWX0+BWR6",
+  machine: "BWX0+BWR7",
+  projectile: "BWX0+BWR6",
+  summon: "BWX0+BWR6",
+});
+
+const INTEGRATION_BLOCKER_FAMILIES_R10: Readonly<Record<
+  string,
+  readonly RenderPresentationCoverageFamilyR10[]
+>> = Object.freeze({
+  "combat-projectile-and-summon-r6-binding-runtime": Object.freeze(["projectile", "summon"] as const),
+  "dropped-item-r6-model-binding-runtime": Object.freeze(["dropped-item"] as const),
+  "machine-world-view-presentation-binding-runtime": Object.freeze(["machine"] as const),
+  "world-prop-model-binding-runtime": Object.freeze(["world-prop"] as const),
+});
+
+function frozenCoverageEntryR10(
+  value: Omit<RenderPresentationCoverageEntryR10, "sourcePresentationIds"> &
+    Readonly<{ sourcePresentationIds: readonly string[] }>,
+): RenderPresentationCoverageEntryR10 {
+  return Object.freeze({
+    ...value,
+    sourcePresentationIds: Object.freeze([...value.sourcePresentationIds].sort()),
+  });
+}
+
+function canonicalPresentationCoverageHashR10(
+  inventory: Omit<RenderPresentationCoverageInventoryR10, "coverageHash">,
+) {
+  const hasher = new WorldPropPolicyHasherV1("blockwild.render.presentation-coverage.v1");
+  hasher.u16(inventory.schema);
+  hasher.string(inventory.catalogId);
+  hasher.u16(inventory.profileCatalogSchema);
+  hasher.u32(inventory.profileCatalogRevision);
+  hasher.string(inventory.modelCatalogHash);
+  hasher.u32(inventory.entries.length);
+  for (const entry of inventory.entries) {
+    hasher.string(entry.id);
+    hasher.string(entry.family);
+    hasher.string(entry.status);
+    hasher.nullableString(entry.profileId);
+    hasher.nullableString(entry.modelId);
+    hasher.u32(entry.sourcePresentationIds.length);
+    for (const sourceId of entry.sourcePresentationIds) hasher.string(sourceId);
+    hasher.nullableString(entry.extractionProtocol);
+    hasher.nullableString(entry.blockerId);
+    hasher.nullableString(entry.reason);
+  }
+  hasher.u32(inventory.families.length);
+  for (const family of inventory.families) {
+    hasher.string(family.family);
+    hasher.u32(family.exactContracts);
+    hasher.u32(family.blockers);
+  }
+  return hasher.finish();
+}
+
+/**
+ * Builds a stable, exhaustive inventory from the attested presentation
+ * catalog. Exact model availability and live source/export readiness are kept
+ * separate so an authored BWM2 model cannot be mistaken for a live binding.
+ */
+export function createRenderPresentationCoverageInventoryR10(
+  catalog: AnyRenderPresentationCatalog = BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
+): RenderPresentationCoverageInventoryR10 {
+  validateProfileShape(catalog);
+  const entries: RenderPresentationCoverageEntryR10[] = [];
+  for (const profile of catalog.profiles) {
+    const protocol = EXACT_PRESENTATION_PROTOCOLS_R10[profile.role];
+    const exact = protocol !== undefined;
+    const blockerId = exact ? null : profile.role === "vehicle"
+      ? "vehicle-semantic-presentation-binding-not-exported"
+      : "world-prop-semantic-presentation-binding-not-exported";
+    entries.push(frozenCoverageEntryR10({
+      id: `${exact ? "contract" : "blocked-profile"}:${profile.id}`,
+      family: profile.role,
+      status: exact ? "exact-contract" : "blocked",
+      profileId: profile.id,
+      modelId: profile.model.id,
+      sourcePresentationIds: profile.contentRefs.map((reference) => `${reference.domain}:${reference.id}`),
+      extractionProtocol: protocol ?? null,
+      blockerId,
+      reason: exact ? null : "The catalog owns an exact BWM2 model, but no live semantic role/content binding is exported for this family.",
+    }));
+  }
+  for (const blocker of catalog.missingProfiles) entries.push(frozenCoverageEntryR10({
+    id: `catalog:${blocker.id}`,
+    family: blocker.role,
+    status: "blocked",
+    profileId: null,
+    modelId: null,
+    sourcePresentationIds: blocker.sourcePresentationIds,
+    extractionProtocol: null,
+    blockerId: blocker.id,
+    reason: blocker.reason,
+  }));
+
+  for (const blockerId of catalog.integrationBlockers) {
+    const families = INTEGRATION_BLOCKER_FAMILIES_R10[blockerId];
+    invariant(families !== undefined, `unclassified render presentation integration blocker '${blockerId}'`);
+    for (const family of families) entries.push(frozenCoverageEntryR10({
+      id: `runtime-source:${family}:${blockerId}`,
+      family,
+      status: "blocked",
+      profileId: null,
+      modelId: null,
+      sourcePresentationIds: [`runtime-export:${family}`],
+      extractionProtocol: null,
+      blockerId,
+      reason: "The TypeScript exact-record adapter exists, but the production Rust source/export gate remains unpromoted.",
+    }));
+  }
+
+  if (catalog.schema === RENDER_PRESENTATION_CATALOG_SCHEMA_V2) {
+    for (const family of catalog.worldPropOwnershipPolicy.dynamicFamilies) {
+      if (family.status === "exact") continue;
+      const blockerId = `world-prop-dynamic-${family.status}:${family.id}`;
+      entries.push(frozenCoverageEntryR10({
+        id: `dynamic:${family.id}`,
+        family: "world-prop",
+        status: "blocked",
+        profileId: null,
+        modelId: null,
+        sourcePresentationIds: [`world-prop-dynamic:${family.id}`],
+        extractionProtocol: null,
+        blockerId,
+        reason: `Dynamic world-prop ownership is ${family.status}; its state and overlay are not one exact live presentation record.`,
+      }));
+    }
+  } else {
+    entries.push(frozenCoverageEntryR10({
+      id: "dynamic:world-prop-policy-absent",
+      family: "world-prop",
+      status: "blocked",
+      profileId: null,
+      modelId: null,
+      sourcePresentationIds: ["world-prop-ownership-policy:v2"],
+      extractionProtocol: null,
+      blockerId: "world-prop-ownership-policy-not-attested",
+      reason: "Legacy presentation catalog schema v1 has no dynamic world-prop ownership proof.",
+    }));
+  }
+
+  for (const [family, blockerId, sourceId, reason] of [
+    ["vehicle", "vehicle-semantic-presentation-binding-not-exported", "BWR6:class:vehicle",
+      "BWR6 can carry vehicle geometry, but it has no exact vehicle role/content/profile binding row."],
+    ["particle", "particle-family-and-material-profile-not-exported", "BWRF:particles",
+      "BWRF particles carry draw values only; they do not identify the authored particle family or an attested presentation profile."],
+    ["weather", "weather-semantic-state-not-exported", "BWRF:environment",
+      "BWRF environment scalars do not identify the authoritative weather state or authored weather presentation family."],
+    ["sky", "sky-presentation-profile-not-exported", "BWRF:environment",
+      "BWRF clear, fog, and ambient values do not bind an authored sky presentation profile."],
+    ["celestial", "celestial-geometry-and-profile-not-exported", "BWRF:environment:sun",
+      "BWRF sun lighting values do not carry the visible sun/moon geometry, phase, or an attested celestial profile."],
+  ] as const) entries.push(frozenCoverageEntryR10({
+    id: `runtime-schema:${family}:${blockerId}`,
+    family,
+    status: "blocked",
+    profileId: null,
+    modelId: null,
+    sourcePresentationIds: [sourceId],
+    extractionProtocol: null,
+    blockerId,
+    reason,
+  }));
+
+  entries.sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+  for (let index = 1; index < entries.length; index += 1) {
+    invariant(entries[index - 1].id < entries[index].id, "render presentation coverage ids are not canonical and unique");
+  }
+  const families = Object.freeze(PRESENTATION_COVERAGE_FAMILIES_R10.map((family) => Object.freeze({
+    family,
+    exactContracts: entries.filter((entry) => entry.family === family && entry.status === "exact-contract").length,
+    blockers: entries.filter((entry) => entry.family === family && entry.status === "blocked").length,
+  })));
+  invariant(families.every((family) => family.exactContracts + family.blockers > 0),
+    "render presentation coverage omitted a required family");
+  const withoutHash = Object.freeze({
+    schema: 1 as const,
+    catalogId: RENDER_PRESENTATION_CATALOG_ID_V1,
+    profileCatalogSchema: catalog.schema,
+    profileCatalogRevision: RENDER_PRESENTATION_CATALOG_REVISION_V1,
+    modelCatalogHash: catalog.catalog.canonicalHash,
+    entries: Object.freeze(entries),
+    families,
+  });
+  return Object.freeze({ ...withoutHash, coverageHash: canonicalPresentationCoverageHashR10(withoutHash) });
+}
+
+export const BLOCKWILD_RENDER_PRESENTATION_COVERAGE_R10 = createRenderPresentationCoverageInventoryR10();
 
 function presentationBindingKey(role: RenderPresentationRoleV1, reference: RenderPresentationContentRefV1) {
   return JSON.stringify([role, reference.domain, reference.id]);

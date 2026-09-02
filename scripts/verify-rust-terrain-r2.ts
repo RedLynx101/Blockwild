@@ -46,17 +46,22 @@ async function publishedWasm() {
   const index = JSON.parse(await readFile(resolve(root, "public/engine/manifest.json"), "utf8"));
   const hash = index.artifacts[index.defaultVariant].hash as string;
   const directory = resolve(root, "public/engine", hash);
-  const module = await import(`${pathToFileURL(resolve(directory, "engine.js")).href}?r2=${Date.now()}`) as WasmModule;
-  await module.default({ module_or_path: new Uint8Array(await readFile(resolve(directory, "engine_bg.wasm"))) });
-  return { module, hash };
+  const wasmModule = await import(`${pathToFileURL(resolve(directory, "engine.js")).href}?r2=${Date.now()}`) as WasmModule;
+  await wasmModule.default({ module_or_path: new Uint8Array(await readFile(resolve(directory, "engine_bg.wasm"))) });
+  return { wasmModule, hash };
 }
 
 async function main() {
   const started = performance.now();
   const registry = canonicalTerrainMaterialRegistryV2();
   const registryBytes = encodeTerrainMaterialRegistryWireV2(registry);
-  const { module, hash } = await publishedWasm();
-  const world = new ChunkWorld({ rustTerrainMode: "off" }) as unknown as WorldHarness;
+  const { wasmModule, hash } = await publishedWasm();
+  // R2 differential reference oracle. This verifier compares Rust meshing to
+  // an explicitly named TypeScript terrain source; it is not worldgen proof.
+  const world = new ChunkWorld({
+    rustTerrainMode: "off",
+    terrainGenerationAuthorityMode: "typescript",
+  }) as unknown as WorldHarness;
   const chunk = world.generateChunk(0, 0);
   const section = Math.floor((0 - MIN_Y) / SECTION_HEIGHT);
   const mismatches: unknown[] = [];
@@ -76,7 +81,7 @@ async function main() {
     const snapshot = world.createRustTerrainSnapshot(target, targetSection);
     const reference = world.createTypeScriptTerrainPacket(snapshot, buckets);
     const wasmStarted = performance.now();
-    const response = decodeRustTerrainWireResponseV1(module.blockwild_world_mesh_section_v1(
+    const response = decodeRustTerrainWireResponseV1(wasmModule.blockwild_world_mesh_section_v1(
       encodeSectionSnapshotWireV1(snapshot), registryBytes,
     ));
     wasmDurations.push(performance.now() - wasmStarted);

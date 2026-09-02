@@ -511,6 +511,66 @@ fn typed_component_command_failure_is_atomic() {
 }
 
 #[test]
+fn compatibility_physics_initializes_and_replaces_typed_locomotion() {
+    let mut authority = EntityAuthority::default();
+    let mut source = record(2);
+    source.custom.insert("physics.grounded".to_owned(), "false".to_owned());
+    source.custom.insert("physics.inLiquid".to_owned(), "true".to_owned());
+    let id = spawn(&mut authority, source, EntityResidency::Hot, 0);
+
+    let initial = authority.components(id).expect("initial typed components");
+    assert!(!initial.locomotion.grounded);
+    assert!(initial.locomotion.submerged);
+
+    let mut replacement = authority.hot()[&id].record.clone();
+    replacement
+        .custom
+        .insert("physics.grounded".to_owned(), "true".to_owned());
+    replacement
+        .custom
+        .insert("physics.inLiquid".to_owned(), "false".to_owned());
+    command(
+        &mut authority,
+        1,
+        EntityCommand::ReplaceCompatibilityRecord {
+            id,
+            value: replacement.clone(),
+        },
+    );
+
+    let replaced = authority.components(id).expect("replaced typed components");
+    assert!(replaced.locomotion.grounded);
+    assert!(!replaced.locomotion.submerged);
+
+    replacement.custom.remove("physics.grounded");
+    replacement.custom.remove("physics.inLiquid");
+    command(
+        &mut authority,
+        2,
+        EntityCommand::ReplaceCompatibilityRecord { id, value: replacement },
+    );
+    let preserved = authority.components(id).expect("preserved typed components");
+    assert!(preserved.locomotion.grounded);
+    assert!(!preserved.locomotion.submerged);
+
+    replacement = authority.hot()[&id].record.clone();
+    replacement
+        .custom
+        .insert("physics.grounded".to_owned(), "not-a-bool".to_owned());
+    replacement.custom.insert("physics.inLiquid".to_owned(), "1".to_owned());
+    command(
+        &mut authority,
+        3,
+        EntityCommand::ReplaceCompatibilityRecord { id, value: replacement },
+    );
+    let malformed = authority
+        .components(id)
+        .expect("malformed values preserve typed components");
+    assert!(malformed.locomotion.grounded);
+    assert!(!malformed.locomotion.submerged);
+}
+
+#[test]
 fn one_hundred_legacy_records_round_trip_without_remap_or_reroll() {
     let mut authority = EntityAuthority::default();
     let records: Vec<_> = (1..=100)

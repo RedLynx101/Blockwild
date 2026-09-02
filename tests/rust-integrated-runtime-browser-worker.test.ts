@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { RustIntegratedRuntimeBrowserKernelV1 } from "../app/game/rust-integrated-runtime-browser-worker.ts";
 import {
+  assertRustIntegratedRuntimeWasmExportsV2,
+  RustIntegratedRuntimeBrowserKernelV1,
+} from "../app/game/rust-integrated-runtime-browser-worker.ts";
+import {
+  RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
   decodeRustIntegratedRuntimeBulkRequestV1,
   encodeRustIntegratedRuntimeBulkResponseV1,
   rustIntegratedRuntimeBulkStateV1,
@@ -39,6 +43,13 @@ function encoded(response: RustIntegratedRuntimeResponseV1) {
 
 test("browser kernel attests the manifest-selected artifact instead of trusting Wasm self-reporting", async () => {
   const nativeSaveRequests: RustIntegratedRuntimeBulkRequestV1[] = [];
+  const legacyMigrationRequests: Array<Readonly<{
+    request: Extract<RustIntegratedRuntimeBulkRequestV1, { type: "runtime-bulk-finalize-save-v1" }>;
+    legacyNonWorldStateFlags: number;
+    sourceKey: string;
+    sourceFormat: string;
+    worldProjection: Uint8Array;
+  }>> = [];
   let ordinaryBulkCalls = 0;
   let recoveryCommandCalls = 0;
   let stepMode: "v2" | "error" | "legacy-success" = "v2";
@@ -141,10 +152,52 @@ test("browser kernel attests the manifest-selected artifact instead of trusting 
         remainingDirtyRecords: 5,
       }).control;
     },
+    blockwild_runtime_migrate_legacy_v2: (
+      _handle: number,
+      control: Uint8Array,
+      legacyNonWorldStateFlags: number,
+      sourceKey: string,
+      sourceFormat: string,
+      worldProjection: Uint8Array,
+    ) => {
+      const request = decodeRustIntegratedRuntimeBulkRequestV1(control);
+      if (request.type !== "runtime-bulk-finalize-save-v1") throw new Error("expected translated legacy FinalizeSave control");
+      legacyMigrationRequests.push({
+        request,
+        legacyNonWorldStateFlags,
+        sourceKey,
+        sourceFormat,
+        worldProjection: Uint8Array.from(worldProjection),
+      });
+      return encodeRustIntegratedRuntimeBulkResponseV1({
+        type: "runtime-bulk-save-progress-v1",
+        requestId: request.requestId,
+        clientEpoch: request.clientEpoch,
+        workerEpoch: 1,
+        current: rustIntegratedRuntimeBulkStateV1(identity()),
+        stageId: request.stageId,
+        state: "finalized",
+        receivedChunks: 1,
+        chunkCount: 1,
+        receivedBytes: 3,
+        setHash: "3".repeat(32),
+        manifestHash: "4".repeat(32),
+        dispatcherRequestId: 2,
+        remainingDirtyRecords: 5,
+      }).control;
+    },
     blockwild_runtime_bulk_v2: () => { ordinaryBulkCalls += 1; return new Uint8Array(); },
     blockwild_runtime_bulk_take_attachment_v2: () => new Uint8Array(),
     blockwild_runtime_destroy_v2: () => new Uint8Array(),
   };
+  assert.throws(
+    () => assertRustIntegratedRuntimeWasmExportsV2({
+      ...namespace,
+      blockwild_runtime_migrate_legacy_v2: undefined,
+    } as unknown as RustEngineWasmExports),
+    /missing export blockwild_runtime_migrate_legacy_v2/u,
+    "the browser kernel must never emulate migration through ordinary finalize",
+  );
   const loader = new RustEngineLoader({
     artifact: {
       moduleUrl: "https://fixture.invalid/blockwild.js",
@@ -224,5 +277,30 @@ test("browser kernel attests the manifest-selected artifact instead of trusting 
   assert.equal(initialized.type === "runtime-bulk-save-progress-v1" ? initialized.stageId : null, "native.new.1");
   assert.equal(nativeSaveRequests.length, 1);
   assert.equal(nativeSaveRequests[0].type, "runtime-bulk-finalize-save-v1");
-  assert.equal(ordinaryBulkCalls, 0, "native initialization never enters the compatibility finalize entrypoint");
+
+  const projection = Uint8Array.of(0x42, 0x57, 0x41, 0x53, 0x80, 0xff);
+  const migrated = await kernel.handleBulk({
+    type: "runtime-bulk-migrate-legacy-world-v1",
+    requestId: 3,
+    clientEpoch: 1,
+    expected: rustIntegratedRuntimeBulkStateV1(identity()),
+    stageId: "legacy.world-only.1",
+    createdAt: 11,
+    sourceKey: "blockwild-world-data-v1:fixture",
+    sourceFormat: "blockwild-world-save-canonical-v1",
+    legacyNonWorldStateFlags: 0,
+    typeId: RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
+    worldProjection: projection,
+  });
+  assert.equal(migrated.type, "runtime-bulk-save-progress-v1");
+  assert.equal(migrated.type === "runtime-bulk-save-progress-v1" ? migrated.stageId : null, "legacy.world-only.1");
+  assert.equal(legacyMigrationRequests.length, 1);
+  assert.equal(legacyMigrationRequests[0].request.type, "runtime-bulk-finalize-save-v1");
+  assert.equal(legacyMigrationRequests[0].request.stageId, "legacy.world-only.1");
+  assert.equal(legacyMigrationRequests[0].request.createdAt, 11);
+  assert.equal(legacyMigrationRequests[0].legacyNonWorldStateFlags, 0);
+  assert.equal(legacyMigrationRequests[0].sourceKey, "blockwild-world-data-v1:fixture");
+  assert.equal(legacyMigrationRequests[0].sourceFormat, "blockwild-world-save-canonical-v1");
+  assert.deepEqual(legacyMigrationRequests[0].worldProjection, projection);
+  assert.equal(ordinaryBulkCalls, 0, "native initialization and legacy migration never enter ordinary compatibility finalize");
 });

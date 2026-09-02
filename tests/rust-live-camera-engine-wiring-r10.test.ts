@@ -10,11 +10,22 @@ import type { RustIntegratedRuntimeExtractionV1 } from "../app/game/rust-integra
 const engineUrl = new URL("../app/game/engine.ts", import.meta.url);
 
 function interval(source: string, startMarker: string, endMarker: string) {
+  // This is semantic source-structure inspection, not a raw-byte artifact check.
+  source = source.replace(/\r\n/g, "\n");
   const start = source.indexOf(startMarker);
   const end = source.indexOf(endMarker, start + startMarker.length);
   assert.ok(start >= 0 && end > start, `missing engine interval '${startMarker}'`);
   return source.slice(start, end);
 }
+
+test("source-structure intervals preserve the same guards in LF and CRLF checkouts", () => {
+  const source = "before\n  start() {\n    requiredGuard();\n  }\n  /**\n   * next\n";
+  const expected = "  start() {\n    requiredGuard();\n  }";
+  for (const text of [source, source.replace(/\n/g, "\r\n")]) {
+    assert.equal(interval(text, "  start() {", "\n  /**\n   * next"), expected);
+    assert.throws(() => interval(text, "missing()", "\n  /**"), /missing engine interval/);
+  }
+});
 
 test("native camera projection is an exact Three presentation mirror", () => {
   const engine = Object.create(VoxelEngine.prototype) as VoxelEngine & Record<string, unknown>;
@@ -81,7 +92,8 @@ test("initial activation validates player and camera before arming and attaching
   assert.match(renderer, /this\.renderExtraction = accepted\.publisher/u);
   assert.equal((acceptance.match(/publisher\.present\(snapshot\)/gu) ?? []).length, 1);
   assert.match(acceptance, /for \(;;\)/u);
-  assert.match(acceptance, /await pump\.refreshView\(generation, view\)/u);
+  assert.match(acceptance,
+    /refreshed = await this\.runRustLivePumpNetworkExclusiveR5\(\s*generation,\s*host,\s*pump,\s*"renderer activation refresh",\s*\(\) => pump\.refreshView\(generation, view\),\s*\)/u);
   assert.match(acceptance, /currentRustLiveRenderViewR10\(\)\?\.viewRevision !== view\.viewRevision\) continue/u);
   assert.match(acceptance, /rejectRustLiveCameraActivationR10\(error, generation, host, pump\)/u);
   assert.match(rejection, /this\.quarantineRustLivePlayerAuthorityR5\(error, pump\)/u);
@@ -118,9 +130,15 @@ test("renderer activation coalesces resizes across creation and submission witho
   const projectedViews: number[] = [];
   let terrainResourceBatches = 0;
   let terrainFrames = 0;
-  const host = { diagnostics: () => ({ state: "ready", contentHash: "a".repeat(64) }) };
+  const host = {
+    diagnostics: () => ({ state: "ready", contentHash: "a".repeat(64) }),
+    multiplayerAuthority: () => ({
+      runExclusiveMutation: async <T>(operation: () => Promise<T>) => operation(),
+    }),
+  };
   const pump = {
     state: "ready",
+    adoptExternalNetworkSuccessor: async () => false,
     refreshView: async (_generation: number, view: { viewRevision: number }) => {
       refreshViews.push(view.viewRevision);
       const result = refreshed.get(view.viewRevision);
@@ -205,6 +223,7 @@ test("renderer activation coalesces resizes across creation and submission witho
         daylight: 0.8, worldTime: 0.3, weather: "clear" as const, underwater: 0, caveOcclusion: 0,
       }),
     }),
+    quarantineRustLivePlayerAuthorityR5: (error: unknown) => { throw error; },
     quarantineRustLiveRendererR10: (error: unknown) => { throw error; },
   });
   const state = engine as unknown as { rustLiveRenderViewR10: typeof view1 | typeof view2 | typeof view3 };
@@ -285,11 +304,17 @@ test("resize during an awaited step commits refreshed player-camera authority an
   const applied: Array<Readonly<{ extraction: RustIntegratedRuntimeExtractionV1; viewRevision: number }>> = [];
   const queued: number[] = [];
   let committedPlayerMarker: string | null = null;
-  const host = { diagnostics: () => ({ state: "ready" }) };
+  const host = {
+    diagnostics: () => ({ state: "ready" }),
+    multiplayerAuthority: () => ({
+      runExclusiveMutation: async <T>(operation: () => Promise<T>) => operation(),
+    }),
+  };
   const pump = {
     state: "ready",
     sample() {},
     advance: () => advance,
+    adoptExternalNetworkSuccessor: async () => false,
     refreshView: async () => Object.freeze({
       discarded: false, extraction: latestExtraction, camera: latestCamera, cause: "viewport" as const,
     }),
@@ -297,6 +322,7 @@ test("resize during an awaited step commits refreshed player-camera authority an
   };
   Object.assign(engine, {
     rustLiveInputPump: pump,
+    rustLivePlayerAttestationR10: Object.freeze({ externalEntityId: "player:camera" }),
     rustRuntimeHost: host,
     rustLivePlayerAuthorityGeneration: 3,
     rustRuntimeTransitionGeneration: 3,
@@ -337,6 +363,73 @@ test("resize during an awaited step commits refreshed player-camera authority an
 
   assert.deepEqual(applied, [{ extraction: latestExtraction, viewRevision: 2 }]);
   assert.equal(committedPlayerMarker, "accepted-post-step-player-row");
+  assert.deepEqual(queued, [2]);
+});
+
+test("resize refresh carries its viewport cause when the awaited step had no extraction", async () => {
+  const engine = Object.create(VoxelEngine.prototype) as VoxelEngine & Record<string, unknown>;
+  const firstView = Object.freeze({ viewportWidth: 800, viewportHeight: 600, viewRevision: 1 });
+  const latestView = Object.freeze({ viewportWidth: 1600, viewportHeight: 900, viewRevision: 2 });
+  const latestExtraction = Object.freeze({ extractionRevision: 11 }) as RustIntegratedRuntimeExtractionV1;
+  const latestCamera = Object.freeze({ viewRevision: BigInt(2) }) as RustLiveCameraViewR10;
+  let releaseAdvance!: (value: unknown) => void;
+  const advance = new Promise((resolve) => { releaseAdvance = resolve; });
+  const cameraViews: number[] = [];
+  const queued: number[] = [];
+  let authorityApplications = 0;
+  const host = {
+    diagnostics: () => ({ state: "ready" }),
+    multiplayerAuthority: () => ({
+      runExclusiveMutation: async <T>(operation: () => Promise<T>) => operation(),
+    }),
+  };
+  const pump = {
+    state: "ready",
+    sample() {},
+    advance: () => advance,
+    adoptExternalNetworkSuccessor: async () => false,
+    refreshView: async () => Object.freeze({
+      discarded: false,
+      extraction: latestExtraction,
+      camera: latestCamera,
+      cause: "viewport" as const,
+    }),
+    diagnostics: () => Object.freeze({ lastView: latestView }),
+  };
+  Object.assign(engine, {
+    rustLiveInputPump: pump,
+    rustLivePlayerAttestationR10: Object.freeze({ externalEntityId: "player:camera" }),
+    rustRuntimeHost: host,
+    rustLivePlayerAuthorityGeneration: 3,
+    rustRuntimeTransitionGeneration: 3,
+    rustLiveRenderViewR10: firstView,
+    rustLiveInputAdvance: null,
+    rustLiveViewRefresh: null,
+    rustLiveRenderRuntime: {},
+    disposed: false,
+    rustLivePlayerAuthorityEnabledR5: () => true,
+    rustLiveInputIntentR5: () => ({}),
+    applyRustLiveAuthorityExtractionR10: () => { authorityApplications += 1; },
+    applyRustLiveCameraExtractionR10: (
+      _generation: number,
+      _host: unknown,
+      _pump: unknown,
+      _extraction: RustIntegratedRuntimeExtractionV1,
+      view: { viewRevision: number },
+    ) => { cameraViews.push(view.viewRevision); },
+    enqueueRustLiveRendererExtractionR10: (entry: { viewRevision: number }) => { queued.push(entry.viewRevision); },
+    trackRustAuthorityOperation: <T>(operation: Promise<T>) => operation,
+    quarantineRustLivePlayerAuthorityR5: (error: unknown) => { throw error; },
+  });
+  const state = engine as unknown as { rustLiveRenderViewR10: typeof firstView | typeof latestView };
+
+  (engine as unknown as { scheduleRustLiveInputAdvanceR5(): void }).scheduleRustLiveInputAdvanceR5();
+  state.rustLiveRenderViewR10 = latestView;
+  releaseAdvance(Object.freeze({ discarded: false, step: Object.freeze({}), extraction: null }));
+  await (engine as unknown as { rustLiveInputAdvance: Promise<void> }).rustLiveInputAdvance;
+
+  assert.equal(authorityApplications, 0);
+  assert.deepEqual(cameraViews, [2]);
   assert.deepEqual(queued, [2]);
 });
 

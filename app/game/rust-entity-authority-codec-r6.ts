@@ -36,7 +36,7 @@ const U64_MAX = (BigInt(1) << BigInt(64)) - BigInt(1);
 const I64_MIN = -(BigInt(1) << BigInt(63));
 const I64_MAX = (BigInt(1) << BigInt(63)) - BigInt(1);
 const encoder = new TextEncoder();
-const decoder = new TextDecoder("utf-8", { fatal: true });
+const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 const ENTITY_CLASSES = ["creature", "player", "sentient", "construct", "projectile", "vehicle"] as const;
 const BODY_SHAPES = ["capsule", "box", "sphere", "serpentine", "flying", "aquatic"] as const;
@@ -64,7 +64,7 @@ function signed64(value: bigint, label: string) {
 }
 
 function finite(value: number, label: string) {
-  if (!Number.isFinite(value)) fail(`${label} must be finite`);
+  if (!Number.isFinite(value) || !Number.isFinite(Math.fround(value))) fail(`${label} must fit finite f32`);
   return value;
 }
 
@@ -119,7 +119,11 @@ function f32Bits(value: number) {
 }
 
 function sameVec3(left: RustEntityVec3R6, right: RustEntityVec3R6) {
-  return f32Bits(left.x) === f32Bits(right.x) && f32Bits(left.y) === f32Bits(right.y) && f32Bits(left.z) === f32Bits(right.z);
+  // Native Vec3 equality is numeric, so +0 and -0 are equal even though the
+  // canonical serializer correctly preserves their distinct wire bits.
+  return Math.fround(left.x) === Math.fround(right.x)
+    && Math.fround(left.y) === Math.fround(right.y)
+    && Math.fround(left.z) === Math.fround(right.z);
 }
 
 function packedIndex(value: bigint) { return Number(value & BigInt(0xffff_ffff)); }
@@ -240,9 +244,10 @@ function writeMap<T>(writer: Writer, value: RustEntityMapR6<T>, maximum: number,
 
 function validateCompatibility(value: RustEntityCompatibilityRecordR6) {
   if (value.schema !== 1) fail("compatibility schema is unsupported");
-  for (const [label, text] of [["external entity id", value.externalEntityId], ["specimen id", value.specimenId], ["kind key", value.kindKey], ["bond tier", value.bondTier]] as const) {
+  for (const [label, text] of [["external entity id", value.externalEntityId], ["specimen id", value.specimenId], ["kind key", value.kindKey]] as const) {
     if (textBytes(text, MAX_COMPATIBILITY_STRING_BYTES, label).byteLength === 0) fail(`${label} is empty`);
   }
+  textBytes(value.bondTier, MAX_COMPATIBILITY_STRING_BYTES, "bond tier");
   for (const optional of [value.variantKey, value.name, value.ownerId, value.socialGroupId, value.factionId, value.settlementId]) {
     if (optional !== null) textBytes(optional, MAX_COMPATIBILITY_STRING_BYTES, "compatibility text");
   }

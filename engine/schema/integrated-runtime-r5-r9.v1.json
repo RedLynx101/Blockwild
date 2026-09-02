@@ -1,0 +1,1175 @@
+{
+  "schemaVersion": 1,
+  "protocol": {
+    "name": "blockwild-integrated-runtime",
+    "wireVersion": 1,
+    "runtimeSchema": 6,
+    "requestEnvelope": {
+      "magic": "BWRQ",
+      "schemaFamily": "RuntimeRequestV1",
+      "canonicalRustPath": "engine/crates/blockwild-runtime-wire/src/codec.rs",
+      "canonicalTypescriptPath": "app/game/rust-integrated-runtime-codec.ts"
+    },
+    "receiptEnvelope": {
+      "magic": "BWRS",
+      "schemaFamily": "RuntimeResponseV1",
+      "canonicalRustPath": "engine/crates/blockwild-runtime-wire/src/codec.rs",
+      "canonicalTypescriptPath": "app/game/rust-integrated-runtime-codec.ts"
+    }
+  },
+  "fingerprint": {
+    "algorithm": "sha256",
+    "canonicalization": "json-sorted-keys-v1",
+    "value": "f5fb5cab925d60512fb52436b26ef3f166f9865f84f8ee7bf43d3c7cd21ac177"
+  },
+  "domains": [
+    {
+      "phase": "R5",
+      "domain": "simulation",
+      "protocolSchema": 1,
+      "canonicalPaths": {
+        "rust": [
+          "engine/crates/blockwild-engine/src/runtime_domain_schema_generated.rs",
+          "engine/crates/blockwild-simulation/src/contract.rs",
+          "engine/crates/blockwild-wasm/src/integrated_runtime.rs",
+          "engine/crates/blockwild-engine/src/runtime_domain_wire.rs",
+          "engine/crates/blockwild-engine/src/runtime_player_final_bind_wire.rs"
+        ],
+        "typescript": [
+          "app/game/rust-integrated-runtime-codec.ts",
+          "app/game/rust-integrated-runtime-domain-schema.generated.ts",
+          "app/game/rust-integrated-runtime-domain-wire.ts",
+          "app/game/rust-integrated-runtime-player-respawn.ts",
+          "app/game/rust-live-input-pump-r5.ts",
+          "app/game/rust-integrated-runtime-player-final-bind.ts",
+          "app/game/rust-integrated-runtime-player-bootstrap.ts"
+        ]
+      },
+      "families": {
+        "requests": [
+          {
+            "id": "context-command-continuity-v2",
+            "direction": "request",
+            "magic": "BWS6",
+            "typeId": "blockwild.simulation.context-command-continuity.r5.v2",
+            "operationSchema": 2,
+            "innerSchema": 2,
+            "normalPath": true
+          },
+          {
+            "id": "player-bootstrap-status-v1",
+            "direction": "request",
+            "magic": "BWS5",
+            "typeId": "blockwild.simulation.player-bootstrap-status.r5.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-combat-bootstrap-status-v1",
+            "direction": "request",
+            "magic": "BWS7",
+            "typeId": "blockwild.simulation.player-combat-bootstrap-status.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-game-mode-set-v1",
+            "direction": "request",
+            "magic": "BWM7",
+            "typeId": "blockwild.simulation.player-game-mode-set.r5.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-respawn-v1",
+            "direction": "request",
+            "magic": "BWD7",
+            "typeId": "blockwild.simulation.player-respawn.r5-r6-r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "simulation-camera-config-v1",
+            "direction": "request",
+            "magic": "BWC5",
+            "typeId": "blockwild.simulation.camera-config.r5.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "simulation-player-bind-v2",
+            "direction": "request",
+            "magic": "BWB6",
+            "typeId": "blockwild.simulation.player-bind.r5.v2",
+            "operationSchema": 2,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "simulation-player-bind-v3",
+            "direction": "request",
+            "magic": "BWB6",
+            "typeId": "blockwild.simulation.player-bind.r5.v3",
+            "operationSchema": 3,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "simulation-player-bind-v4",
+            "direction": "request",
+            "magic": "BWB6",
+            "typeId": "blockwild.simulation.player-bind.r5.v4",
+            "operationSchema": 4,
+            "innerSchema": 1,
+            "normalPath": true
+          }
+        ],
+        "receipts": [
+          {
+            "id": "context-command-continuity-receipt-v2",
+            "direction": "receipt",
+            "magic": "BWO6",
+            "typeId": "blockwild.simulation.context-command-continuity-receipt.r5.v2",
+            "operationSchema": 2,
+            "innerSchema": 2,
+            "normalPath": true
+          },
+          {
+            "id": "player-bootstrap-status-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWO5",
+            "typeId": "blockwild.simulation.player-bootstrap-status-receipt.r5.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-combat-bootstrap-status-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWO7",
+            "typeId": "blockwild.simulation.player-combat-bootstrap-status-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-game-mode-set-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWN7",
+            "typeId": "blockwild.simulation.player-game-mode-set-receipt.r5.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-respawn-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWE7",
+            "typeId": "blockwild.simulation.player-respawn-receipt.r5-r6-r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "simulation-camera-config-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWR5",
+            "typeId": "blockwild.simulation.camera-config-receipt.r5.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "simulation-player-bind-receipt-v2",
+            "direction": "receipt",
+            "magic": "BWB6",
+            "typeId": "blockwild.simulation.player-bind-receipt.r5.v2",
+            "operationSchema": 2,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "simulation-player-bind-final-receipt-v3",
+            "direction": "receipt",
+            "magic": "BWF6",
+            "typeId": "blockwild.simulation.player-bind-final-receipt.r5.v3",
+            "operationSchema": 3,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "simulation-player-bind-final-receipt-v4",
+            "direction": "receipt",
+            "magic": "BWF7",
+            "typeId": "blockwild.simulation.player-bind-final-receipt.r5.v4",
+            "operationSchema": 4,
+            "innerSchema": 1,
+            "normalPath": true
+          }
+        ]
+      },
+      "evidence": {
+        "fixtures": [
+          "tests/fixtures/rust-engine/integrated-runtime-v1/death-respawn-drop-wire-v1.json",
+          "tests/fixtures/rust-engine/r5/simulation-input-hashes.json",
+          "tests/fixtures/rust-engine/integrated-runtime-v1/r5-simulation-wire-v1.json"
+        ],
+        "tests": [
+          "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+          "tests/rust-integrated-runtime-domain-wire.test.ts",
+          "tests/rust-integrated-runtime-player-respawn.test.ts",
+          "tests/rust-simulation-contract.test.ts",
+          "tests/rust-integrated-runtime-r5-schema-fixture.test.ts"
+        ],
+        "native": [
+          "engine/crates/blockwild-engine/examples/death_respawn_drop_wire_fixtures.rs",
+          "engine/crates/blockwild-engine/src/runtime_domain_schema_generated.rs",
+          "engine/crates/blockwild-simulation/src/tests.rs",
+          "engine/crates/blockwild-engine/examples/r5_simulation_wire_fixture.rs",
+          "engine/crates/blockwild-engine/tests/r5_simulation_wire_fixture.rs"
+        ],
+        "wasm": [
+          "engine/crates/blockwild-wasm/src/integrated_runtime.rs"
+        ],
+        "typescript": [
+          "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+          "tests/rust-integrated-runtime-domain-wire.test.ts",
+          "tests/rust-integrated-runtime-player-respawn.test.ts",
+          "tests/rust-integrated-runtime-r5-schema-fixture.test.ts"
+        ]
+      },
+      "assurance": {
+        "bounds": {
+          "status": "verified",
+          "evidence": [
+            "engine/crates/blockwild-simulation/src/contract.rs",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r5-simulation-wire-v1.json",
+            "tests/rust-integrated-runtime-r5-schema-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r5_simulation_wire_fixture.rs"
+          ]
+        },
+        "hashes": {
+          "status": "verified",
+          "evidence": [
+            "tests/fixtures/rust-engine/integrated-runtime-v1/death-respawn-drop-wire-v1.json",
+            "tests/helpers/rust-death-drop-wire-fixtures.ts",
+            "tests/fixtures/rust-engine/r5/simulation-input-hashes.json",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r5-simulation-wire-v1.json",
+            "tests/rust-integrated-runtime-r5-schema-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r5_simulation_wire_fixture.rs"
+          ]
+        },
+        "fingerprint": {
+          "status": "verified",
+          "evidence": [
+            "scripts/generate-integrated-runtime-domain-schema.mjs",
+            "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/wire-fixtures.json",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r5-simulation-wire-v1.json",
+            "tests/rust-integrated-runtime-r5-schema-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r5_simulation_wire_fixture.rs"
+          ]
+        }
+      },
+      "completion": {
+        "status": "complete",
+        "complete": true,
+        "remaining": []
+      }
+    },
+    {
+      "phase": "R6",
+      "domain": "entities",
+      "protocolSchema": 1,
+      "canonicalPaths": {
+        "rust": [
+          "engine/crates/blockwild-engine/src/runtime_domain_schema_generated.rs",
+          "engine/crates/blockwild-entity/src/authority.rs",
+          "engine/crates/blockwild-wasm/src/integrated_runtime.rs",
+          "engine/crates/blockwild-engine/src/runtime_domain_wire.rs"
+        ],
+        "typescript": [
+          "app/game/rust-entity-authority-codec-r6.ts",
+          "app/game/rust-entity-authority-contract-r6.ts",
+          "app/game/rust-integrated-runtime-domain-schema.generated.ts",
+          "app/game/rust-integrated-runtime-domain-wire.ts",
+          "app/game/rust-integrated-runtime-entities.ts",
+          "app/game/rust-entity-authority-hash-r6.ts"
+        ]
+      },
+      "families": {
+        "requests": [
+          {
+            "id": "entity-authority-export-v1",
+            "direction": "request",
+            "magic": "BWQ6",
+            "typeId": "blockwild.entities.authority-export.r6.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "entity-authority-import-v2",
+            "direction": "request",
+            "magic": "BWI6",
+            "typeId": "blockwild.entities.authority-import.r6.v2",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "entity-compatibility-export-v1",
+            "direction": "request",
+            "magic": "BWQ5",
+            "typeId": "blockwild.entities.compatibility-export.r6.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "entity-compatibility-import-v1",
+            "direction": "request",
+            "magic": "BWI5",
+            "typeId": "blockwild.entities.compatibility-import.r6.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "entity-command-v1",
+            "direction": "request",
+            "magic": "BWE6",
+            "typeId": "blockwild.entities.command-batch.r6.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          }
+        ],
+        "receipts": [
+          {
+            "id": "entity-authority-import-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWU6",
+            "typeId": "blockwild.entities.authority-import-receipt.r6.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "entity-authority-snapshot-v2",
+            "direction": "receipt",
+            "magic": "BWEA",
+            "typeId": "blockwild.entities.authority-snapshot.r6.v2",
+            "operationSchema": 1,
+            "innerSchema": 2,
+            "normalPath": true
+          },
+          {
+            "id": "entity-compatibility-record-v1",
+            "direction": "receipt",
+            "magic": "BWEC",
+            "typeId": "blockwild.entities.compatibility-record.r6.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "entity-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWA6",
+            "typeId": "blockwild.entities.event-batch.r6.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          }
+        ]
+      },
+      "evidence": {
+        "fixtures": [
+          "tests/fixtures/rust-engine/r6/entity-wire-v1.json",
+          "tests/fixtures/rust-engine/integrated-runtime-v1/r6-entity-domain-wire-v1.json",
+          "tests/fixtures/rust-engine/r6/entity-authority-hashes-v2.json"
+        ],
+        "tests": [
+          "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+          "tests/rust-integrated-runtime-domain-wire.test.ts",
+          "tests/rust-entity-authority-r6.test.ts",
+          "tests/rust-integrated-runtime-r6-schema-fixture.test.ts",
+          "tests/rust-entity-authority-hash-r6.test.ts"
+        ],
+        "native": [
+          "engine/crates/blockwild-engine/src/runtime_domain_schema_generated.rs",
+          "engine/crates/blockwild-entity/src/tests.rs",
+          "engine/crates/blockwild-engine/examples/r6_entity_domain_wire_fixture.rs",
+          "engine/crates/blockwild-engine/tests/r6_entity_domain_wire_fixture.rs",
+          "engine/crates/blockwild-engine/examples/r6_entity_authority_hash_fixture.rs",
+          "engine/crates/blockwild-engine/tests/r6_entity_authority_hash_fixture.rs"
+        ],
+        "wasm": [
+          "engine/crates/blockwild-wasm/src/integrated_runtime.rs"
+        ],
+        "typescript": [
+          "tests/rust-integrated-runtime-domain-adapters.test.ts",
+          "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+          "tests/rust-integrated-runtime-domain-wire.test.ts",
+          "tests/rust-integrated-runtime-r6-schema-fixture.test.ts",
+          "tests/rust-entity-authority-hash-r6.test.ts"
+        ]
+      },
+      "assurance": {
+        "bounds": {
+          "status": "verified",
+          "evidence": [
+            "scripts/generate-integrated-runtime-domain-schema.mjs",
+            "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+            "tests/fixtures/rust-engine/r6/entity-wire-v1.json",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r6-entity-domain-wire-v1.json",
+            "tests/rust-integrated-runtime-r6-schema-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r6_entity_domain_wire_fixture.rs",
+            "tests/fixtures/rust-engine/r6/entity-authority-hashes-v2.json",
+            "tests/rust-entity-authority-hash-r6.test.ts",
+            "engine/crates/blockwild-engine/tests/r6_entity_authority_hash_fixture.rs",
+            "scripts/verify-rust-schema-browser.mjs",
+            "tests/fixtures/rust-schema-convergence-browser.html"
+          ]
+        },
+        "hashes": {
+          "status": "verified",
+          "evidence": [
+            "engine/crates/blockwild-entity/src/snapshot.rs",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r6-entity-domain-wire-v1.json",
+            "tests/rust-integrated-runtime-r6-schema-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r6_entity_domain_wire_fixture.rs",
+            "tests/fixtures/rust-engine/r6/entity-authority-hashes-v2.json",
+            "tests/rust-entity-authority-hash-r6.test.ts",
+            "engine/crates/blockwild-engine/tests/r6_entity_authority_hash_fixture.rs",
+            "scripts/verify-rust-schema-browser.mjs",
+            "tests/fixtures/rust-schema-convergence-browser.html"
+          ]
+        },
+        "fingerprint": {
+          "status": "verified",
+          "evidence": [
+            "tests/fixtures/rust-engine/r6/entity-wire-v1.json",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r6-entity-domain-wire-v1.json",
+            "tests/rust-integrated-runtime-r6-schema-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r6_entity_domain_wire_fixture.rs",
+            "tests/fixtures/rust-engine/r6/entity-authority-hashes-v2.json",
+            "tests/rust-entity-authority-hash-r6.test.ts",
+            "engine/crates/blockwild-engine/tests/r6_entity_authority_hash_fixture.rs",
+            "scripts/verify-rust-schema-browser.mjs",
+            "tests/fixtures/rust-schema-convergence-browser.html"
+          ]
+        }
+      },
+      "completion": {
+        "status": "complete",
+        "complete": true,
+        "remaining": []
+      }
+    },
+    {
+      "phase": "R7",
+      "domain": "gameplay",
+      "protocolSchema": 1,
+      "canonicalPaths": {
+        "rust": [
+          "engine/crates/blockwild-engine/src/runtime_domain_schema_generated.rs",
+          "engine/crates/blockwild-gameplay/src/contract.rs",
+          "engine/crates/blockwild-wasm/src/integrated_runtime.rs",
+          "engine/crates/blockwild-engine/src/runtime_domain_wire.rs"
+        ],
+        "typescript": [
+          "app/game/rust-gameplay-contract-r7.ts",
+          "app/game/rust-integrated-runtime-codec.ts",
+          "app/game/rust-integrated-runtime-domain-schema.generated.ts",
+          "app/game/rust-integrated-runtime-domain-wire.ts",
+          "app/game/rust-integrated-runtime-drop-pickup.ts",
+          "app/game/rust-integrated-runtime-player-drop.ts",
+          "app/game/rust-integrated-runtime-gameplay-wire.ts",
+          "app/game/rust-integrated-gameplay-command-wire.ts"
+        ]
+      },
+      "families": {
+        "requests": [
+          {
+            "id": "basic-dirt-action-receipt-v1",
+            "direction": "request",
+            "magic": "BWQ7",
+            "typeId": "blockwild.gameplay.basic-dirt-action-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "content-install-page-v1",
+            "direction": "request",
+            "magic": "BWC7",
+            "typeId": "blockwild.gameplay.content-install-page.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "gameplay-actor-grant-v1",
+            "direction": "request",
+            "magic": "BWK7",
+            "typeId": "blockwild.gameplay.actor-grant.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "gameplay-command-v1",
+            "direction": "request",
+            "magic": "BWG7",
+            "typeId": "blockwild.gameplay.command-batch.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "native-block-edit-receipt-v1",
+            "direction": "request",
+            "magic": "BWZ7",
+            "typeId": "blockwild.gameplay.native-block-edit-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "native-block-edit-receipt-v2",
+            "direction": "request",
+            "magic": "BWZ8",
+            "typeId": "blockwild.gameplay.native-block-edit-receipt.r7.v2",
+            "operationSchema": 2,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "native-drop-pickup-receipt-v1",
+            "direction": "request",
+            "magic": "BWQ8",
+            "typeId": "blockwild.gameplay.native-drop-pickup-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "native-player-drop-receipt-v1",
+            "direction": "request",
+            "magic": "BWQ9",
+            "typeId": "blockwild.gameplay.native-player-drop-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-creative-slot-set-v1",
+            "direction": "request",
+            "magic": "BWF7",
+            "typeId": "blockwild.gameplay.player-creative-slot-set.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-inventory-import-v1",
+            "direction": "request",
+            "magic": "BWP7",
+            "typeId": "blockwild.gameplay.player-inventory-import.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-locator-item-consume-v1",
+            "direction": "request",
+            "magic": "BWV7",
+            "typeId": "blockwild.gameplay.player-locator-item-consume.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          }
+        ],
+        "receipts": [
+          {
+            "id": "basic-dirt-action-projection-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWR7",
+            "typeId": "blockwild.gameplay.basic-dirt-action-projection-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "content-install-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWT7",
+            "typeId": "blockwild.gameplay.content-install-receipt.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "gameplay-actor-grant-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWK7",
+            "typeId": "blockwild.gameplay.actor-grant-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "gameplay-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWA7",
+            "typeId": "blockwild.gameplay.command-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "native-block-edit-projection-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWY7",
+            "typeId": "blockwild.gameplay.native-block-edit-projection-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "native-block-edit-projection-receipt-v2",
+            "direction": "receipt",
+            "magic": "BWY8",
+            "typeId": "blockwild.gameplay.native-block-edit-projection-receipt.r7.v2",
+            "operationSchema": 2,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "native-drop-pickup-projection-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWR8",
+            "typeId": "blockwild.gameplay.native-drop-pickup-projection-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "native-player-drop-projection-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWS9",
+            "typeId": "blockwild.gameplay.native-player-drop-projection-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-creative-slot-set-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWH7",
+            "typeId": "blockwild.gameplay.player-creative-slot-set-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-inventory-import-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWI7",
+            "typeId": "blockwild.gameplay.player-inventory-import-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "player-locator-item-consume-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWX7",
+            "typeId": "blockwild.gameplay.player-locator-item-consume-receipt.r7.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          }
+        ]
+      },
+      "evidence": {
+        "fixtures": [
+          "tests/fixtures/rust-engine/integrated-runtime-v1/death-respawn-drop-wire-v1.json",
+          "tests/fixtures/rust-engine/r7/gameplay/gameplay-snapshot-v4-combat.json",
+          "tests/fixtures/rust-engine/integrated-runtime-v1/r7-gameplay-wire-v1.json",
+          "tests/fixtures/rust-engine/integrated-runtime-v1/r7-gameplay-command-wire-v1.json"
+        ],
+        "tests": [
+          "tests/rust-gameplay-contract-r7.test.ts",
+          "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+          "tests/rust-integrated-runtime-domain-wire.test.ts",
+          "tests/rust-integrated-runtime-drop-pickup.test.ts",
+          "tests/rust-integrated-runtime-player-drop.test.ts",
+          "tests/rust-integrated-runtime-r7-schema-fixture.test.ts",
+          "tests/rust-integrated-runtime-r7-command-fixture.test.ts",
+          "tests/rust-integrated-runtime-inventory-text.test.ts"
+        ],
+        "native": [
+          "engine/crates/blockwild-engine/examples/death_respawn_drop_wire_fixtures.rs",
+          "engine/crates/blockwild-engine/src/runtime_domain_schema_generated.rs",
+          "engine/crates/blockwild-gameplay/src/tests.rs",
+          "engine/crates/blockwild-engine/examples/r7_gameplay_wire_fixture.rs",
+          "engine/crates/blockwild-engine/tests/r7_gameplay_wire_fixture.rs",
+          "engine/crates/blockwild-engine/examples/r7_gameplay_command_wire_fixture.rs",
+          "engine/crates/blockwild-engine/tests/r7_gameplay_command_wire_fixture.rs",
+          "engine/crates/blockwild-engine/tests/r7_gameplay_receipt_integrity.rs",
+          "engine/crates/blockwild-engine/tests/shared_inventory_text_wire.rs"
+        ],
+        "wasm": [
+          "engine/crates/blockwild-wasm/src/integrated_runtime.rs"
+        ],
+        "typescript": [
+          "tests/rust-gameplay-browser-r7.test.ts",
+          "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+          "tests/rust-integrated-runtime-domain-wire.test.ts",
+          "tests/rust-integrated-runtime-drop-pickup.test.ts",
+          "tests/rust-integrated-runtime-player-drop.test.ts",
+          "tests/rust-integrated-runtime-r7-schema-fixture.test.ts",
+          "tests/rust-integrated-runtime-r7-command-fixture.test.ts",
+          "tests/rust-integrated-runtime-inventory-text.test.ts"
+        ]
+      },
+      "assurance": {
+        "bounds": {
+          "status": "verified",
+          "evidence": [
+            "engine/crates/blockwild-gameplay/src/contract.rs",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r7-gameplay-wire-v1.json",
+            "tests/rust-integrated-runtime-r7-schema-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r7_gameplay_wire_fixture.rs",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r7-gameplay-command-wire-v1.json",
+            "tests/rust-integrated-runtime-r7-command-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r7_gameplay_command_wire_fixture.rs",
+            "engine/crates/blockwild-engine/tests/r7_gameplay_receipt_integrity.rs",
+            "scripts/verify-rust-schema-browser.mjs",
+            "tests/fixtures/rust-schema-convergence-browser.html"
+          ]
+        },
+        "hashes": {
+          "status": "verified",
+          "evidence": [
+            "tests/fixtures/rust-engine/integrated-runtime-v1/death-respawn-drop-wire-v1.json",
+            "tests/helpers/rust-death-drop-wire-fixtures.ts",
+            "tests/fixtures/rust-engine/r7/gameplay/gameplay-snapshot-v4-combat.json",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r7-gameplay-wire-v1.json",
+            "tests/rust-integrated-runtime-r7-schema-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r7_gameplay_wire_fixture.rs",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r7-gameplay-command-wire-v1.json",
+            "tests/rust-integrated-runtime-r7-command-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r7_gameplay_command_wire_fixture.rs",
+            "engine/crates/blockwild-engine/tests/r7_gameplay_receipt_integrity.rs",
+            "scripts/verify-rust-schema-browser.mjs",
+            "tests/fixtures/rust-schema-convergence-browser.html"
+          ]
+        },
+        "fingerprint": {
+          "status": "verified",
+          "evidence": [
+            "scripts/generate-integrated-runtime-domain-schema.mjs",
+            "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+            "tests/fixtures/rust-engine/r7/gameplay/gameplay-snapshot-v4-combat.json",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r7-gameplay-wire-v1.json",
+            "tests/rust-integrated-runtime-r7-schema-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r7_gameplay_wire_fixture.rs",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r7-gameplay-command-wire-v1.json",
+            "tests/rust-integrated-runtime-r7-command-fixture.test.ts",
+            "engine/crates/blockwild-engine/tests/r7_gameplay_command_wire_fixture.rs",
+            "engine/crates/blockwild-engine/tests/r7_gameplay_receipt_integrity.rs",
+            "scripts/verify-rust-schema-browser.mjs",
+            "tests/fixtures/rust-schema-convergence-browser.html"
+          ]
+        }
+      },
+      "completion": {
+        "status": "complete",
+        "complete": true,
+        "remaining": []
+      }
+    },
+    {
+      "phase": "R8",
+      "domain": "persistence",
+      "protocolSchema": 1,
+      "canonicalPaths": {
+        "rust": [
+          "engine/crates/blockwild-engine/src/runtime_domain_schema_generated.rs",
+          "engine/crates/blockwild-persistence/src/wire.rs",
+          "engine/crates/blockwild-wasm/src/integrated_runtime.rs",
+          "engine/crates/blockwild-engine/src/runtime_domain_wire.rs"
+        ],
+        "typescript": [
+          "app/game/rust-integrated-runtime-domain-schema.generated.ts",
+          "app/game/rust-integrated-runtime-domain-wire.ts",
+          "app/game/rust-integrated-runtime-persistence.ts",
+          "app/game/rust-persistence-runtime-contract.ts"
+        ]
+      },
+      "families": {
+        "requests": [
+          {
+            "id": "persistence-dispatch-v1",
+            "direction": "request",
+            "magic": "BWD8",
+            "typeId": "blockwild.persistence.dispatch.r8.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          }
+        ],
+        "receipts": [
+          {
+            "id": "persistence-dispatch-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWA8",
+            "typeId": "blockwild.persistence.dispatch-receipt.r8.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          }
+        ]
+      },
+      "evidence": {
+        "fixtures": [
+          "tests/fixtures/rust-engine/integrated-runtime-v1/r8-persistence-dispatch-wire-v1.json",
+          "tests/fixtures/rust-engine/r8-r9/persistence-browser-recovery-response-v1.hex",
+          "tests/fixtures/rust-engine/r8-r9/persistence-browser-runtime-v1.hex"
+        ],
+        "tests": [
+          "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+          "tests/rust-integrated-runtime-domain-wire.test.ts",
+          "tests/rust-integrated-runtime-persistence.test.ts",
+          "tests/rust-native-drop-pickup-save-cursor.test.ts",
+          "tests/rust-native-player-death-respawn-save-cursor.test.ts",
+          "tests/rust-native-player-drop-save-cursor.test.ts",
+          "tests/rust-persistence-runtime-contract.test.ts",
+          "tests/rust-persistence-journal-contract.test.ts"
+        ],
+        "native": [
+          "engine/crates/blockwild-engine/examples/r8_persistence_dispatch_wire_fixture.rs",
+          "engine/crates/blockwild-engine/src/runtime_domain_schema_generated.rs",
+          "engine/crates/blockwild-engine/tests/r8_persistence_dispatch_wire_fixture.rs",
+          "engine/crates/blockwild-persistence/src/browser_runtime.rs",
+          "engine/crates/blockwild-persistence/src/tests.rs"
+        ],
+        "wasm": [
+          "engine/crates/blockwild-wasm/src/integrated_runtime.rs"
+        ],
+        "typescript": [
+          "tests/rust-integrated-persistence-pump.test.ts",
+          "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+          "tests/rust-integrated-runtime-domain-wire.test.ts",
+          "tests/rust-integrated-runtime-persistence.test.ts",
+          "tests/rust-native-drop-pickup-save-cursor.test.ts",
+          "tests/rust-native-player-death-respawn-save-cursor.test.ts",
+          "tests/rust-native-player-drop-save-cursor.test.ts",
+          "tests/rust-persistence-runtime-contract.test.ts"
+        ]
+      },
+      "assurance": {
+        "bounds": {
+          "status": "verified",
+          "evidence": [
+            "engine/crates/blockwild-persistence/src/contract.rs",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r8-persistence-dispatch-wire-v1.json",
+            "tests/rust-integrated-runtime-persistence.test.ts",
+            "engine/crates/blockwild-engine/tests/r8_persistence_dispatch_wire_fixture.rs"
+          ]
+        },
+        "hashes": {
+          "status": "verified",
+          "evidence": [
+            "engine/crates/blockwild-persistence/src/checkpoint.rs",
+            "scripts/verify-rust-schema-browser.mjs",
+            "tests/fixtures/rust-schema-convergence-browser.html",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r8-persistence-dispatch-wire-v1.json",
+            "tests/rust-integrated-runtime-persistence.test.ts",
+            "engine/crates/blockwild-engine/tests/r8_persistence_dispatch_wire_fixture.rs"
+          ]
+        },
+        "fingerprint": {
+          "status": "verified",
+          "evidence": [
+            "scripts/generate-integrated-runtime-domain-schema.mjs",
+            "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+            "engine/crates/blockwild-persistence/src/portable.rs",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r8-persistence-dispatch-wire-v1.json",
+            "tests/rust-integrated-runtime-persistence.test.ts",
+            "engine/crates/blockwild-engine/tests/r8_persistence_dispatch_wire_fixture.rs"
+          ]
+        }
+      },
+      "completion": {
+        "status": "complete",
+        "complete": true,
+        "remaining": []
+      }
+    },
+    {
+      "phase": "R9",
+      "domain": "network",
+      "protocolSchema": 1,
+      "canonicalPaths": {
+        "rust": [
+          "engine/crates/blockwild-engine/src/runtime_domain_schema_generated.rs",
+          "engine/crates/blockwild-engine/src/runtime_domain_wire.rs",
+          "engine/crates/blockwild-network/src/wire.rs",
+          "engine/crates/blockwild-wasm/src/integrated_runtime.rs"
+        ],
+        "typescript": [
+          "app/game/rust-integrated-runtime-domain-schema.generated.ts",
+          "app/game/rust-integrated-runtime-domain-wire.ts",
+          "app/game/rust-integrated-runtime-network-lifecycle.ts",
+          "app/game/rust-network-runtime-contract.ts",
+          "app/game/rust-network-wire-v1.ts",
+          "app/game/rust-network-agent-work-v1.ts",
+          "app/game/rust-network-player-pose-v1.ts"
+        ]
+      },
+      "families": {
+        "requests": [
+          {
+            "id": "network-agent-grant-v1",
+            "direction": "request",
+            "magic": "BWJ9",
+            "typeId": "blockwild.network.agent-grant.install.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-command-release-v1",
+            "direction": "request",
+            "magic": "BWM9",
+            "typeId": "blockwild.network.command.release.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-delta-build-v1",
+            "direction": "request",
+            "magic": "BWD9",
+            "typeId": "blockwild.network.delta.build.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-peer-grant-v1",
+            "direction": "request",
+            "magic": "BWP9",
+            "typeId": "blockwild.network.peer-grant.install.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-peer-release-v1",
+            "direction": "request",
+            "magic": "BWL9",
+            "typeId": "blockwild.network.peer.release.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-reconnect-v1",
+            "direction": "request",
+            "magic": "BWC9",
+            "typeId": "blockwild.network.reconnect-checkpoint.read.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-replication-remove-v1",
+            "direction": "request",
+            "magic": "BWI9",
+            "typeId": "blockwild.network.replication-record.remove.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-replication-upsert-v1",
+            "direction": "request",
+            "magic": "BWI9",
+            "typeId": "blockwild.network.replication-record.upsert.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-browser-request-v1",
+            "direction": "request",
+            "magic": "BWRN",
+            "typeId": "blockwild.network.browser-request.r9.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          }
+        ],
+        "receipts": [
+          {
+            "id": "network-agent-grant-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWJ9",
+            "typeId": "blockwild.network.grant-install-receipt.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-command-release-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWM9",
+            "typeId": "blockwild.network.command.release-receipt.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-delta-build-response-v1",
+            "direction": "receipt",
+            "magic": "BWH9",
+            "typeId": "blockwild.network.delta.build-response.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-peer-grant-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWP9",
+            "typeId": "blockwild.network.grant-install-receipt.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-peer-release-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWL9",
+            "typeId": "blockwild.network.peer.release-receipt.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-reconnect-response-v1",
+            "direction": "receipt",
+            "magic": "BWC9",
+            "typeId": "blockwild.network.reconnect-checkpoint.response.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-replication-remove-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWR9",
+            "typeId": "blockwild.network.replication-record-receipt.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-replication-upsert-receipt-v1",
+            "direction": "receipt",
+            "magic": "BWI9",
+            "typeId": "blockwild.network.replication-record-receipt.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          },
+          {
+            "id": "network-browser-response-v1",
+            "direction": "receipt",
+            "magic": "BWNA",
+            "typeId": "blockwild.network.browser-response.r9.v1",
+            "operationSchema": 1,
+            "innerSchema": 1,
+            "normalPath": true
+          }
+        ]
+      },
+      "evidence": {
+        "fixtures": [
+          "tests/fixtures/rust-engine/integrated-runtime-v1/r9-network-wire-fixture.json",
+          "tests/fixtures/rust-engine/r9-network-wire/native-bwn1-vectors.json"
+        ],
+        "tests": [
+          "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+          "tests/rust-integrated-runtime-domain-wire.test.ts",
+          "tests/rust-integrated-runtime-network-ack.test.ts",
+          "tests/rust-integrated-runtime-r9-schema-fixture.test.ts",
+          "tests/rust-network-wire-v1.test.ts",
+          "tests/rust-network-agent-work-v1.test.ts",
+          "tests/rust-network-player-pose-v1.test.ts"
+        ],
+        "native": [
+          "engine/crates/blockwild-engine/examples/r9_integrated_network_wire_fixture.rs",
+          "engine/crates/blockwild-engine/src/runtime_domain_schema_generated.rs",
+          "engine/crates/blockwild-network/src/tests.rs"
+        ],
+        "wasm": [
+          "engine/crates/blockwild-wasm/src/integrated_runtime.rs"
+        ],
+        "typescript": [
+          "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+          "tests/rust-integrated-runtime-domain-wire.test.ts",
+          "tests/rust-integrated-runtime-network-ack.test.ts",
+          "tests/rust-integrated-runtime-r9-schema-fixture.test.ts",
+          "tests/rust-network-runtime-contract.test.ts",
+          "tests/rust-network-agent-work-v1.test.ts",
+          "tests/rust-network-player-pose-v1.test.ts"
+        ]
+      },
+      "assurance": {
+        "bounds": {
+          "status": "verified",
+          "evidence": [
+            "engine/crates/blockwild-network/src/contract.rs",
+            "tests/rust-network-agent-work-v1.test.ts",
+            "tests/rust-network-player-pose-v1.test.ts",
+            "tests/rust-integrated-runtime-r9-schema-fixture.test.ts",
+            "engine/crates/blockwild-wasm/src/integrated_runtime.rs"
+          ]
+        },
+        "hashes": {
+          "status": "verified",
+          "evidence": [
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r9-network-wire-fixture.json",
+            "tests/fixtures/rust-engine/r9-network-wire/native-bwn1-vectors.json"
+          ]
+        },
+        "fingerprint": {
+          "status": "verified",
+          "evidence": [
+            "scripts/generate-integrated-runtime-domain-schema.mjs",
+            "tests/fixtures/rust-engine/integrated-runtime-v1/r9-network-wire-fixture.json",
+            "tests/rust-integrated-runtime-domain-schema-generation.test.mjs",
+            "tests/fixtures/rust-engine/r9-network/canonical-hashes.json"
+          ]
+        }
+      },
+      "completion": {
+        "status": "complete",
+        "complete": true,
+        "remaining": []
+      }
+    }
+  ]
+}

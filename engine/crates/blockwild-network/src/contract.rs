@@ -505,6 +505,8 @@ pub enum NetworkCommandKindV1 {
     Chat = 3,
     Interest = 4,
     Reconnect = 5,
+    Pose = 6,
+    PresentationState = 7,
 }
 
 impl NetworkCommandKindV1 {
@@ -517,6 +519,8 @@ impl NetworkCommandKindV1 {
             Self::Chat => "chat",
             Self::Interest => "interest",
             Self::Reconnect => "reconnect",
+            Self::Pose => "pose",
+            Self::PresentationState => "presentation-state",
         }
     }
 
@@ -528,6 +532,8 @@ impl NetworkCommandKindV1 {
             3 => Some(Self::Chat),
             4 => Some(Self::Interest),
             5 => Some(Self::Reconnect),
+            6 => Some(Self::Pose),
+            7 => Some(Self::PresentationState),
             _ => None,
         }
     }

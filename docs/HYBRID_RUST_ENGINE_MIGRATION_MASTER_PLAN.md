@@ -1454,7 +1454,7 @@ This tranche creates the foundation for the full engine without asking saves, mu
 ### Persistence and multiplayer
 
 - [ ] Rust owns schema, journal, migration, hashing, and repair logic.
-- [ ] Browser IndexedDB adapter is transactional and asynchronous.
+- [x] Browser IndexedDB adapter is transactional and asynchronous.
 - [ ] Existing worlds migrate with backup and verified readback.
 - [ ] Rust owns multiplayer and agent command authority, interest, deltas, and replay.
 - [ ] Native headless engine can reproduce browser-authoritative state.

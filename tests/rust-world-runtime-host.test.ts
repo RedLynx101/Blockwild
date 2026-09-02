@@ -74,7 +74,7 @@ function fakeAuthority(calls: string[], drainError: Error | null = null): RustMu
     currentIdentity: () => ({}) as ReturnType<RustMultiplayerAuthorityV1["currentIdentity"]>,
     createHandshake: () => new Uint8Array(),
     negotiate: async () => ({ capabilities: Object.freeze([]), maxCommandBytes: 1 }),
-    installPeer: async () => undefined,
+    installPeer: async () => ({ status: "installed", nextSequence: 0 }),
     authorizeInbound: async () => ({ accepted: true, commandId: "x", idempotencyKey: "x", code: "accepted", receiptHash: null }),
     installAgentGrant: async () => undefined,
     upsertReplicationRecord: async () => undefined,
@@ -83,7 +83,8 @@ function fakeAuthority(calls: string[], drainError: Error | null = null): RustMu
     acceptDelta: async () => ({ code: "accepted", sequence: 0, stateHash: "0".repeat(32) }),
     reconnectCheckpoint: async () => null,
     releaseCommand: async () => undefined,
-    releasePeer: async () => undefined,
+    releasePeer: async () => "released",
+    runExclusiveMutation: operation => operation(),
     drain: async () => { calls.push("drain"); if (drainError) throw drainError; },
   };
 }

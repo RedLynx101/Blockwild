@@ -246,6 +246,106 @@ function command(expected = identity()): RustIntegratedRuntimeCommandBatchV1 {
   });
 }
 
+function locatorRecoveryCommand(expected = identity()): RustIntegratedRuntimeCommandBatchV1 {
+  return createRustIntegratedRuntimeCommandBatchV1({
+    commandId: "command:locator-consume:1",
+    idempotencyKey: "player-one:locator-consume:1",
+    actorId: "player-one",
+    expected,
+    operations: [createRustIntegratedRuntimeDomainOperationV1({
+      domain: "gameplay",
+      typeId: "blockwild.gameplay.player-locator-item-consume.r7.v1",
+      schema: 1,
+      payload: Uint8Array.from([0x42, 0x57, 0x56, 0x37]),
+    })],
+  });
+}
+
+type RecoveryRequest = Extract<RustIntegratedRuntimeRequestV1, { type: "runtime-command-v1" }>;
+
+function acceptedRecoveryResponse(
+  request: RecoveryRequest,
+  before: RustIntegratedRuntimeIdentityV1,
+  after: RustIntegratedRuntimeIdentityV1,
+  overrides: Readonly<{
+    commandId?: string;
+    idempotencyKey?: string;
+    commandHash?: string;
+  }> = {},
+): Extract<RustIntegratedRuntimeResponseV1, { type: "runtime-command-receipt-v1" }> {
+  return Object.freeze({
+    type: "runtime-command-receipt-v1",
+    requestId: request.requestId,
+    clientEpoch: request.clientEpoch,
+    workerEpoch: 11,
+    receipt: Object.freeze({
+      status: "accepted",
+      commandId: overrides.commandId ?? request.batch.commandId,
+      idempotencyKey: overrides.idempotencyKey ?? request.batch.idempotencyKey,
+      commandHash: overrides.commandHash ?? request.batch.commandHash,
+      before,
+      after,
+      domainReceipts: Object.freeze([]),
+      receiptHash: ZERO_HASH,
+    }),
+  });
+}
+
+function rejectedRecoveryResponse(
+  request: RecoveryRequest,
+  current: RustIntegratedRuntimeIdentityV1,
+  code = "stale-runtime",
+): Extract<RustIntegratedRuntimeResponseV1, { type: "runtime-command-receipt-v1" }> {
+  return Object.freeze({
+    type: "runtime-command-receipt-v1",
+    requestId: request.requestId,
+    clientEpoch: request.clientEpoch,
+    workerEpoch: 11,
+    receipt: Object.freeze({
+      status: "rejected",
+      commandId: request.batch.commandId,
+      idempotencyKey: request.batch.idempotencyKey,
+      commandHash: request.batch.commandHash,
+      code,
+      message: "fixture recovery refusal",
+      current,
+      receiptHash: ZERO_HASH,
+    }),
+  });
+}
+
+function recoveryService(
+  current: RustIntegratedRuntimeIdentityV1,
+  recover: (request: RecoveryRequest) => RustIntegratedRuntimeResponseV1 | Promise<RustIntegratedRuntimeResponseV1>,
+) {
+  const requests: RustIntegratedRuntimeRequestV1[] = [];
+  const service = new RustIntegratedRuntimeServiceV1({
+    mode: "protocol-test",
+    transportFactory: () => ({
+      async request(request): Promise<RustIntegratedRuntimeResponseV1> {
+        requests.push(request);
+        if (request.type === "runtime-create-v1") {
+          return Object.freeze({
+            type: "runtime-ready-v1",
+            requestId: request.requestId,
+            clientEpoch: request.clientEpoch,
+            workerEpoch: 11,
+            runtimeHandle: 1,
+            identity: current,
+            artifactHash: "fixture",
+            instanceId: "recovery-fixture",
+            capabilities: CAPABILITIES,
+          });
+        }
+        if (request.type === "runtime-command-v1") return recover(request);
+        throw new Error(`unexpected ${request.type}`);
+      },
+      dispose() {},
+    }),
+  });
+  return Object.freeze({ service, requests });
+}
+
 function createRequest(): Extract<RustIntegratedRuntimeRequestV1, { type: "runtime-create-v1" }> {
   return Object.freeze({
     type: "runtime-create-v1",
@@ -580,6 +680,198 @@ test("recovery command uses lookup-only operation 8 without changing sealed comm
     batch,
   });
   assert.deepEqual(encoded.subarray(44), ordinary.subarray(44), "recovery intent is envelope control, not command semantics");
+});
+
+test("service recovery looks up an exact cached receipt without applying the normal stale-command precheck", async () => {
+  const before = identity(4, "2".repeat(32));
+  const current = identity(5, "3".repeat(32));
+  const batch = locatorRecoveryCommand(before);
+  const fixture = recoveryService(current, (request) => acceptedRecoveryResponse(request, before, current));
+  await fixture.service.start({
+    ...createRequest().config,
+    universeId: current.universeId,
+    locationId: current.locationId,
+  });
+
+  const recovered = await fixture.service.recoverCommand(batch);
+
+  assert.equal(recovered.status, "accepted");
+  assert.equal(fixture.requests.length, 2, "create plus one explicit native receipt lookup");
+  assert.equal(fixture.requests[1]?.type, "runtime-command-v1");
+  if (fixture.requests[1]?.type === "runtime-command-v1") {
+    assert.deepEqual(fixture.requests[1].batch, batch, "recovery preserves the exact sealed command identity");
+  }
+  assert.equal(fixture.service.identity(), current, "receipt lookup must not replace the service authority identity");
+});
+
+test("persistence-rebased public recovery is unavailable to non-locator commands", async () => {
+  const current = identity(5, "3".repeat(32));
+  const fixture = recoveryService(current, () => {
+    throw new Error("non-locator recovery must not cross the worker boundary");
+  });
+  await fixture.service.start(createRequest().config);
+  await assert.rejects(
+    fixture.service.recoverCommand(command(identity(4, "2".repeat(32)))),
+    (error: unknown) => error instanceof RustIntegratedRuntimeServiceError && error.code === "not-authoritative",
+  );
+  assert.equal(fixture.requests.length, 1, "only runtime creation reached the transport");
+  assert.equal(fixture.service.identity(), current);
+});
+
+test("lookup-only locator recovery cannot execute a command at its original identity", async () => {
+  const current = identity(4, "2".repeat(32));
+  const batch = locatorRecoveryCommand(current);
+  const fixture = recoveryService(current, () => {
+    throw new Error("lookup-only recovery must not reach the worker before authority rebases");
+  });
+  await fixture.service.start({
+    ...createRequest().config,
+    universeId: current.universeId,
+    locationId: current.locationId,
+  });
+  await assert.rejects(
+    fixture.service.recoverCommand(batch),
+    (error: unknown) => error instanceof RustIntegratedRuntimeServiceError
+      && error.code === "not-authoritative",
+  );
+  assert.equal(fixture.requests.length, 1, "only runtime creation reached the transport");
+  assert.equal(fixture.service.identity(), current);
+  assert.equal(fixture.service.diagnostics().state, "ready");
+});
+
+test("locator recovery accepts persistence and state-hash rebasing in either direction", async (context) => {
+  const before = identity(8, "4".repeat(32));
+  const terminal = identity(9, "5".repeat(32));
+  const persistenceCases = Object.freeze([
+    Object.freeze({ name: "lower persistence with another hash", persistence: terminal.revision.persistence - 1, stateHash: "6".repeat(32) }),
+    Object.freeze({ name: "equal persistence with another hash", persistence: terminal.revision.persistence, stateHash: "7".repeat(32) }),
+    Object.freeze({ name: "higher persistence with another hash", persistence: terminal.revision.persistence + 3, stateHash: "8".repeat(32) }),
+    Object.freeze({ name: "equal persistence with the same hash", persistence: terminal.revision.persistence, stateHash: terminal.stateHash }),
+  ]);
+  for (const persistenceCase of persistenceCases) {
+    await context.test(persistenceCase.name, async () => {
+      const current = Object.freeze({
+        ...terminal,
+        revision: Object.freeze({ ...terminal.revision, persistence: persistenceCase.persistence }),
+        stateHash: persistenceCase.stateHash,
+      });
+      const batch = locatorRecoveryCommand(before);
+      const fixture = recoveryService(current, (request) => acceptedRecoveryResponse(request, before, terminal));
+      await fixture.service.start(createRequest().config);
+      const recovered = await fixture.service.recoverCommand(batch);
+      assert.equal(recovered.status, "accepted");
+      assert.deepEqual(recovered.after, terminal);
+      assert.equal(fixture.service.identity(), current);
+      assert.equal(fixture.service.diagnostics().state, "ready");
+    });
+  }
+});
+
+test("service recovery rejects every non-persistence terminal drift", async (context) => {
+  const before = identity(8, "6".repeat(32));
+  const terminal = identity(9, "7".repeat(32));
+  const driftCases: readonly Readonly<{
+    name: string;
+    current: RustIntegratedRuntimeIdentityV1;
+  }>[] = Object.freeze([
+    { name: "universe", current: Object.freeze({ ...terminal, universeId: "2", stateHash: "8".repeat(32) }) },
+    { name: "location", current: Object.freeze({ ...terminal, locationId: "another-surface", stateHash: "8".repeat(32) }) },
+    { name: "tick", current: Object.freeze({ ...terminal, tick: terminal.tick + 1, stateHash: "8".repeat(32) }) },
+    { name: "epoch revision", current: Object.freeze({ ...terminal, revision: Object.freeze({ ...terminal.revision, epoch: terminal.revision.epoch + 1 }), stateHash: "8".repeat(32) }) },
+    { name: "world revision", current: Object.freeze({ ...terminal, revision: Object.freeze({ ...terminal.revision, world: terminal.revision.world + 1 }), stateHash: "8".repeat(32) }) },
+    { name: "entities revision", current: Object.freeze({ ...terminal, revision: Object.freeze({ ...terminal.revision, entities: terminal.revision.entities + 1 }), stateHash: "8".repeat(32) }) },
+    { name: "gameplay revision", current: Object.freeze({ ...terminal, revision: Object.freeze({ ...terminal.revision, gameplay: terminal.revision.gameplay + 1 }), stateHash: "8".repeat(32) }) },
+    { name: "network revision", current: Object.freeze({ ...terminal, revision: Object.freeze({ ...terminal.revision, network: terminal.revision.network + 1 }), stateHash: "8".repeat(32) }) },
+    { name: "simulation revision", current: Object.freeze({ ...terminal, revision: Object.freeze({ ...terminal.revision, simulation: terminal.revision.simulation + 1 }), stateHash: "8".repeat(32) }) },
+  ]);
+
+  for (const drift of driftCases) {
+    await context.test(drift.name, async () => {
+      const batch = locatorRecoveryCommand(before);
+      const fixture = recoveryService(drift.current, (request) => acceptedRecoveryResponse(request, before, terminal));
+      await fixture.service.start({
+        ...createRequest().config,
+        universeId: drift.current.universeId,
+        locationId: drift.current.locationId,
+      });
+      await assert.rejects(
+        fixture.service.recoverCommand(batch),
+        (error: unknown) => error instanceof RustIntegratedRuntimeServiceError && error.code === "invalid-response",
+      );
+      assert.equal(fixture.service.identity(), drift.current, "invalid recovery never replaces current service identity");
+    });
+  }
+});
+
+test("locator recovery rejects persistence rebasing without a changed integrated state hash", async (context) => {
+  const before = identity(8, "4".repeat(32));
+  const terminal = identity(9, "5".repeat(32));
+  for (const persistence of [terminal.revision.persistence - 1, terminal.revision.persistence + 1]) {
+    await context.test(`persistence ${persistence}`, async () => {
+      const current = Object.freeze({
+        ...terminal,
+        revision: Object.freeze({ ...terminal.revision, persistence }),
+      });
+      const fixture = recoveryService(current, (request) => acceptedRecoveryResponse(request, before, terminal));
+      await fixture.service.start(createRequest().config);
+      await assert.rejects(
+        fixture.service.recoverCommand(locatorRecoveryCommand(before)),
+        (error: unknown) => error instanceof RustIntegratedRuntimeServiceError && error.code === "invalid-response",
+      );
+    });
+  }
+});
+
+test("service recovery validates the exact cached command identifiers", async (context) => {
+  const before = identity(8, "9".repeat(32));
+  const current = identity(9, "a".repeat(32));
+  const mismatchCases = Object.freeze([
+    Object.freeze({ name: "command id", overrides: Object.freeze({ commandId: "another-command" }) }),
+    Object.freeze({ name: "idempotency key", overrides: Object.freeze({ idempotencyKey: "another-key" }) }),
+    Object.freeze({ name: "command hash", overrides: Object.freeze({ commandHash: "b".repeat(32) }) }),
+  ]);
+  for (const mismatch of mismatchCases) {
+    await context.test(mismatch.name, async () => {
+      const batch = locatorRecoveryCommand(before);
+      const fixture = recoveryService(current, (request) => acceptedRecoveryResponse(request, before, current, mismatch.overrides));
+      await fixture.service.start(createRequest().config);
+      await assert.rejects(
+        fixture.service.recoverCommand(batch),
+        (error: unknown) => error instanceof RustIntegratedRuntimeServiceError && error.code === "invalid-response",
+      );
+      assert.equal(fixture.service.identity(), current);
+    });
+  }
+});
+
+test("service recovery surfaces lookup miss and conflict without changing authority", async (context) => {
+  const current = identity(9, "c".repeat(32));
+  const cases = Object.freeze([
+    Object.freeze({ nativeCode: "stale-runtime", serviceCode: "indeterminate-command" }),
+    Object.freeze({ nativeCode: "idempotency-conflict", serviceCode: "idempotency-conflict" }),
+  ]);
+  for (const recoveryCase of cases) {
+    await context.test(recoveryCase.nativeCode, async () => {
+      const fixture = recoveryService(current, (request) => recoveryCase.nativeCode === "stale-runtime"
+        ? rejectedRecoveryResponse(request, current)
+        : Object.freeze({
+          type: "runtime-error-v1",
+          requestId: request.requestId,
+          clientEpoch: request.clientEpoch,
+          workerEpoch: 11,
+          code: recoveryCase.nativeCode,
+          message: "fixture recovery refusal",
+          current,
+        }));
+      await fixture.service.start(createRequest().config);
+      await assert.rejects(
+        fixture.service.recoverCommand(locatorRecoveryCommand()),
+        (error: unknown) => error instanceof RustIntegratedRuntimeServiceError && error.code === recoveryCase.serviceCode,
+      );
+      assert.equal(fixture.service.identity(), current);
+      assert.equal(fixture.service.diagnostics().state, "ready", "a conclusive lookup refusal does not corrupt live authority");
+    });
+  }
 });
 
 test("protocol-test service awaits and caches one deterministic receipt without claiming Wasm authority", async () => {

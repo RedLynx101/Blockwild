@@ -755,6 +755,261 @@ fn block_action_rejects_stacked_durable_tools_without_mutation() {
     assert_eq!(state, before);
 }
 
+fn locator_item_authority_fixture(count: u32) -> (GameplayAuthority, GameplayActor, ContainerKey, ItemStack) {
+    let actor = GameplayActor {
+        actor_id: "locator-player".into(),
+        player_id: Some(PlayerId::new(7, 1)),
+        entity_id: Some(EntityId::new(9, 1)),
+        role: ActorRole::Host,
+    };
+    let inventory = ContainerKey::player(actor.actor_id.clone());
+    let mut state = GameplayState::new(WorldKey::new("locator-universe", "surface"), 1);
+    state
+        .inventory
+        .register_item(ItemDefinition {
+            code: 77,
+            content_id: "hearthroads-gazetteer".into(),
+            max_stack: 8,
+            tags: BTreeSet::new(),
+        })
+        .unwrap();
+    let stack = ItemStack::simple(77, count);
+    let mut container = Container::new(inventory.clone(), 9);
+    container.slots[4] = Some(stack.clone());
+    state.inventory.insert_container(container).unwrap();
+    let mut authority = GameplayAuthority::new(state);
+    authority
+        .grant_actor(
+            actor.actor_id.clone(),
+            ActorGrant::host(actor.player_id.unwrap(), actor.entity_id.unwrap()),
+        )
+        .unwrap();
+    (authority, actor, inventory, stack)
+}
+
+#[test]
+fn locator_item_consume_is_exact_atomic_and_idempotent() {
+    let (mut authority, actor, inventory, stack) = locator_item_authority_fixture(2);
+    let request = GameplayBatch::new(
+        "locator-consume",
+        "locator-consume-key",
+        actor,
+        authority.state.identity(),
+        vec![GameplayCommand::Inventory(InventoryCommand::ConsumeInventoryUnitV1(
+            ConsumeInventoryUnitV1 {
+                inventory: inventory.clone(),
+                slot: 4,
+                expected_container_revision: 0,
+                expected_stack: stack.clone(),
+            },
+        ))],
+    );
+    let first = accepted(authority.apply_batch(&request));
+    let retry = accepted(authority.apply_batch(&request));
+    assert_eq!(first, retry);
+    assert_eq!(authority.replay().len(), 1);
+    assert_eq!(first.events[0].kind, "player-locator-item-consumed-v1");
+    assert_eq!(first.resource_deltas.len(), 1);
+    assert_eq!(first.resource_deltas[0].amount, -1);
+    assert_eq!(first.resource_deltas[0].reason, PLAYER_LOCATOR_ITEM_CONSUME_REASON_V1);
+    let container = &authority.state.inventory.containers[&inventory];
+    assert_eq!(container.revision, 1);
+    assert_eq!(container.slots[4], Some(ItemStack::simple(77, 1)));
+
+    let before = authority.clone();
+    let stale = GameplayBatch::new(
+        "locator-consume-stale",
+        "locator-consume-stale-key",
+        request.actor,
+        authority.state.identity(),
+        vec![GameplayCommand::Inventory(InventoryCommand::ConsumeInventoryUnitV1(
+            ConsumeInventoryUnitV1 {
+                inventory,
+                slot: 4,
+                expected_container_revision: 0,
+                expected_stack: stack,
+            },
+        ))],
+    );
+    assert_eq!(
+        rejection(authority.apply_batch(&stale)).code,
+        RejectionCode::StaleRevision
+    );
+    assert_eq!(authority.state, before.state);
+    assert_eq!(authority.replay(), before.replay());
+}
+
+#[test]
+fn locator_item_consume_clears_last_unit_and_rejects_cross_custody_or_revision_overflow() {
+    let (mut authority, actor, inventory, stack) = locator_item_authority_fixture(1);
+    let cross_custody = GameplayBatch::new(
+        "locator-cross-custody",
+        "locator-cross-custody",
+        actor.clone(),
+        authority.state.identity(),
+        vec![GameplayCommand::Inventory(InventoryCommand::ConsumeInventoryUnitV1(
+            ConsumeInventoryUnitV1 {
+                inventory: ContainerKey::player("another-player"),
+                slot: 4,
+                expected_container_revision: 0,
+                expected_stack: stack.clone(),
+            },
+        ))],
+    );
+    let before = authority.clone();
+    assert_eq!(
+        rejection(authority.apply_batch(&cross_custody)).code,
+        RejectionCode::Unauthorized
+    );
+    assert_eq!(authority.state, before.state);
+    assert_eq!(authority.replay(), before.replay());
+
+    let exact = GameplayBatch::new(
+        "locator-last-unit",
+        "locator-last-unit",
+        actor,
+        authority.state.identity(),
+        vec![GameplayCommand::Inventory(InventoryCommand::ConsumeInventoryUnitV1(
+            ConsumeInventoryUnitV1 {
+                inventory: inventory.clone(),
+                slot: 4,
+                expected_container_revision: 0,
+                expected_stack: stack.clone(),
+            },
+        ))],
+    );
+    accepted(authority.apply_batch(&exact));
+    assert_eq!(authority.state.inventory.containers[&inventory].slots[4], None);
+
+    let (mut overflow, _, inventory, stack) = locator_item_authority_fixture(1);
+    overflow
+        .state
+        .inventory
+        .containers
+        .get_mut(&inventory)
+        .unwrap()
+        .revision = u64::MAX;
+    let before = overflow.state.inventory.clone();
+    assert_eq!(
+        overflow
+            .state
+            .inventory
+            .consume_inventory_unit_v1(&ConsumeInventoryUnitV1 {
+                inventory,
+                slot: 4,
+                expected_container_revision: u64::MAX,
+                expected_stack: stack,
+            })
+            .unwrap_err()
+            .code,
+        RejectionCode::Capacity
+    );
+    assert_eq!(overflow.state.inventory, before);
+}
+
+#[test]
+fn creative_slot_set_is_exact_idempotent_and_atomic() {
+    let (mut authority, actor, inventory, prior_stack) = locator_item_authority_fixture(2);
+    authority
+        .state
+        .inventory
+        .register_item(ItemDefinition {
+            code: 78,
+            content_id: "creative-replacement".into(),
+            max_stack: 4,
+            tags: BTreeSet::new(),
+        })
+        .unwrap();
+    let replacement = ItemStack::simple(78, 4);
+    let request = GameplayBatch::new(
+        "creative-slot-set",
+        "creative-slot-set-key",
+        actor.clone(),
+        authority.state.identity(),
+        vec![GameplayCommand::Inventory(
+            InventoryCommand::SetCreativeInventorySlotV1(SetCreativeInventorySlotV1 {
+                inventory: inventory.clone(),
+                slot: 4,
+                expected_container_revision: 0,
+                expected_stack: Some(prior_stack.clone()),
+                replacement_stack: replacement.clone(),
+            }),
+        )],
+    );
+    let first = accepted(authority.apply_batch(&request));
+    let retry = accepted(authority.apply_batch(&request));
+    assert_eq!(first, retry);
+    assert_eq!(first.events[0].kind, "player-creative-slot-set-v1");
+    assert_eq!(first.resource_deltas.len(), 2);
+    assert!(
+        first
+            .resource_deltas
+            .iter()
+            .all(|delta| delta.reason == PLAYER_CREATIVE_SLOT_SET_REASON_V1)
+    );
+    assert_eq!(authority.replay().len(), 1);
+    let container = &authority.state.inventory.containers[&inventory];
+    assert_eq!(container.revision, 1);
+    assert_eq!(container.slots[4], Some(replacement.clone()));
+
+    for command in [
+        SetCreativeInventorySlotV1 {
+            inventory: inventory.clone(),
+            slot: 4,
+            expected_container_revision: 0,
+            expected_stack: Some(prior_stack),
+            replacement_stack: replacement.clone(),
+        },
+        SetCreativeInventorySlotV1 {
+            inventory: inventory.clone(),
+            slot: 4,
+            expected_container_revision: 1,
+            expected_stack: Some(replacement.clone()),
+            replacement_stack: ItemStack::simple(78, 5),
+        },
+        SetCreativeInventorySlotV1 {
+            inventory: inventory.clone(),
+            slot: 4,
+            expected_container_revision: 1,
+            expected_stack: Some(replacement.clone()),
+            replacement_stack: ItemStack::simple(999, 1),
+        },
+    ] {
+        let before = authority.state.clone();
+        assert!(
+            authority
+                .state
+                .inventory
+                .set_creative_inventory_slot_v1(&command)
+                .is_err()
+        );
+        assert_eq!(authority.state, before);
+    }
+
+    let cross_custody = GameplayBatch::new(
+        "creative-slot-cross-custody",
+        "creative-slot-cross-custody",
+        actor,
+        authority.state.identity(),
+        vec![GameplayCommand::Inventory(
+            InventoryCommand::SetCreativeInventorySlotV1(SetCreativeInventorySlotV1 {
+                inventory: ContainerKey::player("another-player"),
+                slot: 4,
+                expected_container_revision: 0,
+                expected_stack: None,
+                replacement_stack: ItemStack::simple(78, 1),
+            }),
+        )],
+    );
+    let before = authority.clone();
+    assert_eq!(
+        rejection(authority.apply_batch(&cross_custody)).code,
+        RejectionCode::Unauthorized
+    );
+    assert_eq!(authority.state, before.state);
+    assert_eq!(authority.replay(), before.replay());
+}
+
 #[test]
 fn reference_fixture_is_deterministic_and_complete() {
     let first = run_reference_fixture();
@@ -1641,6 +1896,478 @@ fn linked_player_combat_install_never_reinterprets_legacy_records() {
         .unwrap_err();
     assert_eq!(error.code, RejectionCode::Conflict);
     assert_eq!(authority.state, before);
+}
+
+#[test]
+fn linked_player_respawn_restores_exact_dead_combatant_once_and_rejects_stale_or_live_state() {
+    let entity_id = EntityId::new(9, 2);
+    let mut authority = GameplayAuthority::new(GameplayState::new(WorldKey::new("world", "surface"), 1));
+    let mut combatant = linked_player_combatant("actor:respawn", entity_id);
+    combatant.revision = 7;
+    combatant.health = 0;
+    combatant.alive = false;
+    authority
+        .state
+        .combat
+        .combatants
+        .insert(combatant.record_id.clone(), combatant);
+    authority.state.revision.sequence = 12;
+    authority.state.revision.combat = 4;
+    let before_replay = authority.replay().len();
+
+    authority
+        .restore_linked_combatant_after_death_v1("actor:respawn", entity_id, 7, 10_000, 3)
+        .unwrap();
+
+    let restored = &authority.state.combat.combatants["actor:respawn"];
+    assert_eq!(
+        (restored.health, restored.max_health, restored.alive),
+        (10_000, 10_000, true)
+    );
+    assert_eq!(restored.revision, 8);
+    assert_eq!(
+        (authority.state.revision.sequence, authority.state.revision.combat),
+        (13, 5)
+    );
+    assert_eq!(authority.replay().len(), before_replay + 1);
+    assert_eq!(authority.replay().last().unwrap().actor_id, "system:player-respawn");
+
+    let committed = authority.state.clone();
+    let replay_hash = authority.replay_hash();
+    let error = authority
+        .restore_linked_combatant_after_death_v1("actor:respawn", entity_id, 7, 10_000, 3)
+        .unwrap_err();
+    assert_eq!(error.code, RejectionCode::Conflict);
+    assert_eq!(authority.state, committed);
+    assert_eq!(authority.replay_hash(), replay_hash);
+
+    let mut wrong_link = authority.clone();
+    let restored = wrong_link.state.combat.combatants.get_mut("actor:respawn").unwrap();
+    restored.health = 0;
+    restored.alive = false;
+    restored.entity_id = Some(EntityId::new(10, 2));
+    let before = wrong_link.state.clone();
+    let error = wrong_link
+        .restore_linked_combatant_after_death_v1("actor:respawn", entity_id, 8, 10_000, 4)
+        .unwrap_err();
+    assert_eq!(error.code, RejectionCode::Conflict);
+    assert_eq!(wrong_link.state, before);
+}
+
+fn player_death_release(
+    player_id: PlayerId,
+    death_sequence: u64,
+    source_lane: PlayerDeathCustodyLaneV1,
+    source_slot: u16,
+    expected_stack: ItemStack,
+) -> PlayerDeathCustodyReleaseV1 {
+    PlayerDeathCustodyReleaseV1 {
+        source_lane,
+        source_slot,
+        expected_stack,
+        custody: ContainerKey {
+            kind: ContainerKind::Container,
+            id: player_death_custody_id_v1(player_id, death_sequence, source_lane, source_slot),
+            owner_id: None,
+        },
+    }
+}
+
+fn player_death_custody_fixture() -> (
+    GameplayAuthority,
+    PlayerDeathRespawnCustodyPlanV1,
+    ItemInstanceMetadataV1,
+) {
+    let record_id = "actor:death-custody";
+    let player_id = PlayerId::new(301, 7);
+    let entity_id = EntityId::new(302, 7);
+    let death_sequence = 23;
+    let inventory_key = ContainerKey::player(record_id);
+    let equipment_key = ContainerKey {
+        kind: ContainerKind::Equipment,
+        id: format!("{record_id}:equipment"),
+        owner_id: Some(record_id.into()),
+    };
+    let mut state = GameplayState::new(WorldKey::new("death-world", "surface"), 3);
+    state
+        .inventory
+        .register_item(ItemDefinition {
+            code: 91,
+            content_id: "death-stack".into(),
+            max_stack: 64,
+            tags: BTreeSet::new(),
+        })
+        .unwrap();
+    state
+        .inventory
+        .register_item(ItemDefinition {
+            code: 92,
+            content_id: "death-durable".into(),
+            max_stack: 1,
+            tags: BTreeSet::from(["back".into()]),
+        })
+        .unwrap();
+    let mut metadata = ItemInstanceMetadataV1 {
+        hash: CanonicalHash::default(),
+        type_id: "blockwild.item.instance".into(),
+        schema_id: "death-custody-test".into(),
+        schema_version: 1,
+        content_version: 4,
+        canonical_json_bytes: b"{\"name\":\"Exact drop\",\"version\":1}".to_vec(),
+        unknown_extension_bytes: vec![0, 0x80, 0xff, 5],
+    };
+    metadata.hash = metadata.calculate_hash();
+    state
+        .inventory
+        .item_instance_metadata
+        .insert(metadata.hash, metadata.clone());
+
+    let inventory_stacks = [
+        (0_u16, ItemStack::simple(91, 12)),
+        (
+            4,
+            ItemStack {
+                item_code: 92,
+                count: 1,
+                durability_millionths: Some(987_654),
+                metadata_hash: metadata.hash,
+            },
+        ),
+    ];
+    let equipment_stacks = [
+        (2_u16, ItemStack::simple(91, 3)),
+        (
+            7,
+            ItemStack {
+                item_code: 92,
+                count: 1,
+                durability_millionths: Some(654_321),
+                metadata_hash: metadata.hash,
+            },
+        ),
+    ];
+    let mut inventory = Container::new(inventory_key.clone(), PLAYER_DEATH_INVENTORY_SLOTS_V1);
+    inventory.revision = 4;
+    for (slot, stack) in &inventory_stacks {
+        inventory.slots[usize::from(*slot)] = Some(stack.clone());
+    }
+    state.inventory.insert_container(inventory).unwrap();
+    let mut equipment = Container::new(equipment_key.clone(), PLAYER_DEATH_EQUIPMENT_SLOTS_V1);
+    equipment.revision = 6;
+    equipment.equipment_tags[7] = Some("back".into());
+    for (slot, stack) in &equipment_stacks {
+        equipment.slots[usize::from(*slot)] = Some(stack.clone());
+    }
+    state.inventory.insert_container(equipment).unwrap();
+
+    let mut combatant = linked_player_combatant(record_id, entity_id);
+    combatant.revision = 7;
+    combatant.health = 0;
+    combatant.alive = false;
+    state.combat.combatants.insert(record_id.into(), combatant);
+    state.revision.sequence = 20;
+    state.revision.combat = 8;
+    state.revision.inventory = 11;
+    let releases = inventory_stacks
+        .into_iter()
+        .map(|(slot, stack)| {
+            player_death_release(
+                player_id,
+                death_sequence,
+                PlayerDeathCustodyLaneV1::Inventory,
+                slot,
+                stack,
+            )
+        })
+        .chain(equipment_stacks.into_iter().map(|(slot, stack)| {
+            player_death_release(
+                player_id,
+                death_sequence,
+                PlayerDeathCustodyLaneV1::Equipment,
+                slot,
+                stack,
+            )
+        }))
+        .collect();
+    let plan = PlayerDeathRespawnCustodyPlanV1 {
+        record_id: record_id.into(),
+        player_id,
+        entity_id,
+        expected_combatant_revision: 7,
+        expected_max_health: 10_000,
+        death_sequence,
+        inventory: inventory_key,
+        expected_inventory_revision: 4,
+        equipment: equipment_key,
+        expected_equipment_revision: 6,
+        releases,
+    };
+    (GameplayAuthority::new(state), plan, metadata)
+}
+
+#[test]
+fn death_custody_respawn_moves_full_stacks_in_canonical_order_with_one_revision_each() {
+    let (mut authority, plan, metadata) = player_death_custody_fixture();
+    let before_hash = authority.state.state_hash();
+    let before_totals = authority.state.inventory.resource_totals();
+    let before_metadata = authority.state.inventory.item_instance_metadata.clone();
+
+    let receipt = authority.respawn_linked_combatant_with_death_custody_v1(&plan).unwrap();
+
+    assert_eq!(receipt.before_state_hash, before_hash);
+    assert_eq!(receipt.after_state_hash, authority.state.state_hash());
+    assert_eq!(receipt.gameplay_sequence, 21);
+    assert_eq!(receipt.combatant_revision, 8);
+    assert!(receipt.inventory_changed);
+    assert_eq!(receipt.releases, plan.releases);
+    assert_eq!(
+        receipt
+            .releases
+            .iter()
+            .map(|release| (release.source_lane, release.source_slot))
+            .collect::<Vec<_>>(),
+        [
+            (PlayerDeathCustodyLaneV1::Inventory, 0),
+            (PlayerDeathCustodyLaneV1::Inventory, 4),
+            (PlayerDeathCustodyLaneV1::Equipment, 2),
+            (PlayerDeathCustodyLaneV1::Equipment, 7),
+        ]
+    );
+    let inventory = &authority.state.inventory.containers[&plan.inventory];
+    let equipment = &authority.state.inventory.containers[&plan.equipment];
+    assert_eq!(inventory.revision, 5);
+    assert_eq!(equipment.revision, 7);
+    assert!(inventory.slots.iter().all(Option::is_none));
+    assert!(equipment.slots.iter().all(Option::is_none));
+    for release in &plan.releases {
+        let custody = &authority.state.inventory.containers[&release.custody];
+        assert_eq!(custody.revision, 0);
+        assert_eq!(custody.slots, [Some(release.expected_stack.clone())]);
+        assert_eq!(custody.key.kind, ContainerKind::Container);
+        assert_eq!(custody.key.owner_id, None);
+    }
+    let durable = &authority.state.inventory.containers[&plan.releases[1].custody].slots[0];
+    assert_eq!(durable.as_ref().unwrap().durability_millionths, Some(987_654));
+    assert_eq!(durable.as_ref().unwrap().metadata_hash, metadata.hash);
+    assert_eq!(authority.state.inventory.item_instance_metadata, before_metadata);
+    assert_eq!(
+        authority.state.inventory.item_instance_metadata[&metadata.hash].unknown_extension_bytes,
+        [0, 0x80, 0xff, 5]
+    );
+    assert_eq!(authority.state.inventory.resource_totals(), before_totals);
+    assert_eq!(
+        (
+            authority.state.revision.sequence,
+            authority.state.revision.combat,
+            authority.state.revision.inventory,
+        ),
+        (21, 9, 12)
+    );
+    let combatant = &authority.state.combat.combatants[&plan.record_id];
+    assert_eq!(
+        (combatant.health, combatant.alive, combatant.revision),
+        (10_000, true, 8)
+    );
+    assert_eq!(authority.replay().len(), 1);
+    let replay = &authority.replay()[0];
+    assert_eq!(replay.before_hash, receipt.before_state_hash);
+    assert_eq!(replay.after_hash, receipt.after_state_hash);
+    assert_eq!(replay.command_hash, receipt.command_hash);
+    assert_eq!(replay.receipt_hash, receipt.receipt_hash);
+
+    let (mut repeated_authority, repeated_plan, _) = player_death_custody_fixture();
+    let repeated_receipt = repeated_authority
+        .respawn_linked_combatant_with_death_custody_v1(&repeated_plan)
+        .unwrap();
+    assert_eq!(receipt, repeated_receipt);
+    assert_eq!(authority.state, repeated_authority.state);
+    assert_eq!(authority.replay(), repeated_authority.replay());
+}
+
+#[test]
+fn death_custody_respawn_is_idempotent_across_checkpoint_and_replay_roundtrip() {
+    let (mut authority, plan, _) = player_death_custody_fixture();
+    let first = authority.respawn_linked_combatant_with_death_custody_v1(&plan).unwrap();
+    let committed_state = authority.state.clone();
+    let committed_replay = authority.replay().to_vec();
+    let retry = authority.respawn_linked_combatant_with_death_custody_v1(&plan).unwrap();
+    assert_eq!(retry, first);
+    assert_eq!(authority.state, committed_state);
+    assert_eq!(authority.replay(), committed_replay);
+
+    let snapshot = authority.encode_snapshot(&[0xde, 0xad]).unwrap();
+    let decoded = decode_gameplay_authority_snapshot(&snapshot).unwrap();
+    assert_eq!(decoded.authority.state, authority.state);
+    assert_eq!(decoded.authority.replay(), authority.replay());
+    assert_eq!(decoded.authority.encode_snapshot(&[0xde, 0xad]).unwrap(), snapshot);
+    let mut restored = decoded.authority;
+    let restored_retry = restored.respawn_linked_combatant_with_death_custody_v1(&plan).unwrap();
+    assert_eq!(restored_retry, first);
+    assert_eq!(restored.state, committed_state);
+    assert_eq!(restored.replay(), committed_replay);
+
+    let mut changed_plan = plan.clone();
+    changed_plan.releases[0].expected_stack.count -= 1;
+    let before = restored.state.clone();
+    let before_replay = restored.replay().to_vec();
+    assert_eq!(
+        restored
+            .respawn_linked_combatant_with_death_custody_v1(&changed_plan)
+            .unwrap_err()
+            .code,
+        RejectionCode::Conflict
+    );
+    assert_eq!(restored.state, before);
+    assert_eq!(restored.replay(), before_replay);
+}
+
+#[test]
+fn empty_death_custody_restores_combat_without_advancing_inventory_or_source_revisions() {
+    let (mut authority, mut plan, _) = player_death_custody_fixture();
+    authority
+        .state
+        .inventory
+        .containers
+        .get_mut(&plan.inventory)
+        .unwrap()
+        .slots
+        .fill(None);
+    authority
+        .state
+        .inventory
+        .containers
+        .get_mut(&plan.equipment)
+        .unwrap()
+        .slots
+        .fill(None);
+    plan.releases.clear();
+    let inventory_domain_revision = authority.state.revision.inventory;
+
+    let receipt = authority.respawn_linked_combatant_with_death_custody_v1(&plan).unwrap();
+    assert!(!receipt.inventory_changed);
+    assert!(receipt.releases.is_empty());
+    assert_eq!(authority.state.revision.inventory, inventory_domain_revision);
+    assert_eq!(authority.state.inventory.containers[&plan.inventory].revision, 4);
+    assert_eq!(authority.state.inventory.containers[&plan.equipment].revision, 6);
+    assert_eq!(authority.state.inventory.containers.len(), 2);
+    assert!(authority.state.combat.combatants[&plan.record_id].alive);
+
+    let (mut keep_authority, keep_plan, _) = player_death_custody_fixture();
+    let before_inventory = keep_authority.state.inventory.clone();
+    let before_inventory_domain = keep_authority.state.revision.inventory;
+    keep_authority
+        .restore_linked_combatant_after_death_v1(
+            &keep_plan.record_id,
+            keep_plan.entity_id,
+            keep_plan.expected_combatant_revision,
+            keep_plan.expected_max_health,
+            keep_plan.death_sequence,
+        )
+        .unwrap();
+    assert_eq!(keep_authority.state.inventory, before_inventory);
+    assert_eq!(keep_authority.state.revision.inventory, before_inventory_domain);
+    assert!(keep_authority.state.combat.combatants[&keep_plan.record_id].alive);
+}
+
+#[test]
+fn death_custody_preflight_rejects_stale_stack_metadata_identity_and_collision_atomically() {
+    type Mutation = Box<dyn Fn(&mut GameplayAuthority, &mut PlayerDeathRespawnCustodyPlanV1)>;
+    let mutations: Vec<Mutation> = vec![
+        Box::new(|_, plan| plan.expected_inventory_revision += 1),
+        Box::new(|_, plan| plan.releases.swap(0, 1)),
+        Box::new(|_, plan| plan.releases[0].expected_stack.count -= 1),
+        Box::new(|_, plan| plan.releases[0].custody.id.push_str(":wrong")),
+        Box::new(|_, plan| plan.releases[0].custody.owner_id = Some(plan.record_id.clone())),
+        Box::new(|authority, plan| {
+            authority
+                .state
+                .inventory
+                .item_instance_metadata
+                .remove(&plan.releases[1].expected_stack.metadata_hash);
+        }),
+        Box::new(|authority, plan| {
+            let custody = Container::new(plan.releases[0].custody.clone(), 1);
+            authority
+                .state
+                .inventory
+                .containers
+                .insert(custody.key.clone(), custody);
+        }),
+        Box::new(|_, plan| plan.inventory.owner_id = Some("actor:other".into())),
+    ];
+    for mutate in mutations {
+        let (mut authority, mut plan, _) = player_death_custody_fixture();
+        mutate(&mut authority, &mut plan);
+        let before_state = authority.state.clone();
+        let before_replay = authority.replay().to_vec();
+        assert!(authority.respawn_linked_combatant_with_death_custody_v1(&plan).is_err());
+        assert_eq!(authority.state, before_state);
+        assert_eq!(authority.replay(), before_replay);
+    }
+}
+
+#[test]
+fn death_custody_capacity_overflow_and_injected_staging_failure_are_atomic() {
+    let (authority, plan, _) = player_death_custody_fixture();
+    let mut injected = authority.state.inventory.clone();
+    let before_injected = injected.clone();
+    assert_eq!(
+        injected
+            .release_player_death_custody_with_injected_failure_for_test(&plan, 1)
+            .unwrap_err()
+            .code,
+        RejectionCode::Conflict
+    );
+    assert_eq!(injected, before_injected);
+
+    let mut overflow_authority = authority.clone();
+    overflow_authority.state.revision.sequence = u64::MAX;
+    let before_overflow = overflow_authority.state.clone();
+    let before_replay = overflow_authority.replay().to_vec();
+    assert_eq!(
+        overflow_authority
+            .respawn_linked_combatant_with_death_custody_v1(&plan)
+            .unwrap_err()
+            .code,
+        RejectionCode::Capacity
+    );
+    assert_eq!(overflow_authority.state, before_overflow);
+    assert_eq!(overflow_authority.replay(), before_replay);
+
+    let mut source_overflow = authority.state.inventory.clone();
+    source_overflow.containers.get_mut(&plan.inventory).unwrap().revision = u64::MAX;
+    let mut source_overflow_plan = plan.clone();
+    source_overflow_plan.expected_inventory_revision = u64::MAX;
+    let before_source_overflow = source_overflow.clone();
+    assert_eq!(
+        source_overflow
+            .release_player_death_custody_v1(&source_overflow_plan)
+            .unwrap_err()
+            .code,
+        RejectionCode::Capacity
+    );
+    assert_eq!(source_overflow, before_source_overflow);
+
+    let mut capacity = authority.state.inventory.clone();
+    let target_existing = MAX_INVENTORY_CONTAINERS_V1 - plan.releases.len() + 1;
+    for index in capacity.containers.len()..target_existing {
+        let key = ContainerKey {
+            kind: ContainerKind::Container,
+            id: format!("death-capacity-{index}"),
+            owner_id: None,
+        };
+        capacity.containers.insert(key.clone(), Container::new(key, 1));
+    }
+    let before_len = capacity.containers.len();
+    let before_inventory = capacity.containers[&plan.inventory].clone();
+    let before_equipment = capacity.containers[&plan.equipment].clone();
+    assert_eq!(
+        capacity.release_player_death_custody_v1(&plan).unwrap_err().code,
+        RejectionCode::Capacity
+    );
+    assert_eq!(capacity.containers.len(), before_len);
+    assert_eq!(capacity.containers[&plan.inventory], before_inventory);
+    assert_eq!(capacity.containers[&plan.equipment], before_equipment);
 }
 
 #[test]

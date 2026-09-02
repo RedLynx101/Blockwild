@@ -38,6 +38,7 @@ import { TCG_CATALOG_REVISION, TCG_SCHEMA } from "./tcg/types";
 import { GOLEM_RECIPES } from "./v1-cultures";
 import { WHEAT_MILL_CYCLE_SECONDS, WHEAT_MILL_PROCESS, WHEAT_MILL_SCHEMA, WHEAT_MILL_STACK_CAP } from "./wheat-mill";
 import { rustIntegratedRuntimeWireChecksumV1 } from "./rust-integrated-runtime-codec";
+import { rustIntegratedRuntimeDomainWireFamilyV1 } from "./rust-integrated-runtime-domain-schema.generated.ts";
 import {
   BLOCKWILD_PLAYER_RENDER_PROFILE_V1,
   PLAYER_RENDER_PROFILE_ID_V1,
@@ -75,7 +76,7 @@ export type RustContentDomain = (typeof RUST_CONTENT_DOMAINS)[number];
 
 export type RustContentBlockerCode =
   | "invalid-id" | "unsupported-value" | "unsupported-schema" | "capacity" | "duplicate-id" | "alias-conflict"
-  | "serialization-cycle" | "hash-drift" | "count-drift" | "manifest-hash-drift";
+  | "descriptor-mismatch" | "serialization-cycle" | "hash-drift" | "count-drift" | "manifest-hash-drift";
 
 export type RustContentBlocker = Readonly<{
   code: RustContentBlockerCode;
@@ -369,10 +370,18 @@ export function compileRustProductionContent(sourceRevision: string, sourceEntri
       blockers.push({ code: "unsupported-schema", domain: entry.domain, id: entry.id, path: "$.schemaId/contentVersion", actual: `${entry.schemaId}/${entry.contentVersion}` });
       continue;
     }
-    const aliases = [...(entry.aliases ?? [`${entry.domain}:${entry.id}`])].sort();
+    const canonicalAlias = `${entry.domain}:${entry.id}`;
+    const aliases = [...(entry.aliases ?? [canonicalAlias])].sort();
     if (aliases.length > MAX_RUST_CONTENT_ALIASES || new Set(aliases).size !== aliases.length
       || aliases.some((alias) => !alias || alias.length > 160 || /[\u0000-\u001f\u007f]/u.test(alias))) {
       blockers.push({ code: "capacity", domain: entry.domain, id: entry.id, path: "$.aliases", expected: String(MAX_RUST_CONTENT_ALIASES), actual: String(aliases.length) });
+      continue;
+    }
+    if (!aliases.includes(canonicalAlias)) {
+      blockers.push({
+        code: "descriptor-mismatch", domain: entry.domain, id: entry.id, path: "$.aliases",
+        expected: canonicalAlias, actual: aliases.join(","),
+      });
       continue;
     }
     const conflictingAlias = aliases.find((alias) => seenAliases.has(alias));
@@ -748,7 +757,7 @@ function blockLoot(definition: BlockDefinition): RustBlockLootV2 {
   if (type === BlockId.SunberryShoot || type === BlockId.SunberryBush) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("sunberry", Item.Sunberry, constantCount(1))] };
   if (type === BlockId.AppleSapling) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("apple", Item.Apple, constantCount(1))] };
   if (type === BlockId.FrostpearSapling) return { mode: "all", selfDropMode: "contextual", silkTouch: "not-authored", rules: [lootRule("frostpear", Item.Frostpear, constantCount(1))] };
-  const item = type === BlockId.Torch || definition.shape === "torch" ? BlockId.Torch : itemForBlock(type);
+  const item = itemForBlock(type);
   if (ITEMS[item] === undefined) return { mode: "none", selfDropMode: "absent", silkTouch: "not-authored", rules: [] };
   return { mode: "all", selfDropMode: "mapped-item", silkTouch: "not-authored", rules: [lootRule("mapped-item", item, constantCount(1))] };
 }
@@ -1355,7 +1364,13 @@ export function blockwildProductionContentSources(): readonly RustContentSourceE
     schemaVersion: RENDER_PRESENTATION_CATALOG_SCHEMA_V2,
     contentVersion: 2,
     value: BLOCKWILD_RENDER_PRESENTATION_CATALOG_V2,
-    aliases: Object.freeze(["render-presentation-catalog:production"]),
+    // MachineProfile is the wire/storage domain even though this record's
+    // schema describes renderer-neutral presentation data. The native content
+    // runtime requires every blob to carry its canonical domain:id alias.
+    aliases: Object.freeze([
+      `machine-profile:${RENDER_PRESENTATION_CATALOG_ID_V1}`,
+      "render-presentation-catalog:production",
+    ]),
   });
   for (const spell of SPELLS) entries.push(source("ability-spell", `spell:${spell.id}`, "spell-definition", 1, spell));
   for (const [id, move] of objectEntries(CREATURE_MOVES)) entries.push(source("ability-spell", `move:${id}`, "creature-move", 1, move));
@@ -1434,8 +1449,11 @@ export function validateRustContentExpectation(
   return Object.freeze(blockers);
 }
 
-export const RUST_CONTENT_INSTALL_PAGE_TYPE_V1 = "blockwild.gameplay.content-install-page.v1" as const;
-export const RUST_CONTENT_INSTALL_RECEIPT_TYPE_V1 = "blockwild.gameplay.content-install-receipt.v1" as const;
+const CONTENT_PAGE_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("content-install-page-v1");
+const CONTENT_RECEIPT_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("content-install-receipt-v1");
+
+export const RUST_CONTENT_INSTALL_PAGE_TYPE_V1 = CONTENT_PAGE_SCHEMA.typeId;
+export const RUST_CONTENT_INSTALL_RECEIPT_TYPE_V1 = CONTENT_RECEIPT_SCHEMA.typeId;
 export const RUST_CONTENT_INSTALL_CAPABILITY_V1 = "content-bundle-install-v1" as const;
 export const RUST_CONTENT_AUTHORITY_CAPABILITY_V1 = "content-authority-v1" as const;
 export const RUST_CONTENT_INSTALL_MAX_PAGES_V1 = 128;
@@ -1472,8 +1490,8 @@ export type RustContentInstallPlanV1 = Readonly<{
   pages: readonly Readonly<{ page: RustContentInstallPageV1; payload: Uint8Array }>[];
 }>;
 
-const CONTENT_PAGE_MAGIC = encoder.encode("BWC7");
-const CONTENT_RECEIPT_MAGIC = encoder.encode("BWT7");
+const CONTENT_PAGE_MAGIC = encoder.encode(CONTENT_PAGE_SCHEMA.magic);
+const CONTENT_RECEIPT_MAGIC = encoder.encode(CONTENT_RECEIPT_SCHEMA.magic);
 const CONTENT_DOMAIN_HEADER_BYTES = 28;
 
 class ContentWireWriter {
@@ -1576,18 +1594,18 @@ function contentPageBody(page: RustContentInstallPageV1) {
   return writer.finish();
 }
 
-function wrapContentPacket(magic: Uint8Array, body: Uint8Array) {
+function wrapContentPacket(magic: Uint8Array, schema: number, body: Uint8Array) {
   const writer = new ContentWireWriter();
-  writer.raw(magic); writer.u16(1); writer.u16(1); writer.u32(body.byteLength);
+  writer.raw(magic); writer.u16(1); writer.u16(schema); writer.u32(body.byteLength);
   writer.hash(rustIntegratedRuntimeWireChecksumV1(body)); writer.raw(body);
   return writer.finish();
 }
 
-function unwrapContentPacket(packet: Uint8Array, magic: Uint8Array) {
+function unwrapContentPacket(packet: Uint8Array, magic: Uint8Array, schema: number) {
   if (packet.byteLength < CONTENT_DOMAIN_HEADER_BYTES) throw new Error("content wire packet is truncated");
   if (!magic.every((byte, index) => packet[index] === byte)) throw new Error("content wire magic mismatch");
   const header = new DataView(packet.buffer, packet.byteOffset, CONTENT_DOMAIN_HEADER_BYTES);
-  if (header.getUint16(4, true) !== 1 || header.getUint16(6, true) !== 1) throw new Error("content wire version is unsupported");
+  if (header.getUint16(4, true) !== 1 || header.getUint16(6, true) !== schema) throw new Error("content wire version is unsupported");
   const length = header.getUint32(8, true); const checksum = bytesToHex(packet.subarray(12, 28));
   const payload = packet.subarray(CONTENT_DOMAIN_HEADER_BYTES);
   if (length !== payload.byteLength || checksum !== rustIntegratedRuntimeWireChecksumV1(payload)) throw new Error("content wire length or checksum mismatch");
@@ -1598,11 +1616,11 @@ export function encodeRustContentInstallPageV1(page: RustContentInstallPageV1) {
   if (page.manifestSchema !== RUST_CONTENT_MANIFEST_SCHEMA || page.pageCount < 1 || page.pageCount > RUST_CONTENT_INSTALL_MAX_PAGES_V1
     || page.pageIndex < 0 || page.pageIndex >= page.pageCount || page.artifacts.length < 1
     || page.artifacts.length > RUST_CONTENT_INSTALL_MAX_ARTIFACTS_PER_PAGE_V1) throw new Error("content install page shape is invalid");
-  return wrapContentPacket(CONTENT_PAGE_MAGIC, contentPageBody(page));
+  return wrapContentPacket(CONTENT_PAGE_MAGIC, CONTENT_PAGE_SCHEMA.innerSchema, contentPageBody(page));
 }
 
 export function decodeRustContentInstallPageV1(packet: Uint8Array): RustContentInstallPageV1 {
-  const reader = new ContentWireReader(unwrapContentPacket(packet, CONTENT_PAGE_MAGIC));
+  const reader = new ContentWireReader(unwrapContentPacket(packet, CONTENT_PAGE_MAGIC, CONTENT_PAGE_SCHEMA.innerSchema));
   const installId = reader.string(); const manifestSchema = reader.u16(); const sourceRevision = reader.string(); const manifestHash = reader.hash();
   const domains = readContentDomains(reader); const pageIndex = reader.u32(); const pageCount = reader.u32(); const count = reader.u32();
   if (count < 1 || count > RUST_CONTENT_INSTALL_MAX_ARTIFACTS_PER_PAGE_V1) throw new Error("content install artifact count is invalid");
@@ -1615,11 +1633,11 @@ export function encodeRustContentInstallReceiptV1(receipt: RustContentInstallRec
   writer.u8(receipt.status === "staged" ? 0 : 1); writer.string(receipt.installId); writer.string(receipt.sourceRevision); writer.hash(receipt.manifestHash);
   writeContentDomains(writer, receipt.domains); writer.u32(receipt.acceptedPages); writer.u32(receipt.pageCount); writer.u32(receipt.acceptedEntries);
   writer.u32(receipt.installedEntries); writer.u64(receipt.installedBytes);
-  return wrapContentPacket(CONTENT_RECEIPT_MAGIC, writer.finish());
+  return wrapContentPacket(CONTENT_RECEIPT_MAGIC, CONTENT_RECEIPT_SCHEMA.innerSchema, writer.finish());
 }
 
 export function decodeRustContentInstallReceiptV1(packet: Uint8Array): RustContentInstallReceiptV1 {
-  const reader = new ContentWireReader(unwrapContentPacket(packet, CONTENT_RECEIPT_MAGIC));
+  const reader = new ContentWireReader(unwrapContentPacket(packet, CONTENT_RECEIPT_MAGIC, CONTENT_RECEIPT_SCHEMA.innerSchema));
   const tag = reader.u8(); if (tag > 1) throw new Error("content install receipt status is invalid");
   const result = Object.freeze({
     status: tag === 0 ? "staged" as const : "installed" as const,

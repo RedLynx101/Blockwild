@@ -21,6 +21,13 @@ import {
 import { loadRustRendererArtifactR11, type RustRendererArtifactR11 } from "./rust-renderer-service-r11.ts";
 
 export type RendererRequestR11 = "three" | "wgpu-shadow" | "wgpu";
+export type RendererPrimaryPresentationR11 = "three" | "wgpu";
+export type RendererSurfaceReplacementRequestR11 = Readonly<{
+  token: number;
+  attempt: number;
+  limit: number;
+  reason: string;
+}>;
 export type RendererPromotionGatesR11 = Readonly<{
   hardwareBrowser: boolean;
   fullGameParity: boolean;
@@ -102,6 +109,9 @@ export interface RendererWorldExtractionSinkR11 extends RendererExtractionSinkR1
 }
 
 type RendererRuntimeStateR11 = "compatibility" | "starting" | "ready" | "recovering" | "failed" | "stopped";
+const MAX_RENDERER_FALLBACK_EVENTS_R11 = 8;
+const MAX_RENDERER_FAILURE_REASON_LENGTH_R11 = 240;
+const DEFAULT_SURFACE_REPLACEMENT_LIMIT_R11 = 2;
 
 export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11 {
   readonly decision: RendererCutoverDecisionR11;
@@ -118,6 +128,16 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
   private startPromise: Promise<void> | null = null;
   private lifecycleGeneration = 0;
   private replacementSurfaceRequired = false;
+  private artifact: RustRendererArtifactR11 | null = null;
+  private activeCanvas: HTMLCanvasElement;
+  private unsubscribeBackend: (() => void) | null = null;
+  private visualPrimary: RendererPrimaryPresentationR11 = "three";
+  private surfaceReplacementToken = 0;
+  private surfaceReplacementAttempts = 0;
+  private surfaceReplacementPending = false;
+  private surfaceReplacementExhausted = false;
+  private readonly surfaceReplacementLimit: number;
+  private readonly fallbackEvents: string[] = [];
 
   constructor(private readonly options: Readonly<{
     request: RendererRequestR11;
@@ -132,11 +152,20 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
     capability?: RustRendererCapabilityR11;
     loadArtifact?: () => Promise<RustRendererArtifactR11>;
     createBackend?: (options: Readonly<{ canvas: HTMLCanvasElement; artifact: RustRendererArtifactR11; epoch: bigint; width: number; height: number }>) => RendererBackendR11 | null;
+    surfaceReplacementLimit?: number;
+    onPrimaryPresentation?: (presentation: RendererPrimaryPresentationR11, reason: string | null) => void;
+    onSurfaceReplacementRequired?: (request: RendererSurfaceReplacementRequestR11) => void;
   }>) {
     this.epoch = checkedRendererEpoch(options.epoch);
     this.width = checkedDimension(options.width, "renderer width");
     this.height = checkedDimension(options.height, "renderer height");
     this.canvasRole = options.canvasRole;
+    this.activeCanvas = options.canvas;
+    const surfaceReplacementLimit = options.surfaceReplacementLimit ?? DEFAULT_SURFACE_REPLACEMENT_LIMIT_R11;
+    if (!Number.isSafeInteger(surfaceReplacementLimit) || surfaceReplacementLimit < 0 || surfaceReplacementLimit > 8) {
+      throw new RangeError("renderer surface replacement limit must be an integer from 0 through 8");
+    }
+    this.surfaceReplacementLimit = surfaceReplacementLimit;
     const capability = options.capability ?? detectRustRendererCapabilityR11(options.canvas);
     this.decision = resolveRendererCutoverR11(options.request, {
       capability,
@@ -157,6 +186,7 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
     this.state = "starting";
     this.startError = null;
     this.replacementSurfaceRequired = false;
+    if (this.decision.primary === "wgpu") this.presentPrimary("three", "WebGPU surface is starting");
     const generation = ++this.lifecycleGeneration;
     const starting = this.startInternal(generation);
     this.startPromise = starting;
@@ -169,14 +199,15 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
     try {
       const artifact = await (this.options.loadArtifact ?? (() => loadRustRendererArtifactR11()))();
       if (!this.isCurrentLifecycle(generation)) return;
+      this.artifact = artifact;
       this.artifactHash = artifact.hash;
       surfaceCreationAttempted = true;
       const backend = (this.options.createBackend ?? createRustRendererBackendR11)({
-        canvas: this.options.canvas, artifact, epoch: this.epoch, width: this.width, height: this.height,
+        canvas: this.activeCanvas, artifact, epoch: this.epoch, width: this.width, height: this.height,
       });
       if (!backend) throw new Error("Rust WebGPU backend rejected the selected canvas capability");
       if (!this.isCurrentLifecycle(generation)) { backend.dispose(); return; }
-      this.backend = backend;
+      this.installBackend(backend, generation);
       for (const bytes of this.pendingResources) backend.resources(bytes);
       this.pendingResources.length = 0;
       if (this.pendingFrame) { backend.frame(this.pendingFrame); this.pendingFrame = null; }
@@ -189,6 +220,7 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
         throw new Error(typeof diagnostics.lastError === "string" ? diagnostics.lastError : `Rust WebGPU backend entered ${String(diagnostics.state)}`);
       }
       this.state = "ready";
+      this.syncBackendLifecycle(backend, generation);
     } catch (error) {
       if (!this.isCurrentLifecycle(generation)) return;
       this.startError = error instanceof Error ? error.message : String(error);
@@ -196,7 +228,7 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
       const backendDiagnostics = this.backend?.diagnostics();
       this.replacementSurfaceRequired = backendDiagnostics?.replacementSurfaceRequired === true
         || (surfaceCreationAttempted && /canvas|dataclone|offscreen|surface|transfer/iu.test(this.startError));
-      this.pendingResources.length = 0; this.pendingFrame = null;
+      this.handlePrimaryFailure(this.startError);
     }
   }
 
@@ -230,13 +262,83 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
 
   requestRecovery(reason = "normal-path renderer recovery request") {
     if (!this.backend || this.effectiveState() !== "ready") return false;
-    this.backend.requestRecovery(reason); return true;
+    if (this.decision.primary === "wgpu") this.presentPrimary("three", boundedRendererReasonR11(reason));
+    this.backend.requestRecovery(reason);
+    this.syncBackendLifecycle(this.backend, this.lifecycleGeneration);
+    return true;
+  }
+
+  /**
+   * Installs a fresh DOM canvas after ownership of the prior canvas was
+   * transferred to a failed worker. The token prevents a late React ref from
+   * replacing a newer surface. Three remains visually active until this new
+   * surface has presented a non-skipped frame.
+   */
+  async replaceSurface(canvas: HTMLCanvasElement, token: number) {
+    if (this.state === "stopped") return false;
+    if (this.decision.primary !== "wgpu" || this.canvasRole !== "primary") return false;
+    if (!this.surfaceReplacementPending || token !== this.surfaceReplacementToken) return false;
+    if (this.surfaceReplacementAttempts >= this.surfaceReplacementLimit) {
+      this.surfaceReplacementPending = false;
+      this.surfaceReplacementExhausted = true;
+      return false;
+    }
+    this.surfaceReplacementPending = false;
+    this.surfaceReplacementAttempts += 1;
+    this.activeCanvas = canvas;
+    this.state = "starting";
+    this.startError = null;
+    this.replacementSurfaceRequired = false;
+    this.presentPrimary("three", "replacement WebGPU surface is starting");
+    const generation = ++this.lifecycleGeneration;
+    try {
+      const backend = this.backend;
+      if (backend?.restartSurface) {
+        const offscreen = canvas.transferControlToOffscreen();
+        const restarting = backend.restartSurface(offscreen, this.width, this.height);
+        this.installBackend(backend, generation);
+        await restarting;
+        if (!this.isCurrentLifecycle(generation)) return false;
+        this.state = "ready";
+        this.syncBackendLifecycle(backend, generation);
+        return true;
+      }
+      backend?.dispose();
+      this.unsubscribeBackend?.();
+      this.unsubscribeBackend = null;
+      this.backend = null;
+      const artifact = this.artifact;
+      if (!artifact) throw new Error("renderer artifact is unavailable for surface replacement");
+      const replacement = (this.options.createBackend ?? createRustRendererBackendR11)({
+        canvas, artifact, epoch: this.epoch, width: this.width, height: this.height,
+      });
+      if (!replacement) throw new Error("Rust WebGPU backend rejected the replacement canvas capability");
+      if (!this.isCurrentLifecycle(generation)) { replacement.dispose(); return false; }
+      this.installBackend(replacement, generation);
+      for (const bytes of this.pendingResources) replacement.resources(bytes);
+      this.pendingResources.length = 0;
+      if (this.pendingFrame) { replacement.frame(this.pendingFrame); this.pendingFrame = null; }
+      replacement.resize(this.width, this.height);
+      if (replacement.ready) await replacement.ready();
+      if (!this.isCurrentLifecycle(generation)) return false;
+      this.state = "ready";
+      this.syncBackendLifecycle(replacement, generation);
+      return replacement.diagnostics().state === "ready";
+    } catch (error) {
+      if (!this.isCurrentLifecycle(generation)) return false;
+      this.startError = error instanceof Error ? error.message : String(error);
+      this.state = "failed";
+      this.replacementSurfaceRequired = true;
+      this.handlePrimaryFailure(this.startError);
+      return false;
+    }
   }
 
   switchEpoch(epoch: bigint) {
     const next = checkedRendererEpoch(epoch);
     const effectiveState = this.effectiveState();
     if (!this.needsExtraction || effectiveState === "failed" || effectiveState === "stopped") return false;
+    if (this.decision.primary === "wgpu") this.presentPrimary("three", `renderer world epoch switching to ${next}`);
     this.backend?.switchEpoch(next);
     this.epoch = next;
     this.pendingResources.length = 0;
@@ -247,9 +349,7 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
   diagnostics() {
     const backend = this.backend?.diagnostics() ?? null;
     const state = this.effectiveState(backend);
-    const activePrimary = this.decision.primary === "wgpu"
-      ? state === "ready" ? "wgpu" : null
-      : "three";
+    const activePrimary = this.decision.primary === "wgpu" ? this.visualPrimary : "three";
     const replacementSurfaceRequired = this.replacementSurfaceRequired || backend?.replacementSurfaceRequired === true;
     return Object.freeze({
       schema: 1,
@@ -267,8 +367,14 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
       startError: this.startError,
       canvasRole: this.canvasRole,
       replacementSurfaceRequired,
-      replacementSurfaceApi: this.backend?.restartSurface ? "explicit-offscreen-canvas" : null,
-      automaticSurfaceReplacement: false,
+      replacementSurfaceApi: this.decision.primary === "wgpu" ? "keyed-html-canvas" : null,
+      automaticSurfaceReplacement: this.decision.primary === "wgpu" && this.options.onSurfaceReplacementRequired !== undefined,
+      visualPrimary: this.visualPrimary,
+      surfaceReplacementAttempts: this.surfaceReplacementAttempts,
+      surfaceReplacementLimit: this.surfaceReplacementLimit,
+      surfaceReplacementPending: this.surfaceReplacementPending,
+      surfaceReplacementExhausted: this.surfaceReplacementExhausted,
+      fallbackEvents: Object.freeze([...this.fallbackEvents]),
       extractionCoverage: "terrain-camera-environment",
       fullGameParity: false,
       backend,
@@ -278,8 +384,11 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
   stop() {
     if (this.state === "stopped") return;
     this.lifecycleGeneration += 1;
+    this.unsubscribeBackend?.(); this.unsubscribeBackend = null;
     this.backend?.dispose(); this.backend = null; this.pendingResources.length = 0; this.pendingFrame = null; this.state = "stopped";
     this.startPromise = null;
+    this.surfaceReplacementPending = false;
+    this.presentPrimary("three", "renderer runtime stopped");
   }
 
   private effectiveState(backend = this.backend?.diagnostics() ?? null): RendererRuntimeStateR11 {
@@ -289,9 +398,307 @@ export class RendererCutoverRuntimeR11 implements RendererWorldExtractionSinkR11
     return this.state;
   }
 
+  private installBackend(backend: RendererBackendR11, generation: number) {
+    this.unsubscribeBackend?.();
+    this.backend = backend;
+    this.unsubscribeBackend = backend.subscribe?.((diagnostics) => {
+      if (this.backend === backend && this.isCurrentLifecycle(generation)) this.syncBackendLifecycle(backend, generation, diagnostics);
+    }) ?? null;
+  }
+
+  private syncBackendLifecycle(
+    backend: RendererBackendR11,
+    generation: number,
+    diagnostics = backend.diagnostics(),
+  ) {
+    if (this.backend !== backend || !this.isCurrentLifecycle(generation)) return;
+    if (diagnostics.state === "failed") {
+      this.state = "failed";
+      this.startError = diagnostics.lastError ?? "Rust WebGPU renderer failed";
+      this.replacementSurfaceRequired = diagnostics.replacementSurfaceRequired === true;
+      this.handlePrimaryFailure(this.startError);
+      return;
+    }
+    if (diagnostics.state === "recovering" || diagnostics.state === "starting") {
+      this.state = diagnostics.state;
+      if (this.decision.primary === "wgpu") this.presentPrimary("three", diagnostics.lastError ?? `WebGPU renderer is ${diagnostics.state}`);
+      return;
+    }
+    if (diagnostics.state !== "ready") return;
+    if (typeof diagnostics.epoch === "bigint" && diagnostics.epoch !== this.epoch) {
+      if (this.decision.primary === "wgpu") this.presentPrimary("three", "WebGPU frame belongs to a prior world epoch");
+      return;
+    }
+    this.state = "ready";
+    this.startError = null;
+    this.replacementSurfaceRequired = false;
+    if (this.decision.primary === "wgpu"
+      && typeof diagnostics.lastPresentedSequence === "bigint"
+      && diagnostics.latestSkipReason === null) {
+      this.presentPrimary("wgpu", null);
+    }
+  }
+
+  private handlePrimaryFailure(reason: string) {
+    if (this.decision.primary !== "wgpu") return;
+    const boundedReason = boundedRendererReasonR11(reason);
+    this.presentPrimary("three", boundedReason);
+    if (!this.replacementSurfaceRequired || this.surfaceReplacementPending || this.surfaceReplacementExhausted) return;
+    if (this.surfaceReplacementAttempts >= this.surfaceReplacementLimit) {
+      this.surfaceReplacementExhausted = true;
+      return;
+    }
+    if (!this.options.onSurfaceReplacementRequired) return;
+    this.surfaceReplacementPending = true;
+    const request = Object.freeze({
+      token: ++this.surfaceReplacementToken,
+      attempt: this.surfaceReplacementAttempts + 1,
+      limit: this.surfaceReplacementLimit,
+      reason: boundedReason,
+    });
+    this.options.onSurfaceReplacementRequired(request);
+  }
+
+  private presentPrimary(presentation: RendererPrimaryPresentationR11, reason: string | null) {
+    if (this.decision.primary !== "wgpu" && presentation === "wgpu") return;
+    if (reason && presentation === "three") {
+      const bounded = boundedRendererReasonR11(reason);
+      if (this.fallbackEvents.at(-1) !== bounded) {
+        this.fallbackEvents.push(bounded);
+        if (this.fallbackEvents.length > MAX_RENDERER_FALLBACK_EVENTS_R11) this.fallbackEvents.shift();
+      }
+    }
+    if (this.visualPrimary === presentation && reason === null) return;
+    this.visualPrimary = presentation;
+    this.options.onPrimaryPresentation?.(presentation, reason ? boundedRendererReasonR11(reason) : null);
+  }
+
   private isCurrentLifecycle(generation: number) {
     return this.state !== "stopped" && generation === this.lifecycleGeneration;
   }
+}
+
+export type RendererCanvasMetricsR11 = Readonly<{
+  cssWidth: number;
+  cssHeight: number;
+  devicePixelRatio: number;
+  pixelWidth: number;
+  pixelHeight: number;
+  dimensionClamped: boolean;
+}>;
+
+type RendererLifecycleEventTargetR11 = Readonly<{
+  addEventListener(type: string, listener: EventListener): void;
+  removeEventListener(type: string, listener: EventListener): void;
+}>;
+
+type RendererResizeObserverR11 = Readonly<{
+  observe(target: Element): void;
+  disconnect(): void;
+}>;
+
+type RendererMutationObserverR11 = Readonly<{
+  observe(target: Node, options: MutationObserverInit): void;
+  disconnect(): void;
+}>;
+
+const MAX_RENDERER_DRAWING_BUFFER_DIMENSION_R11 = 16_384;
+
+export function rendererCanvasEffectivePixelRatioR11(
+  canvas: Pick<HTMLCanvasElement, "clientWidth" | "clientHeight" | "width" | "height">,
+  fallback: number,
+) {
+  const fallbackRatio = Number.isFinite(fallback) && fallback > 0 ? fallback : 1;
+  if (canvas.clientWidth <= 0 || canvas.clientHeight <= 0 || canvas.width <= 0 || canvas.height <= 0) return fallbackRatio;
+  const widthRatio = canvas.width / canvas.clientWidth;
+  const heightRatio = canvas.height / canvas.clientHeight;
+  if (!Number.isFinite(widthRatio) || !Number.isFinite(heightRatio)
+    || widthRatio < 0.25 || widthRatio > 8 || heightRatio < 0.25 || heightRatio > 8
+    || Math.abs(widthRatio - heightRatio) > Math.max(0.02, Math.min(widthRatio, heightRatio) * 0.02)) {
+    return fallbackRatio;
+  }
+  return (widthRatio + heightRatio) / 2;
+}
+
+export function rendererCanvasMetricsR11(canvas: Pick<HTMLCanvasElement, "clientWidth" | "clientHeight" | "width" | "height">, devicePixelRatio: number): RendererCanvasMetricsR11 {
+  const dpr = Number.isFinite(devicePixelRatio) && devicePixelRatio > 0 ? devicePixelRatio : 1;
+  const cssWidth = Math.max(1, Math.round(canvas.clientWidth || canvas.width / dpr || 1));
+  const cssHeight = Math.max(1, Math.round(canvas.clientHeight || canvas.height / dpr || 1));
+  const rawPixelWidth = Math.max(1, Math.round(cssWidth * dpr));
+  const rawPixelHeight = Math.max(1, Math.round(cssHeight * dpr));
+  return Object.freeze({
+    cssWidth,
+    cssHeight,
+    devicePixelRatio: dpr,
+    pixelWidth: Math.min(MAX_RENDERER_DRAWING_BUFFER_DIMENSION_R11, rawPixelWidth),
+    pixelHeight: Math.min(MAX_RENDERER_DRAWING_BUFFER_DIMENSION_R11, rawPixelHeight),
+    dimensionClamped: rawPixelWidth > MAX_RENDERER_DRAWING_BUFFER_DIMENSION_R11
+      || rawPixelHeight > MAX_RENDERER_DRAWING_BUFFER_DIMENSION_R11,
+  });
+}
+
+/**
+ * Keeps the Three canvas in layout as the sole trusted input/pointer-lock
+ * target while allowing exactly one canvas to contribute pixels. The WGPU
+ * surface never receives pointer events, so replacing it cannot break input.
+ */
+export function applyRendererCanvasPresentationR11(
+  threeCanvas: HTMLCanvasElement,
+  wgpuCanvas: HTMLCanvasElement,
+  presentation: RendererPrimaryPresentationR11,
+) {
+  const wgpuVisible = presentation === "wgpu";
+  threeCanvas.style.opacity = wgpuVisible ? "0" : "1";
+  threeCanvas.style.visibility = "visible";
+  threeCanvas.style.pointerEvents = "auto";
+  wgpuCanvas.style.opacity = wgpuVisible ? "1" : "0";
+  wgpuCanvas.style.visibility = "visible";
+  wgpuCanvas.style.pointerEvents = "none";
+  threeCanvas.dataset.rendererVisualContribution = wgpuVisible ? "none" : "primary";
+  threeCanvas.dataset.rendererInputTarget = "primary";
+  wgpuCanvas.dataset.rendererVisualContribution = wgpuVisible ? "primary" : "none";
+  wgpuCanvas.dataset.rendererInputTarget = "none";
+  return Object.freeze({
+    presentation,
+    visualContributors: 1,
+    inputTarget: "three" as const,
+  });
+}
+
+export class RendererVisibleCanvasLifecycleR11 {
+  private wgpuCanvas: HTMLCanvasElement;
+  private presentation: RendererPrimaryPresentationR11 = "three";
+  private resizeObserver: RendererResizeObserverR11 | null = null;
+  private mutationObserver: RendererMutationObserverR11 | null = null;
+  private started = false;
+  private disposed = false;
+  private replacementGeneration = 0;
+  private pendingReplacementGeneration: number | null = null;
+  private resizeEvents = 0;
+  private fullscreenEvents = 0;
+  private latestMetrics: RendererCanvasMetricsR11;
+  private readonly fallbackEvents: string[] = [];
+  private readonly onWindowResize = (() => { this.resizeEvents += 1; this.syncSize(); }) as EventListener;
+  private readonly onFullscreenChange = (() => { this.fullscreenEvents += 1; this.syncSize(); }) as EventListener;
+
+  constructor(private readonly options: Readonly<{
+    threeCanvas: HTMLCanvasElement;
+    wgpuCanvas: HTMLCanvasElement;
+    resize: (pixelWidth: number, pixelHeight: number) => void;
+    devicePixelRatio?: () => number;
+    windowTarget?: RendererLifecycleEventTargetR11;
+    documentTarget?: RendererLifecycleEventTargetR11;
+    createResizeObserver?: (listener: () => void) => RendererResizeObserverR11;
+    createMutationObserver?: (listener: () => void) => RendererMutationObserverR11;
+  }>) {
+    this.wgpuCanvas = options.wgpuCanvas;
+    this.latestMetrics = rendererCanvasMetricsR11(options.threeCanvas, this.devicePixelRatio());
+  }
+
+  start() {
+    if (this.disposed) throw new Error("renderer canvas lifecycle is disposed");
+    if (this.started) return this.latestMetrics;
+    this.started = true;
+    this.prepareCanvas(this.wgpuCanvas);
+    applyRendererCanvasPresentationR11(this.options.threeCanvas, this.wgpuCanvas, "three");
+    this.options.windowTarget?.addEventListener("resize", this.onWindowResize);
+    this.options.documentTarget?.addEventListener("fullscreenchange", this.onFullscreenChange);
+    this.resizeObserver = this.options.createResizeObserver?.(() => {
+      this.resizeEvents += 1;
+      this.syncSize();
+    }) ?? null;
+    this.resizeObserver?.observe(this.options.threeCanvas);
+    this.mutationObserver = this.options.createMutationObserver?.(() => {
+      this.resizeEvents += 1;
+      this.syncSize();
+    }) ?? null;
+    this.mutationObserver?.observe(this.options.threeCanvas, { attributes: true, attributeFilter: ["width", "height"] });
+    this.options.resize(this.latestMetrics.pixelWidth, this.latestMetrics.pixelHeight);
+    return this.latestMetrics;
+  }
+
+  setPresentation(presentation: RendererPrimaryPresentationR11, reason: string | null = null) {
+    if (this.disposed) return false;
+    if (presentation === "three" && reason) this.recordFallback(reason);
+    this.presentation = presentation;
+    applyRendererCanvasPresentationR11(this.options.threeCanvas, this.wgpuCanvas, presentation);
+    return true;
+  }
+
+  /** Reveals Three synchronously; React may replace the keyed WGPU node after this returns. */
+  prepareReplacement(reason: string) {
+    if (this.disposed) return null;
+    this.setPresentation("three", reason);
+    this.pendingReplacementGeneration = ++this.replacementGeneration;
+    return this.pendingReplacementGeneration;
+  }
+
+  installReplacementCanvas(canvas: HTMLCanvasElement, generation: number) {
+    if (this.disposed || generation !== this.pendingReplacementGeneration) return null;
+    this.wgpuCanvas = canvas;
+    this.pendingReplacementGeneration = null;
+    this.prepareCanvas(canvas);
+    applyRendererCanvasPresentationR11(this.options.threeCanvas, canvas, "three");
+    return this.latestMetrics;
+  }
+
+  syncSize() {
+    if (this.disposed) return this.latestMetrics;
+    this.latestMetrics = rendererCanvasMetricsR11(this.options.threeCanvas, this.devicePixelRatio());
+    this.options.resize(this.latestMetrics.pixelWidth, this.latestMetrics.pixelHeight);
+    return this.latestMetrics;
+  }
+
+  diagnostics() {
+    return Object.freeze({
+      schema: 1,
+      presentation: this.presentation,
+      visualContributors: 1,
+      inputTarget: "three" as const,
+      replacementGeneration: this.replacementGeneration,
+      pendingReplacementGeneration: this.pendingReplacementGeneration,
+      resizeEvents: this.resizeEvents,
+      fullscreenEvents: this.fullscreenEvents,
+      metrics: this.latestMetrics,
+      fallbackEvents: Object.freeze([...this.fallbackEvents]),
+      disposed: this.disposed,
+    });
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.mutationObserver?.disconnect();
+    this.mutationObserver = null;
+    this.options.windowTarget?.removeEventListener("resize", this.onWindowResize);
+    this.options.documentTarget?.removeEventListener("fullscreenchange", this.onFullscreenChange);
+    applyRendererCanvasPresentationR11(this.options.threeCanvas, this.wgpuCanvas, "three");
+    this.pendingReplacementGeneration = null;
+  }
+
+  private prepareCanvas(canvas: HTMLCanvasElement) {
+    this.latestMetrics = rendererCanvasMetricsR11(this.options.threeCanvas, this.devicePixelRatio());
+    canvas.width = this.latestMetrics.pixelWidth;
+    canvas.height = this.latestMetrics.pixelHeight;
+  }
+
+  private devicePixelRatio() {
+    return this.options.devicePixelRatio?.() ?? 1;
+  }
+
+  private recordFallback(reason: string) {
+    const bounded = boundedRendererReasonR11(reason);
+    if (this.fallbackEvents.at(-1) === bounded) return;
+    this.fallbackEvents.push(bounded);
+    if (this.fallbackEvents.length > MAX_RENDERER_FALLBACK_EVENTS_R11) this.fallbackEvents.shift();
+  }
+}
+
+function boundedRendererReasonR11(reason: string) {
+  const normalized = String(reason).replace(/[\r\n\t]+/gu, " ").trim() || "renderer lifecycle fallback";
+  return normalized.slice(0, MAX_RENDERER_FAILURE_REASON_LENGTH_R11);
 }
 
 export type RendererShellSnapshotR11 = Readonly<{

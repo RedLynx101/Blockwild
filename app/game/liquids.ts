@@ -376,6 +376,8 @@ export type SwimmerState = Readonly<{
   entryMomentumSpeed?: number;
   /** A released Space press rearms one controlled breach through the surface. */
   surfaceBreachReady?: boolean;
+  /** A released Space press rearms one, and only one, low-bank exit impulse. */
+  shoreExitReady?: boolean;
   /** Remaining time for the current surface-crossing stroke. */
   surfaceBreachSeconds?: number;
   /** Recovery window before held swim input may begin another surface stroke. */
@@ -449,6 +451,168 @@ export type SwimRules = Readonly<{
   surfaceStrokeCycleSeconds: number;
 }>;
 
+/**
+ * A shore exit is a short mantle, not a single frame of upward velocity.
+ * The existing surface-breach timer carries this bounded state so saved-body
+ * and wire schemas do not need another field.
+ */
+export const SHORE_MANTLE_SUSTAIN_SECONDS = 0.2;
+
+/**
+ * Find the top of a contiguous loaded liquid column only when a bounded probe
+ * reaches a loaded, non-solid cell. Reaching the cap, an unloaded cell, or a
+ * solid ceiling is unknown rather than an invented surface.
+ */
+export function loadedLiquidSurfaceY(
+  startY: number,
+  maximumCellsAbove: number,
+  getBlock: (y: number) => BlockId | undefined,
+): number | undefined {
+  if (!Number.isFinite(startY) || !Number.isFinite(maximumCellsAbove) || maximumCellsAbove < 1) return undefined;
+  const first = getBlock(startY);
+  if (first === undefined || liquidKindForBlock(first) === undefined) return undefined;
+  let liquidY = startY;
+  const limit = Math.min(512, Math.trunc(maximumCellsAbove));
+  for (let offset = 1; offset <= limit; offset += 1) {
+    const above = getBlock(startY + offset);
+    if (above === undefined) return undefined;
+    if (liquidKindForBlock(above) !== undefined) {
+      liquidY = startY + offset;
+      continue;
+    }
+    const definition = BLOCKS[above];
+    return !definition || definition.solid ? undefined : liquidY + 0.5;
+  }
+  return undefined;
+}
+
+export type LoadedShoreLedgeProbe = Readonly<{
+  surfaceY: number | undefined;
+  forwardX: number;
+  forwardZ: number;
+  radius: number;
+  height: number;
+  getBlock: (x: number, y: number, z: number) => BlockId | undefined;
+}>;
+
+export type LoadedBodyCollision = "clear" | "solid" | "unknown";
+
+export type LoadedBodyCollisionProbe = Readonly<{
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  height: number;
+  getBlock: (x: number, y: number, z: number) => BlockId | undefined;
+}>;
+
+export function projectBodyOntoForwardMotion(
+  positionX: number,
+  positionZ: number,
+  velocityX: number,
+  velocityZ: number,
+  yaw: number,
+  deltaSeconds: number,
+) {
+  const forwardX = -Math.sin(yaw);
+  const forwardZ = -Math.cos(yaw);
+  const attemptedDistance = Math.max(
+    0,
+    velocityX * deltaSeconds * forwardX + velocityZ * deltaSeconds * forwardZ,
+  );
+  return {
+    x: positionX + forwardX * attemptedDistance,
+    z: positionZ + forwardZ * attemptedDistance,
+    attemptedDistance,
+  };
+}
+
+/** Full-cell collision scan matching the native body kernel, with unknown winning. */
+export function loadedBodyCollisionAt({
+  x: bodyX,
+  y: bodyY,
+  z: bodyZ,
+  radius,
+  height,
+  getBlock,
+}: LoadedBodyCollisionProbe): LoadedBodyCollision {
+  if (![bodyX, bodyY, bodyZ, radius, height].every(Number.isFinite) || radius < 0 || height <= 0) {
+    return "unknown";
+  }
+  const minimumX = Math.floor(bodyX - radius + 0.5);
+  const maximumX = Math.floor(bodyX + radius - 0.001 + 0.5);
+  const minimumY = Math.floor(bodyY + 0.25);
+  const maximumY = Math.floor(bodyY + height - 0.001 + 0.5);
+  const minimumZ = Math.floor(bodyZ - radius + 0.5);
+  const maximumZ = Math.floor(bodyZ + radius - 0.001 + 0.5);
+  let collision = false;
+  let unknown = false;
+  for (let x = minimumX; x <= maximumX; x += 1) {
+    for (let y = minimumY; y <= maximumY; y += 1) {
+      for (let z = minimumZ; z <= maximumZ; z += 1) {
+        const block = getBlock(x, y, z);
+        if (block === undefined) {
+          unknown = true;
+          continue;
+        }
+        const definition = BLOCKS[block];
+        if (!definition) {
+          unknown = true;
+          continue;
+        }
+        if (!definition.solid) continue;
+        const blockBottom = y - 0.5;
+        const blockTop = blockBottom + 1;
+        if (bodyY + height > blockBottom && bodyY < blockTop) collision = true;
+      }
+    }
+  }
+  return unknown ? "unknown" : collision ? "solid" : "clear";
+}
+
+/**
+ * Classify a surface-relative low bank only when the complete standing capsule
+ * is loaded and collision-free. Like native, the forward probe selects an
+ * integer target cell and centers the standing capsule there; every cell that
+ * the supplied radius reaches still has to be loaded and clear.
+ */
+export function loadedLowBankShoreLedgeHeight({
+  surfaceY,
+  forwardX,
+  forwardZ,
+  radius,
+  height,
+  getBlock,
+}: LoadedShoreLedgeProbe): number | undefined {
+  if (surfaceY === undefined || !Number.isFinite(surfaceY)
+    || !Number.isFinite(forwardX) || !Number.isFinite(forwardZ)
+    || !Number.isFinite(radius) || radius < 0
+    || !Number.isFinite(height) || height <= 0) return undefined;
+  const targetX = Math.floor(forwardX + 0.5);
+  const targetZ = Math.floor(forwardZ + 0.5);
+  const minimumSupportY = Math.floor(surfaceY - 0.5);
+  const maximumSupportY = Math.floor(surfaceY + 1.15 - 0.5);
+
+  for (let supportY = maximumSupportY; supportY >= minimumSupportY; supportY -= 1) {
+    const support = getBlock(targetX, supportY, targetZ);
+    if (support === undefined) return undefined;
+    const supportDefinition = BLOCKS[support];
+    if (!supportDefinition) return undefined;
+    if (!supportDefinition.solid) continue;
+    const supportTop = supportY + 0.5;
+    const standingY = supportTop + 0.01;
+    if (loadedBodyCollisionAt({
+      x: targetX,
+      y: standingY,
+      z: targetZ,
+      radius,
+      height,
+      getBlock,
+    }) === "clear") return Math.max(0, supportTop - surfaceY);
+  }
+  return undefined;
+}
+
 export const DEFAULT_SWIM_RULES: SwimRules = Object.freeze({
   maxOxygenSeconds: 12,
   oxygenDrainPerSecond: 1,
@@ -497,23 +661,46 @@ export function stepSwimming(
   let damage = 0;
   let entryMomentumSpeed = Math.max(0, state.entryMomentumSpeed ?? 0);
   let surfaceBreachReady = state.surfaceBreachReady ?? true;
+  let shoreExitReady = state.shoreExitReady ?? true;
   let surfaceBreachSeconds = Math.max(0, state.surfaceBreachSeconds ?? 0);
   let surfaceStrokeCooldownSeconds = Math.max(0, state.surfaceStrokeCooldownSeconds ?? 0);
   let surfaceBobActive = state.surfaceBobActive ?? false;
   surfaceStrokeCooldownSeconds = Math.max(0, surfaceStrokeCooldownSeconds - dt);
+  const ledgeHeight = environment.shoreLedgeHeight ?? Number.POSITIVE_INFINITY;
+  const surfaceGap = environment.surfaceGap ?? Number.POSITIVE_INFINITY;
+  const shoreExitCandidate = input.jumpHeld
+    && input.movingForward
+    && !environment.headSubmerged
+    && environment.horizontalCollision
+    && ledgeHeight <= 1.15
+    && surfaceGap <= 0.9;
+  const shoreMantleWasActive = !shoreExitReady
+    && surfaceBreachSeconds > 0
+    && surfaceStrokeCooldownSeconds <= 0
+    && !surfaceBobActive;
   if (!input.jumpHeld) {
     surfaceBreachReady = true;
+    shoreExitReady = true;
     surfaceBreachSeconds = 0;
     surfaceStrokeCooldownSeconds = 0;
     surfaceBobActive = false;
-  } else if (surfaceStrokeCooldownSeconds <= 0
+  } else if (!input.movingForward && shoreMantleWasActive) {
+    surfaceBreachSeconds = 0;
+  } else if (shoreExitReady
+    && surfaceStrokeCooldownSeconds <= 0
     && (environment.headSubmerged
       || (environment.surfaceClearance ?? Number.NEGATIVE_INFINITY) <= rules.surfaceBobFloorClearance)) {
     // A held swimmer earns another stroke after the complete recovery
-    // interval. This catches the bottom of the breathing arc just before the
-    // eye sample falls underwater, while the cooldown still prevents a
-    // walkable-water elevator.
+    // interval. Shore exits use an independent press latch, so ordinary
+    // surface-bob recovery cannot re-arm a held bank impulse. This catches
+    // the bottom of the breathing arc just before the eye sample falls
+    // underwater, while the cooldown still prevents a walkable-water elevator.
     surfaceBreachReady = true;
+  }
+  if (submersion <= Number.EPSILON) {
+    surfaceBreachSeconds = 0;
+    surfaceStrokeCooldownSeconds = 0;
+    surfaceBobActive = false;
   }
 
   if (environment.headSubmerged) {
@@ -563,15 +750,24 @@ export function stepSwimming(
     velocityY = Math.max(-entryMaximumSink, velocityY);
     if (velocityY >= -ordinaryMaximumSink + 1e-6) entryMomentumSpeed = 0;
 
-    const ledgeHeight = environment.shoreLedgeHeight ?? Number.POSITIVE_INFINITY;
-    const surfaceGap = environment.surfaceGap ?? Number.POSITIVE_INFINITY;
-    if (input.jumpHeld && input.movingForward && environment.horizontalCollision && ledgeHeight <= 1.15 && surfaceGap <= 0.9) {
+    const shoreMantleActive = !shoreExitReady
+      && surfaceBreachSeconds > 0
+      && surfaceStrokeCooldownSeconds <= 0
+      && !surfaceBobActive;
+    if (shoreMantleActive && input.jumpHeld && input.movingForward) {
+      velocityY = Math.max(velocityY, rules.shoreExitVelocity);
+      surfaceBreachSeconds = Math.max(0, surfaceBreachSeconds - dt);
+    } else if (shoreExitReady && shoreExitCandidate) {
       velocityY = Math.max(velocityY, rules.shoreExitVelocity);
       shoreBoosted = true;
+      shoreExitReady = false;
       surfaceBreachReady = false;
-      surfaceBreachSeconds = 0;
+      surfaceBreachSeconds = SHORE_MANTLE_SUSTAIN_SECONDS;
+      surfaceStrokeCooldownSeconds = 0;
       surfaceBobActive = false;
-    } else if (input.jumpHeld && !environment.headSubmerged && entryMomentumSpeed <= ordinaryMaximumSink) {
+    } else if (input.jumpHeld
+      && !environment.headSubmerged
+      && entryMomentumSpeed <= ordinaryMaximumSink) {
       const beginsSurfaceBreach = surfaceBreachReady && velocityY > 0.35;
       const beginsHeldSurfaceBob = surfaceBreachReady
         && surfaceStrokeCooldownSeconds <= 0
@@ -617,6 +813,7 @@ export function stepSwimming(
       drowningAccumulator,
       entryMomentumSpeed,
       surfaceBreachReady,
+      shoreExitReady,
       surfaceBreachSeconds,
       surfaceStrokeCooldownSeconds,
       surfaceBobActive,

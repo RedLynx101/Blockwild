@@ -18,10 +18,15 @@ import {
   type RustIntegratedRuntimeTransportV1,
 } from "./rust-integrated-runtime-contract";
 import {
+  RUST_INTEGRATED_PERSISTENCE_STATUS_RECEIPT_TYPE_V1,
+  RUST_INTEGRATED_PERSISTENCE_STATUS_TYPE_V1,
   RUST_INTEGRATED_PERSISTENCE_RESPONSE_TYPE_V1,
   RUST_INTEGRATED_RUNTIME_BULK_MAX_ATTACHMENT_BYTES_V1,
+  RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1,
   RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1,
   RUST_INTEGRATED_RUNTIME_BULK_SAVE_CHUNK_BYTES_V1,
+  RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1,
+  RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
   rustIntegratedRuntimeBulkStateV1,
   type RustIntegratedRuntimeBulkResponseV1,
   type RustIntegratedRuntimeBulkStateV1,
@@ -42,6 +47,7 @@ import {
   createRustIntegratedRuntimeCommandBatchV1,
   createRustIntegratedRuntimeDomainOperationV1,
 } from "./rust-integrated-runtime-codec";
+import { rustIntegratedRuntimeDomainWireFamilyV1 } from "./rust-integrated-runtime-domain-schema.generated.ts";
 
 export const RUST_INTEGRATED_RUNTIME_COMMAND_P95_BUDGET_MS = 50;
 export const RUST_INTEGRATED_RUNTIME_STEP_P95_BUDGET_MS = 8;
@@ -56,6 +62,10 @@ const FIXED_STEP_INPUT_CAPABILITY = "fixed-step-input-v1";
 const BOUNDED_EXTRACTION_CAPABILITY = "bounded-extraction-v1";
 const BOUNDED_ENTITY_EXTRACTION_CAPABILITY = "bounded-entity-extraction-v1";
 const BOUNDED_EXTRACTION_BLOCKERS_CAPABILITY = "bounded-extraction-blockers-v1";
+const CONTENT_INSTALL_PAGE_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("content-install-page-v1");
+const CONTENT_INSTALL_RECEIPT_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("content-install-receipt-v1");
+const PLAYER_LOCATOR_ITEM_CONSUME_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("player-locator-item-consume-v1");
+const PLAYER_LOCATOR_ITEM_CONSUME_TYPE_V1 = PLAYER_LOCATOR_ITEM_CONSUME_SCHEMA_V1.typeId;
 
 export type RustIntegratedRuntimeServiceStateV1 = "idle" | "starting" | "ready" | "failed" | "recovering" | "stopping" | "stopped";
 
@@ -155,6 +165,45 @@ function identityDoesNotRegress(
     .every((key) => after.revision[key] >= before.revision[key]);
 }
 
+function recoveredLocatorReceiptTerminalMatchesCurrent(
+  terminal: RustIntegratedRuntimeIdentityV1,
+  current: RustIntegratedRuntimeIdentityV1,
+) {
+  if (terminal.universeId !== current.universeId
+    || terminal.locationId !== current.locationId
+    || terminal.tick !== current.tick) return false;
+  if (terminal.revision.epoch !== current.revision.epoch
+    || terminal.revision.world !== current.revision.world
+    || terminal.revision.entities !== current.revision.entities
+    || terminal.revision.gameplay !== current.revision.gameplay
+    || terminal.revision.network !== current.revision.network
+    || terminal.revision.simulation !== current.revision.simulation) return false;
+  // Native save hydration may rebase only persistence revision and stateHash
+  // in either direction. The locator caller additionally verifies the exact
+  // BWX7 receipt and post-hydrate inventory extraction before browser commit.
+  return rustIntegratedRuntimeIdentityEqualsV1(terminal, current)
+    || terminal.stateHash !== current.stateHash;
+}
+
+function isPlayerLocatorItemConsumeRecovery(batch: RustIntegratedRuntimeCommandBatchV1) {
+  return batch.operations.length === 1
+    && batch.operations[0].domain === "gameplay"
+    && batch.operations[0].typeId === PLAYER_LOCATOR_ITEM_CONSUME_TYPE_V1
+    && batch.operations[0].schema === PLAYER_LOCATOR_ITEM_CONSUME_SCHEMA_V1.operationSchema;
+}
+
+function provenLargeBulkPollBytesV1(
+  response: Extract<RustIntegratedRuntimeBulkResponseV1, { type: "runtime-bulk-error-v1" }>,
+) {
+  // IntegratedRuntimeError preserves the dispatcher code in the message while
+  // giving every dispatcher failure the stable outer wire code below.
+  if (response.code !== "persistence-dispatch-error") return null;
+  const match = /^dispatch-packet-too-large: next BWPR requires ([1-9][0-9]*) bytes$/u.exec(response.message);
+  if (!match) return null;
+  const requiredBytes = Number(match[1]);
+  return Number.isSafeInteger(requiredBytes) ? requiredBytes : null;
+}
+
 export class RustIntegratedRuntimeServiceV1 {
   private transport: RustIntegratedRuntimeTransportV1 | null = null;
   private state: RustIntegratedRuntimeServiceStateV1 = "idle";
@@ -236,6 +285,61 @@ export class RustIntegratedRuntimeServiceV1 {
 
   command(batch: RustIntegratedRuntimeCommandBatchV1) {
     return this.dispatchCommand(batch, false);
+  }
+
+  /**
+   * Lookup-only replay of a command receipt already committed by Rust. This
+   * deliberately bypasses command()'s expected-identity precheck because a
+   * native save hydration may have rebased persistence state since the locator
+   * consume became terminal. It never mutates the service authority identity.
+   */
+  recoverCommand(batch: RustIntegratedRuntimeCommandBatchV1) {
+    this.requireReady();
+    if (!isPlayerLocatorItemConsumeRecovery(batch)) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError(
+        "not-authoritative",
+        "persistence-rebased receipt recovery is limited to the versioned player locator item consume operation",
+      ));
+    }
+    const key = `${batch.actorId}\u0000${batch.idempotencyKey}`;
+    const cached = this.idempotency.get(key);
+    if (cached && cached.commandHash !== batch.commandHash) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError("idempotency-conflict", "idempotency key was reused for different command bytes"));
+    }
+    return this.enqueue(async () => {
+      const started = this.now();
+      try {
+        this.requireReady();
+        const current = this.requireIdentity();
+        if (rustIntegratedRuntimeIdentityEqualsV1(current, batch.expected)) {
+          throw new RustIntegratedRuntimeServiceError(
+            "not-authoritative",
+            "lookup-only locator recovery requires a post-dispatch hydrated identity",
+          );
+        }
+        const receipt = await this.lookupRecoveredLocatorCommand(batch, current);
+        if (!rustIntegratedRuntimeIdentityEqualsV1(this.requireIdentity(), current)) {
+          throw new RustIntegratedRuntimeServiceError("invalid-response", "command recovery changed the authoritative service identity");
+        }
+        const previous = this.idempotency.get(key);
+        this.idempotency.set(key, Object.freeze({ commandHash: batch.commandHash, state: "settled", receipt }));
+        this.retainIdempotencyKey(key);
+        if (previous?.state !== "settled") {
+          if (receipt.status === "accepted") this.acceptedCommands += 1;
+          else this.rejectedCommands += 1;
+        }
+        return receipt;
+      } catch (error) {
+        if (!(error instanceof RustIntegratedRuntimeServiceError
+          && (error.code === "idempotency-conflict" || error.code === "indeterminate-command"
+            || error.code === "not-authoritative"))) {
+          this.failClosed(error);
+        }
+        throw error;
+      } finally {
+        this.recordMetric("command", this.now() - started);
+      }
+    });
   }
 
   private dispatchCommand(batch: RustIntegratedRuntimeCommandBatchV1, allowContentPending: boolean) {
@@ -361,6 +465,58 @@ export class RustIntegratedRuntimeServiceV1 {
     }
   }
 
+  private async lookupRecoveredLocatorCommand(
+    batch: RustIntegratedRuntimeCommandBatchV1,
+    current: RustIntegratedRuntimeIdentityV1,
+  ) {
+    // This is deliberately the ordinary command envelope. Native Rust checks
+    // its durable idempotency cache before the historical expected identity;
+    // a cache miss therefore returns a stale rejection and cannot execute.
+    const response = await this.send({
+      type: "runtime-command-v1",
+      requestId: this.requestId(),
+      clientEpoch: this.clientEpoch,
+      batch,
+    }, true);
+    this.acceptWorkerEpoch(response);
+    if (response.type === "runtime-error-v1") {
+      if (response.current && !rustIntegratedRuntimeIdentityEqualsV1(response.current, current)) {
+        throw new RustIntegratedRuntimeServiceError("invalid-response", "runtime recovery refusal reported a different authority identity");
+      }
+      if (response.code === "idempotency-conflict") {
+        throw new RustIntegratedRuntimeServiceError("idempotency-conflict", response.message);
+      }
+      throw new RustIntegratedRuntimeServiceError("invalid-response", `${response.code}: ${response.message}`);
+    }
+    if (response.type !== "runtime-command-receipt-v1") {
+      throw new RustIntegratedRuntimeServiceError("invalid-response", "runtime recovery command did not return an awaited receipt");
+    }
+    const receipt = response.receipt;
+    if (receipt.commandId !== batch.commandId || receipt.idempotencyKey !== batch.idempotencyKey || receipt.commandHash !== batch.commandHash) {
+      throw new RustIntegratedRuntimeServiceError("invalid-response", "recovered receipt does not identify the original command bytes");
+    }
+    if (receipt.status === "accepted") {
+      if (!rustIntegratedRuntimeIdentityEqualsV1(receipt.before, batch.expected)) {
+        throw new RustIntegratedRuntimeServiceError("invalid-response", "recovered accepted receipt before-identity does not match the original command");
+      }
+      if (!identityDoesNotRegress(receipt.before, receipt.after)) {
+        throw new RustIntegratedRuntimeServiceError("invalid-response", "recovered accepted receipt regressed the authoritative identity");
+      }
+    } else {
+      // A cache miss is a normal stale-command receipt at the current hydrated
+      // identity. It conclusively proves that no locator debit can be resumed.
+      if (receipt.code === "stale-runtime"
+        && rustIntegratedRuntimeIdentityEqualsV1(receipt.current, current)) {
+        throw new RustIntegratedRuntimeServiceError("indeterminate-command", "restored runtime has no durable locator command receipt");
+      }
+      throw new RustIntegratedRuntimeServiceError("invalid-response", "locator receipt lookup returned a non-cached rejection");
+    }
+    if (!recoveredLocatorReceiptTerminalMatchesCurrent(receipt.after, current)) {
+      throw new RustIntegratedRuntimeServiceError("invalid-response", "recovered locator receipt differs from current authority outside persistence state");
+    }
+    return receipt;
+  }
+
   installContent(bundle: RustProductionContentBundle) {
     this.requireReady(true);
     if (!this.contentRequired || !this.verifiedCapabilities.has(RUST_CONTENT_INSTALL_CAPABILITY_V1)) {
@@ -388,7 +544,7 @@ export class RustIntegratedRuntimeServiceV1 {
             operations: [createRustIntegratedRuntimeDomainOperationV1({
               domain: "gameplay",
               typeId: RUST_CONTENT_INSTALL_PAGE_TYPE_V1,
-              schema: 1,
+              schema: CONTENT_INSTALL_PAGE_SCHEMA_V1.operationSchema,
               payload,
             })],
           });
@@ -397,7 +553,8 @@ export class RustIntegratedRuntimeServiceV1 {
             throw new RustIntegratedRuntimeServiceError("content-install", result.status === "rejected" ? `${result.code}: ${result.message}` : "content page returned no native receipt");
           }
           const domainReceipt = result.domainReceipts[0];
-          if (domainReceipt.domain !== "gameplay" || domainReceipt.typeId !== RUST_CONTENT_INSTALL_RECEIPT_TYPE_V1 || domainReceipt.schema !== 1) {
+          if (domainReceipt.domain !== "gameplay" || domainReceipt.typeId !== RUST_CONTENT_INSTALL_RECEIPT_TYPE_V1
+            || domainReceipt.schema !== CONTENT_INSTALL_RECEIPT_SCHEMA_V1.operationSchema) {
             throw new RustIntegratedRuntimeServiceError("content-install", "content page returned the wrong native receipt type");
           }
           const receipt = decodeRustContentInstallReceiptV1(domainReceipt.payload);
@@ -570,20 +727,93 @@ export class RustIntegratedRuntimeServiceV1 {
     return this.enqueue(async () => {
       const expected = this.requireIdentity();
       try {
-        const response = await this.sendBulk({
-          type: "runtime-bulk-poll-v1",
-          requestId: this.requestId(),
-          clientEpoch: this.clientEpoch,
-          expected: rustIntegratedRuntimeBulkStateV1(expected),
-          maxBytes,
-        });
-        this.acceptBulkWorkerEpoch(response);
+        const sendPoll = async (pollMaxBytes: number) => {
+          const requestId = this.requestId();
+          const response = await this.sendBulk({
+            type: "runtime-bulk-poll-v1",
+            requestId,
+            clientEpoch: this.clientEpoch,
+            expected: rustIntegratedRuntimeBulkStateV1(expected),
+            maxBytes: pollMaxBytes,
+          });
+          this.acceptBulkWorkerEpoch(response);
+          if (response.requestId !== requestId) throw this.failBulkProtocol("bulk poll returned another request id");
+          return response;
+        };
+        // maxBytes is caller capacity, not proof that an ordinary poll is
+        // recovery-scale work. Probe at the routine bound first. Rust returns
+        // this exact error before removing the queued packet or allocating its
+        // transfer token, so only a proven large front packet earns the wider
+        // retry watchdog.
+        let response = await sendPoll(Math.min(maxBytes, RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1));
+        const requiredBytes = response.type === "runtime-bulk-error-v1"
+          ? provenLargeBulkPollBytesV1(response)
+          : null;
+        if (maxBytes > RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1
+          && requiredBytes !== null
+          && requiredBytes > RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1
+          && requiredBytes <= maxBytes) {
+          if (!response.current || !bulkStateEqualsIdentity(response.current, expected)) {
+            throw this.failBulkProtocol("bulk capacity probe did not preserve exact authority state");
+          }
+          response = await sendPoll(maxBytes);
+        }
         if (response.type === "runtime-bulk-error-v1") return this.rejectBulkError(response, expected);
         if (response.type !== "runtime-bulk-empty-v1" && response.type !== "runtime-bulk-platform-request-v1") {
           throw this.failBulkProtocol("bulk poll returned the wrong operation");
         }
-        if (!bulkStateEqualsIdentity(response.current, expected)) throw this.failBulkProtocol("bulk poll changed or regressed authority state");
+        if (response.type === "runtime-bulk-empty-v1") {
+          if (!bulkStateEqualsIdentity(response.current, expected)) {
+            throw this.failBulkProtocol("empty bulk poll changed authority state");
+          }
+        } else {
+          // Moving a Rust-owned dispatcher request from pending to in-flight is
+          // itself an authoritative custody transition. It may change only the
+          // state hash while leaving the public revision counters unchanged.
+          // Adopt that exact returned identity before the browser completes
+          // the transfer token, or the following completion is necessarily
+          // authored against stale authority.
+          this.acceptBulkPollCustodyTransition(expected, response.current);
+        }
         return response;
+      } catch (error) {
+        if (error instanceof RustIntegratedRuntimeServiceError && error.code === "bulk-platform") throw error;
+        this.failClosed(error);
+        throw error;
+      }
+    });
+  }
+
+  /** Reads a dedicated BWT8 terminal attestation without command caching or an authority transition. */
+  persistenceStatus(payload: Uint8Array) {
+    this.requireReady();
+    this.requireBulkCapability();
+    if (!(payload instanceof Uint8Array) || payload.byteLength < 1
+      || payload.byteLength > RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError("capacity", "persistence status query exceeds its inline byte budget"));
+    }
+    return this.enqueue(async () => {
+      const expected = this.requireIdentity();
+      try {
+        const response = await this.sendBulk({
+          type: "runtime-bulk-persistence-status-v1",
+          requestId: this.requestId(),
+          clientEpoch: this.clientEpoch,
+          expected: rustIntegratedRuntimeBulkStateV1(expected),
+          typeId: RUST_INTEGRATED_PERSISTENCE_STATUS_TYPE_V1,
+          payload,
+        });
+        this.acceptBulkWorkerEpoch(response);
+        if (response.type === "runtime-bulk-error-v1") return this.rejectBulkError(response, expected);
+        if (response.type !== "runtime-bulk-persistence-status-v1"
+          || response.typeId !== RUST_INTEGRATED_PERSISTENCE_STATUS_RECEIPT_TYPE_V1) {
+          throw this.failBulkProtocol("bulk persistence status returned the wrong operation");
+        }
+        if (!bulkStateEqualsIdentity(response.current, expected)
+          || !rustIntegratedRuntimeIdentityEqualsV1(this.requireIdentity(), expected)) {
+          throw this.failBulkProtocol("bulk persistence status changed authority state");
+        }
+        return response.payload;
       } catch (error) {
         if (error instanceof RustIntegratedRuntimeServiceError && error.code === "bulk-platform") throw error;
         this.failClosed(error);
@@ -726,6 +956,75 @@ export class RustIntegratedRuntimeServiceV1 {
           throw this.failBulkProtocol("bulk native save initialization returned the wrong receipt");
         }
         this.acceptBulkAuthorityAdvance(expected, response.current, "bulk native save initialization");
+        return response;
+      } catch (error) {
+        if (error instanceof RustIntegratedRuntimeServiceError && error.code === "bulk-platform") throw error;
+        this.failClosed(error);
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * Migrates only a provably world-only legacy source through Rust's dedicated
+   * one-time gate. The exact source must already occupy the named compatibility
+   * stage. Any non-world flags are sent to Rust so it can reject rich saves
+   * without consuming that stage; this method never emulates migration with an
+   * ordinary compatibility finalize.
+   */
+  migrateLegacyWorldOnly(
+    stageId: string,
+    createdAt: number,
+    legacyNonWorldStateFlags: number,
+    sourceKey: string,
+    sourceFormat: string,
+    worldProjection: Uint8Array,
+  ) {
+    this.requireReady();
+    this.requireNativeSaveCapability();
+    if (!Number.isSafeInteger(legacyNonWorldStateFlags)
+      || legacyNonWorldStateFlags < 0
+      || legacyNonWorldStateFlags > 0xffff) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError(
+        "bulk-platform",
+        "legacy migration non-world state flags exceed the V1 mask",
+      ));
+    }
+    if (!(worldProjection instanceof Uint8Array)
+      || worldProjection.byteLength < 1
+      || worldProjection.byteLength > RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError(
+        "capacity",
+        "legacy world projection is outside its 32 MiB byte budget",
+      ));
+    }
+    return this.enqueue(async () => {
+      const expected = this.requireIdentity();
+      try {
+        const response = await this.sendBulk({
+          type: "runtime-bulk-migrate-legacy-world-v1",
+          requestId: this.requestId(),
+          clientEpoch: this.clientEpoch,
+          expected: rustIntegratedRuntimeBulkStateV1(expected),
+          stageId,
+          createdAt,
+          legacyNonWorldStateFlags,
+          sourceKey,
+          sourceFormat,
+          typeId: RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
+          worldProjection,
+        });
+        this.acceptBulkWorkerEpoch(response);
+        if (response.type === "runtime-bulk-error-v1") {
+          if (!response.current) throw this.failBulkProtocol("bulk legacy world migration rejection omitted authority state");
+          return this.rejectBulkError(response, expected);
+        }
+        if (response.type !== "runtime-bulk-save-progress-v1"
+          || response.state !== "finalized"
+          || response.stageId !== stageId) {
+          throw this.failBulkProtocol("bulk legacy world migration returned the wrong receipt");
+        }
+        this.acceptBulkAuthorityAdvance(expected, response.current, "bulk legacy world migration");
         return response;
       } catch (error) {
         if (error instanceof RustIntegratedRuntimeServiceError && error.code === "bulk-platform") throw error;
@@ -1002,7 +1301,11 @@ export class RustIntegratedRuntimeServiceV1 {
     try {
       response = await transport.request(request);
     } catch (error) {
-      throw new RustIntegratedRuntimeServiceError("worker-failed", "integrated runtime worker request failed", error);
+      const operation = request.type === "runtime-command-v1" || request.type === "runtime-recover-command-v1"
+        ? `${request.type} [${request.batch.operations.map((entry) => entry.typeId).join(", ")}]`
+        : request.type;
+      const detail = error instanceof Error && error.message ? `: ${error.message}` : "";
+      throw new RustIntegratedRuntimeServiceError("worker-failed", `${operation} worker request failed${detail}`, error);
     }
     if (response.clientEpoch !== this.clientEpoch || response.requestId !== request.requestId) {
       this.staleResponses += 1;
@@ -1052,6 +1355,18 @@ export class RustIntegratedRuntimeServiceV1 {
     const after = identityFromBulkState(before, state);
     if (!identityDoesNotRegress(before, after)) throw this.failBulkProtocol(`${operation} regressed authoritative state`);
     this.currentIdentity = after;
+  }
+
+  private acceptBulkPollCustodyTransition(
+    before: RustIntegratedRuntimeIdentityV1,
+    state: RustIntegratedRuntimeBulkStateV1,
+  ) {
+    const revisionsMatch = (Object.keys(state.revision) as Array<keyof RustIntegratedRuntimeIdentityV1["revision"]>)
+      .every((key) => state.revision[key] === before.revision[key]);
+    if (state.tick !== before.tick || !revisionsMatch || state.stateHash === before.stateHash) {
+      throw this.failBulkProtocol("bulk poll returned an invalid dispatcher custody transition");
+    }
+    this.currentIdentity = identityFromBulkState(before, state);
   }
 
   private acceptWorkerEpoch(response: Readonly<{ workerEpoch: number }>) {

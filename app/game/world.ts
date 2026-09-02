@@ -1,7 +1,18 @@
 import * as THREE from "three";
 import { ChunkMemoryCache, ChunkPersistentCache, type CachedChunkData } from "./chunk-cache";
 import { TerrainBufferPipeline, type TerrainMergedGeometry, type TerrainSectionGeometry } from "./terrain-buffer-pipeline";
-import { TerrainGenerationPipeline, type TerrainGenerationResult } from "./terrain-generation-pipeline";
+import {
+  TerrainGenerationPipeline,
+  type TerrainDragonLairLocatorQuery,
+  type TerrainGenerationResult,
+  type TerrainSettlementLocatorQuery,
+} from "./terrain-generation-pipeline";
+import {
+  configuredTerrainGenerationAuthorityV2,
+  explicitTerrainGenerationAuthorityV2,
+  type TerrainGenerationAuthorityModeV2,
+  type TerrainGenerationAuthoritySelectionV2,
+} from "./terrain-generation-authority";
 import {
   TerrainFluidFlagV1,
   TerrainHiddenFlagV1,
@@ -26,14 +37,25 @@ import {
 import type {
   RustChunkAuxiliaryInstallR4V1,
   RustChunkAuxiliaryPatchR4V1,
+  RustImmediateEditEventR4V1,
   RustSectionInstallR4V1,
   RustWorldMutationCommandR4V1,
 } from "./rust-world-authority-bridge-r4";
 import {
+  RUST_INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_DIRTY_SUBSYSTEMS_V2,
+  rustIntegratedRuntimeNativeBlockEditDirtyEvidenceHashV2,
+  type RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2,
+} from "./rust-integrated-runtime-native-block-edit";
+import {
+  assertWorldSectionAddressV1,
+  assertWorldAddressV1,
   canonicalWorldJsonV1,
   createWorldCompatibilitySaveV1,
   encodeWorldCompatibilitySaveV1,
+  sameWorldAddressV1,
+  worldSectionAddressKeyV1,
   type WorldAddressV1,
+  type WorldAuthorityIdentityV1,
 } from "./world-authority-contract";
 import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow";
 import { TypeScriptTerrainMesherBackend } from "./typescript-terrain-mesher";
@@ -122,7 +144,7 @@ import { DENSE_CUTOUT_LEAF_POLICY, planFullTree, planSubmergedFlora, planSyrupPo
 import { dragonLairMarkersForChunk, dragonLairPlacementsForChunk, dragonLairsIntersectingChunk, repairGeneratedTreePlan } from "./dragon-world";
 import { NPC_FACTION_IDS, normalizeEnabledFactions, type NpcFactionId } from "./factions";
 import { isRootableTreeSoil, planFrostpearTree } from "./farming";
-import { GUILD_NPCS, compatibleGuildIdsForSettlement, planGuildHalls, type GuildHallCandidate, type GuildHallState, type GuildId } from "./guilds";
+import { GUILD_NPCS, compatibleGuildIdsForSettlement, planGuildHalls, type GuildHallCandidate, type GuildHallPlacement, type GuildHallState, type GuildId } from "./guilds";
 import {
   planBiomeVegetation,
   planStructure,
@@ -148,6 +170,10 @@ import {
   type SettlementLayoutPlan,
   type SettlementResident,
 } from "./settlements";
+import {
+  materializeSettlementLayoutV1,
+  materializeSettlementPublicArrivalV1,
+} from "./settlement-materialization";
 import {
   DEFAULT_SETTLEMENT_ORIGIN_SEARCH_RADIUS,
   SettlementIndex,
@@ -194,6 +220,172 @@ export const SEA_LEVEL = 32;
 export const SECTION_HEIGHT = 16;
 export const SECTION_COUNT = WORLD_HEIGHT / SECTION_HEIGHT;
 export const GENERATOR_VERSION = 18;
+
+export type RustWorldCellProjectionInputV1 = Readonly<{
+  x: number;
+  y: number;
+  z: number;
+  expectedBlockId: BlockId;
+  replacementBlockId: BlockId;
+  immediate: boolean;
+  /** Permits recovery only when this exact non-noop transition is already visible locally. */
+  allowAlreadyApplied?: boolean;
+}>;
+
+export type RustWorldCellProjectionResultV1 = Readonly<{
+  schemaVersion: 1;
+  status: "applied" | "already-applied";
+  x: number;
+  y: number;
+  z: number;
+  expectedBlockId: BlockId;
+  replacementBlockId: BlockId;
+  immediate: boolean;
+  mutationRevisionBefore: number;
+  mutationRevisionAfter: number;
+  recordedEdit: boolean;
+}>;
+
+export type RustWorldAwaitedMutationCommandR4V1 =
+  | Readonly<{
+    kind: "set-block";
+    x: number;
+    y: number;
+    z: number;
+    blockId: BlockId;
+    facing?: BlockFacing;
+  }>
+  | Readonly<{
+    kind: "set-facing";
+    x: number;
+    y: number;
+    z: number;
+    facing: BlockFacing;
+  }>;
+
+export type RustWorldAwaitedMutationOptionsR4V1 = Readonly<{
+  /** Rebuild directly affected visible meshes before the accepted result resolves. */
+  immediate?: boolean;
+  /** Preserve the existing large-batch lighting deferral without weakening receipt ordering. */
+  deferLighting?: boolean;
+  /** Bounded caller identity recorded in the authoritative mutation receipt. */
+  authorityId?: string;
+}>;
+
+export type RustWorldAwaitedProjectedChangeR4V1 = Readonly<{
+  x: number;
+  y: number;
+  z: number;
+  previousBlockId: BlockId;
+  blockId: BlockId;
+  previousFacing: BlockFacing;
+  facing: BlockFacing;
+}>;
+
+export type RustWorldAwaitedMutationFailureReasonR4V1 =
+  | "invalid-request"
+  | "authority-not-active"
+  | "authority-not-ready"
+  | "authority-no-receipt"
+  | "authority-rejected"
+  | "stale-authority-revision"
+  | "world-generation-replaced"
+  | "authority-replaced"
+  | "compatibility-state-changed"
+  | "receipt-mismatch";
+
+type RustWorldAwaitedMutationResultBaseR4V1 = Readonly<{
+  schemaVersion: 1;
+  batchId: string;
+  authorityEpoch: number;
+  authorityIdentityBefore: WorldAuthorityIdentityV1 | null;
+  authorityIdentityAfter: WorldAuthorityIdentityV1 | null;
+  compatibilityMutationRevisionBefore: number;
+  compatibilityMutationRevisionAfter: number;
+}>;
+
+export type RustWorldAwaitedMutationResultR4V1 = RustWorldAwaitedMutationResultBaseR4V1 & (
+  | Readonly<{
+    status: "accepted";
+    mutated: boolean;
+    projectionStatus: "applied" | "already-applied" | "no-op";
+    projectedChanges: readonly RustWorldAwaitedProjectedChangeR4V1[];
+  }>
+  | Readonly<{
+    status: "rejected" | "stale";
+    reason: RustWorldAwaitedMutationFailureReasonR4V1;
+    detail: string;
+  }>
+);
+
+export type RustWorldValidatedMutationProjectionInputR4V1 = Readonly<{
+  batchId: string;
+  authorityIdentityBefore: WorldAuthorityIdentityV1;
+  authorityIdentityAfter: WorldAuthorityIdentityV1;
+  changes: readonly RustWorldAwaitedProjectedChangeR4V1[];
+  immediate: boolean;
+  deferLighting?: boolean;
+  /** Recovery succeeds only when every exact replacement is already recorded locally. */
+  allowAlreadyApplied?: boolean;
+}>;
+
+/**
+ * Already-authoritative native receipt projection with Rust-authored dirty
+ * evidence. The caller validates that the dirty seeds are cryptographically
+ * linked to the same accepted receipt; this boundary validates their exact
+ * structure and consumes the supplied section topology without deriving a
+ * second compatibility halo.
+ */
+export type RustWorldValidatedMutationProjectionInputR4V2 = RustWorldValidatedMutationProjectionInputR4V1 & Readonly<{
+  dirty: RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2;
+}>;
+
+type RustWorldValidatedMutationProjectionRawInputR4V2 = Omit<
+  RustWorldValidatedMutationProjectionInputR4V2,
+  "changes" | "dirty"
+> & Readonly<{
+  changes: readonly RustWorldAwaitedProjectedChangeR4V1[] | null;
+  dirty: Readonly<{
+    schema: unknown;
+    sequence: unknown;
+    receiptHash: unknown;
+    sections: RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2["sections"] | null;
+    columns: RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2["columns"] | null;
+    subsystemSeeds: RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2["subsystemSeeds"] | null;
+    evidenceHash: unknown;
+  }> | null;
+}>;
+
+type RustWorldAwaitedCellExpectationR4V1 = {
+  x: number;
+  y: number;
+  z: number;
+  initialBlock: BlockId;
+  initialFacing: BlockFacing;
+  block: BlockId;
+  facing: BlockFacing;
+};
+
+function cloneWorldAuthorityIdentityR4V1(identity: WorldAuthorityIdentityV1): WorldAuthorityIdentityV1;
+function cloneWorldAuthorityIdentityR4V1(identity: WorldAuthorityIdentityV1 | null): WorldAuthorityIdentityV1 | null;
+function cloneWorldAuthorityIdentityR4V1(identity: WorldAuthorityIdentityV1 | null): WorldAuthorityIdentityV1 | null {
+  if (!identity) return null;
+  return Object.freeze({
+    address: Object.freeze({ ...identity.address }),
+    revision: Object.freeze({ ...identity.revision }),
+    stateHash: identity.stateHash,
+  });
+}
+
+function sameWorldAuthorityIdentityR4V1(left: WorldAuthorityIdentityV1 | null, right: WorldAuthorityIdentityV1 | null) {
+  return Boolean(left && right
+    && left.address.universeId === right.address.universeId
+    && left.address.locationId === right.address.locationId
+    && left.revision.epoch === right.revision.epoch
+    && left.revision.mutation === right.revision.mutation
+    && left.revision.residency === right.revision.residency
+    && left.stateHash === right.stateHash);
+}
 
 export type RustTerrainR2BrowserHarnessV1 = Readonly<{
   schemaVersion: 1;
@@ -1026,6 +1218,7 @@ type ChunkGenerationTask = {
 type MeshBuildTask = {
   key: string;
   section: number;
+  urgent: boolean;
   buckets: Record<WorldRenderLayer, GeometryBucket>;
   nextLocalX: number;
 };
@@ -1234,77 +1427,6 @@ const FACES: Face[] = [
 const BIOME_TINT: Record<number, [number, number, number]> = Object.fromEntries(
   TERRAIN_BIOME_TINTS_V1.map((tint, biome) => [biome, [...tint] as [number, number, number]]),
 );
-
-/**
- * Fits an aquatic settlement to the water volume at every authored point.
- * The candidate's center is already re-anchored to its real seabed; this
- * second pass handles relief across wide towns and keeps roofs, paths, lights,
- * furniture and patrol approaches at least one cell below the local surface.
- * A candidate is rejected only when a building footprint has no physically
- * valid submerged vertical range.
- */
-function fitUnderwaterSettlementLayout(
-  layout: SettlementLayoutPlan,
-  sample: (x: number, z: number) => ColumnSample,
-): SettlementLayoutPlan | null {
-  if (layout.environment !== "underwater") return layout;
-  let invalid = false;
-  const clampWaterPoint = <T extends Readonly<{ x: number; z: number; y?: number }>>(point: T): T => {
-    const column = sample(point.x, point.z);
-    const minimum = column.height + 1;
-    const maximum = column.waterline - 1;
-    if (minimum > maximum) invalid = true;
-    const requested = point.y ?? minimum;
-    return { ...point, y: Math.max(minimum, Math.min(maximum, requested)) };
-  };
-  const buildings = layout.buildings.map((building) => {
-    const halfWidth = Math.floor(building.width / 2);
-    const halfDepth = Math.floor(building.depth / 2);
-    let highestBed = MIN_Y;
-    let lowestSurface = MAX_Y;
-    for (let x = building.position.x - halfWidth; x <= building.position.x + halfWidth; x += 1) {
-      for (let z = building.position.z - halfDepth; z <= building.position.z + halfDepth; z += 1) {
-        const column = sample(x, z);
-        highestBed = Math.max(highestBed, column.height);
-        lowestSurface = Math.min(lowestSurface, column.waterline);
-      }
-    }
-    // Underwater world placement raises the roof by four cells for one floor
-    // and five cells for two floors from the chosen base plane.
-    const roofRise = Math.min(5, building.floors * 3 + 1);
-    const minimumY = highestBed + 2;
-    const maximumY = lowestSurface - roofRise;
-    if (minimumY > maximumY) invalid = true;
-    const previousY = building.position.y ?? minimumY;
-    const positionY = Math.max(minimumY, Math.min(maximumY, previousY));
-    const deltaY = positionY - previousY;
-    return {
-      ...building,
-      position: { ...building.position, y: positionY },
-      furniture: building.furniture.map((furniture) => ({
-        ...furniture,
-        position: clampWaterPoint({
-          ...furniture.position,
-          y: (furniture.position.y ?? previousY) + deltaY,
-        }),
-      })),
-    };
-  });
-  if (invalid) return null;
-  const center = clampWaterPoint(layout.center);
-  const paths = layout.paths.map(clampWaterPoint);
-  const approaches = layout.approaches.map((approach) => ({ ...approach, position: clampWaterPoint(approach.position) }));
-  const lights = layout.lights.map((light) => ({ ...light, position: clampWaterPoint(light.position) }));
-  const centerColumn = sample(center.x, center.z);
-  const minimumLayer = centerColumn.height + 1;
-  const maximumLayer = centerColumn.waterline - 1;
-  const verticalLayers = layout.verticalLayers.map((layer) => ({
-    ...layer,
-    y: Math.max(minimumLayer, Math.min(maximumLayer, layer.y)),
-  }));
-  if (invalid || minimumLayer > maximumLayer) return null;
-  return { ...layout, center, buildings, paths, approaches, lights, verticalLayers };
-}
 
 const TILE_COLORS = [
   "#65a441", "#775338", "#795338", "#7b8181", "#d7c27b", "#735033", "#9d7446", "#3f7d36",
@@ -3195,18 +3317,30 @@ export class ChunkWorld {
   consolidationRevision = new Map<string, number>();
   consolidationDirtyLayers = new Map<string, Set<WorldRenderLayer>>();
   pendingConsolidations = new Set<string>();
-  completedConsolidations: Array<{ key: string; layer: WorldRenderLayer; revision: number; geometry: TerrainMergedGeometry | null }> = [];
+  completedConsolidations: Array<{
+    key: string;
+    layer: WorldRenderLayer;
+    revision: number;
+    presentationEpoch: number;
+    geometry: TerrainMergedGeometry | null;
+  }> = [];
+  /** Fences asynchronous presentation work across reset/dispose world lifecycles. */
+  private terrainPresentationEpoch = 0;
   staleConsolidations = 0;
   coalescedConsolidations = 0;
   invalidatedCombinedMeshes = 0;
   terrainBufferPipeline = new TerrainBufferPipeline();
-  terrainGenerationPipeline = new TerrainGenerationPipeline();
+  readonly terrainGenerationAuthority: TerrainGenerationAuthoritySelectionV2;
+  terrainGenerationPipeline: TerrainGenerationPipeline;
+  private terrainGenerationLifecycleRevision = 0;
   private readonly rendererTerrainClock = new RendererTerrainRevisionClockR11();
   private readonly rustTerrainMode: RustTerrainMesherMode;
   private readonly rustTerrainMesher: RustTerrainMesherBackend | null;
   private readonly rustWorldAuthority: RustWorldAuthorityRuntimeR4V1;
   private rustWorldAuthorityEpoch = 0;
   private rustWorldMutationSequence = 0;
+  /** Serializes explicit awaited mutations so each preflight observes the prior accepted projection. */
+  private rustWorldAwaitedMutationTail: Promise<void> = Promise.resolve();
   private applyingRustWorldAuthorityEvent = false;
   private readonly rustWorldPendingChunkKeys = new Set<string>();
   private readonly rustWorldChunkInstallGenerations = new Map<string, number>();
@@ -3272,6 +3406,8 @@ export class ChunkWorld {
     }> | null,
   };
   pendingWorkerGeneration = new Set<string>();
+  /** Bounded non-render residency for gameplay/agent interests away from the local camera. */
+  private generationResidencyLeases = new Map<string, number>();
   completedWorkerGeneration: TerrainGenerationResult[] = [];
   staleWorkerGeneration = 0;
   terrainGeometriesCreated = 0;
@@ -3281,6 +3417,8 @@ export class ChunkWorld {
   urgentMeshQueue: Array<{ key: string; section: number }> = [];
   urgentMeshQueueHead = 0;
   urgentMeshQueued = new Set<string>();
+  /** Edit ownership survives coalescing with generation seams until the final replacement is installed. */
+  private pendingEditMeshes = new Set<string>();
   /** Sections whose old consolidated geometry still contains a now-resolved chunk-edge face. */
   seamMeshRebuilds = new Set<string>();
   /** New sections held back until every already-present neighbor has retired its speculative edge. */
@@ -3307,6 +3445,8 @@ export class ChunkWorld {
   streamingViewZ = 1;
   streamingViewSector = 0;
   scheduledViewSector = Number.NaN;
+  scheduledLookaheadChunkX = Number.NaN;
+  scheduledLookaheadChunkZ = Number.NaN;
   renderDrawCallPressure = 0;
   renderFramePressureMilliseconds = 16.7;
   streamingCompleted = { generation: 0, lighting: 0, meshing: 0 };
@@ -3372,7 +3512,16 @@ export class ChunkWorld {
   constructor(options: Readonly<{
     rustTerrainMode?: RustTerrainMesherMode;
     rustWorldAuthorityMode?: RustWorldAuthorityModeR4V1;
+    terrainGenerationAuthorityMode?: TerrainGenerationAuthorityModeV2;
+    terrainGenerationAuthoritySelection?: TerrainGenerationAuthoritySelectionV2;
   }> = {}) {
+    this.terrainGenerationAuthority = options.terrainGenerationAuthoritySelection
+      ?? (options.terrainGenerationAuthorityMode
+        ? explicitTerrainGenerationAuthorityV2(options.terrainGenerationAuthorityMode)
+        : configuredTerrainGenerationAuthorityV2());
+    this.terrainGenerationPipeline = new TerrainGenerationPipeline(undefined, undefined, {
+      authoritySelection: this.terrainGenerationAuthority,
+    });
     this.rustTerrainMode = options.rustTerrainMode ?? DEFAULT_RUST_TERRAIN_MESHER_MODE;
     const atlasSurface = typeof document === "undefined" ? null : createBlockAtlasSurfaceR11();
     if (atlasSurface) {
@@ -3783,13 +3932,27 @@ export class ChunkWorld {
   }
 
   private applyRustWorldImmediateEvent(
-    event: NonNullable<NonNullable<Awaited<ReturnType<RustWorldAuthorityRuntimeR4V1["mutate"]>>>["immediateEvent"]>,
+    event: RustImmediateEditEventR4V1,
     immediate: boolean,
+    deferLighting = false,
+  ) {
+    this.applyRustWorldProjectionChanges(event.changes, immediate, deferLighting);
+  }
+
+  private applyRustWorldProjectionChanges(
+    changes: readonly Readonly<{ x: number; y: number; z: number; blockId: number; facing: number }>[],
+    immediate: boolean,
+    deferLighting: boolean,
   ) {
     this.applyingRustWorldAuthorityEvent = true;
     try {
-      this.setBlocksBatch(event.changes.map((change) => ({ x: change.x, y: change.y, z: change.z, type: change.blockId as BlockId })), true, immediate);
-      for (const change of event.changes) {
+      this.setBlocksBatch(
+        changes.map((change) => ({ x: change.x, y: change.y, z: change.z, type: change.blockId as BlockId })),
+        true,
+        immediate,
+        deferLighting,
+      );
+      for (const change of changes) {
         if (change.facing !== this.blockFacingAt(change.x, change.y, change.z)) {
           this.setBlockFacing(change.x, change.y, change.z, normalizeBlockFacing(change.facing), immediate);
         }
@@ -3871,6 +4034,866 @@ export class ChunkWorld {
     });
   }
 
+  /**
+   * Explicit Rust-authoritative mutation route. Unlike the synchronous legacy
+   * methods, this never projects a fallback or reports success before the exact
+   * accepted receipt has been validated.
+   */
+  mutateRustWorldAwaitedR4V1(
+    commands: readonly RustWorldAwaitedMutationCommandR4V1[],
+    options: RustWorldAwaitedMutationOptionsR4V1 = {},
+  ): Promise<RustWorldAwaitedMutationResultR4V1> {
+    const batchId = `browser-awaited-${++this.rustWorldMutationSequence}`;
+    const authorityEpoch = this.rustWorldAuthorityEpoch;
+    const copiedCommands = Array.isArray(commands)
+      ? commands.map((command) => Object.freeze({ ...command })) as readonly RustWorldAwaitedMutationCommandR4V1[]
+      : null;
+    const copiedOptions = options && typeof options === "object" ? Object.freeze({ ...options }) : null;
+    return this.enqueueRustWorldAwaitedOperation(() => this.performRustWorldAwaitedMutationR4V1(
+      batchId,
+      authorityEpoch,
+      copiedCommands,
+      copiedOptions,
+    ));
+  }
+
+  setBlockAwaitedR4V1(
+    x: number,
+    y: number,
+    z: number,
+    blockId: BlockId,
+    options: RustWorldAwaitedMutationOptionsR4V1 = {},
+  ) {
+    return this.mutateRustWorldAwaitedR4V1([{ kind: "set-block", x, y, z, blockId }], options);
+  }
+
+  setBlocksBatchAwaitedR4V1(
+    changes: readonly Readonly<{ x: number; y: number; z: number; type: BlockId }>[],
+    options: RustWorldAwaitedMutationOptionsR4V1 = {},
+  ) {
+    return this.mutateRustWorldAwaitedR4V1(changes.map((change) => ({
+      kind: "set-block" as const,
+      x: change.x,
+      y: change.y,
+      z: change.z,
+      blockId: change.type,
+    })), options);
+  }
+
+  setBlockFacingAwaitedR4V1(
+    x: number,
+    y: number,
+    z: number,
+    facing: BlockFacing,
+    options: RustWorldAwaitedMutationOptionsR4V1 = {},
+  ) {
+    return this.mutateRustWorldAwaitedR4V1([{ kind: "set-facing", x, y, z, facing }], options);
+  }
+
+  /**
+   * Projects an already-accepted native receipt without submitting it again.
+   * This is the companion seam for integrated-runtime receipts; callers must
+   * validate their receipt hash/content binding before crossing this boundary.
+   */
+  applyValidatedRustWorldMutationProjectionR4V1(
+    input: RustWorldValidatedMutationProjectionInputR4V1,
+  ): Promise<RustWorldAwaitedMutationResultR4V1> {
+    const authorityEpoch = this.rustWorldAuthorityEpoch;
+    const copiedInput = input && typeof input === "object" ? Object.freeze({
+      ...input,
+      authorityIdentityBefore: cloneWorldAuthorityIdentityR4V1(input.authorityIdentityBefore),
+      authorityIdentityAfter: cloneWorldAuthorityIdentityR4V1(input.authorityIdentityAfter),
+      changes: Array.isArray(input.changes)
+        ? Object.freeze(input.changes.map((change) => Object.freeze({ ...change })))
+        : null,
+    }) : null;
+    return this.enqueueRustWorldAwaitedOperation(() => this.performValidatedRustWorldMutationProjectionR4V1(
+      authorityEpoch,
+      copiedInput,
+    ));
+  }
+
+  /**
+   * V2 companion seam for native receipts whose Rust dirty set is already
+   * authoritative. V1 remains available for compatibility callers that have
+   * not yet adopted native dirty evidence.
+   */
+  applyValidatedRustWorldMutationProjectionR4V2(
+    input: RustWorldValidatedMutationProjectionInputR4V2,
+  ): Promise<RustWorldAwaitedMutationResultR4V1> {
+    const authorityEpoch = this.rustWorldAuthorityEpoch;
+    const copiedInput: RustWorldValidatedMutationProjectionRawInputR4V2 | null = input && typeof input === "object" ? Object.freeze({
+      ...input,
+      authorityIdentityBefore: cloneWorldAuthorityIdentityR4V1(input.authorityIdentityBefore),
+      authorityIdentityAfter: cloneWorldAuthorityIdentityR4V1(input.authorityIdentityAfter),
+      changes: Array.isArray(input.changes)
+        ? Object.freeze(input.changes.map((change) => Object.freeze({ ...change })))
+        : null,
+      dirty: input.dirty && typeof input.dirty === "object" ? Object.freeze({
+        schema: input.dirty.schema,
+        sequence: input.dirty.sequence,
+        receiptHash: input.dirty.receiptHash,
+        sections: Array.isArray(input.dirty.sections)
+          ? Object.freeze(input.dirty.sections.map((section) => Object.freeze({ ...section })))
+          : null,
+        columns: Array.isArray(input.dirty.columns)
+          ? Object.freeze(input.dirty.columns.map((column) => Object.freeze({ ...column })))
+          : null,
+        subsystemSeeds: Array.isArray(input.dirty.subsystemSeeds)
+          ? Object.freeze(input.dirty.subsystemSeeds.map((entry) => Object.freeze({ ...entry })))
+          : null,
+        evidenceHash: input.dirty.evidenceHash,
+      }) : null,
+    }) : null;
+    return this.enqueueRustWorldAwaitedOperation(() => this.performValidatedRustWorldMutationProjectionR4V2(
+      authorityEpoch,
+      copiedInput,
+    ));
+  }
+
+  private enqueueRustWorldAwaitedOperation<T>(operation: () => Promise<T> | T): Promise<T> {
+    const result = this.rustWorldAwaitedMutationTail.then(operation, operation);
+    this.rustWorldAwaitedMutationTail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private rustWorldAwaitedFailureR4V1(
+    status: "rejected" | "stale",
+    reason: RustWorldAwaitedMutationFailureReasonR4V1,
+    detail: string,
+    batchId: string,
+    authorityEpoch: number,
+    authorityIdentityBefore: WorldAuthorityIdentityV1 | null,
+    compatibilityMutationRevisionBefore: number,
+    authorityIdentityAfterOverride?: WorldAuthorityIdentityV1 | null,
+  ): RustWorldAwaitedMutationResultR4V1 {
+    return Object.freeze({
+      schemaVersion: 1,
+      status,
+      reason,
+      detail: String(detail).slice(0, 512),
+      batchId,
+      authorityEpoch,
+      authorityIdentityBefore: cloneWorldAuthorityIdentityR4V1(authorityIdentityBefore),
+      authorityIdentityAfter: cloneWorldAuthorityIdentityR4V1(
+        authorityIdentityAfterOverride === undefined ? this.rustWorldAuthority.identity() : authorityIdentityAfterOverride,
+      ),
+      compatibilityMutationRevisionBefore,
+      compatibilityMutationRevisionAfter: this.mutationRevision,
+    });
+  }
+
+  private performValidatedRustWorldMutationProjectionR4V1(
+    authorityEpoch: number,
+    rawInput: (Omit<RustWorldValidatedMutationProjectionInputR4V1, "changes"> & Readonly<{
+      changes: readonly RustWorldAwaitedProjectedChangeR4V1[] | null;
+    }>) | null,
+  ): RustWorldAwaitedMutationResultR4V1 {
+    const batchId = typeof rawInput?.batchId === "string" ? rawInput.batchId : "invalid-native-receipt";
+    const compatibilityMutationRevisionBefore = this.mutationRevision;
+    const authorityIdentityBefore = cloneWorldAuthorityIdentityR4V1(rawInput?.authorityIdentityBefore ?? null);
+    const fail = (
+      status: "rejected" | "stale",
+      reason: RustWorldAwaitedMutationFailureReasonR4V1,
+      detail: string,
+    ) => this.rustWorldAwaitedFailureR4V1(
+      status,
+      reason,
+      detail,
+      batchId,
+      authorityEpoch,
+      authorityIdentityBefore,
+      compatibilityMutationRevisionBefore,
+      rawInput?.authorityIdentityAfter ?? null,
+    );
+    if (authorityEpoch !== this.rustWorldAuthorityEpoch) {
+      return fail("stale", "world-generation-replaced", "The world generation changed before native receipt projection.");
+    }
+    if (!rawInput || batchId.length < 1 || batchId.length > 160
+      || typeof rawInput.immediate !== "boolean"
+      || (rawInput.deferLighting !== undefined && typeof rawInput.deferLighting !== "boolean")
+      || (rawInput.allowAlreadyApplied !== undefined && typeof rawInput.allowAlreadyApplied !== "boolean")
+      || !rawInput.authorityIdentityBefore || !rawInput.authorityIdentityAfter
+      || !rawInput.changes || rawInput.changes.length < 1 || rawInput.changes.length > 4_096) {
+      return fail("rejected", "invalid-request", "Native world receipt projection input is malformed.");
+    }
+    const before = rawInput.authorityIdentityBefore;
+    const after = rawInput.authorityIdentityAfter;
+    const validHash = (value: string) => /^[0-9a-f]{32}$/u.test(value);
+    const validRevision = (revision: WorldAuthorityIdentityV1["revision"]) => Number.isSafeInteger(revision.epoch) && revision.epoch >= 0
+      && Number.isSafeInteger(revision.mutation) && revision.mutation >= 0
+      && Number.isSafeInteger(revision.residency) && revision.residency >= 0;
+    let validSourceAddress = true;
+    try {
+      assertWorldAddressV1(before.address);
+      assertWorldAddressV1(after.address);
+    } catch {
+      validSourceAddress = false;
+    }
+    if (/[ -]/u.test(batchId)
+      || !validSourceAddress || !sameWorldAddressV1(before.address, after.address)
+      || !validRevision(before.revision) || !validRevision(after.revision)
+      || before.revision.epoch !== after.revision.epoch
+      || after.revision.mutation !== before.revision.mutation + 1
+      || after.revision.residency !== before.revision.residency
+      || !validHash(before.stateHash) || !validHash(after.stateHash) || before.stateHash === after.stateHash) {
+      return fail("stale", "receipt-mismatch", "Native world receipt identities do not describe one exact R4 mutation transition.");
+    }
+    const seen = new Set<string>();
+    const changes: RustWorldAwaitedProjectedChangeR4V1[] = [];
+    for (const raw of rawInput.changes) {
+      if (!raw || typeof raw !== "object"
+        || !Number.isSafeInteger(raw.x) || raw.x < -0x8000_0000 || raw.x > 0x7fff_ffff
+        || !Number.isSafeInteger(raw.z) || raw.z < -0x8000_0000 || raw.z > 0x7fff_ffff
+        || !Number.isSafeInteger(raw.y) || raw.y < MIN_Y || raw.y > MAX_Y
+        || !Number.isSafeInteger(raw.previousBlockId) || !BLOCKS[raw.previousBlockId]
+        || !Number.isSafeInteger(raw.blockId) || !BLOCKS[raw.blockId]
+        || !Number.isSafeInteger(raw.previousFacing) || raw.previousFacing < 0 || raw.previousFacing > 3
+        || !Number.isSafeInteger(raw.facing) || raw.facing < 0 || raw.facing > 3
+        || (!isDirectionallyPlacedBlock(raw.previousBlockId) && raw.previousFacing !== BLOCK_FACING_NORTH)
+        || (!isDirectionallyPlacedBlock(raw.blockId) && raw.facing !== BLOCK_FACING_NORTH)
+        || (raw.blockId === BlockId.Air && isWaterloggedFloraBlock(raw.previousBlockId))
+        || (raw.previousBlockId === raw.blockId && raw.previousFacing === raw.facing)) {
+        return fail("rejected", "invalid-request", "Native world receipt contains an invalid cell transition.");
+      }
+      const key = `${raw.x},${raw.y},${raw.z}`;
+      if (seen.has(key)) return fail("rejected", "invalid-request", `Native world receipt duplicates cell ${key}.`);
+      seen.add(key);
+      changes.push(Object.freeze({ ...raw }));
+    }
+    changes.sort((left, right) => left.x - right.x || left.y - right.y || left.z - right.z);
+    const immutableChanges = Object.freeze(changes);
+    const atPrevious = immutableChanges.every((change) => this.getBlock(change.x, change.y, change.z) === change.previousBlockId
+      && this.blockFacingAt(change.x, change.y, change.z) === change.previousFacing);
+    const atRecordedReplacement = immutableChanges.every((change) => {
+      if (this.getBlock(change.x, change.y, change.z) !== change.blockId
+        || this.blockFacingAt(change.x, change.y, change.z) !== change.facing) return false;
+      const sx = splitCoordinate(change.x);
+      const sz = splitCoordinate(change.z);
+      const editRecorded = this.edits.get(chunkKey(sx.chunk, sz.chunk))?.get(blockIndex(sx.local, change.y, sz.local)) === change.blockId;
+      const facingKey = `${change.x},${change.y},${change.z}`;
+      const facingRecorded = change.facing === BLOCK_FACING_NORTH
+        ? !this.blockFacings.has(facingKey)
+        : this.blockFacings.get(facingKey) === change.facing;
+      return editRecorded && facingRecorded;
+    });
+    if (!atPrevious) {
+      if (rawInput.allowAlreadyApplied !== true || !atRecordedReplacement) {
+        return fail("stale", "compatibility-state-changed", "Compatibility world does not match the exact prior or recorded replacement receipt state.");
+      }
+      return Object.freeze({
+        schemaVersion: 1,
+        status: "accepted",
+        mutated: true,
+        projectionStatus: "already-applied",
+        projectedChanges: immutableChanges,
+        batchId,
+        authorityEpoch,
+        authorityIdentityBefore: cloneWorldAuthorityIdentityR4V1(before),
+        authorityIdentityAfter: cloneWorldAuthorityIdentityR4V1(after),
+        compatibilityMutationRevisionBefore,
+        compatibilityMutationRevisionAfter: this.mutationRevision,
+      });
+    }
+
+    this.applyRustWorldProjectionChanges(immutableChanges, rawInput.immediate, rawInput.deferLighting ?? false);
+    this.flushRustWorldAuxiliaryPatches();
+    if (immutableChanges.some((change) => this.getBlock(change.x, change.y, change.z) !== change.blockId
+      || this.blockFacingAt(change.x, change.y, change.z) !== change.facing)) {
+      throw new Error("Validated native world receipt did not produce its exact compatibility projection");
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      status: "accepted",
+      mutated: true,
+      projectionStatus: "applied",
+      projectedChanges: immutableChanges,
+      batchId,
+      authorityEpoch,
+      authorityIdentityBefore: cloneWorldAuthorityIdentityR4V1(before),
+      authorityIdentityAfter: cloneWorldAuthorityIdentityR4V1(after),
+      compatibilityMutationRevisionBefore,
+      compatibilityMutationRevisionAfter: this.mutationRevision,
+    });
+  }
+
+  private performValidatedRustWorldMutationProjectionR4V2(
+    authorityEpoch: number,
+    rawInput: RustWorldValidatedMutationProjectionRawInputR4V2 | null,
+  ): RustWorldAwaitedMutationResultR4V1 {
+    const batchId = typeof rawInput?.batchId === "string" ? rawInput.batchId : "invalid-native-receipt";
+    const compatibilityMutationRevisionBefore = this.mutationRevision;
+    const authorityIdentityBefore = cloneWorldAuthorityIdentityR4V1(rawInput?.authorityIdentityBefore ?? null);
+    const fail = (
+      status: "rejected" | "stale",
+      reason: RustWorldAwaitedMutationFailureReasonR4V1,
+      detail: string,
+    ) => this.rustWorldAwaitedFailureR4V1(
+      status,
+      reason,
+      detail,
+      batchId,
+      authorityEpoch,
+      authorityIdentityBefore,
+      compatibilityMutationRevisionBefore,
+      rawInput?.authorityIdentityAfter ?? null,
+    );
+    if (authorityEpoch !== this.rustWorldAuthorityEpoch) {
+      return fail("stale", "world-generation-replaced", "The world generation changed before native receipt projection.");
+    }
+    if (!rawInput || batchId.length < 1 || batchId.length > 160
+      || typeof rawInput.immediate !== "boolean"
+      || (rawInput.deferLighting !== undefined && typeof rawInput.deferLighting !== "boolean")
+      || (rawInput.allowAlreadyApplied !== undefined && typeof rawInput.allowAlreadyApplied !== "boolean")
+      || !rawInput.authorityIdentityBefore || !rawInput.authorityIdentityAfter
+      || !rawInput.changes || rawInput.changes.length < 1 || rawInput.changes.length > 4_096
+      || !rawInput.dirty || !rawInput.dirty.sections || !rawInput.dirty.columns || !rawInput.dirty.subsystemSeeds) {
+      return fail("rejected", "invalid-request", "Native world V2 receipt projection input is malformed.");
+    }
+    const before = rawInput.authorityIdentityBefore;
+    const after = rawInput.authorityIdentityAfter;
+    const validHash = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{32}$/u.test(value);
+    const validRevision = (revision: WorldAuthorityIdentityV1["revision"]) => Number.isSafeInteger(revision.epoch) && revision.epoch >= 0
+      && Number.isSafeInteger(revision.mutation) && revision.mutation >= 0
+      && Number.isSafeInteger(revision.residency) && revision.residency >= 0;
+    let validSourceAddress = true;
+    try {
+      assertWorldAddressV1(before.address);
+      assertWorldAddressV1(after.address);
+    } catch {
+      validSourceAddress = false;
+    }
+    if (/[\u0000-\u001f\u007f]/u.test(batchId)
+      || !validSourceAddress || !sameWorldAddressV1(before.address, after.address)
+      || !validRevision(before.revision) || !validRevision(after.revision)
+      || before.revision.epoch !== after.revision.epoch
+      || after.revision.mutation !== before.revision.mutation + 1
+      || after.revision.residency !== before.revision.residency
+      || !validHash(before.stateHash) || !validHash(after.stateHash) || before.stateHash === after.stateHash) {
+      return fail("stale", "receipt-mismatch", "Native world V2 receipt identities do not describe one exact R4 mutation transition.");
+    }
+
+    const seen = new Set<string>();
+    const changes: RustWorldAwaitedProjectedChangeR4V1[] = [];
+    for (const raw of rawInput.changes) {
+      if (!raw || typeof raw !== "object"
+        || !Number.isSafeInteger(raw.x) || raw.x < -0x8000_0000 || raw.x > 0x7fff_ffff
+        || !Number.isSafeInteger(raw.z) || raw.z < -0x8000_0000 || raw.z > 0x7fff_ffff
+        || !Number.isSafeInteger(raw.y) || raw.y < MIN_Y || raw.y > MAX_Y
+        || !Number.isSafeInteger(raw.previousBlockId) || !BLOCKS[raw.previousBlockId]
+        || !Number.isSafeInteger(raw.blockId) || !BLOCKS[raw.blockId]
+        || !Number.isSafeInteger(raw.previousFacing) || raw.previousFacing < 0 || raw.previousFacing > 3
+        || !Number.isSafeInteger(raw.facing) || raw.facing < 0 || raw.facing > 3
+        || (!isDirectionallyPlacedBlock(raw.previousBlockId) && raw.previousFacing !== BLOCK_FACING_NORTH)
+        || (!isDirectionallyPlacedBlock(raw.blockId) && raw.facing !== BLOCK_FACING_NORTH)
+        || (raw.blockId === BlockId.Air && isWaterloggedFloraBlock(raw.previousBlockId))
+        || (raw.previousBlockId === raw.blockId && raw.previousFacing === raw.facing)) {
+        return fail("rejected", "invalid-request", "Native world V2 receipt contains an invalid cell transition.");
+      }
+      const key = `${raw.x},${raw.y},${raw.z}`;
+      if (seen.has(key)) return fail("rejected", "invalid-request", `Native world V2 receipt duplicates cell ${key}.`);
+      seen.add(key);
+      changes.push(Object.freeze({ ...raw }));
+    }
+    changes.sort((left, right) => left.x - right.x || left.y - right.y || left.z - right.z);
+    const immutableChanges = Object.freeze(changes);
+
+    const dirty = rawInput.dirty;
+    const dirtySections = dirty.sections;
+    const dirtyColumns = dirty.columns;
+    const dirtySubsystemSeeds = dirty.subsystemSeeds;
+    if (!dirtySections || !dirtyColumns || !dirtySubsystemSeeds
+      || dirty.schema !== 1
+      || !Number.isSafeInteger(dirty.sequence) || (dirty.sequence as number) < 1
+      || !validHash(dirty.receiptHash) || !validHash(dirty.evidenceHash)
+      || dirtySections.length < 1 || dirtySections.length > immutableChanges.length * 6
+      || dirtyColumns.length < 1 || dirtyColumns.length > immutableChanges.length
+      || dirtySubsystemSeeds.length !== RUST_INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_DIRTY_SUBSYSTEMS_V2.length) {
+      return fail("rejected", "invalid-request", "Native world V2 dirty evidence has an invalid envelope.");
+    }
+
+    const sections: RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2["sections"][number][] = [];
+    let priorSectionKey: string | null = null;
+    for (const candidate of dirtySections as readonly unknown[]) {
+      if (!candidate || typeof candidate !== "object") {
+        return fail("rejected", "invalid-request", "Native world V2 dirty evidence contains a malformed section.");
+      }
+      const section = candidate as RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2["sections"][number];
+      let sectionKey: string;
+      try {
+        assertWorldSectionAddressV1(section);
+        sectionKey = worldSectionAddressKeyV1(section);
+      } catch {
+        return fail("rejected", "invalid-request", "Native world V2 dirty evidence contains an invalid section address.");
+      }
+      if (section.sectionY < 0 || section.sectionY >= SECTION_COUNT
+        || !sameWorldAddressV1(section, after.address)) {
+        return fail("stale", "receipt-mismatch", "Native world V2 dirty section does not belong to the active receipt world.");
+      }
+      if (priorSectionKey !== null && sectionKey <= priorSectionKey) {
+        return fail("rejected", "invalid-request", "Native world V2 dirty sections are duplicated or out of canonical order.");
+      }
+      priorSectionKey = sectionKey;
+      sections.push(Object.freeze({ ...section }));
+    }
+
+    const columns: RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2["columns"][number][] = [];
+    let priorColumn: Readonly<{ x: number; z: number }> | null = null;
+    for (const candidate of dirtyColumns as readonly unknown[]) {
+      if (!candidate || typeof candidate !== "object") {
+        return fail("rejected", "invalid-request", "Native world V2 dirty evidence contains a malformed column.");
+      }
+      const column = candidate as Readonly<{ x: number; z: number }>;
+      if (!Number.isSafeInteger(column.x) || column.x < -0x8000_0000 || column.x > 0x7fff_ffff
+        || !Number.isSafeInteger(column.z) || column.z < -0x8000_0000 || column.z > 0x7fff_ffff
+        || (priorColumn !== null && (column.x < priorColumn.x || (column.x === priorColumn.x && column.z <= priorColumn.z)))) {
+        return fail("rejected", "invalid-request", "Native world V2 dirty columns are invalid, duplicated, or out of canonical order.");
+      }
+      priorColumn = column;
+      columns.push(Object.freeze({ x: column.x, z: column.z }));
+    }
+
+    const subsystemSeeds: RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2["subsystemSeeds"][number][] = [];
+    for (let index = 0; index < RUST_INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_DIRTY_SUBSYSTEMS_V2.length; index += 1) {
+      const candidate = (dirtySubsystemSeeds as readonly unknown[])[index];
+      if (!candidate || typeof candidate !== "object") {
+        return fail("rejected", "invalid-request", "Native world V2 dirty evidence contains a malformed subsystem seed.");
+      }
+      const entry = candidate as RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2["subsystemSeeds"][number];
+      if (entry.subsystem !== RUST_INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_DIRTY_SUBSYSTEMS_V2[index]
+        || !validHash(entry.seed)) {
+        return fail("rejected", "invalid-request", "Native world V2 dirty subsystem seeds are missing, duplicated, or out of canonical order.");
+      }
+      subsystemSeeds.push(Object.freeze({ subsystem: entry.subsystem, seed: entry.seed }));
+    }
+
+    const immutableDirty = Object.freeze({
+      schema: 1 as const,
+      sequence: dirty.sequence as number,
+      receiptHash: dirty.receiptHash,
+      sections: Object.freeze(sections),
+      columns: Object.freeze(columns),
+      subsystemSeeds: Object.freeze(subsystemSeeds),
+      evidenceHash: dirty.evidenceHash,
+    }) satisfies RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2;
+    try {
+      if (rustIntegratedRuntimeNativeBlockEditDirtyEvidenceHashV2(immutableDirty) !== immutableDirty.evidenceHash) {
+        return fail("rejected", "invalid-request", "Native world V2 dirty evidence hash does not match its canonical fields.");
+      }
+    } catch {
+      return fail("rejected", "invalid-request", "Native world V2 dirty evidence cannot be canonically hashed.");
+    }
+
+    const sectionKeys = new Set(immutableDirty.sections.map((section) => worldSectionAddressKeyV1(section)));
+    const columnKeys = new Set(immutableDirty.columns.map((column) => `${column.x},${column.z}`));
+    for (const change of immutableChanges) {
+      const directSection = Object.freeze({
+        ...after.address,
+        chunkX: Math.floor(change.x / CHUNK_SIZE),
+        chunkZ: Math.floor(change.z / CHUNK_SIZE),
+        sectionY: sectionForY(change.y),
+      });
+      if (!sectionKeys.has(worldSectionAddressKeyV1(directSection))
+        || !columnKeys.has(`${change.x},${change.z}`)) {
+        return fail("rejected", "invalid-request", "Native world V2 dirty evidence omits a directly edited section or column.");
+      }
+    }
+
+    const atPrevious = immutableChanges.every((change) => this.getBlock(change.x, change.y, change.z) === change.previousBlockId
+      && this.blockFacingAt(change.x, change.y, change.z) === change.previousFacing);
+    const atRecordedReplacement = immutableChanges.every((change) => {
+      if (this.getBlock(change.x, change.y, change.z) !== change.blockId
+        || this.blockFacingAt(change.x, change.y, change.z) !== change.facing) return false;
+      const sx = splitCoordinate(change.x);
+      const sz = splitCoordinate(change.z);
+      const editRecorded = change.previousBlockId === change.blockId
+        || this.edits.get(chunkKey(sx.chunk, sz.chunk))?.get(blockIndex(sx.local, change.y, sz.local)) === change.blockId;
+      const facingKey = `${change.x},${change.y},${change.z}`;
+      const facingRecorded = change.facing === BLOCK_FACING_NORTH
+        ? !this.blockFacings.has(facingKey)
+        : this.blockFacings.get(facingKey) === change.facing;
+      return editRecorded && facingRecorded;
+    });
+    if (!atPrevious) {
+      if (rawInput.allowAlreadyApplied !== true || !atRecordedReplacement) {
+        return fail("stale", "compatibility-state-changed", "Compatibility world does not match the exact prior or recorded replacement V2 receipt state.");
+      }
+      return Object.freeze({
+        schemaVersion: 1,
+        status: "accepted",
+        mutated: true,
+        projectionStatus: "already-applied",
+        projectedChanges: immutableChanges,
+        batchId,
+        authorityEpoch,
+        authorityIdentityBefore: cloneWorldAuthorityIdentityR4V1(before),
+        authorityIdentityAfter: cloneWorldAuthorityIdentityR4V1(after),
+        compatibilityMutationRevisionBefore,
+        compatibilityMutationRevisionAfter: this.mutationRevision,
+      });
+    }
+
+    this.applyRustWorldProjectionChangesR4V2(
+      immutableChanges,
+      immutableDirty,
+      rawInput.immediate,
+      rawInput.deferLighting ?? false,
+    );
+    if (immutableChanges.some((change) => this.getBlock(change.x, change.y, change.z) !== change.blockId
+      || this.blockFacingAt(change.x, change.y, change.z) !== change.facing)) {
+      throw new Error("Validated native world V2 receipt did not produce its exact compatibility projection");
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      status: "accepted",
+      mutated: true,
+      projectionStatus: "applied",
+      projectedChanges: immutableChanges,
+      batchId,
+      authorityEpoch,
+      authorityIdentityBefore: cloneWorldAuthorityIdentityR4V1(before),
+      authorityIdentityAfter: cloneWorldAuthorityIdentityR4V1(after),
+      compatibilityMutationRevisionBefore,
+      compatibilityMutationRevisionAfter: this.mutationRevision,
+    });
+  }
+
+  /**
+   * Applies cell and facing state first, then consumes Rust's ordered section
+   * set as the only topology invalidation source. Lighting remains a separate
+   * compatibility attribute stream and may update packed light pages without
+   * inventing additional mesh topology.
+   */
+  private applyRustWorldProjectionChangesR4V2(
+    changes: readonly RustWorldAwaitedProjectedChangeR4V1[],
+    dirty: RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2,
+    immediate: boolean,
+    deferLighting: boolean,
+  ) {
+    const affectedLayers = new Set<WorldRenderLayer>();
+    const directlyAffected = new Set(changes.map((change) => {
+      const sx = splitCoordinate(change.x);
+      const sz = splitCoordinate(change.z);
+      return `${chunkKey(sx.chunk, sz.chunk)}:${sectionForY(change.y)}`;
+    }));
+    const affectedLavaCells = new Map<string, { x: number; y: number; z: number }>();
+    const lightChanges: Array<{ x: number; y: number; z: number; previous: BlockId; next: BlockId }> = [];
+    const batchRelight = changes.length > 12;
+    let mutated = false;
+
+    this.applyingRustWorldAuthorityEvent = true;
+    try {
+      for (const change of changes) {
+        const sx = splitCoordinate(change.x);
+        const sz = splitCoordinate(change.z);
+        const key = chunkKey(sx.chunk, sz.chunk);
+        const chunk = this.chunks.get(key);
+        if (!chunk) throw new Error("Validated native world V2 receipt targets an unloaded compatibility chunk");
+        const index = blockIndex(sx.local, change.y, sz.local);
+        const previousType = chunk.blocks[index] as BlockId;
+        const nextType = change.blockId as BlockId;
+        for (const layer of this.renderLayersAffectedByEdit(change.x, change.y, change.z, previousType, nextType)) {
+          affectedLayers.add(layer);
+        }
+        this.markPlayerEditMutation();
+
+        if (previousType !== nextType) {
+          mutated = true;
+          this.writeChunkBlock(chunk, index, nextType);
+          const lightChange = { x: change.x, y: change.y, z: change.z, previous: previousType, next: nextType };
+          if (batchRelight) lightChanges.push(lightChange);
+          else this.lightEngine.updateBlock(lightChange);
+          if (previousType === BlockId.Lava || nextType === BlockId.Lava) {
+            affectedLavaCells.set(lavaLightCellKey(change.x, change.y, change.z), change);
+          }
+          let edits = this.edits.get(key);
+          if (!edits) { edits = new Map(); this.edits.set(key, edits); }
+          edits.set(index, nextType);
+          this.chunkEditSignatureCache.delete(key);
+        }
+
+        const facingKey = `${change.x},${change.y},${change.z}`;
+        const previousFacing = this.blockFacings.get(facingKey) ?? BLOCK_FACING_NORTH;
+        if (previousFacing !== change.facing) {
+          mutated = true;
+          if (change.facing === BLOCK_FACING_NORTH) this.blockFacings.delete(facingKey);
+          else this.blockFacings.set(facingKey, change.facing);
+        }
+      }
+      if (mutated) this.mutationRevision += 1;
+      if (lightChanges.length > 0) {
+        if (deferLighting) this.deferLightRebuildAround(lightChanges);
+        else this.lightEngine.rebuildAround(lightChanges);
+      }
+      for (const change of affectedLavaCells.values()) this.refreshLavaLightCell(change.x, change.y, change.z);
+      this.flushRustWorldAuxiliaryPatches();
+
+      const immediateSectionsByChunk = new Map<string, { chunk: Chunk; sections: number[] }>();
+      for (const section of dirty.sections) {
+        const key = chunkKey(section.chunkX, section.chunkZ);
+        const entry = `${key}:${section.sectionY}`;
+        const chunk = this.chunks.get(key);
+        const rebuildNow = immediate && (!deferLighting || directlyAffected.has(entry));
+        if (rebuildNow && chunk?.group.visible) {
+          const pending = immediateSectionsByChunk.get(key) ?? { chunk, sections: [] };
+          pending.sections.push(section.sectionY);
+          immediateSectionsByChunk.set(key, pending);
+        } else {
+          this.queueEditedMesh(key, section.sectionY);
+        }
+      }
+      for (const [key, pending] of immediateSectionsByChunk) {
+        this.invalidateCombinedMeshesForImmediateEdit(pending.chunk, affectedLayers);
+        for (const section of pending.sections) {
+          this.cancelQueuedMesh(key, section);
+          this.rebuildSection(pending.chunk, section);
+        }
+      }
+      if (immediate && !deferLighting) this.flushLightSections();
+      if (immediate) this.markPlayerEditLocalMeshVisible();
+    } finally {
+      this.applyingRustWorldAuthorityEvent = false;
+    }
+  }
+
+  private async performRustWorldAwaitedMutationR4V1(
+    batchId: string,
+    authorityEpoch: number,
+    rawCommands: readonly RustWorldAwaitedMutationCommandR4V1[] | null,
+    rawOptions: RustWorldAwaitedMutationOptionsR4V1 | null,
+  ): Promise<RustWorldAwaitedMutationResultR4V1> {
+    const compatibilityMutationRevisionBefore = this.mutationRevision;
+    const authorityIdentityBefore = cloneWorldAuthorityIdentityR4V1(this.rustWorldAuthority.identity());
+    const fail = (
+      status: "rejected" | "stale",
+      reason: RustWorldAwaitedMutationFailureReasonR4V1,
+      detail: string,
+    ) => this.rustWorldAwaitedFailureR4V1(
+      status,
+      reason,
+      detail,
+      batchId,
+      authorityEpoch,
+      authorityIdentityBefore,
+      compatibilityMutationRevisionBefore,
+    );
+
+    if (authorityEpoch !== this.rustWorldAuthorityEpoch) {
+      return fail("stale", "world-generation-replaced", "The world generation changed before the mutation reached authority.");
+    }
+    if (!rawOptions) return fail("rejected", "invalid-request", "Mutation options must be an object.");
+    const immediate = rawOptions.immediate ?? false;
+    const deferLighting = rawOptions.deferLighting ?? false;
+    const authorityId = rawOptions.authorityId ?? "browser-world-awaited";
+    if (typeof immediate !== "boolean" || typeof deferLighting !== "boolean"
+      || typeof authorityId !== "string" || authorityId.length < 1 || authorityId.length > 128
+      || /[ -]/u.test(authorityId)) {
+      return fail("rejected", "invalid-request", "Mutation options contain an invalid immediate, lighting, or authority identity value.");
+    }
+    if (!rawCommands || rawCommands.length < 1 || rawCommands.length > 4_096) {
+      return fail("rejected", "invalid-request", "Awaited world mutations require between 1 and 4096 commands.");
+    }
+
+    const seen = new Set<string>();
+    const commands: RustWorldAwaitedMutationCommandR4V1[] = [];
+    for (const raw of rawCommands) {
+      if (!raw || typeof raw !== "object" || (raw.kind !== "set-block" && raw.kind !== "set-facing")) {
+        return fail("rejected", "invalid-request", "Awaited world mutations contain an unknown command.");
+      }
+      const { x, y, z } = raw;
+      if (!Number.isSafeInteger(x) || x < -0x8000_0000 || x > 0x7fff_ffff
+        || !Number.isSafeInteger(z) || z < -0x8000_0000 || z > 0x7fff_ffff
+        || !Number.isSafeInteger(y) || y < MIN_Y || y > MAX_Y) {
+        return fail("rejected", "invalid-request", "Awaited world mutation coordinates are outside the exact loaded-cell range.");
+      }
+      const duplicateKey = `${x},${y},${z}:${raw.kind}`;
+      if (seen.has(duplicateKey)) return fail("rejected", "invalid-request", `Duplicate ${raw.kind} command at ${x},${y},${z}.`);
+      seen.add(duplicateKey);
+      if (raw.kind === "set-block") {
+        if (!Number.isSafeInteger(raw.blockId) || !BLOCKS[raw.blockId]) {
+          return fail("rejected", "invalid-request", `Unknown block id at ${x},${y},${z}.`);
+        }
+        if (raw.facing !== undefined && (!Number.isSafeInteger(raw.facing) || raw.facing < 0 || raw.facing > 3)) {
+          return fail("rejected", "invalid-request", `Invalid block facing at ${x},${y},${z}.`);
+        }
+        commands.push(Object.freeze({
+          kind: "set-block",
+          x,
+          y,
+          z,
+          blockId: raw.blockId,
+          ...(raw.facing === undefined ? {} : { facing: raw.facing }),
+        }));
+      } else {
+        if (!Number.isSafeInteger(raw.facing) || raw.facing < 0 || raw.facing > 3) {
+          return fail("rejected", "invalid-request", `Invalid block facing at ${x},${y},${z}.`);
+        }
+        commands.push(Object.freeze({ kind: "set-facing", x, y, z, facing: raw.facing }));
+      }
+    }
+    commands.sort((left, right) => left.y - right.y || left.z - right.z || left.x - right.x
+      || (left.kind === "set-block" ? -1 : 1));
+
+    const cells = new Map<string, RustWorldAwaitedCellExpectationR4V1>();
+    for (const command of commands) {
+      const key = `${command.x},${command.y},${command.z}`;
+      const initialBlock = this.getBlock(command.x, command.y, command.z);
+      if (initialBlock === undefined) {
+        return fail("rejected", "invalid-request", `Awaited world mutation targets unloaded cell ${key}.`);
+      }
+      const initialFacing = this.blockFacingAt(command.x, command.y, command.z);
+      const state = cells.get(key) ?? {
+        x: command.x,
+        y: command.y,
+        z: command.z,
+        initialBlock,
+        initialFacing,
+        block: initialBlock,
+        facing: initialFacing,
+      };
+      if (command.kind === "set-block") {
+        state.block = command.blockId === BlockId.Air && isWaterloggedFloraBlock(state.block)
+          ? BlockId.Water
+          : command.blockId;
+        if (!isDirectionallyPlacedBlock(state.block)) state.facing = BLOCK_FACING_NORTH;
+        else if (command.facing !== undefined) state.facing = command.facing;
+      } else {
+        if (!isDirectionallyPlacedBlock(state.block)) {
+          return fail("rejected", "invalid-request", `Facing mutation targets non-directional block at ${key}.`);
+        }
+        state.facing = command.facing;
+      }
+      cells.set(key, state);
+    }
+    const expectedChanges = Object.freeze([...cells.values()]
+      .filter((state) => state.initialBlock !== state.block || state.initialFacing !== state.facing)
+      .sort((left, right) => left.x - right.x || left.y - right.y || left.z - right.z)
+      .map((state) => Object.freeze({
+        x: state.x,
+        y: state.y,
+        z: state.z,
+        previousBlockId: state.initialBlock,
+        blockId: state.block,
+        previousFacing: state.initialFacing,
+        facing: state.facing,
+      }) satisfies RustWorldAwaitedProjectedChangeR4V1));
+
+    const mode = this.rustWorldAuthority.mode();
+    if (!this.rustWorldAuthority.isRustAuthoritative() || (mode !== "canary" && mode !== "authority")) {
+      return fail("rejected", "authority-not-active", "The active world is not using Rust mutation authority.");
+    }
+    if (!authorityIdentityBefore || this.rustWorldAuthority.diagnostics().state !== "ready") {
+      return fail("rejected", "authority-not-ready", "Rust world mutation authority is not ready.");
+    }
+    const address = this.rustWorldAddress();
+    if (authorityIdentityBefore.address.universeId !== address.universeId
+      || authorityIdentityBefore.address.locationId !== address.locationId) {
+      return fail("stale", "authority-replaced", "Rust world authority belongs to another world address.");
+    }
+
+    let response: Awaited<ReturnType<RustWorldAuthorityRuntimeR4V1["mutate"]>>;
+    try {
+      response = await this.rustWorldAuthority.mutate(batchId, authorityId, commands as readonly RustWorldMutationCommandR4V1[]);
+    } catch (error) {
+      if (authorityEpoch !== this.rustWorldAuthorityEpoch) {
+        return fail("stale", "world-generation-replaced", "The world generation changed while awaiting authority.");
+      }
+      if (!sameWorldAuthorityIdentityR4V1(authorityIdentityBefore, this.rustWorldAuthority.identity())) {
+        return fail("stale", "authority-replaced", "Rust world authority was replaced while the mutation was pending.");
+      }
+      return fail("rejected", "authority-no-receipt", error instanceof Error ? error.message : String(error));
+    }
+
+    if (authorityEpoch !== this.rustWorldAuthorityEpoch) {
+      return fail("stale", "world-generation-replaced", "The world generation changed while awaiting the mutation receipt.");
+    }
+    if (!response) {
+      const diagnostics = this.rustWorldAuthority.diagnostics();
+      const currentIdentity = this.rustWorldAuthority.identity();
+      if (!sameWorldAuthorityIdentityR4V1(authorityIdentityBefore, currentIdentity)) {
+        return fail("stale", "authority-replaced", "Rust world authority was replaced before returning a receipt.");
+      }
+      if (/stale(?:-| )revision/iu.test(diagnostics.lastFallbackReason ?? "")) {
+        return fail("stale", "stale-authority-revision", diagnostics.lastFallbackReason ?? "Rust authority rejected a stale revision.");
+      }
+      return fail("rejected", "authority-no-receipt", diagnostics.lastFallbackReason ?? "Rust authority returned no mutation receipt.");
+    }
+    if (response.type !== "authority-mutation-result-r4-v1") {
+      return fail("stale", "receipt-mismatch", "Rust authority returned the wrong receipt type.");
+    }
+    if (response.status === "rejected") {
+      if (response.rejectionCode === "stale-revision") {
+        return fail("stale", "stale-authority-revision", response.message ?? "Rust authority rejected a stale revision.");
+      }
+      return fail("rejected", "authority-rejected", response.message ?? response.rejectionCode ?? "Rust authority rejected the mutation.");
+    }
+
+    const authorityIdentityAfter = cloneWorldAuthorityIdentityR4V1(response.identity);
+    if (!sameWorldAuthorityIdentityR4V1(authorityIdentityAfter, this.rustWorldAuthority.identity())
+      || this.rustWorldAuthority.diagnostics().state !== "ready"
+      || !this.rustWorldAuthority.isRustAuthoritative()) {
+      return fail("stale", "authority-replaced", "The accepted receipt is not current for the active Rust authority.");
+    }
+    if (!authorityIdentityAfter
+      || authorityIdentityAfter.address.universeId !== address.universeId
+      || authorityIdentityAfter.address.locationId !== address.locationId) {
+      return fail("stale", "receipt-mismatch", "The accepted receipt belongs to another world address.");
+    }
+    if (expectedChanges.length > 0
+      && (authorityIdentityAfter.revision.epoch !== authorityIdentityBefore.revision.epoch
+        || authorityIdentityAfter.revision.mutation <= authorityIdentityBefore.revision.mutation
+        || authorityIdentityAfter.stateHash === authorityIdentityBefore.stateHash)) {
+      return fail("stale", "receipt-mismatch", "The accepted receipt did not advance the exact Rust mutation identity.");
+    }
+    if (this.mutationRevision !== compatibilityMutationRevisionBefore
+      || [...cells.values()].some((state) => this.getBlock(state.x, state.y, state.z) !== state.initialBlock
+        || this.blockFacingAt(state.x, state.y, state.z) !== state.initialFacing)) {
+      return fail("stale", "compatibility-state-changed", "Compatibility world state changed while the Rust receipt was pending.");
+    }
+
+    const event = response.immediateEvent;
+    const receiptMatches = response.mutated === (expectedChanges.length > 0)
+      && (expectedChanges.length === 0
+        ? event === undefined
+        : Boolean(event
+          && event.batchId === batchId
+          && event.address.universeId === address.universeId
+          && event.address.locationId === address.locationId
+          && sameWorldAuthorityIdentityR4V1(event.identity, authorityIdentityAfter)
+          && event.changes.length === expectedChanges.length
+          && event.changes.every((change, index) => {
+            const expected = expectedChanges[index];
+            return change.x === expected.x && change.y === expected.y && change.z === expected.z
+              && change.previousBlockId === expected.previousBlockId && change.blockId === expected.blockId
+              && change.previousFacing === expected.previousFacing && change.facing === expected.facing;
+          })));
+    if (!receiptMatches) {
+      return fail("stale", "receipt-mismatch", "Rust mutation receipt does not exactly match the preflighted block and facing transition.");
+    }
+
+    if (event) {
+      this.applyRustWorldImmediateEvent(event, immediate, deferLighting);
+      this.flushRustWorldAuxiliaryPatches();
+      if (expectedChanges.some((change) => this.getBlock(change.x, change.y, change.z) !== change.blockId
+        || this.blockFacingAt(change.x, change.y, change.z) !== change.facing)) {
+        throw new Error("Accepted Rust mutation did not produce its exact compatibility projection");
+      }
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      status: "accepted",
+      mutated: expectedChanges.length > 0,
+      projectionStatus: expectedChanges.length > 0 ? "applied" : "no-op",
+      projectedChanges: expectedChanges,
+      batchId,
+      authorityEpoch,
+      authorityIdentityBefore,
+      authorityIdentityAfter,
+      compatibilityMutationRevisionBefore,
+      compatibilityMutationRevisionAfter: this.mutationRevision,
+    });
+  }
+
   /** Supplies sparse runtime flow metadata without coupling world storage to the simulator. */
   setLiquidCellProvider(provider: typeof this.liquidCellProvider) {
     this.liquidCellProvider = provider;
@@ -3939,6 +4962,9 @@ export class ChunkWorld {
     generationOptions?: Partial<WorldGenerationOptions>,
     savedFacings?: Readonly<Record<string, number>>,
   ) {
+    this.terrainPresentationEpoch += 1;
+    this.terrainGenerationLifecycleRevision += 1;
+    this.terrainGenerationPipeline.resetAuthorityEpoch();
     this.disposeChunks();
     this.generationQueue = [];
     this.generationQueued.clear();
@@ -3969,6 +4995,7 @@ export class ChunkWorld {
     this.coalescedConsolidations = 0;
     this.invalidatedCombinedMeshes = 0;
     this.pendingWorkerGeneration.clear();
+    this.generationResidencyLeases.clear();
     this.completedWorkerGeneration = [];
     this.staleWorkerGeneration = 0;
     this.terrainGeometriesCreated = 0;
@@ -3978,6 +5005,7 @@ export class ChunkWorld {
     this.urgentMeshQueue = [];
     this.urgentMeshQueueHead = 0;
     this.urgentMeshQueued.clear();
+    this.pendingEditMeshes.clear();
     this.seamMeshRebuilds.clear();
     this.seamPresentationPending.clear();
     this.activeMeshTask = null;
@@ -4059,6 +5087,10 @@ export class ChunkWorld {
     this.playerChunkZ = Number.NaN;
     this.playerSection = sectionForY(0);
     this.scheduledViewSector = Number.NaN;
+    this.streamingLookaheadChunkX = 0;
+    this.streamingLookaheadChunkZ = 0;
+    this.scheduledLookaheadChunkX = Number.NaN;
+    this.scheduledLookaheadChunkZ = Number.NaN;
     if (savedEdits) {
       for (const [key, pairs] of Object.entries(savedEdits)) {
         const map = new Map<number, BlockId>();
@@ -4146,13 +5178,18 @@ export class ChunkWorld {
   initializeAround(x: number, z: number) {
     const cx = Math.floor(x / CHUNK_SIZE);
     const cz = Math.floor(z / CHUNK_SIZE);
-    for (let radius = 0; radius <= 1; radius += 1) {
-      for (let dx = -radius; dx <= radius; dx += 1) for (let dz = -radius; dz <= radius; dz += 1) {
-        if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
-        this.generateChunk(cx + dx, cz + dz);
+    if (this.terrainGenerationAuthority.mode === "typescript") {
+      for (let radius = 0; radius <= 1; radius += 1) {
+        for (let dx = -radius; dx <= radius; dx += 1) for (let dz = -radius; dz <= radius; dz += 1) {
+          if (Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
+          this.generateChunk(cx + dx, cz + dz);
+        }
       }
+      for (const chunk of this.chunks.values()) for (let section = 0; section < SECTION_COUNT; section += 1) this.rebuildSection(chunk, section);
     }
-    for (const chunk of this.chunks.values()) for (let section = 0; section < SECTION_COUNT; section += 1) this.rebuildSection(chunk, section);
+    // Rust startup and long travel deliberately share scheduleAround's one
+    // worker queue. The nearest 3x3 receives highest priority; no synchronous
+    // TypeScript task is constructed while the required authority is cold.
     this.scheduleAround(x, z, true);
   }
 
@@ -4189,10 +5226,14 @@ export class ChunkWorld {
     this.streamingLookaheadChunkX = lookaheadChunks ? Math.round(velocityX / speed * lookaheadChunks) : 0;
     this.streamingLookaheadChunkZ = lookaheadChunks ? Math.round(velocityZ / speed * lookaheadChunks) : 0;
     const focusSection = Number.isFinite(y) ? clamp(sectionForY(y!), 0, SECTION_COUNT - 1) : this.playerSection;
+    const periodicScheduleRefresh = this.frame % 180 === 0;
     if (cx !== this.playerChunkX || cz !== this.playerChunkZ || focusSection !== this.playerSection
-      || this.streamingViewSector !== this.scheduledViewSector || this.frame % 180 === 0) {
+      || this.streamingViewSector !== this.scheduledViewSector
+      || this.streamingLookaheadChunkX !== this.scheduledLookaheadChunkX
+      || this.streamingLookaheadChunkZ !== this.scheduledLookaheadChunkZ || periodicScheduleRefresh) {
       const startedAt = performance.now();
-      this.scheduleAround(x, z, false, y);
+      // The periodic debt/aging refresh must bypass scheduleAround's unchanged-anchor guard.
+      this.scheduleAround(x, z, periodicScheduleRefresh, y);
       schedulingMilliseconds += performance.now() - startedAt;
     }
     // A missing player chunk is a correctness problem, not ordinary backlog.
@@ -4284,7 +5325,7 @@ export class ChunkWorld {
           lightingMilliseconds += performance.now() - startedAt;
           lightingSlices += 1;
         } else {
-          const processed = this.processMesh();
+          const processed = this.processBackgroundMesh();
           meshingMilliseconds += performance.now() - startedAt;
           if (!processed) continue;
           meshSlices += 1;
@@ -4330,11 +5371,17 @@ export class ChunkWorld {
     const cz = Math.floor(z / CHUNK_SIZE);
     const focusSection = Number.isFinite(y) ? clamp(sectionForY(y!), 0, SECTION_COUNT - 1) : this.playerSection;
     if (!force && cx === this.playerChunkX && cz === this.playerChunkZ && focusSection === this.playerSection
-      && this.streamingViewSector === this.scheduledViewSector) return;
+      && this.streamingViewSector === this.scheduledViewSector
+      && this.streamingLookaheadChunkX === this.scheduledLookaheadChunkX
+      && this.streamingLookaheadChunkZ === this.scheduledLookaheadChunkZ) return;
     this.playerChunkX = cx;
     this.playerChunkZ = cz;
     this.playerSection = focusSection;
     this.scheduledViewSector = this.streamingViewSector;
+    // Priority depends on the rounded target cell, not raw velocity or sub-chunk position.
+    // Remember the target used by the effective schedule so reversals refresh it immediately.
+    this.scheduledLookaheadChunkX = this.streamingLookaheadChunkX;
+    this.scheduledLookaheadChunkZ = this.streamingLookaheadChunkZ;
     const generationRadius = this.renderDistance + 1;
     const radialStreaming = this.renderDistance > RADIAL_STREAMING_DISTANCE_THRESHOLD;
     const withinGenerationWindow = (offsetX: number, offsetZ: number) => chunkWithinDirectionalStreamingWindow(
@@ -4345,6 +5392,9 @@ export class ChunkWorld {
       this.streamingViewX,
       this.streamingViewZ,
     );
+    const leaseNow = performance.now();
+    for (const [key, expiresAt] of this.generationResidencyLeases) if (expiresAt <= leaseNow) this.generationResidencyLeases.delete(key);
+    const leased = (key: string) => (this.generationResidencyLeases.get(key) ?? 0) > leaseNow;
     const currentKey = chunkKey(cx, cz);
     if (this.activeGenerationTask) {
       const active = this.activeGenerationTask;
@@ -4365,12 +5415,12 @@ export class ChunkWorld {
         const key = chunkKey(entry.cx, entry.cz);
         return key !== this.activeGenerationTask?.key
           && !this.chunks.has(key)
-          && withinGenerationWindow(entry.cx - cx, entry.cz - cz);
+          && (withinGenerationWindow(entry.cx - cx, entry.cz - cz) || leased(key));
       })
       .map((entry) => ({ ...entry, distance: chunkStreamingSortDistance(entry.cx - cx, entry.cz - cz, radialStreaming) }));
     for (const [key, task] of this.generationTasks) {
       if (key === this.activeGenerationTask?.key) continue;
-      if (this.chunks.has(key) || !withinGenerationWindow(task.cx - cx, task.cz - cz)) {
+      if (this.chunks.has(key) || (!withinGenerationWindow(task.cx - cx, task.cz - cz) && !leased(key))) {
         this.generationTasks.delete(key);
       }
     }
@@ -4416,6 +5466,15 @@ export class ChunkWorld {
       this.meshEnqueuedAt.delete(queueKey);
       this.streamingCanceled.meshing += 1;
     }
+    // Visibility pruning also cancels edit ownership for an active retained-halo
+    // section; it may have no queue entry while its partial mesh is in progress.
+    for (const queueKey of this.pendingEditMeshes) {
+      const key = queueKey.slice(0, queueKey.lastIndexOf(":"));
+      const chunk = this.chunks.get(key);
+      if (!chunk || !chunkWithinStreamingRadius(chunk.cx - cx, chunk.cz - cz, this.renderDistance, radialStreaming)) {
+        this.pendingEditMeshes.delete(queueKey);
+      }
+    }
     for (let dx = -generationRadius; dx <= generationRadius; dx += 1) {
       for (let dz = -generationRadius; dz <= generationRadius; dz += 1) {
         if (!withinGenerationWindow(dx, dz)) continue;
@@ -4444,17 +5503,7 @@ export class ChunkWorld {
         }
       }
     }
-    const generationPriority = (entry: Readonly<{ cx: number; cz: number }>) => {
-      const key = chunkKey(entry.cx, entry.cz);
-      return this.agedStreamingPriority(
-        this.coordinateStreamingPriority(entry.cx, entry.cz),
-        this.generationEnqueuedAt.get(key),
-      );
-    };
-    // processGenerationSlice pops from the end, so keep the strongest item
-    // last while preserving deterministic coordinate ties.
-    this.generationQueue.sort((a, b) => generationPriority(b) - generationPriority(a)
-      || b.cx - a.cx || b.cz - a.cz);
+    this.sortGenerationQueue();
     this.sortMeshQueues();
     this.preemptMeshForPlayer();
 
@@ -4462,7 +5511,7 @@ export class ChunkWorld {
     for (const [key, chunk] of this.chunks.entries()) {
       const offsetX = chunk.cx - cx;
       const offsetZ = chunk.cz - cz;
-      if (!chunkWithinStreamingRadius(offsetX, offsetZ, retainRadius, radialStreaming)) this.unloadChunk(key);
+      if (!chunkWithinStreamingRadius(offsetX, offsetZ, retainRadius, radialStreaming) && !leased(key)) this.unloadChunk(key);
       else this.setChunkPresentationVisible(chunk, chunkWithinStreamingRadius(offsetX, offsetZ, this.renderDistance, radialStreaming));
     }
     this.reprioritizeLightInitialization();
@@ -4485,6 +5534,22 @@ export class ChunkWorld {
       ? -Math.min(1.2, base * 0.22) * cameraDot
       : Math.min(0.45, base * 0.08) * -cameraDot;
     return Math.max(0, base + Math.min(0, lookahead - base) * 0.5 + cameraBias);
+  }
+
+  private sortGenerationQueue() {
+    const now = performance.now();
+    const anchored = Number.isFinite(this.playerChunkX) && Number.isFinite(this.playerChunkZ);
+    const priority = (entry: Readonly<{ cx: number; cz: number; distance: number }>) => this.agedStreamingPriority(
+      // Radius-zero residency can be requested before any camera schedule establishes an anchor.
+      anchored ? this.coordinateStreamingPriority(entry.cx, entry.cz) : entry.distance,
+      this.generationEnqueuedAt.get(chunkKey(entry.cx, entry.cz)),
+      now,
+    );
+    // Every admission path must preserve the same camera/lookahead/aging order; a late
+    // persistent miss or direct residency request must not restore distance-only ordering.
+    // processGenerationSlice pops from the end, with deterministic coordinate ties.
+    this.generationQueue.sort((left, right) => priority(right) - priority(left)
+      || right.cx - left.cx || right.cz - left.cz);
   }
 
   private chunkStreamingPriority(key: string) {
@@ -4538,9 +5603,24 @@ export class ChunkWorld {
     this.urgentMeshQueueHead = 0;
   }
 
+  private activeMeshTaskBlocksRequiredImmediateSeam() {
+    const active = this.activeMeshTask;
+    if (!active) return false;
+    const blocker = `${active.key}:${active.section}`;
+    for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
+      const key = chunkKey(this.playerChunkX + dx, this.playerChunkZ + dz);
+      const chunk = this.chunks.get(key);
+      if (!chunk) continue;
+      for (const section of this.playerRequiredMeshSections(chunk)) {
+        if (this.seamPresentationPending.get(`${key}:${section}`)?.blockers.has(blocker)) return true;
+      }
+    }
+    return false;
+  }
+
   private preemptMeshForPlayer() {
     const active = this.activeMeshTask;
-    if (!active) return;
+    if (!active || this.activeMeshTaskBlocksRequiredImmediateSeam()) return;
     const currentKey = chunkKey(this.playerChunkX, this.playerChunkZ);
     const candidates = [...this.urgentMeshQueue.slice(this.urgentMeshQueueHead), ...this.meshQueue.slice(this.meshQueueHead)]
       .filter((entry) => entry.key === currentKey
@@ -4548,7 +5628,7 @@ export class ChunkWorld {
     const best = candidates.sort((left, right) => this.compareMeshPriority(left, right))[0];
     if (!best || this.compareMeshPriority(best, active) >= 0) return;
     this.activeMeshTask = null;
-    this.queueMesh(active.key, active.section);
+    this.queueMesh(active.key, active.section, active.urgent || this.seamMeshRebuilds.has(`${active.key}:${active.section}`));
   }
 
   private reprioritizeLightInitialization() {
@@ -4650,6 +5730,20 @@ export class ChunkWorld {
     return `terrain-v5|g${GENERATOR_VERSION}|${this.seedText}|${JSON.stringify(this.generationOptions)}|${key}|${editHalo}`;
   }
 
+  private terrainLocatorAuthorityNamespace() {
+    // Pure regional planners depend only on generator identity, never mutable
+    // chunk edits or camera residency.
+    return `terrain-locator-v1|g${GENERATOR_VERSION}|${this.seedText}|${JSON.stringify(this.generationOptions)}`;
+  }
+
+  /** Stable pure-planner identity used to discard stale asynchronous UI/gameplay locator results. */
+  terrainLocatorAuthorityIdentity() {
+    return Object.freeze({
+      namespace: this.terrainLocatorAuthorityNamespace(),
+      lifecycleRevision: this.terrainGenerationLifecycleRevision,
+    });
+  }
+
   private structureMarkerEntriesForChunk(cx: number, cz: number) {
     return [...this.structureMarkers.entries()].filter(([, marker]) => (
       Math.floor(marker.position.x / CHUNK_SIZE) === cx
@@ -4725,7 +5819,7 @@ export class ChunkWorld {
       this.generationQueue.push({ cx, cz, distance });
       this.generationQueued.add(key);
       this.generationEnqueuedAt.set(key, performance.now());
-      this.generationQueue.sort((left, right) => right.distance - left.distance || right.cx - left.cx || right.cz - left.cz);
+      this.sortGenerationQueue();
     };
     this.pendingPersistentChunks.add(cacheKey);
     void this.chunkPersistentCache.get(cacheKey).then((data) => {
@@ -4820,6 +5914,9 @@ export class ChunkWorld {
   }
 
   processGeneration() {
+    if (this.terrainGenerationAuthority.mode === "rust") {
+      throw new Error("Synchronous terrain generation is unavailable while Rust worldgen authority is required");
+    }
     if (this.activeGenerationTask) {
       const task = this.activeGenerationTask;
       this.activeGenerationTask = null;
@@ -4849,7 +5946,7 @@ export class ChunkWorld {
   }
 
   processGenerationSlice(preferredKey?: string) {
-    if (this.terrainGenerationPipeline.supported) {
+    if (this.terrainGenerationAuthority.mode === "rust") {
       const completedIndex = preferredKey
         ? this.completedWorkerGeneration.findIndex((entry) => entry.key === preferredKey)
         : (this.completedWorkerGeneration.length ? 0 : -1);
@@ -4862,11 +5959,12 @@ export class ChunkWorld {
           completed.cz - this.playerChunkZ,
           this.renderDistance + 1,
           radialStreaming,
-        );
+        ) || (this.generationResidencyLeases.get(completed.key) ?? 0) > performance.now();
         if (completed.namespace !== this.chunkCacheKey(completed.key) || !retained || this.chunks.has(completed.key)) {
           this.generationQueued.delete(completed.key);
           this.generationEnqueuedAt.delete(completed.key);
           this.staleWorkerGeneration += 1;
+          if (retained && !this.chunks.has(completed.key)) this.requestChunk(completed.cx, completed.cz);
           return true;
         }
         const chunk: Chunk = {
@@ -4902,14 +6000,21 @@ export class ChunkWorld {
         this.queueLightReconciliation(chunk);
         return true;
       }
-      if (this.terrainGenerationPipeline.availableSlots <= 0) return false;
+      if (this.terrainGenerationPipeline.authorityUnavailable
+        || this.terrainGenerationPipeline.availableSlots <= 0) return false;
       if (!preferredKey && this.terrainGenerationPipeline.availableSlots <= 1
         && (this.generationQueue.at(-1)?.distance ?? Number.POSITIVE_INFINITY) > 1) return false;
       const currentKey = chunkKey(this.playerChunkX, this.playerChunkZ);
       const downstreamDebt = this.lightInitializationQueued.size + this.lightReconciliationQueued.size
         + Math.ceil((this.meshQueued.size + this.urgentMeshQueued.size) / 4);
       const nearestQueuedDistance = this.generationQueue.at(-1)?.distance ?? Number.POSITIVE_INFINITY;
-      if (this.chunks.has(currentKey) && downstreamDebt >= 32 && nearestQueuedDistance > 1) return false;
+      // Presentation debt may throttle ordinary far-field streaming, but a
+      // caller-specified key is a correctness-critical residency request
+      // (startup, teleport, guest join, or an authoritative gameplay probe).
+      // Blocking that lane behind lighting/mesh debt can deadlock startup:
+      // the radius-one chunks create enough presentation work to prevent the
+      // required radius-two ring from ever reaching an otherwise idle worker.
+      if (!preferredKey && this.chunks.has(currentKey) && downstreamDebt >= 32 && nearestQueuedDistance > 1) return false;
       while (this.generationQueue.length) {
         const next = this.takeQueuedGeneration(preferredKey);
         if (!next) return false;
@@ -4924,10 +6029,18 @@ export class ChunkWorld {
           cz: next.cz,
           edits: [...(this.edits.get(key) ?? new Map<number, BlockId>())],
         };
+        const lifecycleRevision = this.terrainGenerationLifecycleRevision;
         if (!this.terrainGenerationPipeline.submit(
           request,
-          (result) => this.completedWorkerGeneration.push(result),
+          (result) => {
+            if (lifecycleRevision !== this.terrainGenerationLifecycleRevision) {
+              this.staleWorkerGeneration += 1;
+              return;
+            }
+            this.completedWorkerGeneration.push(result);
+          },
           () => {
+            if (lifecycleRevision !== this.terrainGenerationLifecycleRevision) return;
             this.pendingWorkerGeneration.delete(key);
             const radialStreaming = this.renderDistance > RADIAL_STREAMING_DISTANCE_THRESHOLD;
             const retained = chunkWithinStreamingRadius(
@@ -4935,13 +6048,15 @@ export class ChunkWorld {
               next.cz - this.playerChunkZ,
               this.renderDistance + 1,
               radialStreaming,
-            );
-            if (request.namespace !== this.chunkCacheKey(key) || !retained || this.chunks.has(key)) {
+            ) || (this.generationResidencyLeases.get(key) ?? 0) > performance.now();
+            if (!retained || this.chunks.has(key)) {
               this.generationQueued.delete(key);
               this.generationEnqueuedAt.delete(key);
               return;
             }
-            this.generationQueue.push(next);
+            this.generationQueued.delete(key);
+            this.generationEnqueuedAt.delete(key);
+            this.requestChunk(next.cx, next.cz);
           },
         )) {
           this.generationQueue.push(next);
@@ -5172,14 +6287,121 @@ export class ChunkWorld {
     return this.processLightInitialization() || this.processLightReconciliation();
   }
 
-  processMesh(preferredKey?: string) {
-    if (preferredKey && this.activeMeshTask && this.activeMeshTask.key !== preferredKey) {
+  private hasRunnableQueuedMeshForKey(key: string, preferredSection?: number) {
+    const chunk = this.chunks.get(key);
+    if (!chunk?.group.visible || !this.chunkLightPresentationReady(key)) return false;
+    for (let section = 0; section < SECTION_COUNT; section += 1) {
+      if (preferredSection !== undefined && section !== preferredSection) continue;
+      const queueKey = `${key}:${section}`;
+      if (this.seamPresentationPending.has(queueKey)) continue;
+      if (this.urgentMeshQueued.has(queueKey) || this.meshQueued.has(queueKey)) return true;
+    }
+    return false;
+  }
+
+  private queuedRequiredSeamBlocker(key: string, includeActive = false) {
+    const chunk = this.chunks.get(key);
+    if (!chunk?.group.visible || !this.chunkLightPresentationReady(key)) return null;
+    const missing = this.playerRequiredMeshSections(chunk).filter((section) => !chunk.sections.has(section));
+    // Finish runnable local-height work first. Only parked required sections inherit
+    // a dependency's slot; unrelated queued sections must not mask that dependency.
+    if (missing.some((section) => (this.activeMeshTask?.key === key && this.activeMeshTask.section === section)
+      || this.hasRunnableQueuedMeshForKey(key, section))) return null;
+    const candidates = new Map<string, { key: string; section: number }>();
+    const active = includeActive ? this.activeMeshTask : null;
+    for (const section of missing) {
+      const pending = this.seamPresentationPending.get(`${key}:${section}`);
+      if (!pending) continue;
+      for (const blocker of pending.blockers) {
+        if (!this.seamMeshRebuilds.has(blocker)) continue;
+        const separator = blocker.lastIndexOf(":");
+        const blockerKey = blocker.slice(0, separator);
+        const blockerSection = Number(blocker.slice(separator + 1));
+        if (!Number.isInteger(blockerSection) || blockerSection < 0 || blockerSection >= SECTION_COUNT) continue;
+        const activeRunnable = active?.key === blockerKey && active.section === blockerSection
+          && this.chunks.get(blockerKey)?.group.visible && this.chunkLightPresentationReady(blockerKey)
+          && !this.seamPresentationPending.has(blocker);
+        if (activeRunnable || this.hasRunnableQueuedMeshForKey(blockerKey, blockerSection)) {
+          candidates.set(blocker, { key: blockerKey, section: blockerSection });
+        }
+      }
+    }
+    if (active && candidates.has(`${active.key}:${active.section}`)) return candidates.get(`${active.key}:${active.section}`)!;
+    return [...candidates.values()].sort((left, right) => this.compareMeshPriority(left, right))[0] ?? null;
+  }
+
+  private predictedRequiredMeshTarget() {
+    if ((!this.streamingLookaheadChunkX && !this.streamingLookaheadChunkZ)
+      || !Number.isFinite(this.playerChunkX) || !Number.isFinite(this.playerChunkZ)
+      || this.ringCompleteness(1).ratio !== 1) return null;
+    const candidates: Array<{ key: string; section: number }> = [];
+    const active = this.activeMeshTask;
+    for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
+      const key = chunkKey(this.playerChunkX + this.streamingLookaheadChunkX + dx,
+        this.playerChunkZ + this.streamingLookaheadChunkZ + dz);
+      const chunk = this.chunks.get(key);
+      if (!chunk?.group.visible || !this.chunkLightPresentationReady(key)) continue;
+      const local = this.playerRequiredMeshSections(chunk)
+        .filter((section) => !chunk.sections.has(section))
+        .filter((section) => (active?.key === key && active.section === section)
+          || this.hasRunnableQueuedMeshForKey(key, section))
+        .map((section) => ({ key, section }));
+      const blocker = local.length ? null : this.queuedRequiredSeamBlocker(key, true);
+      const targets = blocker ? [blocker] : local;
+      // A useful partial build must finish instead of restarting whenever another
+      // predicted chunk becomes eligible. Reversal naturally changes this set.
+      if (active && targets.some((target) => target.key === active.key && target.section === active.section)) return active;
+      candidates.push(...targets);
+    }
+    return candidates.sort((left, right) => this.compareMeshPriority(left, right))[0] ?? null;
+  }
+
+  /** Prediction only spends the existing discretionary mesh turn, never a correctness reserve. */
+  private processBackgroundMesh() {
+    const target = this.predictedRequiredMeshTarget();
+    if (!target) return this.processMesh();
+    const protectedUrgent = (entry: Readonly<{ key: string; section: number }>) => {
+      const queueKey = `${entry.key}:${entry.section}`;
+      return this.pendingEditMeshes.has(queueKey) || !this.seamMeshRebuilds.has(queueKey);
+    };
+    const active = this.activeMeshTask;
+    if (active && (this.activeMeshTaskBlocksRequiredImmediateSeam()
+      || ((active.urgent || this.urgentMeshQueued.has(`${active.key}:${active.section}`)) && protectedUrgent(active)))) {
+      return this.processMesh();
+    }
+    // Unknown urgent causes remain conservative. Only identified generation-seam
+    // backlog may yield to missing predicted presentation; coalesced edits never do.
+    let urgent: { key: string; section: number } | undefined;
+    for (let index = this.urgentMeshQueueHead; index < this.urgentMeshQueue.length; index += 1) {
+      const entry = this.urgentMeshQueue[index];
+      if (!this.urgentMeshQueued.has(`${entry.key}:${entry.section}`) || !protectedUrgent(entry)
+        || !this.hasRunnableQueuedMeshForKey(entry.key, entry.section)) continue;
+      if (!urgent || this.compareMeshPriority(entry, urgent) < 0) urgent = entry;
+    }
+    return this.processMesh(urgent?.key ?? target.key, urgent?.section ?? target.section);
+  }
+
+  processMesh(preferredKey?: string, preferredSection?: number) {
+    if (preferredKey && preferredSection === undefined) {
+      const blocker = this.queuedRequiredSeamBlocker(preferredKey);
+      if (blocker) {
+        preferredKey = blocker.key;
+        preferredSection = blocker.section;
+      }
+    }
+    if (preferredKey
+      && this.activeMeshTask
+      && (this.activeMeshTask.key !== preferredKey
+        || (preferredSection !== undefined && this.activeMeshTask.section !== preferredSection))
+      && !this.activeMeshTaskBlocksRequiredImmediateSeam()
+      && this.hasRunnableQueuedMeshForKey(preferredKey, preferredSection)) {
       const interrupted = this.activeMeshTask;
       this.activeMeshTask = null;
-      this.queueMesh(interrupted.key, interrupted.section);
+      this.queueMesh(interrupted.key, interrupted.section, interrupted.urgent || this.seamMeshRebuilds.has(`${interrupted.key}:${interrupted.section}`));
     }
     while (!this.activeMeshTask) {
-      const next = this.takeQueuedMesh(true, preferredKey) ?? this.takeQueuedMesh(false, preferredKey);
+      const urgentNext = this.takeQueuedMesh(true, preferredKey, preferredSection);
+      const next = urgentNext ?? this.takeQueuedMesh(false, preferredKey, preferredSection);
       if (!next) return false;
       const chunk = this.chunks.get(next.key);
       if (!chunk || !chunk.group.visible) continue;
@@ -5195,6 +6417,7 @@ export class ChunkWorld {
       this.activeMeshTask = {
         key: next.key,
         section: next.section,
+        urgent: Boolean(urgentNext),
         buckets: { opaque: emptyBucket(), cutout: emptyBucket(), emissive: emptyBucket(), translucentSolid: emptyBucket(), water: emptyBucket(), transparent: emptyBucket(), glass: emptyBucket() },
         nextLocalX: 0,
       };
@@ -5467,7 +6690,9 @@ export class ChunkWorld {
     const completed = this.completedConsolidations.shift();
     if (completed) {
       const queueKey = `${completed.key}:${completed.layer}`;
-      if (completed.revision === this.consolidationRevision.get(queueKey)) {
+      if (completed.presentationEpoch !== this.terrainPresentationEpoch) {
+        this.staleConsolidations += 1;
+      } else if (completed.revision === this.consolidationRevision.get(queueKey)) {
         this.installCombinedGeometry(completed.key, completed.layer, completed.geometry);
         this.resolvePlayerEditConsolidation(queueKey);
         this.consolidationEnqueuedAt.delete(queueKey);
@@ -5513,16 +6738,25 @@ export class ChunkWorld {
       const parts = chunk.rendererTerrain.sectionPages(next.layer)
         .map((page) => cloneRendererTerrainGeometryForTransferR11(page.geometry));
       const revision = this.consolidationRevision.get(queueKey) ?? 0;
+      const presentationEpoch = this.terrainPresentationEpoch;
       dirtyLayers.delete(next.layer);
       if (!dirtyLayers.size) this.consolidationDirtyLayers.delete(next.key);
       this.pendingConsolidations.add(queueKey);
       this.terrainBufferPipeline.submit(
         parts,
         (geometry) => {
+          if (presentationEpoch !== this.terrainPresentationEpoch) return;
           this.pendingConsolidations.delete(queueKey);
-          this.completedConsolidations.push({ key: next.key, layer: next.layer, revision, geometry });
+          this.completedConsolidations.push({
+            key: next.key,
+            layer: next.layer,
+            revision,
+            presentationEpoch,
+            geometry,
+          });
         },
         () => {
+          if (presentationEpoch !== this.terrainPresentationEpoch) return;
           this.pendingConsolidations.delete(queueKey);
           if (!this.chunks.has(next.key) || revision !== this.consolidationRevision.get(queueKey)) return;
           const retryLayers = this.consolidationDirtyLayers.get(next.key) ?? new Set<WorldRenderLayer>();
@@ -5680,7 +6914,7 @@ export class ChunkWorld {
     for (let index = 0; index < maximum && this.lightSectionQueued.size > 0; index += 1) this.processLightSection();
   }
 
-  takeQueuedMesh(urgent: boolean, preferredKey?: string) {
+  takeQueuedMesh(urgent: boolean, preferredKey?: string, preferredSection?: number) {
     let queue = urgent ? this.urgentMeshQueue : this.meshQueue;
     let head = urgent ? this.urgentMeshQueueHead : this.meshQueueHead;
     const queued = urgent ? this.urgentMeshQueued : this.meshQueued;
@@ -5688,10 +6922,11 @@ export class ChunkWorld {
     for (let index = head; index < queue.length; index += 1) {
       const entry = queue[index];
       if (preferredKey && entry.key !== preferredKey) continue;
+      if (preferredSection !== undefined && entry.section !== preferredSection) continue;
       if (!queued.has(`${entry.key}:${entry.section}`)) continue;
       if (bestIndex < 0 || this.compareMeshPriority(entry, queue[bestIndex]) < 0) bestIndex = index;
     }
-    if (preferredKey && bestIndex < 0) return undefined;
+    if ((preferredKey || preferredSection !== undefined) && bestIndex < 0) return undefined;
     if (bestIndex >= 0 && bestIndex !== head) [queue[head], queue[bestIndex]] = [queue[bestIndex], queue[head]];
     while (head < queue.length) {
       const next = queue[head];
@@ -5734,6 +6969,7 @@ export class ChunkWorld {
     }
     chunk.dirty.add(section);
     const queueKey = `${key}:${section}`;
+    urgent ||= this.pendingEditMeshes.has(queueKey);
     if (urgent) {
       if (this.urgentMeshQueued.has(queueKey)) return;
       this.meshQueued.delete(queueKey);
@@ -5748,16 +6984,26 @@ export class ChunkWorld {
     this.meshQueue.push({ key, section });
   }
 
+  private queueEditedMesh(key: string, section: number) {
+    this.queueMesh(key, section, true);
+    const queueKey = `${key}:${section}`;
+    if (this.urgentMeshQueued.has(queueKey)) this.pendingEditMeshes.add(queueKey);
+  }
+
   cancelQueuedMesh(key: string, section: number) {
     const queueKey = `${key}:${section}`;
     this.meshQueued.delete(queueKey);
     this.urgentMeshQueued.delete(queueKey);
+    this.pendingEditMeshes.delete(queueKey);
     if (this.seamMeshRebuilds.delete(queueKey)) this.releaseSeamPresentationBlocker(queueKey);
     if (this.meshEnqueuedAt.delete(queueKey)) this.streamingCanceled.meshing += 1;
     if (this.activeMeshTask?.key === key && this.activeMeshTask.section === section) this.activeMeshTask = null;
   }
 
   sampleColumn(x: number, z: number): ColumnSample {
+    if (this.terrainGenerationAuthority.mode === "rust") {
+      throw new Error("Legacy TypeScript sampleColumn is unavailable while Rust terrain authority is required; use installedColumn and defer if absent");
+    }
     const biomeScale = this.generationOptions.profile === "legacy-v14" ? 1 : this.generationOptions.biomeScale;
     const sampleX = x / biomeScale;
     const sampleZ = z / biomeScale;
@@ -6180,6 +7426,9 @@ export class ChunkWorld {
 
   /** Worker entry point: deterministic terrain/features/finalization without neighbor-sensitive lighting. */
   generateChunkTerrainOnly(cx: number, cz: number) {
+    if (this.terrainGenerationAuthority.mode === "rust") {
+      throw new Error("TypeScript terrain task construction is forbidden while Rust worldgen authority is required");
+    }
     const key = chunkKey(cx, cz);
     const existing = this.chunks.get(key);
     if (existing) return existing;
@@ -6189,6 +7438,9 @@ export class ChunkWorld {
   }
 
   generateChunk(cx: number, cz: number) {
+    if (this.terrainGenerationAuthority.mode === "rust") {
+      throw new Error("Synchronous generateChunk is forbidden while Rust worldgen authority is required; use requestChunk and await readiness");
+    }
     const key = chunkKey(cx, cz);
     const existing = this.chunks.get(key);
     if (existing) {
@@ -6208,6 +7460,141 @@ export class ChunkWorld {
     this.generationTasks.delete(key);
     this.generationQueued.delete(key);
     return this.completeChunkGenerationSynchronously(task);
+  }
+
+  /** Returns only installed or exact-namespace memory-cached authoritative column bytes. */
+  installedColumn(x: number, z: number) {
+    const sx = splitCoordinate(x);
+    const sz = splitCoordinate(z);
+    const key = chunkKey(sx.chunk, sz.chunk);
+    const chunk = this.chunks.get(key);
+    const index = sx.local + sz.local * CHUNK_SIZE;
+    if (!chunk) {
+      const cached = this.chunkMemoryCache.peekColumn(this.chunkCacheKey(key), index);
+      return cached ? Object.freeze({ ...cached, biome: cached.biome as BiomeId, waterline: SEA_LEVEL }) : undefined;
+    }
+    return Object.freeze({
+      height: chunk.heightmap[index],
+      biome: chunk.biomes[index] as BiomeId,
+      waterline: SEA_LEVEL,
+    });
+  }
+
+  requireInstalledColumn(x: number, z: number) {
+    const installed = this.installedColumn(x, z);
+    if (installed) return installed;
+    this.requestChunk(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+    throw new Error(`Authoritative terrain column ${Math.floor(x)},${Math.floor(z)} is not installed`);
+  }
+
+  /**
+   * Runtime-safe chunk request. Rust mode only queues work; TypeScript rollback
+   * preserves the legacy synchronous API for deliberate recovery and tests.
+   */
+  requestChunk(cx: number, cz: number, leaseMilliseconds = 10_000) {
+    const key = chunkKey(cx, cz);
+    if (this.terrainGenerationAuthority.mode === "rust") {
+      this.generationResidencyLeases.set(key, performance.now() + clamp(leaseMilliseconds, 250, 15_000));
+    }
+    const existing = this.chunks.get(key);
+    if (existing) return existing;
+    const cacheKey = this.chunkCacheKey(key);
+    if (this.chunkMemoryCache.has(cacheKey)) {
+      const cached = this.chunkMemoryCache.take(cacheKey);
+      const restored = cached ? this.restoreCachedChunk(cached) : undefined;
+      if (restored) return restored;
+    }
+    if (this.terrainGenerationAuthority.mode === "typescript") return this.generateChunk(cx, cz);
+    if (this.pendingWorkerGeneration.has(key) || this.generationQueued.has(key)) return undefined;
+    const playerX = Number.isFinite(this.playerChunkX) ? this.playerChunkX : cx;
+    const playerZ = Number.isFinite(this.playerChunkZ) ? this.playerChunkZ : cz;
+    const distance = chunkStreamingSortDistance(
+      cx - playerX,
+      cz - playerZ,
+      this.renderDistance > RADIAL_STREAMING_DISTANCE_THRESHOLD,
+    );
+    this.generationQueue.push({ cx, cz, distance });
+    this.generationQueued.add(key);
+    this.generationEnqueuedAt.set(key, performance.now());
+    this.sortGenerationQueue();
+    return undefined;
+  }
+
+  /**
+   * Prioritized bounded residency for gameplay interests outside the camera
+   * ring. It may submit only through the same required-Rust worker lane.
+   */
+  requestChunkForResidency(cx: number, cz: number, leaseMilliseconds = 10_000) {
+    const resident = this.requestChunk(cx, cz, leaseMilliseconds);
+    if (!resident && this.terrainGenerationAuthority.mode === "rust") this.processGenerationSlice(chunkKey(cx, cz));
+    return resident;
+  }
+
+  /** Await only accepted installs; startup never manufactures a fallback chunk. */
+  async awaitGenerationRing(
+    x: number,
+    z: number,
+    radius = 1,
+    timeoutMilliseconds = 60_000,
+    signal?: AbortSignal,
+  ) {
+    const lifecycleRevision = this.terrainGenerationLifecycleRevision;
+    const assertActive = () => {
+      if (signal?.aborted) {
+        const error = new Error("Rust terrain generation readiness was cancelled");
+        error.name = "AbortError";
+        throw error;
+      }
+      if (this.terrainGenerationPipeline.state === "disposed") {
+        throw new Error("Required Rust terrain generation authority was disposed before readiness");
+      }
+      if (this.terrainGenerationLifecycleRevision !== lifecycleRevision) {
+        throw new Error("Rust terrain generation readiness was superseded by a world reset");
+      }
+    };
+    assertActive();
+    const centerX = Math.floor(x / CHUNK_SIZE);
+    const centerZ = Math.floor(z / CHUNK_SIZE);
+    const keys: string[] = [];
+    for (let dx = -radius; dx <= radius; dx += 1) for (let dz = -radius; dz <= radius; dz += 1) {
+      const key = chunkKey(centerX + dx, centerZ + dz);
+      keys.push(key);
+      if (this.terrainGenerationAuthority.mode === "rust") {
+        this.generationResidencyLeases.set(key, performance.now() + Math.max(250, timeoutMilliseconds + 1_000));
+      }
+      this.requestChunk(centerX + dx, centerZ + dz, Math.min(15_000, timeoutMilliseconds));
+    }
+    if (this.terrainGenerationAuthority.mode === "typescript") return Object.freeze({ mode: "typescript" as const, keys: Object.freeze(keys) });
+    const deadline = performance.now() + Math.max(1, timeoutMilliseconds);
+    while (keys.some((key) => !this.chunks.has(key))) {
+      assertActive();
+      const leaseDeadline = performance.now() + Math.max(250, deadline - performance.now() + 1_000);
+      for (const key of keys) if (!this.chunks.has(key)) this.generationResidencyLeases.set(key, leaseDeadline);
+      if (this.terrainGenerationPipeline.authorityUnavailable) {
+        throw new Error(`Required Rust terrain generation authority is unavailable: ${this.terrainGenerationPipeline.diagnostics().lastError?.message ?? "unknown startup failure"}`);
+      }
+      // Snapshot capacity before dispatch. Each successful submission reduces
+      // availableSlots; re-reading it in the loop condition makes a two-slot
+      // pipeline submit only one job (and a three-slot pipeline only two),
+      // serializing the very startup ring this loop is meant to fill.
+      const dispatchSlots = Math.max(1, this.terrainGenerationPipeline.availableSlots);
+      for (let slot = 0; slot < dispatchSlots; slot += 1) {
+        let progressed = this.completedWorkerGeneration.length > 0 && this.processGenerationSlice();
+        if (!progressed) {
+          const preferred = keys.find((key) => !this.chunks.has(key) && !this.pendingWorkerGeneration.has(key));
+          progressed = Boolean(preferred && this.processGenerationSlice(preferred));
+        }
+        if (!progressed) break;
+      }
+      // A completion processed by the final dispatch slot is authoritative
+      // even when that work lands exactly on the deadline. Recheck readiness
+      // before classifying the still-pending ring as timed out.
+      if (keys.every((key) => this.chunks.has(key))) break;
+      if (performance.now() >= deadline) throw new Error(`Required Rust terrain generation did not install the ${keys.length}-chunk startup ring before timeout`);
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+    assertActive();
+    return Object.freeze({ mode: "rust" as const, keys: Object.freeze(keys) });
   }
 
   surfaceBlocks(biome: BiomeId, height: number, temperature: number): [BlockId, BlockId] {
@@ -7493,6 +8880,30 @@ export class ChunkWorld {
     return accepted;
   }
 
+  /** Resolves the same regional guild parcel used by actual terrain stamping. */
+  private settlementGuildHallPlacement(
+    candidate: SettlementCandidate,
+    sample: (x: number, z: number) => ColumnSample,
+  ): GuildHallPlacement | null {
+    const macroX = Math.floor(candidate.regionX / 4) * 4;
+    const macroZ = Math.floor(candidate.regionZ / 4) * 4;
+    const regionId = `settlement-cluster:${Math.floor(candidate.regionX / 4)}:${Math.floor(candidate.regionZ / 4)}`;
+    const candidates: GuildHallCandidate[] = [];
+    for (let dx = 0; dx < 4; dx += 1) for (let dz = 0; dz < 4; dz += 1) {
+      const accepted = this.validatedSettlementCandidateForRegion(macroX + dx, macroZ + dz, sample);
+      if (!accepted) continue;
+      candidates.push({
+        settlementId: accepted.id,
+        factionId: accepted.factionId,
+        size: accepted.size,
+        regionId,
+        civicParcelId: `${accepted.id}:guild-parcel`,
+        compatibleGuildIds: compatibleGuildIdsForSettlement(accepted.factionId, accepted.environment ?? "surface"),
+      });
+    }
+    return planGuildHalls(this.seedText, candidates).find((entry) => entry.settlementId === candidate.id) ?? null;
+  }
+
   setHeldLight(light: VoxelHeldLight) {
     this.lightingUniforms.voxelHeldLightPosition.value.copy(light.position);
     this.lightingUniforms.voxelHeldLightColor.value.copy(light.color);
@@ -7545,46 +8956,140 @@ export class ChunkWorld {
   }
 
   queryNearestSettlement(query: SettlementQuery): SettlementIndexResult | null {
+    if (this.terrainGenerationAuthority.mode === "rust") return null;
     return this.settlementIndex.queryNearest(this.seedText, this.generationOptions, query, this.settlementTerrainSampler());
   }
 
+  async queryNearestSettlementsAuthoritative(
+    query: Omit<TerrainSettlementLocatorQuery, "namespace" | "seedText" | "generationOptions">,
+    signal?: AbortSignal,
+  ) {
+    if (this.terrainGenerationAuthority.mode !== "rust") {
+      throw new Error("Authoritative Rust settlement locator is unavailable in TypeScript rollback mode");
+    }
+    return this.queryNearestSettlementsForGenerationAuthoritative(
+      this.seedText,
+      this.generationOptions,
+      query,
+      signal,
+    );
+  }
+
+  async queryNearestSettlementsForGenerationAuthoritative(
+    seedText: string,
+    generationOptions: Partial<WorldGenerationOptions>,
+    query: Omit<TerrainSettlementLocatorQuery, "namespace" | "seedText" | "generationOptions">,
+    signal?: AbortSignal,
+  ) {
+    if (this.terrainGenerationAuthority.mode !== "rust") {
+      throw new Error("Authoritative Rust settlement locator is unavailable in TypeScript rollback mode");
+    }
+    const lifecycleRevision = this.terrainGenerationLifecycleRevision;
+    const normalized = normalizeWorldGenerationOptions(generationOptions);
+    const result = await this.terrainGenerationPipeline.querySettlements({
+      ...query,
+      namespace: `terrain-locator-v1|g${GENERATOR_VERSION}|${seedText}|${JSON.stringify(normalized)}`,
+      seedText,
+      generationOptions: normalized as unknown as Readonly<Record<string, unknown>>,
+    }, signal);
+    if (lifecycleRevision !== this.terrainGenerationLifecycleRevision) {
+      throw new Error("Settlement locator result was superseded by a world reset");
+    }
+    return result;
+  }
+
+  async queryNearestDragonLairAuthoritative(
+    query: Omit<TerrainDragonLairLocatorQuery, "namespace" | "seedText" | "generationOptions">,
+    signal?: AbortSignal,
+  ) {
+    if (this.terrainGenerationAuthority.mode !== "rust") {
+      throw new Error("Authoritative Rust dragon-lair locator is unavailable in TypeScript rollback mode");
+    }
+    const lifecycleRevision = this.terrainGenerationLifecycleRevision;
+    const result = await this.terrainGenerationPipeline.queryDragonLair({
+      ...query,
+      namespace: this.terrainLocatorAuthorityNamespace(),
+      seedText: this.seedText,
+      generationOptions: this.generationOptions as unknown as Readonly<Record<string, unknown>>,
+    }, signal);
+    if (lifecycleRevision !== this.terrainGenerationLifecycleRevision) {
+      throw new Error("Dragon-lair locator result was superseded by a world reset");
+    }
+    return result;
+  }
+
   queryNearestSettlements(query: SettlementQuery): readonly SettlementIndexResult[] {
+    if (this.terrainGenerationAuthority.mode === "rust") return [];
     return this.settlementIndex.queryNearestMany(this.seedText, this.generationOptions, query, this.settlementTerrainSampler());
   }
 
+  /**
+   * Named legacy oracle used by rollback gameplay and the cross-language
+   * promotion corpus. It filters during the bounded regional search, so an
+   * invalid nearer layout cannot hide a later materializable settlement.
+   */
+  queryNearestMaterializableSettlementsCompatibility(query: SettlementQuery, breathesWater = false) {
+    if (this.terrainGenerationAuthority.mode === "rust") {
+      throw new Error("The TypeScript settlement materialization oracle requires explicit rollback mode");
+    }
+    const sample = (x: number, z: number) => this.sampleColumn(x, z);
+    const arrivals = new Map<string, Readonly<{
+      position: Readonly<{ x: number; y: number; z: number }>;
+      anchorKind: "public-approach" | "reef-air-arrival" | "surface-entry";
+      guildHall: GuildHallPlacement | null;
+    }>>();
+    const results = this.settlementIndex.queryNearestMany(
+      this.seedText,
+      this.generationOptions,
+      query,
+      this.settlementTerrainSampler(sample),
+      (candidate) => {
+        const guildHall = this.settlementGuildHallPlacement(candidate, sample);
+        const arrival = materializeSettlementPublicArrivalV1(
+          candidate,
+          planSettlementLayout(candidate),
+          sample,
+          breathesWater,
+          guildHall,
+          this.seed,
+        );
+        if (!arrival) return false;
+        arrivals.set(candidate.id, Object.freeze({
+          position: arrival.position,
+          anchorKind: arrival.anchorKind,
+          guildHall,
+        }));
+        return true;
+      },
+    );
+    return Object.freeze(results.map((result) => Object.freeze({
+      ...result,
+      ...arrivals.get(result.candidate.id)!,
+    })));
+  }
+
   settlementRoadNeighbors(settlementId: string): readonly SettlementRoadConnection[] {
+    if (this.terrainGenerationAuthority.mode === "rust") return [];
     return this.settlementIndex.roadNeighbors(this.seedText, this.generationOptions, settlementId, this.settlementTerrainSampler());
   }
 
   resolveSettlementOrigin(preference: WorldOriginPreference, breathesWater = false, maxRegionRadius = DEFAULT_SETTLEMENT_ORIGIN_SEARCH_RADIUS) {
     if (preference.mode === "wilderness" || !this.generationOptions.structures || this.generationOptions.settlementDensity <= 0) return null;
+    if (this.terrainGenerationAuthority.mode === "rust") {
+      throw new Error("Settlement origin planning requires the explicit TypeScript worldgen rollback and a reload");
+    }
     const sizes: SettlementCandidate["size"][] = preference.mode === "culture-settlement"
       ? preference.minimumSize === "town" ? ["town"] : preference.minimumSize === "village" ? ["village", "town"] : ["hamlet", "village", "town"]
       : ["hamlet", "village", "town"];
-    const result = this.queryNearestSettlement({
+    const result = this.queryNearestMaterializableSettlementsCompatibility({
       origin: { x: 0, z: 0 },
       ...(preference.mode === "culture-settlement" ? { factionIds: [preference.factionId] } : {}),
       sizes,
       maxRegionRadius: normalizeSettlementOriginSearchRadius(maxRegionRadius),
-    });
+      limit: 1,
+    }, breathesWater)[0] ?? null;
     if (!result) return null;
-    const layout = planSettlementLayout(result.candidate);
-    const publicAnchor = layout.gates[0]?.position ?? layout.approaches[0]?.position ?? layout.center;
-    const environment = result.candidate.environment ?? "surface";
-    const column = this.sampleColumn(Math.round(publicAnchor.x), Math.round(publicAnchor.z));
-    const offset = layout.gates[0]
-      ? ([[0, -4], [4, 0], [0, 4], [-4, 0]] as const)[layout.gates[0].facing]
-      : [0, 0] as const;
-    const x = Math.round(publicAnchor.x + offset[0]);
-    const z = Math.round(publicAnchor.z + offset[1]);
-    const y = environment === "underwater" && breathesWater
-      ? Math.max((result.candidate.floorY ?? column.height) + 2, publicAnchor.y ?? column.height + 2)
-      : environment === "underwater"
-        ? column.waterline + 1.51
-        : environment === "underground"
-          ? column.height + 1.51
-          : column.height + 1.51;
-    return Object.freeze({ ...result, position: Object.freeze({ x, y, z }), anchorKind: environment === "underground" ? "surface-entry" : environment === "underwater" && !breathesWater ? "reef-air-arrival" : "public-approach" as const });
+    return result;
   }
 
   private generateHeartlandRoadsForChunk(
@@ -7924,30 +9429,13 @@ export class ChunkWorld {
         });
       }
       const hallPlacement = planGuildHalls(this.seedText, hallCandidates).find((entry) => entry.settlementId === candidate.id) ?? null;
-      let plannedLayout = planSettlementLayout(candidate);
-      if (hallPlacement) {
-        const replaceable = plannedLayout.buildings.filter((building) => ![
-          "mayor-hall", "tide-hall", "sugar-palace", "moonbough-hall", "deepgear-hall", "guardhouse", "entrance-barracks",
-        ].includes(building.role));
-        const replacement = replaceable[Math.floor(hash2(candidate.center.x, candidate.center.z, this.seed ^ 0x71a11) * Math.max(1, replaceable.length))] ?? plannedLayout.buildings.at(-1);
-        if (replacement) plannedLayout = {
-          ...plannedLayout,
-          buildings: Object.freeze(plannedLayout.buildings.map((building) => building.id !== replacement.id ? building : Object.freeze({
-            ...building,
-            width: Math.max(7, building.width),
-            depth: Math.max(7, building.depth),
-            materialPalette: Object.freeze([...building.materialPalette, `guild:${hallPlacement.guildId}`, `hall-state:${hallPlacement.state}`]),
-            furniture: Object.freeze([
-              ...building.furniture,
-              { kind: "table" as const, position: building.position, facing: building.facing, functional: true },
-              { kind: "chair" as const, position: { ...building.position, x: building.position.x + 2 }, facing: ((building.facing + 2) & 3) as 0 | 1 | 2 | 3, functional: true },
-              { kind: "chair" as const, position: { ...building.position, x: building.position.x - 2 }, facing: building.facing, functional: true },
-            ]),
-            guildHall: Object.freeze({ placementId: hallPlacement.id, guildId: hallPlacement.guildId, state: hallPlacement.state, variantId: hallPlacement.variantId }),
-          }))),
-        };
-      }
-      const layout = underwater ? fitUnderwaterSettlementLayout(plannedLayout, sample) : plannedLayout;
+      const layout = materializeSettlementLayoutV1(
+        candidate,
+        planSettlementLayout(candidate),
+        sample,
+        hallPlacement,
+        this.seed,
+      );
       if (!layout) continue;
       const palette = settlementBlockPalette(candidate.factionId);
       this.settlementPlans.set(candidate.id, { candidate, layout });
@@ -8363,6 +9851,11 @@ export class ChunkWorld {
     return [...this.structureMarkers.entries()].find(([, marker]) => marker.position.x === x && marker.position.y === y && marker.position.z === z && (!type || marker.type === type));
   }
 
+  settlementLandmarkMarker(id: string): Extract<StructureMarker, { type: "landmark" }> | null {
+    const marker = this.structureMarkers.get(`${id}:landmark:${id}`);
+    return marker?.type === "landmark" ? marker : null;
+  }
+
   getBlock(x: number, y: number, z: number): BlockId | undefined {
     if (y > MAX_Y) return BlockId.Air;
     if (y < MIN_Y) return BlockId.Bedrock;
@@ -8455,8 +9948,20 @@ export class ChunkWorld {
     const sx = splitCoordinate(x);
     const sz = splitCoordinate(z);
     const key = chunkKey(sx.chunk, sz.chunk);
-    const chunk = this.chunks.get(key) ?? this.generateChunk(sx.chunk, sz.chunk);
     const index = blockIndex(sx.local, y, sz.local);
+    const loaded = this.chunks.get(key);
+    if (!loaded && this.terrainGenerationAuthority.mode === "rust") {
+      if (!record) throw new Error("Unrecorded mutation cannot target an unloaded Rust-authoritative terrain chunk");
+      let edits = this.edits.get(key);
+      if (!edits) { edits = new Map(); this.edits.set(key, edits); }
+      edits.set(index, type);
+      this.chunkEditSignatureCache.delete(key);
+      this.mutationRevision += 1;
+      this.markPlayerEditMutation();
+      this.requestChunk(sx.chunk, sz.chunk);
+      return true;
+    }
+    const chunk = loaded ?? this.generateChunk(sx.chunk, sz.chunk);
     const previousType = chunk.blocks[index] as BlockId;
     const resolvedType = type === BlockId.Air && isWaterloggedFloraBlock(previousType) ? BlockId.Water : type;
     if (previousType === resolvedType) return true;
@@ -8479,6 +9984,91 @@ export class ChunkWorld {
     return true;
   }
 
+  /**
+   * Projects one fully validated integrated-runtime cell receipt into the
+   * compatibility world cache and local-save edit log. This is presentation
+   * projection only: the caller retains authority and owns exactly-once receipt
+   * accounting. The Rust R4 mutation service is deliberately bypassed here.
+   */
+  applyValidatedRustCellProjectionV1(input: RustWorldCellProjectionInputV1): RustWorldCellProjectionResultV1 {
+    const { x, y, z, expectedBlockId, replacementBlockId, immediate } = input;
+    if (!Number.isSafeInteger(x) || x < -0x8000_0000 || x > 0x7fff_ffff
+      || !Number.isSafeInteger(z) || z < -0x8000_0000 || z > 0x7fff_ffff
+      || !Number.isSafeInteger(y) || y < MIN_Y || y > MAX_Y) {
+      throw new RangeError("Rust cell projection coordinates are outside the exact world-cell range");
+    }
+    if (!Number.isSafeInteger(expectedBlockId) || !BLOCKS[expectedBlockId]
+      || !Number.isSafeInteger(replacementBlockId) || !BLOCKS[replacementBlockId]) {
+      throw new RangeError("Rust cell projection contains an unknown block id");
+    }
+    if (typeof immediate !== "boolean") throw new TypeError("Rust cell projection immediate must be boolean");
+    if (input.allowAlreadyApplied !== undefined && typeof input.allowAlreadyApplied !== "boolean") {
+      throw new TypeError("Rust cell projection recovery flag must be boolean");
+    }
+    if (expectedBlockId === replacementBlockId) {
+      throw new Error("Rust cell projection must describe a non-noop transition");
+    }
+
+    const sx = splitCoordinate(x);
+    const sz = splitCoordinate(z);
+    const key = chunkKey(sx.chunk, sz.chunk);
+    const chunk = this.chunks.get(key);
+    if (!chunk) throw new Error("Rust cell projection cannot target an unloaded chunk");
+    const index = blockIndex(sx.local, y, sz.local);
+    const currentBlockId = chunk.blocks[index] as BlockId;
+    const mutationRevisionBefore = this.mutationRevision;
+    if (currentBlockId !== expectedBlockId) {
+      if (input.allowAlreadyApplied === true
+        && currentBlockId === replacementBlockId
+        && this.edits.get(key)?.get(index) === replacementBlockId) {
+        return Object.freeze({
+          schemaVersion: 1,
+          status: "already-applied",
+          x, y, z,
+          expectedBlockId,
+          replacementBlockId,
+          immediate,
+          mutationRevisionBefore,
+          mutationRevisionAfter: mutationRevisionBefore,
+          recordedEdit: false,
+        });
+      }
+      throw new Error("Rust cell projection expected block does not match the loaded cell");
+    }
+    // setBlock intentionally preserves water when removing waterlogged flora;
+    // that compatibility rewrite cannot represent an exact Rust replacement.
+    if (replacementBlockId === BlockId.Air && isWaterloggedFloraBlock(expectedBlockId)) {
+      throw new Error("Rust cell projection replacement conflicts with waterlogged compatibility semantics");
+    }
+
+    const previousAuthorityEventGuard = this.applyingRustWorldAuthorityEvent;
+    this.applyingRustWorldAuthorityEvent = true;
+    try {
+      if (!this.setBlock(x, y, z, replacementBlockId, true, immediate)) {
+        throw new Error("Rust cell projection was rejected by the compatibility world");
+      }
+    } finally {
+      this.applyingRustWorldAuthorityEvent = previousAuthorityEventGuard;
+    }
+    const mutationRevisionAfter = this.mutationRevision;
+    if (chunk.blocks[index] !== replacementBlockId
+      || this.edits.get(key)?.get(index) !== replacementBlockId
+      || mutationRevisionAfter !== mutationRevisionBefore + 1) {
+      throw new Error("Rust cell projection did not produce one exact recorded edit");
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      status: "applied",
+      x, y, z,
+      expectedBlockId,
+      replacementBlockId,
+      immediate,
+      mutationRevisionBefore,
+      mutationRevisionAfter,
+      recordedEdit: true,
+    });
+  }
+
   setChestVisualHidden(x: number, y: number, z: number, hidden: boolean) {
     const visualKey = `${x},${y},${z}`;
     if (this.hiddenChestVisuals.has(visualKey) === hidden) return false;
@@ -8494,7 +10084,7 @@ export class ChunkWorld {
     if (chunk.group.visible) {
       this.cancelQueuedMesh(key, section);
       this.rebuildSection(chunk, section);
-    } else this.queueMesh(key, section, true);
+    } else this.queueEditedMesh(key, section);
     return true;
   }
 
@@ -8537,8 +10127,20 @@ export class ChunkWorld {
       const sx = splitCoordinate(change.x);
       const sz = splitCoordinate(change.z);
       const key = chunkKey(sx.chunk, sz.chunk);
-      const chunk = this.chunks.get(key) ?? this.generateChunk(sx.chunk, sz.chunk);
       const index = blockIndex(sx.local, change.y, sz.local);
+      const loaded = this.chunks.get(key);
+      if (!loaded && this.terrainGenerationAuthority.mode === "rust") {
+        if (!record) throw new Error("Unrecorded batch mutation cannot target an unloaded Rust-authoritative terrain chunk");
+        let edits = this.edits.get(key);
+        if (!edits) { edits = new Map(); this.edits.set(key, edits); }
+        edits.set(index, change.type);
+        this.chunkEditSignatureCache.delete(key);
+        this.requestChunk(sx.chunk, sz.chunk);
+        mutated = true;
+        this.markPlayerEditMutation();
+        continue;
+      }
+      const chunk = loaded ?? this.generateChunk(sx.chunk, sz.chunk);
       const previousType = chunk.blocks[index] as BlockId;
       const resolvedType = change.type === BlockId.Air && isWaterloggedFloraBlock(previousType) ? BlockId.Water : change.type;
       if (previousType === resolvedType) continue;
@@ -8594,7 +10196,7 @@ export class ChunkWorld {
         this.cancelQueuedMesh(key, section);
         this.rebuildSection(chunk, section);
       }
-      else this.queueMesh(key, section, true);
+      else this.queueEditedMesh(key, section);
     }
     if (immediate && !deferLighting) this.flushLightSections();
     if (immediate) this.markPlayerEditLocalMeshVisible();
@@ -8625,7 +10227,7 @@ export class ChunkWorld {
         this.cancelQueuedMesh(key, targetSection);
         this.rebuildSection(targetChunk, targetSection);
       }
-      else this.queueMesh(key, targetSection, true);
+      else this.queueEditedMesh(key, targetSection);
     }
   }
 
@@ -8641,14 +10243,18 @@ export class ChunkWorld {
     const sx = splitCoordinate(x);
     const sz = splitCoordinate(z);
     const chunk = this.chunks.get(chunkKey(sx.chunk, sz.chunk));
-    return chunk ? chunk.biomes[sx.local + sz.local * CHUNK_SIZE] as BiomeId : this.sampleColumn(x, z).biome;
+    if (chunk) return chunk.biomes[sx.local + sz.local * CHUNK_SIZE] as BiomeId;
+    if (this.terrainGenerationAuthority.mode === "rust") return this.requireInstalledColumn(x, z).biome;
+    return this.sampleColumn(x, z).biome;
   }
 
   surfaceAt(x: number, z: number) {
     const sx = splitCoordinate(x);
     const sz = splitCoordinate(z);
     const chunk = this.chunks.get(chunkKey(sx.chunk, sz.chunk));
-    return chunk ? chunk.heightmap[sx.local + sz.local * CHUNK_SIZE] : this.sampleColumn(x, z).height;
+    if (chunk) return chunk.heightmap[sx.local + sz.local * CHUNK_SIZE];
+    if (this.terrainGenerationAuthority.mode === "rust") return this.requireInstalledColumn(x, z).height;
+    return this.sampleColumn(x, z).height;
   }
 
   lightSourcesNear(x: number, y: number, z: number, radius = 18) {
@@ -8721,7 +10327,9 @@ export class ChunkWorld {
   /** Continuous cave presentation input: roofs matter, but depth prevents an ordinary house from becoming a cave. */
   subterraneanBlendAt(x: number, y: number, z: number) {
     const visibility = this.skyVisibilityAt(x, y, z);
-    const depth = this.surfaceAt(Math.floor(x), Math.floor(z)) - y;
+    const column = this.installedColumn(Math.floor(x), Math.floor(z));
+    if (!column) return 0;
+    const depth = column.height - y;
     const skyOcclusion = 1 - smoothstep(0.08, 0.68, visibility);
     const depthWeight = 0.16 + smoothstep(0.5, 8, depth) * 0.84;
     return clamp(skyOcclusion * depthWeight, 0, 1);
@@ -8843,7 +10451,7 @@ export class ChunkWorld {
         const owner = this.chunks.get(chunkKey(sx.chunk, sz.chunk));
         biomes[haloX + haloZ * TERRAIN_SECTION_HALO_SIZE_V1] = owner
           ? owner.biomes[sx.local + sz.local * CHUNK_SIZE]
-          : this.sampleColumn(worldX, worldZ).biome;
+          : chunk.biomes[clamp(worldX - originX, 0, CHUNK_SIZE - 1) + clamp(worldZ - originZ, 0, CHUNK_SIZE - 1) * CHUNK_SIZE];
       }
     }
     return createSectionSnapshotV1({
@@ -9127,13 +10735,10 @@ export class ChunkWorld {
     };
     const vertexBiomeTintCache = new Map<string, [number, number, number]>();
     const biomeTintForColumn = (worldX: number, worldZ: number) => {
-      const sx = splitCoordinate(worldX);
-      const sz = splitCoordinate(worldZ);
-      const owner = this.chunks.get(chunkKey(sx.chunk, sz.chunk));
-      const biome = owner
-        ? owner.biomes[sx.local + sz.local * CHUNK_SIZE] as BiomeId
-        : this.sampleColumn(worldX, worldZ).biome;
-      return BIOME_TINT[biome] ?? [1, 1, 1] as [number, number, number];
+      const installed = this.installedColumn(worldX, worldZ);
+      const biome = installed?.biome
+        ?? (this.terrainGenerationAuthority.mode === "typescript" ? this.sampleColumn(worldX, worldZ).biome : null);
+      return biome === null ? null : BIOME_TINT[biome] ?? [1, 1, 1] as [number, number, number];
     };
     /**
      * Terrain tint belongs to a world-space vertex, not to whichever chunk
@@ -9153,8 +10758,10 @@ export class ChunkWorld {
       const z1 = Math.ceil(worldZ);
       const samples = new Map<string, [number, number, number]>();
       for (const sampleX of [x0, x1]) for (const sampleZ of [z0, z1]) {
-        samples.set(`${sampleX},${sampleZ}`, biomeTintForColumn(sampleX, sampleZ));
+        const sample = biomeTintForColumn(sampleX, sampleZ);
+        if (sample) samples.set(`${sampleX},${sampleZ}`, sample);
       }
+      if (!samples.size) return [1, 1, 1] as [number, number, number];
       const result: [number, number, number] = [0, 0, 0];
       for (const sample of samples.values()) {
         result[0] += sample[0];
@@ -9954,6 +11561,7 @@ export class ChunkWorld {
     const completingSeamRebuild = this.seamMeshRebuilds.has(queueKey)
       && !this.meshQueued.has(queueKey)
       && !this.urgentMeshQueued.has(queueKey);
+    if (!this.meshQueued.has(queueKey) && !this.urgentMeshQueued.has(queueKey)) this.pendingEditMeshes.delete(queueKey);
     const invalidatedLayers: WorldRenderLayer[] = [];
     if (completingSeamRebuild) {
       this.seamMeshRebuilds.delete(queueKey);
@@ -10092,6 +11700,7 @@ export class ChunkWorld {
       const queueKey = `${key}:${section}`;
       this.meshQueued.delete(queueKey);
       this.urgentMeshQueued.delete(queueKey);
+      this.pendingEditMeshes.delete(queueKey);
       if (this.seamMeshRebuilds.delete(queueKey)) this.releaseSeamPresentationBlocker(queueKey);
       this.seamPresentationPending.delete(queueKey);
       this.meshEnqueuedAt.delete(queueKey);
@@ -10156,7 +11765,13 @@ export class ChunkWorld {
       return {
         playerChunkReady: false,
         playerChunkStage: "generation" as const,
-        playerChunkDetail: task?.stage ?? (this.generationQueued.has(key) ? "queued" : "missing"),
+        playerChunkDetail: this.terrainGenerationAuthority.mode === "rust"
+          ? this.terrainGenerationPipeline.state === "authority-unavailable"
+            ? "authority-unavailable"
+            : this.terrainGenerationPipeline.state === "starting" || this.terrainGenerationPipeline.state === "recovering"
+              ? `authority-${this.terrainGenerationPipeline.state}`
+              : this.pendingWorkerGeneration.has(key) ? "worker" : this.generationQueued.has(key) ? "queued" : "missing"
+          : task?.stage ?? (this.generationQueued.has(key) ? "queued" : "missing"),
       };
     }
     if (!this.chunkLightPresentationReady(key)) return {
@@ -10282,6 +11897,96 @@ export class ChunkWorld {
       invalidatedCombinedMeshes: this.invalidatedCombinedMeshes,
       coalescedConsolidations: this.coalescedConsolidations,
     } as const;
+  }
+
+  /**
+   * Bounded read-only proof that the player's current terrain ring has an
+   * actual visible Three presentation. Global mesh/submission totals cannot
+   * prove this: they may belong to a prior or distant chunk.
+   */
+  private playerTerrainPresentationDiagnostics() {
+    const centerKey = chunkKey(this.playerChunkX, this.playerChunkZ);
+    const chunks = [] as Array<Readonly<{
+      key: string;
+      offset: Readonly<{ x: number; z: number }>;
+      present: boolean;
+      visible: boolean;
+      lightReady: boolean;
+      requiredSections: readonly Readonly<{
+        section: number;
+        requiredLayers: readonly ("opaque" | "cutout")[];
+        presentations: Readonly<Record<"opaque" | "cutout", Readonly<{
+          required: boolean;
+          source: boolean;
+          sourceVisible: boolean;
+          combined: boolean;
+          combinedVisible: boolean;
+          mode: "source" | "combined" | null;
+        }>>>;
+        ready: boolean;
+      }>[];
+      ready: boolean;
+    }>>;
+    for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
+      const key = chunkKey(this.playerChunkX + dx, this.playerChunkZ + dz);
+      const chunk = this.chunks.get(key);
+      const visible = Boolean(chunk?.presentationVisible && chunk.group.visible);
+      const lightReady = Boolean(chunk && this.chunkLightPresentationReady(key));
+      const requiredSections = chunk ? this.playerRequiredMeshSections(chunk).map((section) => {
+        const required = new Set<"opaque" | "cutout">();
+        // Renderer-neutral source pages are the exact expected visual inputs.
+        // A non-empty but fully occluded section legitimately has no page and
+        // therefore must not be mistaken for missing terrain presentation.
+        for (const layer of ["opaque", "cutout"] as const) {
+          if (chunk.rendererTerrain.sectionPage(section, layer)) required.add(layer);
+        }
+        const sourceMeshes = chunk.sections.get(section);
+        const presentation = (layer: "opaque" | "cutout") => {
+          const source = sourceMeshes?.[layer];
+          const combined = chunk.combinedMeshes[layer];
+          const sourceVisible = Boolean(visible && source?.visible);
+          const combinedVisible = Boolean(visible && combined?.visible);
+          return Object.freeze({
+            required: required.has(layer),
+            source: Boolean(source),
+            sourceVisible,
+            combined: Boolean(combined),
+            combinedVisible,
+            mode: combinedVisible ? "combined" as const : sourceVisible ? "source" as const : null,
+          });
+        };
+        const presentations = Object.freeze({ opaque: presentation("opaque"), cutout: presentation("cutout") });
+        const requiredLayers = Object.freeze([...required].sort()) as readonly ("opaque" | "cutout")[];
+        return Object.freeze({
+          section,
+          requiredLayers,
+          presentations,
+          // No pages means proven occlusion only after this section has been built.
+          ready: sourceMeshes !== undefined && requiredLayers.every((layer) => presentations[layer].mode !== null),
+        });
+      }) : [];
+      chunks.push(Object.freeze({
+        key,
+        offset: Object.freeze({ x: dx, z: dz }),
+        present: Boolean(chunk),
+        visible,
+        lightReady,
+        requiredSections: Object.freeze(requiredSections),
+        ready: Boolean(chunk)
+          && visible
+          && lightReady
+          && requiredSections.length > 0
+          && requiredSections.every((section) => section.ready),
+      }));
+    }
+    return Object.freeze({
+      schema: 1 as const,
+      epoch: this.terrainPresentationEpoch,
+      centerKey,
+      desired: chunks.length,
+      ready: chunks.filter((chunk) => chunk.ready).length,
+      chunks: Object.freeze(chunks),
+    });
   }
 
   resetPlayerEditFeedbackDiagnostics() {
@@ -10900,6 +12605,7 @@ export class ChunkWorld {
         coalescedRequests: this.coalescedConsolidations,
       },
       terrainSubmission: this.terrainSubmissionDiagnostics(),
+      playerTerrainPresentation: this.playerTerrainPresentationDiagnostics(),
       rustTerrain: {
         mode: this.rustTerrainMode,
         ...this.rustTerrainShadow,
@@ -10929,7 +12635,7 @@ export class ChunkWorld {
       lanes: {
         immediateRingReady: this.ringCompleteness(1).ratio,
         viewDirection: { x: this.streamingViewX, z: this.streamingViewZ, sector: this.streamingViewSector },
-        reservedGenerationSlot: this.terrainGenerationPipeline.supported,
+        reservedGenerationSlot: this.terrainGenerationPipeline.availableSlots > 0,
         consolidationReserveActive: this.renderDrawCallPressure >= 300
           || this.renderFramePressureMilliseconds >= 24
           || this.consolidationQueue.length >= 48,
@@ -10945,6 +12651,9 @@ export class ChunkWorld {
   }
 
   dispose() {
+    this.terrainPresentationEpoch += 1;
+    this.terrainGenerationLifecycleRevision += 1;
+    this.rustWorldAuthorityEpoch += 1;
     if (typeof window !== "undefined") {
       const target = window as Window & {
         blockwildRustTerrainR2?: RustTerrainR2BrowserHarnessV1;

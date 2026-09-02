@@ -1,7 +1,8 @@
 import vinext from "vinext";
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import hostingConfig from "./.openai/hosting.json";
 import { sites } from "./build/sites-vite-plugin";
+import { resolveWorldgenBuildProfile } from "./build/worldgen-build-profile";
 
 const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
   "00000000-0000-4000-8000-000000000000";
@@ -10,6 +11,37 @@ const { d1, r2 } = hostingConfig;
 
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === "seatbelt";
+const worldgenBuildProfile = resolveWorldgenBuildProfile();
+
+const RUST_ENGINE_CANDIDATE_PREFIX = "/engine-locator-candidate";
+
+export function rewriteRustEngineCandidateRequestUrl(requestUrl: string) {
+  const queryIndex = requestUrl.indexOf("?");
+  const pathname = queryIndex >= 0 ? requestUrl.slice(0, queryIndex) : requestUrl;
+  const query = queryIndex >= 0 ? requestUrl.slice(queryIndex) : "";
+  if (pathname === "/engine") return `${RUST_ENGINE_CANDIDATE_PREFIX}${query}`;
+  if (pathname.startsWith("/engine/")) {
+    return `${RUST_ENGINE_CANDIDATE_PREFIX}${pathname.slice("/engine".length)}${query}`;
+  }
+  return requestUrl;
+}
+
+export function rustEngineCandidateAliasPlugin(
+  enabled = process.env.BLOCKWILD_RUST_ENGINE_CANDIDATE_ALIAS === "1",
+): Plugin {
+  return {
+    name: "blockwild-rust-engine-candidate-alias",
+    apply: "serve",
+    enforce: "pre",
+    configureServer(server) {
+      if (!enabled) return;
+      server.middlewares.use((request, _response, next) => {
+        if (request.url) request.url = rewriteRustEngineCandidateRequestUrl(request.url);
+        next();
+      });
+    },
+  };
+}
 
 const localBindingConfig = {
   main: "./worker/index.ts",
@@ -44,6 +76,9 @@ export default defineConfig(async () => {
   const { cloudflare } = await import("@cloudflare/vite-plugin");
 
   return {
+    define: {
+      "process.env.NEXT_PUBLIC_BLOCKWILD_WORLDGEN_BUILD_PROFILE": JSON.stringify(worldgenBuildProfile),
+    },
     server: {
       host: "0.0.0.0",
       allowedHosts: ["terminal.local"],
@@ -52,6 +87,7 @@ export default defineConfig(async () => {
         : {}),
     },
     plugins: [
+      rustEngineCandidateAliasPlugin(),
       vinext(),
       sites(),
       cloudflare({

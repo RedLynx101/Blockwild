@@ -4,7 +4,12 @@ import { BasicWorldRenderer, disabledBasicWorldRendererStats } from "../app/game
 import { BiomeId, normalizeWorldGenerationOptions, type ChunkWorld, type ColumnSample } from "../app/game/world.ts";
 
 const column: ColumnSample = { height: 42, waterline: 32, biome: BiomeId.Meadow, temperature: 0.5, moisture: 0.5, continental: 0.5, river: 0, mountain: 0 };
-const world = { seed: 19, seedText: "BASIC-RENDERER", sampleColumn: () => column } as unknown as ChunkWorld;
+const world = {
+  seed: 19,
+  seedText: "BASIC-RENDERER",
+  sampleColumn: () => column,
+  terrainGenerationAuthority: { mode: "typescript" },
+} as unknown as ChunkWorld;
 const generationOptions = normalizeWorldGenerationOptions();
 
 test("feature-gated basic rendering reports deliberate zero work", () => {
@@ -39,6 +44,23 @@ test("basic renderer performs no proxy work when basic equals full distance", ()
   renderer.update({ world, seedText: world.seedText, generationOptions, x: 0, y: 48, z: 0, fullDistance: 10, basicDistance: 10, caveBlend: 0, framePressure: false, enabled: true, now: 1_000 });
   assert.equal(renderer.stats().active, false);
   assert.equal(renderer.stats().submitted, 0);
+  renderer.dispose();
+});
+
+test("required Rust mode rejects the legacy proxy before any worker or sampler submission", () => {
+  let sampled = 0;
+  const rustWorld = {
+    ...world,
+    terrainGenerationAuthority: { mode: "rust" },
+    sampleColumn: () => { sampled += 1; return column; },
+  } as unknown as ChunkWorld;
+  const renderer = new BasicWorldRenderer(false);
+  renderer.update({ world: rustWorld, seedText: rustWorld.seedText, generationOptions, x: 0, y: 48, z: 0, fullDistance: 8, basicDistance: 12, caveBlend: 0, framePressure: false, enabled: true, now: 1_000 });
+  const stats = renderer.stats();
+  assert.equal(stats.submitted, 0);
+  assert.equal(stats.completed, 0);
+  assert.equal(stats.reason, "rust-authority-no-legacy-fallback");
+  assert.equal(sampled, 0);
   renderer.dispose();
 });
 

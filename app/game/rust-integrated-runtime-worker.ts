@@ -15,11 +15,13 @@ import {
   encodeRustIntegratedRuntimeResponseV1,
   encodeRustIntegratedRuntimeStepRequestV2,
   encodeRustIntegratedRuntimeStepResultV2,
+  rustIntegratedRuntimeWireChecksumV1,
 } from "./rust-integrated-runtime-codec";
 import {
   RUST_INTEGRATED_RUNTIME_BULK_MAX_PENDING_V1,
   RUST_INTEGRATED_RUNTIME_BULK_MAX_QUEUED_BYTES_V1,
   RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1,
+  RUST_INTEGRATED_RUNTIME_BULK_SAVE_CHUNK_BYTES_V1,
   decodeRustIntegratedRuntimeBulkRequestV1,
   decodeRustIntegratedRuntimeBulkResponseV1,
   encodeRustIntegratedRuntimeBulkRequestV1,
@@ -28,6 +30,224 @@ import {
   type RustIntegratedRuntimeBulkResponseV1,
   type RustIntegratedRuntimeBulkTransportDiagnosticsV1,
 } from "./rust-integrated-runtime-bulk-platform";
+import { RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1 } from "./rust-persistence-runtime-contract";
+import { rustIntegratedRuntimeDomainWireFamilyV1 } from "./rust-integrated-runtime-domain-schema.generated.ts";
+
+export const RUST_INTEGRATED_RUNTIME_BULK_TIMEOUT_WORK_QUANTUM_BYTES_V1 = 4 * 1024 * 1024;
+export const RUST_INTEGRATED_RUNTIME_BULK_TIMEOUT_MAX_MULTIPLIER_V1 = 24;
+export const RUST_INTEGRATED_RUNTIME_BULK_TIMEOUT_MAX_MS_V1 = 120_000;
+export const RUST_INTEGRATED_RUNTIME_BOOTSTRAP_TIMEOUT_MAX_MULTIPLIER_V1 = 12;
+export const RUST_INTEGRATED_RUNTIME_BOOTSTRAP_TIMEOUT_MAX_MS_V1 = 60_000;
+export const RUST_INTEGRATED_RUNTIME_CONTENT_INSTALL_TIMEOUT_MAX_MULTIPLIER_V1 = 24;
+export const RUST_INTEGRATED_RUNTIME_CONTENT_INSTALL_TIMEOUT_MAX_MS_V1 = 120_000;
+
+const RUST_CONTENT_INSTALL_PAGE_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("content-install-page-v1");
+const RUST_CONTENT_INSTALL_PAGE_TYPE_V1 = RUST_CONTENT_INSTALL_PAGE_SCHEMA_V1.typeId;
+const RUST_CONTENT_INSTALL_PAGE_HEADER_BYTES_V1 = 28;
+const RUST_CONTENT_INSTALL_PAGE_MAGIC_V1 = Object.freeze([
+  ...new TextEncoder().encode(RUST_CONTENT_INSTALL_PAGE_SCHEMA_V1.magic),
+]);
+const RUST_CONTENT_INSTALL_PAGE_BUDGET_V1 = 768 * 1024;
+const RUST_CONTENT_INSTALL_MAX_PAGES_V1 = 128;
+const RUST_CONTENT_INSTALL_MAX_ARTIFACTS_PER_PAGE_V1 = 1_024;
+const RUST_CONTENT_INSTALL_DOMAIN_COUNT_V1 = 11;
+const RUST_CONTENT_INSTALL_MAX_ALIASES_V1 = 16;
+const RUST_CONTENT_INSTALL_MAX_CANONICAL_BYTES_V1 = 256 * 1024;
+const RUST_CONTENT_INSTALL_MAX_EXTENSION_BYTES_V1 = 64 * 1024;
+const RUST_CONTENT_INSTALL_MAX_STRING_BYTES_V1 = 16 * 1024;
+
+class RustContentInstallPageShapeReaderV1 {
+  private offset = 0;
+  private readonly decoder = new TextDecoder("utf-8", { fatal: true });
+
+  constructor(private readonly bytes: Uint8Array) {}
+
+  u8() { return this.take(1)[0]; }
+  u16() {
+    const bytes = this.take(2);
+    return bytes[0] | (bytes[1] << 8);
+  }
+  u32() {
+    const bytes = this.take(4);
+    return new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).getUint32(0, true);
+  }
+  hash() { this.take(16); }
+  string() {
+    const length = this.u32();
+    if (length < 1 || length > RUST_CONTENT_INSTALL_MAX_STRING_BYTES_V1) throw new Error("content string is outside its bound");
+    const value = this.decoder.decode(this.take(length));
+    if (/[\u0000-\u001f\u007f]/u.test(value)) throw new Error("content string contains a control character");
+  }
+  boundedBytes(maximum: number) {
+    const length = this.u32();
+    if (length > maximum) throw new Error("content bytes exceed their bound");
+    this.take(length);
+  }
+  finish() {
+    if (this.offset !== this.bytes.byteLength) throw new Error("content page has trailing bytes");
+  }
+
+  private take(length: number) {
+    if (!Number.isSafeInteger(length) || length < 0 || length > this.bytes.byteLength - this.offset) {
+      throw new Error("content page is truncated");
+    }
+    const result = this.bytes.subarray(this.offset, this.offset + length);
+    this.offset += length;
+    return result;
+  }
+}
+
+function bytesToHexV1(bytes: Uint8Array) {
+  let result = "";
+  for (const byte of bytes) result += byte.toString(16).padStart(2, "0");
+  return result;
+}
+
+function rustContentInstallPageShapeV1(
+  body: Uint8Array,
+): Readonly<{ pageIndex: number; pageCount: number }> | null {
+  try {
+    const reader = new RustContentInstallPageShapeReaderV1(body);
+    reader.string();
+    if (reader.u16() !== 1) return null;
+    reader.string();
+    reader.hash();
+    if (reader.u16() !== RUST_CONTENT_INSTALL_DOMAIN_COUNT_V1) return null;
+    for (let tag = 0; tag < RUST_CONTENT_INSTALL_DOMAIN_COUNT_V1; tag += 1) {
+      if (reader.u8() !== tag) return null;
+      reader.u32();
+      reader.hash();
+    }
+    const pageIndex = reader.u32();
+    const pageCount = reader.u32();
+    const artifactCount = reader.u32();
+    if (pageCount < 1 || pageCount > RUST_CONTENT_INSTALL_MAX_PAGES_V1
+      || pageIndex >= pageCount || artifactCount < 1
+      || artifactCount > RUST_CONTENT_INSTALL_MAX_ARTIFACTS_PER_PAGE_V1) return null;
+    for (let index = 0; index < artifactCount; index += 1) {
+      if (reader.u8() >= RUST_CONTENT_INSTALL_DOMAIN_COUNT_V1) return null;
+      reader.string();
+      reader.string();
+      reader.u16();
+      reader.u32();
+      const aliasCount = reader.u32();
+      if (aliasCount > RUST_CONTENT_INSTALL_MAX_ALIASES_V1) return null;
+      for (let alias = 0; alias < aliasCount; alias += 1) reader.string();
+      reader.boundedBytes(RUST_CONTENT_INSTALL_MAX_CANONICAL_BYTES_V1);
+      reader.boundedBytes(RUST_CONTENT_INSTALL_MAX_EXTENSION_BYTES_V1);
+    }
+    reader.finish();
+    return Object.freeze({ pageIndex, pageCount });
+  } catch {
+    return null;
+  }
+}
+
+function isExactRustContentInstallPageRequestV1(request: RustIntegratedRuntimeRequestV1) {
+  if (request.type !== "runtime-command-v1" || request.batch.operations.length !== 1) return false;
+  const operation = request.batch.operations[0];
+  const payload = operation.payload;
+  if (operation.domain !== "gameplay"
+    || operation.typeId !== RUST_CONTENT_INSTALL_PAGE_TYPE_V1
+    || operation.schema !== RUST_CONTENT_INSTALL_PAGE_SCHEMA_V1.operationSchema
+    || payload.byteLength < RUST_CONTENT_INSTALL_PAGE_HEADER_BYTES_V1
+    || payload.byteLength > RUST_CONTENT_INSTALL_PAGE_BUDGET_V1
+    || !RUST_CONTENT_INSTALL_PAGE_MAGIC_V1.every((byte, index) => payload[index] === byte)) return false;
+  const header = new DataView(
+    payload.buffer,
+    payload.byteOffset,
+    RUST_CONTENT_INSTALL_PAGE_HEADER_BYTES_V1,
+  );
+  const body = payload.subarray(RUST_CONTENT_INSTALL_PAGE_HEADER_BYTES_V1);
+  if (header.getUint16(4, true) !== 1
+    || header.getUint16(6, true) !== RUST_CONTENT_INSTALL_PAGE_SCHEMA_V1.innerSchema
+    || header.getUint32(8, true) !== body.byteLength
+    || bytesToHexV1(payload.subarray(12, RUST_CONTENT_INSTALL_PAGE_HEADER_BYTES_V1))
+      !== rustIntegratedRuntimeWireChecksumV1(body)) return false;
+  const shape = rustContentInstallPageShapeV1(body);
+  return shape !== null;
+}
+
+/**
+ * A fresh module worker must compile/instantiate Wasm before create or restore
+ * can answer, and that bounded bootstrap can exceed the routine command
+ * watchdog on slower browser/SwiftShader runs. Content-install pages likewise
+ * materialize and hash bounded registry state on every page. Keep all other
+ * requests on the routine deadline; only these named bootstrap operations or
+ * an exact, fully validated, versioned BWC7 installer envelope receive a wider
+ * bound.
+ */
+export function rustIntegratedRuntimeRequestTimeoutMsV1(
+  request: RustIntegratedRuntimeRequestV1,
+  routineTimeoutMs: number,
+) {
+  if (request.type === "runtime-create-v1" || request.type === "runtime-restore-v1") {
+    return Math.max(
+      routineTimeoutMs,
+      Math.min(
+        RUST_INTEGRATED_RUNTIME_BOOTSTRAP_TIMEOUT_MAX_MS_V1,
+        routineTimeoutMs * RUST_INTEGRATED_RUNTIME_BOOTSTRAP_TIMEOUT_MAX_MULTIPLIER_V1,
+      ),
+    );
+  }
+  if (!isExactRustContentInstallPageRequestV1(request)) return routineTimeoutMs;
+  return Math.max(
+    routineTimeoutMs,
+    Math.min(
+      RUST_INTEGRATED_RUNTIME_CONTENT_INSTALL_TIMEOUT_MAX_MS_V1,
+      routineTimeoutMs * RUST_INTEGRATED_RUNTIME_CONTENT_INSTALL_TIMEOUT_MAX_MULTIPLIER_V1,
+    ),
+  );
+}
+
+function rustIntegratedRuntimeBulkWorkBytesV1(
+  request: RustIntegratedRuntimeBulkRequestV1,
+  attachmentBytes: number,
+): number {
+  switch (request.type) {
+    case "runtime-bulk-poll-v1":
+      return Math.max(attachmentBytes, request.maxBytes);
+    case "runtime-bulk-finalize-save-v1":
+    case "runtime-bulk-hydrate-recovery-v1":
+    case "runtime-bulk-initialize-native-save-v1":
+    case "runtime-bulk-migrate-legacy-world-v1":
+      return Math.max(attachmentBytes, RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1);
+    case "runtime-bulk-persistence-status-v1":
+      // The request is intentionally tiny, but producing BWT8 reconstructs
+      // and hashes the complete terminal save set. Budget against the bounded
+      // aggregate persistence custody rather than the inline request bytes.
+      return Math.max(attachmentBytes, RUST_INTEGRATED_RUNTIME_BULK_MAX_QUEUED_BYTES_V1);
+    case "runtime-bulk-read-hydrated-compatibility-v1":
+      return Math.max(attachmentBytes, RUST_INTEGRATED_RUNTIME_BULK_SAVE_CHUNK_BYTES_V1);
+    default:
+      return attachmentBytes;
+  }
+}
+
+/**
+ * Keep the latency-sensitive lane tight while giving bounded recovery-scale
+ * work enough time for repeated hashing, Wasm copies, and IndexedDB I/O.
+ */
+export function rustIntegratedRuntimeBulkTimeoutMsV1(
+  request: RustIntegratedRuntimeBulkRequestV1,
+  attachmentBytes: number,
+  routineTimeoutMs: number,
+): number {
+  const workBytes = rustIntegratedRuntimeBulkWorkBytesV1(request, attachmentBytes);
+  if (workBytes <= RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1) return routineTimeoutMs;
+  const additionalQuanta = Math.ceil(
+    (workBytes - RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1)
+      / RUST_INTEGRATED_RUNTIME_BULK_TIMEOUT_WORK_QUANTUM_BYTES_V1,
+  );
+  const multiplier = Math.min(
+    RUST_INTEGRATED_RUNTIME_BULK_TIMEOUT_MAX_MULTIPLIER_V1,
+    1 + additionalQuanta,
+  );
+  return Math.max(
+    routineTimeoutMs,
+    Math.min(RUST_INTEGRATED_RUNTIME_BULK_TIMEOUT_MAX_MS_V1, routineTimeoutMs * multiplier),
+  );
+}
 
 export type RustIntegratedRuntimeWorkerMessageV1 = Readonly<{
   type: "blockwild-integrated-runtime-wire-v1";
@@ -244,9 +464,10 @@ export class RustIntegratedRuntimeWorkerTransportV1 implements RustIntegratedRun
     const encoded = encodeRustIntegratedRuntimeRequestV1(request);
     const bytes = ownedTransferBuffer(encoded);
     return new Promise<RustIntegratedRuntimeResponseV1>((resolve, reject) => {
+      const timeoutMs = rustIntegratedRuntimeRequestTimeoutMsV1(request, this.timeoutMs);
       const timeout = setTimeout(() => {
-        this.abort(new RustIntegratedRuntimeWorkerError("timeout", `request ${request.requestId} exceeded ${this.timeoutMs} ms`));
-      }, this.timeoutMs);
+        this.abort(new RustIntegratedRuntimeWorkerError("timeout", `request ${request.requestId} exceeded ${timeoutMs} ms`));
+      }, timeoutMs);
       this.pending.set(request.requestId, {
         clientEpoch: request.clientEpoch,
         resolve,
@@ -299,14 +520,16 @@ export class RustIntegratedRuntimeWorkerTransportV1 implements RustIntegratedRun
     this.bulkQueuedBytes += byteLength;
     this.bulkPeakQueuedBytes = Math.max(this.bulkPeakQueuedBytes, this.bulkQueuedBytes);
     this.bulkRequests += 1;
-    if (byteLength <= RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1) this.bulkRoutineRequests += 1;
-    else this.bulkRecoveryScaleRequests += 1;
+    if (request.type === "runtime-bulk-migrate-legacy-world-v1"
+      || byteLength > RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1) this.bulkRecoveryScaleRequests += 1;
+    else this.bulkRoutineRequests += 1;
     this.bulkCopiedInputBytes += encoded.copiedInputBytes;
     this.bulkTransferredInputBytes += byteLength;
     return new Promise<RustIntegratedRuntimeBulkResponseV1>((resolve, reject) => {
+      const timeoutMs = rustIntegratedRuntimeBulkTimeoutMsV1(request, byteLength, this.timeoutMs);
       const timeout = setTimeout(() => {
-        this.abort(new RustIntegratedRuntimeWorkerError("timeout", `bulk request ${request.requestId} exceeded ${this.timeoutMs} ms`));
-      }, this.timeoutMs);
+        this.abort(new RustIntegratedRuntimeWorkerError("timeout", `bulk request ${request.requestId} exceeded ${timeoutMs} ms`));
+      }, timeoutMs);
       this.pendingBulk.set(request.requestId, { clientEpoch: request.clientEpoch, byteLength, resolve, reject, timeout });
       try {
         this.worker.postMessage({

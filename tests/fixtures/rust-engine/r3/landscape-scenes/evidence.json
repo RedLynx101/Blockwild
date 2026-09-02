@@ -1,68 +1,177 @@
 {
-  "schema": 1,
-  "source": "exact published Rust generation and shared BWRD/BWRF records",
+  "schema": 2,
+  "createdAt": "2026-09-02T15:44:22.281Z",
+  "mode": "update-tracked-fixtures",
+  "candidate": false,
+  "source": "validated content-addressed Rust/Wasm generation and shared BWRD/BWRF records",
   "rendererContract": "RenderResourceBatchV2/RenderFrameV2",
-  "contactSheet": "r3-landscape-three-wgpu-contact-sheet.png",
-  "reports": [
+  "threeOracle": {
+    "implementation": "app/three-compat/renderer-extraction-oracle-r11.ts#ThreeExtractionOracleR11",
+    "browserBundleSha256": "5f24afecb2feb7f0e2f441d17cfff231aeaf93a3e348e27d2e8f70bf41c752af",
+    "input": "the same served BWRD/BWRF bytes used by wgpu"
+  },
+  "artifact": {
+    "variant": "compatibility",
+    "hash": "c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b",
+    "publicDirectory": "public/engine",
+    "selectedPath": "public/engine/c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b",
+    "sourceSnapshot": {
+      "schema": 1,
+      "digest": "e4fcec5a5762968647960f41e5c18ee7688c81c4c56fa833cb3d476b7f2a0cda",
+      "fileCount": 222
+    }
+  },
+  "certificate": {
+    "generatorVersion": 18,
+    "generatorHash": "161eef7e34381d450067b7ebedbcb4e1",
+    "contentHash": "cc59903be77dfe30109d15bfaf0e3022",
+    "corpusHash": "5d4e6b1445b00f3430164d1a8093d8dc",
+    "corpusCases": 155,
+    "byteEqual": true
+  },
+  "caseIdentities": [
     {
       "id": "poi-negative-chunk",
-      "chunkHash": "f8078d0b6424a9d75010483aa79cd9bc",
-      "resources": "poi-negative-chunk.bwrd",
-      "frame": "poi-negative-chunk.bwrf",
-      "wgpuReport": {
-        "applied": {
-          "revision": 1,
-          "applied": true
-        },
-        "rendered": {
-          "cpuMicros": 7000,
-          "gpuMicros": null,
-          "backend": "BrowserWebGpu",
-          "adapter": "",
-          "visibleInstances": 1,
-          "culledInstances": 0,
-          "drawCalls": 1,
-          "transparentDrawCalls": 0,
-          "geometryBytes": 262256,
-          "instanceBytes": 80,
-          "residentInstanceBytes": 256,
-          "instanceBufferReallocations": 0,
-          "deviceLost": false
-        }
-      }
+      "seed": "WILDERNESS",
+      "chunk": [
+        -8,
+        -1
+      ],
+      "focus": "surface POI, marker table, authored structure silhouette"
     },
     {
       "id": "connected-ocean-horizon",
-      "chunkHash": "e9f1c24b9fb4d43ac83a575691bb62bd",
-      "resources": "connected-ocean-horizon.bwrd",
-      "frame": "connected-ocean-horizon.bwrf",
-      "wgpuReport": {
-        "applied": {
-          "revision": 1,
-          "applied": true
-        },
-        "rendered": {
-          "cpuMicros": 5000,
-          "gpuMicros": null,
-          "backend": "BrowserWebGpu",
-          "adapter": "",
-          "visibleInstances": 1,
-          "culledInstances": 0,
-          "drawCalls": 1,
-          "transparentDrawCalls": 0,
-          "geometryBytes": 347504,
-          "instanceBytes": 80,
-          "residentInstanceBytes": 256,
-          "instanceBufferReallocations": 0,
-          "deviceLost": false
-        }
-      }
+      "seed": "CONNECTED-WATER-DATUM",
+      "chunk": [
+        0,
+        0
+      ],
+      "focus": "ocean datum, ice and water adjacency, horizon continuity"
     },
     {
       "id": "deep-ocean-flora",
-      "chunkHash": "5bfddc0fb1ffd238c83a575691bb623d",
-      "resources": "deep-ocean-flora.bwrd",
-      "frame": "deep-ocean-flora.bwrf",
+      "seed": "OCEAN-V07",
+      "chunk": [
+        -16,
+        23
+      ],
+      "focus": "ocean floor, dominant flora, transparent water layers"
+    },
+    {
+      "id": "cave-aquifer-section",
+      "seed": "WILDERNESS",
+      "chunk": [
+        -2,
+        3
+      ],
+      "focus": "cave topology, sealed aquifer, ore and emission metadata"
+    },
+    {
+      "id": "biome-transition-negative-space",
+      "seed": "large-negative-9007199254740991",
+      "chunk": [
+        -511,
+        509
+      ],
+      "focus": "negative-coordinate macro terrain and biome transition"
+    }
+  ],
+  "images": {
+    "contactSheet": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/r3-landscape-three-wgpu-contact-sheet.png",
+    "contactSheetMetrics": {
+      "sha256": "af83a68f235156904e6a68b72e4037e5d4b4b4bd96ea0b4f6828978ad2ff1446",
+      "bytes": 224252,
+      "width": 1200,
+      "height": 1910,
+      "channels": 4,
+      "entropy": 2.590346591470734,
+      "channelMeans": [
+        89.33712129144851,
+        124.57277792321116,
+        134.64346116928448,
+        255
+      ]
+    },
+    "trackedContactComparison": null
+  },
+  "reports": [
+    {
+      "id": "poi-negative-chunk",
+      "caseIdentity": {
+        "seed": "WILDERNESS",
+        "chunk": [
+          -8,
+          -1
+        ],
+        "focus": "surface POI, marker table, authored structure silhouette"
+      },
+      "chunkHash": "f8078d0b6424a9d75010483aa79cd9bc",
+      "sceneRecords": {
+        "directory": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records",
+        "resources": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/poi-negative-chunk.bwrd",
+        "frame": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/poi-negative-chunk.bwrf",
+        "metadata": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/poi-negative-chunk.json",
+        "resourcesSha256": "70cc0a5f8cdadacc50325419916712090a83b5af93cd31d4467cf3e1aac6dd0e",
+        "frameSha256": "dc512a5fa16d25be87ea7d9bb96cc69be31c23cacc6ad1db2524ba7a7cebd454",
+        "fixtureCheck": {
+          "exact": true,
+          "updated": true
+        }
+      },
+      "images": {
+        "three": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/1-poi-negative-chunk-three.png",
+        "wgpu": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/1-poi-negative-chunk-wgpu.png",
+        "metrics": {
+          "three": {
+            "sha256": "b8a0f5c818b648c33b94e1e5d4b6e5c9573c5662ccefb6934ff8144cf7a6384e",
+            "bytes": 7917,
+            "width": 960,
+            "height": 540,
+            "channels": 3,
+            "entropy": 1.1579709947109222,
+            "channelMeans": [
+              116.06394290123457,
+              161.7214274691358,
+              171.20431327160495
+            ]
+          },
+          "wgpu": {
+            "sha256": "9a790174a90f216fcbcef7148991558543717c9666182937fed717be047013e4",
+            "bytes": 7920,
+            "width": 960,
+            "height": 540,
+            "channels": 3,
+            "entropy": 1.1579709947109222,
+            "channelMeans": [
+              116.06394290123457,
+              161.7214274691358,
+              171.12233217592592
+            ]
+          },
+          "comparison": {
+            "comparable": true,
+            "width": 960,
+            "height": 540,
+            "channels": 4,
+            "meanAbsoluteError": 0.020651523919753088,
+            "rootMeanSquareError": 0.1704532243682438,
+            "maximumChannelError": 60,
+            "changedPixels": 42501,
+            "changedPixelRatio": 0.0819849537037037
+          }
+        }
+      },
+      "threeReport": {
+        "renderer": "ThreeExtractionOracleR11",
+        "resourceBytes": 99390,
+        "frameBytes": 261,
+        "batchHash": "8dedbf80e5f1a2f1c8ce1034092dd091",
+        "frameHash": "35275623aae247fac83a571e907d15fe",
+        "operations": 2,
+        "instances": 1,
+        "resourceRevision": "1",
+        "frameSequence": "1"
+      },
       "wgpuReport": {
         "applied": {
           "revision": 1,
@@ -77,26 +186,308 @@
           "culledInstances": 0,
           "drawCalls": 1,
           "transparentDrawCalls": 0,
-          "geometryBytes": 144152,
+          "geometryBytes": 276432,
+          "textureBytes": 0,
           "instanceBytes": 80,
+          "residentGeometryBytes": 99232,
+          "residentTextureBytes": 0,
           "residentInstanceBytes": 256,
           "instanceBufferReallocations": 0,
           "deviceLost": false
         }
-      }
+      },
+      "errors": []
+    },
+    {
+      "id": "connected-ocean-horizon",
+      "caseIdentity": {
+        "seed": "CONNECTED-WATER-DATUM",
+        "chunk": [
+          0,
+          0
+        ],
+        "focus": "ocean datum, ice and water adjacency, horizon continuity"
+      },
+      "chunkHash": "e9f1c24b9fb4d43ac83a575691bb62bd",
+      "sceneRecords": {
+        "directory": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records",
+        "resources": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/connected-ocean-horizon.bwrd",
+        "frame": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/connected-ocean-horizon.bwrf",
+        "metadata": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/connected-ocean-horizon.json",
+        "resourcesSha256": "79b4cc4ab47b65e15d6018db5d204a2cd2d0729f3af8256ce7a2e8237192264e",
+        "frameSha256": "68fbc49840e4a489774a1043f6203a59517d3f7212b6a1fdf6cab316f457a6f4",
+        "fixtureCheck": {
+          "exact": true,
+          "updated": true
+        }
+      },
+      "images": {
+        "three": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/2-connected-ocean-horizon-three.png",
+        "wgpu": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/2-connected-ocean-horizon-wgpu.png",
+        "metrics": {
+          "three": {
+            "sha256": "a992f2464c1069c576c95f015661c0f91e3f3dad2977a800f9a7292c865d238d",
+            "bytes": 11662,
+            "width": 960,
+            "height": 540,
+            "channels": 3,
+            "entropy": 1.2314202040433884,
+            "channelMeans": [
+              107.84313078703704,
+              156.70653935185186,
+              171.7450675154321
+            ]
+          },
+          "wgpu": {
+            "sha256": "262fa6789ab6f332cedae9fbab5236782847decde8741b961958c6813e5bda6b",
+            "bytes": 11673,
+            "width": 960,
+            "height": 540,
+            "channels": 3,
+            "entropy": 1.2314202040433884,
+            "channelMeans": [
+              107.85076774691358,
+              156.70653935185186,
+              171.7450675154321
+            ]
+          },
+          "comparison": {
+            "comparable": true,
+            "width": 960,
+            "height": 540,
+            "channels": 4,
+            "meanAbsoluteError": 0.0019092399691358025,
+            "rootMeanSquareError": 0.04369485060205381,
+            "maximumChannelError": 1,
+            "changedPixels": 3959,
+            "changedPixelRatio": 0.00763695987654321
+          }
+        }
+      },
+      "threeReport": {
+        "renderer": "ThreeExtractionOracleR11",
+        "resourceBytes": 131646,
+        "frameBytes": 261,
+        "batchHash": "40811f53c7fbcccfc8428eb573785a2b",
+        "frameHash": "7efcfc037fcc367cc83a571e907d15fe",
+        "operations": 2,
+        "instances": 1,
+        "resourceRevision": "1",
+        "frameSequence": "2"
+      },
+      "wgpuReport": {
+        "applied": {
+          "revision": 1,
+          "applied": true
+        },
+        "rendered": {
+          "cpuMicros": 3000,
+          "gpuMicros": null,
+          "backend": "BrowserWebGpu",
+          "adapter": "",
+          "visibleInstances": 1,
+          "culledInstances": 0,
+          "drawCalls": 1,
+          "transparentDrawCalls": 0,
+          "geometryBytes": 366288,
+          "textureBytes": 0,
+          "instanceBytes": 80,
+          "residentGeometryBytes": 131488,
+          "residentTextureBytes": 0,
+          "residentInstanceBytes": 256,
+          "instanceBufferReallocations": 0,
+          "deviceLost": false
+        }
+      },
+      "errors": []
+    },
+    {
+      "id": "deep-ocean-flora",
+      "caseIdentity": {
+        "seed": "OCEAN-V07",
+        "chunk": [
+          -16,
+          23
+        ],
+        "focus": "ocean floor, dominant flora, transparent water layers"
+      },
+      "chunkHash": "5bfddc0fb1ffd238c83a575691bb623d",
+      "sceneRecords": {
+        "directory": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records",
+        "resources": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/deep-ocean-flora.bwrd",
+        "frame": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/deep-ocean-flora.bwrf",
+        "metadata": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/deep-ocean-flora.json",
+        "resourcesSha256": "0a5ab0e748f3918322600477f83e675faf48415b4d2fe76a3fcc908935d8089f",
+        "frameSha256": "b2f11e1d9e156d1a9a954daf44b5f34bb4d8331c92a69453842eedaac85ea8e7",
+        "fixtureCheck": {
+          "exact": true,
+          "updated": true
+        }
+      },
+      "images": {
+        "three": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/3-deep-ocean-flora-three.png",
+        "wgpu": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/3-deep-ocean-flora-wgpu.png",
+        "metrics": {
+          "three": {
+            "sha256": "7c88278d9b8f8f4aeec17a88af4917cf8a6ad593d3d10bb1edaf73bb93684761",
+            "bytes": 5311,
+            "width": 960,
+            "height": 540,
+            "channels": 3,
+            "entropy": 0.706717848777771,
+            "channelMeans": [
+              116.8635686728395,
+              162.62662808641974,
+              184.7116435185185
+            ]
+          },
+          "wgpu": {
+            "sha256": "5b7dfd1baa9e53e631afa23305d3d022e69c1ae9e00c5b60abe6c3f8c22d7864",
+            "bytes": 5309,
+            "width": 960,
+            "height": 540,
+            "channels": 3,
+            "entropy": 0.706717848777771,
+            "channelMeans": [
+              116.8635686728395,
+              162.65437307098765,
+              184.67235146604938
+            ]
+          },
+          "comparison": {
+            "comparable": true,
+            "width": 960,
+            "height": 540,
+            "channels": 4,
+            "meanAbsoluteError": 0.01675925925925926,
+            "rootMeanSquareError": 0.12945755775256715,
+            "maximumChannelError": 1,
+            "changedPixels": 34752,
+            "changedPixelRatio": 0.06703703703703703
+          }
+        }
+      },
+      "threeReport": {
+        "renderer": "ThreeExtractionOracleR11",
+        "resourceBytes": 54702,
+        "frameBytes": 261,
+        "batchHash": "b70179be3875ff2dc8b62d8017f8a337",
+        "frameHash": "f90f1f260fbbd9e6c83a571e907d15fe",
+        "operations": 2,
+        "instances": 1,
+        "resourceRevision": "1",
+        "frameSequence": "3"
+      },
+      "wgpuReport": {
+        "applied": {
+          "revision": 1,
+          "applied": true
+        },
+        "rendered": {
+          "cpuMicros": 2000,
+          "gpuMicros": null,
+          "backend": "BrowserWebGpu",
+          "adapter": "",
+          "visibleInstances": 1,
+          "culledInstances": 0,
+          "drawCalls": 1,
+          "transparentDrawCalls": 0,
+          "geometryBytes": 151944,
+          "textureBytes": 0,
+          "instanceBytes": 80,
+          "residentGeometryBytes": 54544,
+          "residentTextureBytes": 0,
+          "residentInstanceBytes": 256,
+          "instanceBufferReallocations": 0,
+          "deviceLost": false
+        }
+      },
+      "errors": []
     },
     {
       "id": "cave-aquifer-section",
+      "caseIdentity": {
+        "seed": "WILDERNESS",
+        "chunk": [
+          -2,
+          3
+        ],
+        "focus": "cave topology, sealed aquifer, ore and emission metadata"
+      },
       "chunkHash": "7527b8ab71de0602c83a575691bb62bd",
-      "resources": "cave-aquifer-section.bwrd",
-      "frame": "cave-aquifer-section.bwrf",
+      "sceneRecords": {
+        "directory": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records",
+        "resources": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/cave-aquifer-section.bwrd",
+        "frame": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/cave-aquifer-section.bwrf",
+        "metadata": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/cave-aquifer-section.json",
+        "resourcesSha256": "5a250c65971b3b5e875ca1e7b50611013e14bddcf6807db3150556ca9e6410fd",
+        "frameSha256": "9834d062c4a4f93cbc9bd1b3e4b764c9a7666f486c9704ca58ba1a562a56b8f5",
+        "fixtureCheck": {
+          "exact": true,
+          "updated": true
+        }
+      },
+      "images": {
+        "three": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/4-cave-aquifer-section-three.png",
+        "wgpu": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/4-cave-aquifer-section-wgpu.png",
+        "metrics": {
+          "three": {
+            "sha256": "65356fa84305f60c1bc893de5571cb86cc2c3ee1aad5c17845c315ae323d5fcb",
+            "bytes": 5850,
+            "width": 960,
+            "height": 540,
+            "channels": 3,
+            "entropy": 0.7056565535021946,
+            "channelMeans": [
+              19.118439429012344,
+              32.414461805555554,
+              32.848007330246915
+            ]
+          },
+          "wgpu": {
+            "sha256": "2fe19ff4534fa2d325fe617475101edd2d618cafe61804895e95c6adfc1426c2",
+            "bytes": 5636,
+            "width": 960,
+            "height": 540,
+            "channels": 3,
+            "entropy": 0.7068098122254014,
+            "channelMeans": [
+              19.113823302469136,
+              32.41862461419753,
+              32.84979938271605
+            ]
+          },
+          "comparison": {
+            "comparable": true,
+            "width": 960,
+            "height": 540,
+            "channels": 4,
+            "meanAbsoluteError": 0.007798996913580247,
+            "rootMeanSquareError": 0.46712217352636987,
+            "maximumChannelError": 81,
+            "changedPixels": 8848,
+            "changedPixelRatio": 0.0170679012345679
+          }
+        }
+      },
+      "threeReport": {
+        "renderer": "ThreeExtractionOracleR11",
+        "resourceBytes": 70494,
+        "frameBytes": 261,
+        "batchHash": "09071b9f0d110eeac8de025095c25866",
+        "frameHash": "c63db6111894ba40c83a571e907d15fe",
+        "operations": 2,
+        "instances": 1,
+        "resourceRevision": "1",
+        "frameSequence": "4"
+      },
       "wgpuReport": {
         "applied": {
           "revision": 1,
           "applied": true
         },
         "rendered": {
-          "cpuMicros": 4000,
+          "cpuMicros": 3000,
           "gpuMicros": null,
           "backend": "BrowserWebGpu",
           "adapter": "",
@@ -104,26 +495,102 @@
           "culledInstances": 0,
           "drawCalls": 1,
           "transparentDrawCalls": 0,
-          "geometryBytes": 185888,
+          "geometryBytes": 195936,
+          "textureBytes": 0,
           "instanceBytes": 80,
+          "residentGeometryBytes": 70336,
+          "residentTextureBytes": 0,
           "residentInstanceBytes": 256,
           "instanceBufferReallocations": 0,
           "deviceLost": false
         }
-      }
+      },
+      "errors": []
     },
     {
       "id": "biome-transition-negative-space",
+      "caseIdentity": {
+        "seed": "large-negative-9007199254740991",
+        "chunk": [
+          -511,
+          509
+        ],
+        "focus": "negative-coordinate macro terrain and biome transition"
+      },
       "chunkHash": "dcc26b6583c21ebfc83a575691bb623d",
-      "resources": "biome-transition-negative-space.bwrd",
-      "frame": "biome-transition-negative-space.bwrf",
+      "sceneRecords": {
+        "directory": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records",
+        "resources": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/biome-transition-negative-space.bwrd",
+        "frame": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/biome-transition-negative-space.bwrf",
+        "metadata": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/biome-transition-negative-space.json",
+        "resourcesSha256": "1c8d50e70468515b821fd9b7d3d6e190929738ac6a6341404a9a2a15de3c2034",
+        "frameSha256": "7596f48651d4ae7956d1115cd4a94370855a98b6941250fe714a6aff42f3e492",
+        "fixtureCheck": {
+          "exact": true,
+          "updated": true
+        }
+      },
+      "images": {
+        "three": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/5-biome-transition-negative-space-three.png",
+        "wgpu": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/5-biome-transition-negative-space-wgpu.png",
+        "metrics": {
+          "three": {
+            "sha256": "8f183f8526f4a720dec55ec3bf292ba646ee8235c8cd367e93a0113c42ca1612",
+            "bytes": 6314,
+            "width": 960,
+            "height": 540,
+            "channels": 3,
+            "entropy": 1.1088445074856281,
+            "channelMeans": [
+              131.0533950617284,
+              170.42977816358024,
+              184.38040702160495
+            ]
+          },
+          "wgpu": {
+            "sha256": "26a5384ae803a82d9b1795daade8e8fb48f4e37887fd4e9a54ecc240de28048d",
+            "bytes": 6265,
+            "width": 960,
+            "height": 540,
+            "channels": 3,
+            "entropy": 1.1088104285299778,
+            "channelMeans": [
+              131.0523611111111,
+              170.4292939814815,
+              184.26703896604937
+            ]
+          },
+          "comparison": {
+            "comparable": true,
+            "width": 960,
+            "height": 540,
+            "channels": 4,
+            "meanAbsoluteError": 0.03030815972222222,
+            "rootMeanSquareError": 0.3912459570650578,
+            "maximumChannelError": 145,
+            "changedPixels": 58953,
+            "changedPixelRatio": 0.11372106481481481
+          }
+        }
+      },
+      "threeReport": {
+        "renderer": "ThreeExtractionOracleR11",
+        "resourceBytes": 57502,
+        "frameBytes": 261,
+        "batchHash": "823b295134fc8795c83601ca4209245d",
+        "frameHash": "009c751881e40832c83a571e907d15fe",
+        "operations": 2,
+        "instances": 1,
+        "resourceRevision": "1",
+        "frameSequence": "5"
+      },
       "wgpuReport": {
         "applied": {
           "revision": 1,
           "applied": true
         },
         "rendered": {
-          "cpuMicros": 4000,
+          "cpuMicros": 2000,
           "gpuMicros": null,
           "backend": "BrowserWebGpu",
           "adapter": "",
@@ -131,13 +598,28 @@
           "culledInstances": 0,
           "drawCalls": 1,
           "transparentDrawCalls": 0,
-          "geometryBytes": 151552,
+          "geometryBytes": 159744,
+          "textureBytes": 0,
           "instanceBytes": 80,
+          "residentGeometryBytes": 57344,
+          "residentTextureBytes": 0,
           "residentInstanceBytes": 256,
           "instanceBufferReallocations": 0,
           "deviceLost": false
         }
-      }
+      },
+      "errors": []
     }
-  ]
+  ],
+  "errors": [],
+  "assertions": {
+    "completeArtifactAndSourceSnapshotValidated": true,
+    "exactArtifactHash": true,
+    "exact155CaseCertificate": true,
+    "exactFiveLandscapeCaseIdentities": true,
+    "threeUsesAppExtractionOracleR11": true,
+    "rendererPixelParityWithinBounds": true,
+    "candidateEvidenceOnly": true,
+    "trackedFixturesUpdated": true
+  }
 }

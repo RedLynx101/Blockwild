@@ -39,6 +39,7 @@ import {
   shouldBypassOpenableUse,
   survivalFoodUsagePerSecond,
   torchBlockForPlacement,
+  type SavedCreature,
   type WorldSave,
 } from "../app/game/engine.ts";
 
@@ -70,6 +71,7 @@ test("Giant Mooncaps keep full collision while rendering an inset stem", () => {
 import { harvestPlant } from "../app/game/farming.ts";
 import { CHEST_VISUAL, chestLatchCenters } from "../app/game/chest-model.ts";
 import { ChunkWorld, BIOME_NAMES, BiomeId, CHUNK_SIZE, FLOWING_WATER_LEVEL_INSET, GENERATOR_VERSION, GLASS_OPACITY, LIQUID_SURFACE_INSET, MAX_Y, MIN_Y, PACKED_VERTEX_COLOR_RANGE, RADIAL_STREAMING_DISTANCE_THRESHOLD, SECTION_HEIGHT, WORLD_HEIGHT, blockIndex, chunkAabbRadialDistanceSquared, chunkKey, chunkWithinDirectionalStreamingWindow, chunkWithinStreamingRadius, chunksWithinStreamingRadius, liquidSurfaceInsetForCell, splitCoordinate } from "../app/game/world.ts";
+import { mergeTerrainGeometry, type TerrainMergedGeometry, type TerrainSectionGeometry } from "../app/game/terrain-buffer-pipeline.ts";
 import { MOB_DEFS, MOB_ORDER } from "../app/game/mobs.ts";
 import { accumulateGroundStepPresentationOffset, stepGroundPresentationOffset } from "../app/game/creature-pathing.ts";
 import { createHeldToolSpec, createRidgebackSpec, createZombieSpec, INSPECTOR_MODEL_SPECS, RIDGEBACK_GROUND_LIFT } from "../app/game/model-specs.ts";
@@ -287,6 +289,8 @@ test("the hard streaming budget rotates priority instead of starving queues", ()
   world.playerChunkX = 0;
   world.playerChunkZ = 0;
   world.scheduledViewSector = world.streamingViewSector;
+  world.scheduledLookaheadChunkX = world.streamingLookaheadChunkX;
+  world.scheduledLookaheadChunkZ = world.streamingLookaheadChunkZ;
   const playerChunk = world.generateChunk(0, 0);
   for (const section of [3, 4]) if (playerChunk.sectionBlockCounts[section] > 0) world.rebuildSection(playerChunk, section);
   world.streamingFrameBudgetMilliseconds = 0;
@@ -479,6 +483,10 @@ test("zero-density worlds skip habitat scans as well as natural population creat
   const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
   Object.assign(engine, {
     worldOptions: { ...DEFAULT_WORLD_OPTIONS, mobDensity: 0 },
+    world: {
+      requestChunkForResidency: () => ({}),
+      installedColumn: () => ({ height: 0, biome: BiomeId.Meadow, waterline: 0 }),
+    },
     skyVisibility: 1,
     naturalSpawnInterestCursor: 0,
     simulationInterestPoints: () => [focus],
@@ -545,6 +553,7 @@ test("engine storm rendering hides the sun, moon, and stars behind a full overca
     world: {
       getBlock: () => BlockId.Air,
       biomeAt: () => 3,
+      installedColumn: () => undefined,
     },
   });
   engine.updateDayNight(0);
@@ -1944,6 +1953,35 @@ test("due saplings remain scheduled while their chunk is unloaded", () => {
   assert.ok((engine.saplings.get("64,10,64") ?? 0) > Date.now());
 });
 
+test("pending Rust saplings respect the bounded residency admission budget", () => {
+  const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
+  engine.saplings = new Map(Array.from({ length: 8 }, (_, index) => [
+    `${index * CHUNK_SIZE + Math.floor(CHUNK_SIZE / 2)},10,${Math.floor(CHUNK_SIZE / 2)}`,
+    0,
+  ]));
+  engine.saplingCheckTimer = 0;
+  let residencyRequests = 0;
+  let terrainReads = 0;
+  engine.world = {
+    terrainGenerationAuthority: { mode: "rust" },
+    requestChunkForResidency: () => {
+      residencyRequests += 1;
+      return false;
+    },
+    installedColumn: () => undefined,
+    getBlock: () => {
+      terrainReads += 1;
+      return undefined;
+    },
+  } as unknown as VoxelEngine["world"];
+
+  engine.updateSaplings(1);
+
+  assert.equal(residencyRequests, 6, "pending Rust growth must share the six-record scheduler budget");
+  assert.equal(terrainReads, 0, "unready Rust terrain must never be read as implicit air");
+  assert.ok([...engine.saplings.values()].every((due) => due === 0), "authority-pending records retain their deterministic due time");
+});
+
 test("tree felling takes only the rooted vertical trunk and leaves attached builds intact", () => {
   const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
   engine.world = new ChunkWorld();
@@ -2216,6 +2254,7 @@ test("ever-led protection survives creature serialization and restoration", () =
     isWalkThrough: (type: BlockId | undefined) => type === BlockId.Air,
     findWalkableY: () => 0,
     surfaceAt: () => 0,
+    requestChunk: () => ({}),
   } as unknown as VoxelEngine["world"];
   const original = engine.spawnMob("meadow-cow", new THREE.Vector3(2, 1, 3), { naturalSpawned: true, everLed: true });
   const saved = engine.serializeCreature(original);
@@ -2224,6 +2263,221 @@ test("ever-led protection survives creature serialization and restoration", () =
   const restored = engine.restoreCreature(saved);
   assert.equal(restored?.everLed, true);
   assert.equal(restored?.naturalSpawned, true);
+});
+
+test("creature restore residency and terrain samples use the same rounded cell across chunk boundaries", () => {
+  for (const fixture of [
+    { label: "positive", x: 15.6, cellX: 16, chunkX: 1 },
+    { label: "negative half", x: -0.5, cellX: -0, chunkX: -0 },
+    { label: "negative", x: -16.5, cellX: -16, chunkX: -1 },
+  ] as const) {
+    const chunkRequests: Array<[number, number]> = [];
+    const terrainSamples: Array<[number, number]> = [];
+    const restoredPositions: THREE.Vector3[] = [];
+    const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
+    Object.assign(engine, {
+      world: {
+        requestChunk(cx: number, cz: number) {
+          chunkRequests.push([cx, cz]);
+          return cx === fixture.chunkX && cz === 0 ? {} : undefined;
+        },
+        getBlock(x: number, y: number, z: number) {
+          terrainSamples.push([x, z]);
+          return y <= 0 ? BlockId.Stone : BlockId.Air;
+        },
+        isWalkThrough: (type: BlockId | undefined) => type === BlockId.Air,
+        findWalkableY(x: number, z: number) {
+          terrainSamples.push([x, z]);
+          return 0;
+        },
+        surfaceAt(x: number, z: number) {
+          terrainSamples.push([x, z]);
+          return 0;
+        },
+      },
+      spawnMob: (_kind: string, position: THREE.Vector3) => {
+        restoredPositions.push(position.clone());
+        return { restored: true };
+      },
+    });
+    const saved: SavedCreature = {
+      id: fixture.chunkX + 10,
+      kind: "meadow-cow",
+      x: fixture.x,
+      y: 1,
+      z: 0.2,
+      yaw: 0,
+      health: 8,
+      age: 0,
+      naturalSpawned: true,
+    };
+
+    assert.ok(engine.restoreCreature(saved), `${fixture.label} boundary creature should restore`);
+    assert.deepEqual(chunkRequests, [[fixture.chunkX, 0]], `${fixture.label} residency must follow the rounded cell`);
+    assert.ok(terrainSamples.length > 0);
+    assert.ok(
+      terrainSamples.every(([x, z]) => Object.is(x, fixture.cellX) && Object.is(z, 0)),
+      `${fixture.label} terrain reads must use the exact admitted cell`,
+    );
+    assert.equal(restoredPositions.at(-1)?.x, fixture.x, "terrain sampling must not quantize the saved spawn position");
+    assert.equal(restoredPositions.at(-1)?.z, 0.2);
+  }
+});
+
+test("Rust load deferral uses migrated rounded cells and retains valid null restores", () => {
+  const active = [
+    { id: 101, kind: "meadow-cow", x: 15.6, y: 1, z: 0, yaw: 0, health: 8, age: 0 },
+    { id: 102, kind: "meadow-cow", x: -0.5, y: 1, z: 0, yaw: 0, health: 8, age: 0 },
+    { id: 103, kind: "meadow-cow", x: -16.5, y: 1, z: 0, yaw: 0, health: 8, age: 0 },
+  ] satisfies SavedCreature[];
+  const sleeping = [{ ...active[0], id: 104 }];
+  const restoreCalls: number[] = [];
+  const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
+  Object.assign(engine, {
+    world: { chunks: new Map([["1,0", {}], ["0,0", {}]]) },
+    restoreCreature: (saved: SavedCreature) => {
+      restoreCalls.push(saved.id);
+      return saved.id === 101 ? null : { restored: true };
+    },
+  });
+  const restoreLoaded = (engine as unknown as {
+    restoreLoadedCreatureRecords(
+      activeCreatures: readonly SavedCreature[],
+      sleepingCreatures: readonly SavedCreature[],
+      rustRequired: boolean,
+    ): SavedCreature[];
+  }).restoreLoadedCreatureRecords.bind(engine);
+
+  const retained = restoreLoaded(active, sleeping, true);
+
+  assert.deepEqual(restoreCalls, [101, 102], "-0.5 must resolve to chunk 0 while cold -16.5 resolves to chunk -1");
+  assert.deepEqual(retained.map((saved) => saved.id), [104, 101, 103]);
+  assert.notEqual(retained[1], active[0], "deferred records must be retained as independent save values");
+});
+
+test("natural aquatic restoration preflights its rounded surface column", () => {
+  let ready = false;
+  let surfaceReads = 0;
+  let spawns = 0;
+  const requests: Array<[number, number]> = [];
+  const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
+  Object.assign(engine, {
+    world: {
+      requestChunk(cx: number, cz: number) {
+        requests.push([cx, cz]);
+        return ready ? {} : undefined;
+      },
+      surfaceAt(x: number, z: number) {
+        surfaceReads += 1;
+        assert.deepEqual([x, z], [16, -16]);
+        return 12;
+      },
+    },
+    spawnMob: (_kind: string, position: THREE.Vector3) => {
+      spawns += 1;
+      assert.deepEqual(position.toArray(), [15.6, 9.25, -16.5]);
+      return { restored: true };
+    },
+  });
+  const saved: SavedCreature = {
+    id: 91,
+    kind: "glowfin",
+    x: 15.6,
+    y: 9.25,
+    z: -16.5,
+    yaw: 0,
+    health: 4,
+    age: 0,
+    naturalSpawned: true,
+  };
+
+  assert.equal(engine.restoreCreature(saved), null);
+  assert.equal(surfaceReads, 0, "a cold aquatic column must not be sampled as if it were installed");
+  assert.equal(spawns, 0);
+  ready = true;
+  assert.ok(engine.restoreCreature(saved));
+  assert.deepEqual(requests, [[1, -1], [1, -1]]);
+  assert.equal(surfaceReads, 1);
+  assert.equal(spawns, 1);
+});
+
+test("sleeping creature wake retains pending records and restores each ready record once", () => {
+  const saved: SavedCreature = {
+    id: 92,
+    kind: "meadow-cow",
+    x: 15.6,
+    y: 1,
+    z: -16.5,
+    yaw: 0,
+    health: 8,
+    age: 0,
+    outOfRangeSeconds: 12,
+  };
+  let ready = false;
+  let restoreCalls = 0;
+  let saves = 0;
+  const requests: Array<[number, number]> = [];
+  const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
+  Object.assign(engine, {
+    sleepingCreatures: [{ ...saved }],
+    sleepingCreatureWakeTimer: 0,
+    settings: { simulationDistance: 8 },
+    simulationInterestPoints: () => [{ x: saved.x, y: saved.y, z: saved.z }],
+    world: {
+      requestChunk(cx: number, cz: number) {
+        requests.push([cx, cz]);
+        return ready ? {} : undefined;
+      },
+    },
+    restoreCreature: (candidate: SavedCreature) => {
+      restoreCalls += 1;
+      assert.equal(candidate.outOfRangeSeconds, 0);
+      return { restored: true };
+    },
+    saveSoon: () => { saves += 1; },
+  });
+
+  engine.wakeSleepingCreatures(1);
+  assert.equal(engine.sleepingCreatures.length, 1);
+  assert.equal(restoreCalls, 0, "the restore must not run before canonical cell residency");
+  ready = true;
+  engine.sleepingCreatureWakeTimer = 0;
+  engine.wakeSleepingCreatures(1);
+  assert.equal(engine.sleepingCreatures.length, 0);
+  assert.equal(restoreCalls, 1);
+  assert.equal(saves, 1);
+  assert.deepEqual(requests, [[1, -1], [1, -1]]);
+  engine.sleepingCreatureWakeTimer = 0;
+  engine.wakeSleepingCreatures(1);
+  assert.equal(restoreCalls, 1, "a successfully restored record must be consumed exactly once");
+});
+
+test("sleeping creature wake keeps a record when authored halo restoration is still pending", () => {
+  const saved: SavedCreature = {
+    id: 93,
+    kind: "hobbit-merchant",
+    x: 32,
+    y: 42,
+    z: 29,
+    yaw: 0,
+    health: 20,
+    age: 0,
+  };
+  let saves = 0;
+  const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
+  Object.assign(engine, {
+    sleepingCreatures: [{ ...saved }],
+    sleepingCreatureWakeTimer: 0,
+    settings: { simulationDistance: 8 },
+    simulationInterestPoints: () => [{ x: saved.x, y: saved.y, z: saved.z }],
+    world: { requestChunk: () => ({}) },
+    restoreCreature: () => null,
+    saveSoon: () => { saves += 1; },
+  });
+
+  engine.wakeSleepingCreatures(1);
+  assert.deepEqual(engine.sleepingCreatures, [saved]);
+  assert.equal(saves, 0);
 });
 
 test("terrain sections consolidate to at most one visible submission per render layer", () => {
@@ -2346,6 +2600,9 @@ test("a late neighboring chunk urgently removes speculative water and terrain ed
   world.lightEngine.initializeChunk(left);
   world.setBlock(15, 0, 0, BlockId.Water, false, false);
   const section = Math.floor((0 - MIN_Y) / SECTION_HEIGHT);
+  world.playerChunkX = 0;
+  world.playerChunkZ = 0;
+  world.playerSection = section;
   world.rebuildSection(left, section);
   assert.equal(left.sections.get(section)?.water?.geometry.getAttribute("position").count, 24, "the absent neighbor initially exposes six water faces");
 
@@ -2354,6 +2611,8 @@ test("a late neighboring chunk urgently removes speculative water and terrain ed
   right.sectionBlockCounts.fill(0);
   world.lightEngine.initializeChunk(right);
   world.setBlock(16, 0, 0, BlockId.Water, false, false);
+  const unrelatedSection = section + 1;
+  world.setBlock(CHUNK_SIZE + 1, MIN_Y + unrelatedSection * SECTION_HEIGHT, 0, BlockId.Stone, false, false);
   world.meshQueue = [];
   world.meshQueueHead = 0;
   world.meshQueued.clear();
@@ -2364,12 +2623,27 @@ test("a late neighboring chunk urgently removes speculative water and terrain ed
   assert.equal(world.urgentMeshQueued.has(`${left.key}:${section}`), true);
   assert.equal(world.seamPresentationPending.has(`${right.key}:${section}`), true, "the arriving section must wait for the old edge replacement");
   assert.equal(world.meshQueued.has(`${right.key}:${section}`), false, "both sides of an unresolved seam must never be presented together");
+  assert.equal(
+    world.meshQueued.has(`${right.key}:${unrelatedSection}`) || world.urgentMeshQueued.has(`${right.key}:${unrelatedSection}`),
+    true,
+    "an unrelated arriving section should remain independently runnable",
+  );
+  assert.equal(world.processMesh(left.key), true);
+  const blockerProgress = world.activeMeshTask?.nextLocalX ?? -1;
+  assert.equal(world.activeMeshTask?.key, left.key);
+  assert.equal(world.processMesh(right.key), true, "a seam-held preferred chunk must let its runnable blocker advance");
+  assert.equal(world.activeMeshTask?.key, left.key, "the preferred chunk cannot preempt the mesh that must release its seam");
+  assert.ok((world.activeMeshTask?.nextLocalX ?? -1) > blockerProgress, "the seam blocker must retain and advance its resumable mesh state");
   for (let slice = 0; slice < 20; slice += 1) world.processMesh(left.key);
   assert.equal(left.sections.get(section)?.water?.geometry.getAttribute("position").count, 20, "water beside water must have no internal chunk-wall quad");
   assert.equal(world.seamMeshRebuilds.has(`${left.key}:${section}`), false);
   assert.equal(world.seamPresentationPending.has(`${right.key}:${section}`), false, "installing the corrected edge must release its arriving section");
-  assert.equal(world.meshQueued.has(`${right.key}:${section}`), true, "the coherent arriving section should become eligible immediately");
-  for (let slice = 0; slice < 20; slice += 1) world.processMesh(right.key);
+  assert.equal(
+    world.meshQueued.has(`${right.key}:${section}`) || world.urgentMeshQueued.has(`${right.key}:${section}`),
+    true,
+    "the coherent arriving section should become eligible immediately",
+  );
+  for (let slice = 0; slice < 40; slice += 1) world.processMesh(right.key);
   assert.equal(right.sections.get(section)?.water?.geometry.getAttribute("position").count, 20);
   world.dispose();
 });
@@ -2458,6 +2732,104 @@ test("immediate edits keep unaffected consolidated render layers installed", () 
 
   assert.equal(chunk.combinedMeshes.opaque, undefined, "the edited opaque layer must be detached immediately");
   assert.equal(chunk.combinedMeshes.water, water, "an unrelated water layer must stay consolidated and submitted once");
+  world.dispose();
+});
+
+test("terrain consolidation callbacks cannot cross a reset into the same chunk layer and revision", () => {
+  const world = new ChunkWorld();
+  world.terrainBufferPipeline.dispose();
+  const requests: Array<{
+    parts: readonly TerrainSectionGeometry[];
+    complete: (geometry: TerrainMergedGeometry | null) => void;
+    fail: () => void;
+  }> = [];
+  const delayedPipeline = {
+    submit(
+      parts: readonly TerrainSectionGeometry[],
+      complete: (geometry: TerrainMergedGeometry | null) => void,
+      fail: () => void,
+    ) {
+      requests.push({ parts, complete, fail });
+    },
+    diagnostics: () => ({
+      supported: true,
+      submitted: requests.length,
+      completed: 0,
+      failed: 0,
+      pending: requests.length,
+      transferBytes: 0,
+      ready: true,
+      restarts: 0,
+      lastError: null,
+    }),
+    dispose: () => undefined,
+  };
+  world.terrainBufferPipeline = delayedPipeline as unknown as typeof world.terrainBufferPipeline;
+
+  const setup = (seed: string) => {
+    world.reset(seed, undefined, { structures: false });
+    world.playerChunkX = 0;
+    world.playerChunkZ = 0;
+    const chunk = world.generateChunk(0, 0);
+    chunk.presentationVisible = true;
+    chunk.group.visible = true;
+    chunk.blocks.fill(BlockId.Air);
+    chunk.sectionBlockCounts.fill(0);
+    world.lightEngine.initializeChunk(chunk);
+    const y = 0;
+    const section = Math.floor((y - MIN_Y) / SECTION_HEIGHT);
+    world.playerSection = section;
+    world.setBlock(3, y, 4, BlockId.Stone, false, true);
+    assert.ok(chunk.sections.get(section)?.opaque?.visible, "the current world starts from a visible opaque source section");
+    assert.equal(world.processConsolidation(), true);
+    const queueKey = `${chunk.key}:opaque`;
+    return { chunk, section, queueKey, revision: world.consolidationRevision.get(queueKey) };
+  };
+
+  const worldA = setup("OPAQUE-EPOCH-A");
+  assert.equal(requests.length, 1);
+  const requestA = requests[0];
+  const worldB = setup("OPAQUE-EPOCH-B");
+  assert.equal(requests.length, 2);
+  const requestB = requests[1];
+  assert.ok(Number.isSafeInteger(worldA.revision) && worldA.revision! > 0);
+  assert.equal(worldB.revision, worldA.revision, "the replacement world deliberately reuses the same consolidation revision");
+  assert.equal(world.pendingConsolidations.has(worldB.queueKey), true);
+
+  requestA.complete(mergeTerrainGeometry(requestA.parts));
+  requestA.fail();
+
+  assert.equal(world.pendingConsolidations.has(worldB.queueKey), true, "world A callbacks cannot clear world B pending state");
+  assert.equal(world.completedConsolidations.length, 0, "world A success cannot enter world B's completion queue");
+  assert.equal(world.consolidationQueue.length, 0, "world A failure cannot requeue world B's layer");
+  assert.equal(world.consolidationQueued.has(worldB.queueKey), false);
+  assert.equal(worldB.chunk.combinedMeshes.opaque, undefined);
+  assert.equal(worldB.chunk.sections.get(worldB.section)?.opaque?.visible, true, "world B keeps its visible source while its own merge is pending");
+  const pendingPresentation = world.streamingDiagnostics().playerTerrainPresentation.chunks
+    .find((chunk) => chunk.offset.x === 0 && chunk.offset.z === 0)
+    ?.requiredSections.find((section) => section.section === worldB.section);
+  assert.equal(pendingPresentation?.presentations.opaque.mode, "source");
+
+  requestB.complete(mergeTerrainGeometry(requestB.parts));
+  assert.equal(world.pendingConsolidations.has(worldB.queueKey), false);
+  assert.equal(world.completedConsolidations.length, 1);
+  const presentationEpoch = (world as unknown as { terrainPresentationEpoch: number }).terrainPresentationEpoch;
+  world.completedConsolidations.unshift({
+    key: worldB.chunk.key,
+    layer: "opaque",
+    revision: worldB.revision!,
+    presentationEpoch: presentationEpoch - 1,
+    geometry: mergeTerrainGeometry(requestA.parts),
+  });
+  assert.equal(world.processConsolidation(), true, "a stale completed record is consumed fail-closed");
+  assert.equal(worldB.chunk.combinedMeshes.opaque, undefined, "the install boundary rechecks the presentation epoch");
+  assert.equal(world.processConsolidation(), true, "world B's own completion remains installable");
+  assert.ok(worldB.chunk.combinedMeshes.opaque);
+  assert.equal(worldB.chunk.sections.get(worldB.section)?.opaque?.visible, false);
+  const installedPresentation = world.streamingDiagnostics().playerTerrainPresentation.chunks
+    .find((chunk) => chunk.offset.x === 0 && chunk.offset.z === 0)
+    ?.requiredSections.find((section) => section.section === worldB.section);
+  assert.equal(installedPresentation?.presentations.opaque.mode, "combined");
   world.dispose();
 });
 

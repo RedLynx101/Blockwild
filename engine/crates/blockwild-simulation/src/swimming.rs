@@ -1,5 +1,10 @@
 //! Pure swimming, surface-bob, oxygen, and drowning rules.
 
+/// Same-press vertical follow-through after the one emitted shore-exit cue.
+/// The timer reuses `surface_breach_seconds`; a consumed shore latch, zero
+/// stroke cooldown, and inactive bob distinguish it from a surface stroke.
+pub const SHORE_MANTLE_SUSTAIN_SECONDS: f64 = 0.20;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SwimmerState {
     pub velocity_y: f64,
@@ -10,6 +15,9 @@ pub struct SwimmerState {
     pub surface_breach_seconds: f64,
     pub surface_stroke_cooldown_seconds: f64,
     pub surface_bob_active: bool,
+    /// One-shot shore-exit intent latch. A qualifying boost consumes it and
+    /// only releasing jump arms another attempt.
+    pub shore_exit_ready: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -96,7 +104,8 @@ pub struct SwimStep {
     pub horizontal_speed_scale: f64,
 }
 
-/// Exact Rust port of `app/game/liquids.ts::stepSwimming`.
+/// Rust port of `app/game/liquids.ts::stepSwimming`, with a native one-shot
+/// latch for shore exits so one held input cannot pin the upward impulse.
 #[must_use]
 pub fn step_swimming(
     state: SwimmerState,
@@ -116,17 +125,31 @@ pub fn step_swimming(
     let mut surface_stroke_cooldown_seconds = state.surface_stroke_cooldown_seconds.max(0.0);
     let mut surface_bob_active = state.surface_bob_active;
     surface_stroke_cooldown_seconds = (surface_stroke_cooldown_seconds - dt).max(0.0);
+    let mut shore_exit_ready = state.shore_exit_ready;
+    let shore_mantle_was_active = !shore_exit_ready
+        && surface_breach_seconds > 0.0
+        && surface_stroke_cooldown_seconds <= 0.0
+        && !surface_bob_active;
 
     if !input.jump_held {
         surface_breach_ready = true;
+        shore_exit_ready = true;
         surface_breach_seconds = 0.0;
         surface_stroke_cooldown_seconds = 0.0;
         surface_bob_active = false;
-    } else if surface_stroke_cooldown_seconds <= 0.0
+    } else if !input.moving_forward && shore_mantle_was_active {
+        surface_breach_seconds = 0.0;
+    } else if shore_exit_ready
+        && surface_stroke_cooldown_seconds <= 0.0
         && (environment.head_submerged
             || environment.surface_clearance.unwrap_or(f64::NEG_INFINITY) <= rules.surface_bob_floor_clearance)
     {
         surface_breach_ready = true;
+    }
+    if submersion <= f64::EPSILON {
+        surface_breach_seconds = 0.0;
+        surface_stroke_cooldown_seconds = 0.0;
+        surface_bob_active = false;
     }
 
     if environment.head_submerged {
@@ -190,16 +213,27 @@ pub fn step_swimming(
 
         let ledge_height = environment.shore_ledge_height.unwrap_or(f64::INFINITY);
         let surface_gap = environment.surface_gap.unwrap_or(f64::INFINITY);
-        if input.jump_held
+        let shore_mantle_active = !shore_exit_ready
+            && surface_breach_seconds > 0.0
+            && surface_stroke_cooldown_seconds <= 0.0
+            && !surface_bob_active;
+        if shore_mantle_active && input.jump_held && input.moving_forward {
+            velocity_y = velocity_y.max(rules.shore_exit_velocity);
+            surface_breach_seconds = (surface_breach_seconds - dt).max(0.0);
+        } else if shore_exit_ready
+            && input.jump_held
             && input.moving_forward
             && environment.horizontal_collision
+            && !environment.head_submerged
             && ledge_height <= 1.15
             && surface_gap <= 0.9
         {
             velocity_y = velocity_y.max(rules.shore_exit_velocity);
             shore_boosted = true;
+            shore_exit_ready = false;
             surface_breach_ready = false;
-            surface_breach_seconds = 0.0;
+            surface_breach_seconds = SHORE_MANTLE_SUSTAIN_SECONDS;
+            surface_stroke_cooldown_seconds = 0.0;
             surface_bob_active = false;
         } else if input.jump_held && !environment.head_submerged && entry_momentum_speed <= ordinary_maximum_sink {
             let begins_surface_breach = surface_breach_ready && velocity_y > 0.35;
@@ -239,6 +273,7 @@ pub fn step_swimming(
             surface_breach_seconds,
             surface_stroke_cooldown_seconds,
             surface_bob_active,
+            shore_exit_ready,
         },
         damage,
         shore_boosted,

@@ -1,13 +1,17 @@
 import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow";
 import { rustIntegratedRuntimeWireChecksumV1 } from "./rust-integrated-runtime-codec";
 import { RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES } from "./rust-integrated-runtime-contract";
+import { rustIntegratedRuntimeDomainWireFamilyV1 } from "./rust-integrated-runtime-domain-schema.generated.ts";
 import type { RustGameplayRevisionR7 } from "./rust-gameplay-contract-r7";
 
-export const RUST_INTEGRATED_PLAYER_INVENTORY_IMPORT_TYPE_V1 = "blockwild.gameplay.player-inventory-import.r7.v1";
-export const RUST_INTEGRATED_PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1 = "blockwild.gameplay.player-inventory-import-receipt.r7.v1";
+const IMPORT_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("player-inventory-import-v1");
+const RECEIPT_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("player-inventory-import-receipt-v1");
 
-const BWP7_MAGIC = Uint8Array.of(0x42, 0x57, 0x50, 0x37);
-const BWI7_MAGIC = Uint8Array.of(0x42, 0x57, 0x49, 0x37);
+export const RUST_INTEGRATED_PLAYER_INVENTORY_IMPORT_TYPE_V1 = IMPORT_SCHEMA.typeId;
+export const RUST_INTEGRATED_PLAYER_INVENTORY_IMPORT_RECEIPT_TYPE_V1 = RECEIPT_SCHEMA.typeId;
+
+const BWP7_MAGIC = new TextEncoder().encode(IMPORT_SCHEMA.magic);
+const BWI7_MAGIC = new TextEncoder().encode(RECEIPT_SCHEMA.magic);
 const BIR7_MAGIC = Uint8Array.of(0x42, 0x49, 0x52, 0x37);
 const HEADER_BYTES = 28;
 const MAX_STRING_BYTES = 16 * 1024;
@@ -20,7 +24,8 @@ const U64_MAX = (BigInt(1) << BigInt(64)) - BigInt(1);
 const U32_MAX = 0xffff_ffff;
 const ZERO_HASH = "00000000000000000000000000000000";
 const encoder = new TextEncoder();
-const decoder = new TextDecoder("utf-8", { fatal: true });
+// Rust preserves U+FEFF in strings. It is data in identifiers, not a transport BOM.
+const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 export type RustIntegratedContainerKindV1 =
   | "player" | "equipment" | "container" | "machine" | "waygrid" | "cardforge-case";
@@ -268,15 +273,15 @@ export function readRustIntegratedPlayerInventoryContentsV1(reader: RustIntegrat
   validateRustIntegratedPlayerInventoryContentsV1(slots, metadata); return Object.freeze({ slots, metadata });
 }
 
-function wrap(magic: Uint8Array, body: Uint8Array) {
+function wrap(magic: Uint8Array, schema: number, body: Uint8Array) {
   if (body.byteLength > RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES - HEADER_BYTES) fail("inventory-size", "native inventory packet exceeds its byte budget");
   const output = new Uint8Array(HEADER_BYTES + body.byteLength); const view = new DataView(output.buffer);
-  output.set(magic); view.setUint16(4, 1, true); view.setUint16(6, 1, true); view.setUint32(8, body.byteLength, true); output.set(hashBytes(rustIntegratedRuntimeWireChecksumV1(body), "packet checksum"), 12); output.set(body, HEADER_BYTES); return output;
+  output.set(magic); view.setUint16(4, 1, true); view.setUint16(6, schema, true); view.setUint32(8, body.byteLength, true); output.set(hashBytes(rustIntegratedRuntimeWireChecksumV1(body), "packet checksum"), 12); output.set(body, HEADER_BYTES); return output;
 }
 
-function unwrap(packet: Uint8Array, magic: Uint8Array) {
+function unwrap(packet: Uint8Array, magic: Uint8Array, schema: number) {
   if (!(packet instanceof Uint8Array) || packet.byteLength < HEADER_BYTES || packet.byteLength > RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES || !magic.every((byte, index) => packet[index] === byte)) fail("inventory-header", "native inventory packet header is malformed");
-  const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength); if (view.getUint16(4, true) !== 1 || view.getUint16(6, true) !== 1 || view.getUint32(8, true) !== packet.byteLength - HEADER_BYTES) fail("inventory-header", "native inventory packet version or length is invalid");
+  const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength); if (view.getUint16(4, true) !== 1 || view.getUint16(6, true) !== schema || view.getUint32(8, true) !== packet.byteLength - HEADER_BYTES) fail("inventory-header", "native inventory packet version or length is invalid");
   const body = packet.subarray(HEADER_BYTES); if (bytesHash(packet.subarray(12, 28)) !== rustIntegratedRuntimeWireChecksumV1(body)) fail("inventory-checksum", "native inventory packet checksum is invalid"); return body;
 }
 
@@ -284,11 +289,11 @@ export function encodeRustIntegratedPlayerInventoryImportV1(value: RustIntegrate
   if (value.inventoryContainer.kind !== "player" || value.inventoryContainer.ownerId === null) fail("inventory-container", "inventory import requires an owned player container");
   if (value.expectedRevision !== BigInt(0)) fail("inventory-revision", "inventory import requires pristine revision zero");
   checkedInteger(value.selectedSlot, 8, "selected slot");
-  const writer = new RustIntegratedPlayerInventoryWriterV1(); writeRustIntegratedContainerKeyV1(writer, value.inventoryContainer); writer.u64(value.expectedRevision); writer.u16(value.selectedSlot); writeRustIntegratedPlayerInventoryContentsV1(writer, value.slots, value.metadata); return wrap(BWP7_MAGIC, writer.finish());
+  const writer = new RustIntegratedPlayerInventoryWriterV1(); writeRustIntegratedContainerKeyV1(writer, value.inventoryContainer); writer.u64(value.expectedRevision); writer.u16(value.selectedSlot); writeRustIntegratedPlayerInventoryContentsV1(writer, value.slots, value.metadata); return wrap(BWP7_MAGIC, IMPORT_SCHEMA.innerSchema, writer.finish());
 }
 
 export function decodeRustIntegratedPlayerInventoryImportV1(packet: Uint8Array) {
-  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWP7_MAGIC)); const inventoryContainer = readRustIntegratedContainerKeyV1(reader); const expectedRevision = reader.u64(); const selectedSlot = reader.u16(); const contents = readRustIntegratedPlayerInventoryContentsV1(reader); reader.finish(); const value = Object.freeze({ inventoryContainer, expectedRevision, selectedSlot, ...contents }); encodeRustIntegratedPlayerInventoryImportV1(value); return value;
+  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWP7_MAGIC, IMPORT_SCHEMA.innerSchema)); const inventoryContainer = readRustIntegratedContainerKeyV1(reader); const expectedRevision = reader.u64(); const selectedSlot = reader.u16(); const contents = readRustIntegratedPlayerInventoryContentsV1(reader); reader.finish(); const value = Object.freeze({ inventoryContainer, expectedRevision, selectedSlot, ...contents }); encodeRustIntegratedPlayerInventoryImportV1(value); return value;
 }
 
 function writeGameplayIdentity(writer: RustIntegratedPlayerInventoryWriterV1, value: RustIntegratedGameplayAuthorityIdentityV1) {
@@ -304,11 +309,11 @@ export function rustIntegratedPlayerInventoryResultHashV1(value: Readonly<{ inve
 }
 
 export function encodeRustIntegratedPlayerInventoryImportReceiptV1(value: RustIntegratedPlayerInventoryImportReceiptV1) {
-  checkedInteger(value.selectedSlot, 8, "receipt selected slot"); const writer = new RustIntegratedPlayerInventoryWriterV1(); writer.raw(hashBytes(value.requestPayloadHash, "request payload hash")); writeGameplayIdentity(writer, value.before); writeGameplayIdentity(writer, value.after); writer.raw(hashBytes(value.acceptedReceiptHash, "accepted receipt hash")); writer.u64(value.resultingInventoryRevision); writer.u16(value.selectedSlot); writer.raw(hashBytes(value.inventoryResultHash, "inventory result hash")); return wrap(BWI7_MAGIC, writer.finish());
+  checkedInteger(value.selectedSlot, 8, "receipt selected slot"); const writer = new RustIntegratedPlayerInventoryWriterV1(); writer.raw(hashBytes(value.requestPayloadHash, "request payload hash")); writeGameplayIdentity(writer, value.before); writeGameplayIdentity(writer, value.after); writer.raw(hashBytes(value.acceptedReceiptHash, "accepted receipt hash")); writer.u64(value.resultingInventoryRevision); writer.u16(value.selectedSlot); writer.raw(hashBytes(value.inventoryResultHash, "inventory result hash")); return wrap(BWI7_MAGIC, RECEIPT_SCHEMA.innerSchema, writer.finish());
 }
 
 export function decodeRustIntegratedPlayerInventoryImportReceiptV1(packet: Uint8Array) {
-  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWI7_MAGIC)); const value = Object.freeze({ requestPayloadHash: bytesHash(reader.take(16)), before: readGameplayIdentity(reader), after: readGameplayIdentity(reader), acceptedReceiptHash: bytesHash(reader.take(16)), resultingInventoryRevision: reader.u64(), selectedSlot: reader.u16(), inventoryResultHash: bytesHash(reader.take(16)) }); reader.finish(); checkedInteger(value.selectedSlot, 8, "receipt selected slot"); return value;
+  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWI7_MAGIC, RECEIPT_SCHEMA.innerSchema)); const value = Object.freeze({ requestPayloadHash: bytesHash(reader.take(16)), before: readGameplayIdentity(reader), after: readGameplayIdentity(reader), acceptedReceiptHash: bytesHash(reader.take(16)), resultingInventoryRevision: reader.u64(), selectedSlot: reader.u16(), inventoryResultHash: bytesHash(reader.take(16)) }); reader.finish(); checkedInteger(value.selectedSlot, 8, "receipt selected slot"); return value;
 }
 
 export function normalizeRustIntegratedPlayerInventoryIntentV1(inventoryContainer: RustIntegratedContainerKeyV1, value: RustIntegratedPlayerInventoryIntentV1): RustIntegratedPlayerInventoryImportV1 {

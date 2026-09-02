@@ -12,11 +12,18 @@ import {
 } from "./settlement-index";
 import { LEGACY_GAME_VERSION, normalizeGameVersion } from "./version";
 import { IndexedDbPersistenceAdapterV1 } from "./indexeddb-persistence-adapter";
-import type {
-  RustNativeWorldPersistenceRecoveryV1,
-  RustNativeWorldPersistenceSaveV1,
-  RustNativeWorldPersistenceSessionV1,
+import {
+  RUST_NATIVE_WORLD_LEGACY_SOURCE_FORMAT_V1,
+  type RustNativeWorldCompatibilityProofV1,
+  type RustNativeWorldPersistenceRecoveryV1,
+  type RustNativeWorldPersistenceSaveV1,
+  type RustNativeWorldPersistenceSessionV1,
 } from "./rust-native-world-persistence";
+import {
+  planRustLegacyWorldMigrationV1,
+  requireRustLegacyWorldOnlyMigrationV1,
+} from "./rust-legacy-world-migration";
+import { encodeCanonicalWorldSaveValueV1 } from "./world-save-sharding";
 import { WorldPersistenceCoordinatorV1 } from "./world-persistence-coordinator";
 import {
   LEGACY_TERRAIN_CONTENT_HASH_V2,
@@ -140,6 +147,12 @@ export type WorldStorageResult<T> =
   | { ok: true; value: T; warnings?: WorldStorageIssue[] }
   | { ok: false; error: WorldStorageIssue };
 
+export type RustNativeLegacyWorldMigrationBootstrapV1 = Readonly<{
+  seed: string;
+  generationIdentity: WorldGenerationIdentityV1;
+  createdAt: number;
+}>;
+
 export type CreateWorldInput = {
   name?: string;
   save: WorldSave;
@@ -181,6 +194,7 @@ type StoredWorldShell = Pick<StoredWorld, "version" | "metadata" | "options">
   & Readonly<{ save: Pick<WorldSave, "generatorProfile" | "generatorVersion"> }>;
 type CachedWorldShell = { revision: number; shell: StoredWorldShell };
 type StorageRevisionState = { catalog: number; documents: Map<string, number> };
+type DocumentPersistencePolicy = "schedule" | "local-only";
 
 /**
  * Storage events are not fired in the tab which performed a localStorage
@@ -460,6 +474,15 @@ function sanitizeEdits(value: unknown, offset = 0) {
   return edits;
 }
 
+/** Resolve envelope options before save migration erases the source generator version. */
+function migrateStoredWorldOptions(options: unknown, sourceSave: unknown): WorldOptions {
+  const sourceVersion = isRecord(sourceSave) ? Math.trunc(finite(sourceSave.generatorVersion, -1)) : -1;
+  const input = isRecord(options) ? options : {};
+  return normalizeWorldOptions(sourceVersion > 0 && sourceVersion < 17
+    ? { ...input, settlementPattern: "legacy-scattered-v1" }
+    : input);
+}
+
 export function migrateLegacyWorldSave(value: unknown): WorldSave | null {
   if (!isRecord(value) || value.version !== 2) return null;
   const seed = normalizeSeed(value.seed);
@@ -676,22 +699,65 @@ export class WorldStorage {
     catch (error) { return this.nativePersistenceFailure(catalogWorldId, "initialize", error); }
   }
 
+  /**
+   * Read-only preflight for a catalog entry whose legacy source has no rich
+   * browser-owned state. This is the only path allowed to synthesize a missing
+   * catalog generation identity before the native worker exists.
+   */
+  prepareNativeLegacyWorldMigration(
+    catalogWorldId: string,
+  ): WorldStorageResult<RustNativeLegacyWorldMigrationBootstrapV1> {
+    const prepared = this.prepareNativeLegacyMigrationSource(
+      catalogWorldId,
+      `world:${catalogWorldId}@overworld`,
+    );
+    if (!prepared.ok) return prepared;
+    return ok(Object.freeze({
+      seed: prepared.value.seed,
+      generationIdentity: prepared.value.generationIdentity,
+      createdAt: prepared.value.proof.createdAt,
+    }));
+  }
+
   async hydrateNativeWorld(catalogWorldId: string): Promise<WorldStorageResult<RustNativeWorldPersistenceRecoveryV1>> {
     const binding = this.requireNativeBinding(catalogWorldId);
     if (!binding.ok) return binding;
     try {
-      const recovery = await binding.value.recoverAndHydrate();
-      if (recovery.status === "blocked") {
-        return fail("corrupt", `Native Rust recovery was blocked: ${recovery.message}`, this.dataKey(catalogWorldId));
+      const initial = await binding.value.recoverAndHydrate();
+      const catalogIdentity = this.catalog.worlds.find((entry) => entry.id === catalogWorldId)?.generationIdentity ?? null;
+      if (initial.status === "hydrated" && catalogIdentity) return ok(initial);
+      if (initial.status === "blocked" && initial.code !== "compatibility-adapter-required") {
+        return fail("corrupt", `Native Rust recovery was blocked: ${initial.message}`, this.dataKey(catalogWorldId));
       }
-      if (recovery.status === "empty") {
-        return fail(
-          "corrupt",
-          "This browser world has no native Rust checkpoint. Its protected compatibility save needs an explicit lossless migration adapter before it can be opened.",
-          this.dataKey(catalogWorldId),
+
+      // Re-read and re-plan the protected source for every attempt. The stable
+      // source/metadata timestamp reproduces the same migration ID after a
+      // page, worker, or browser restart; Date.now() is deliberately excluded.
+      const prepared = this.prepareNativeLegacyMigrationSource(catalogWorldId, binding.value.worldId);
+      if (!prepared.ok) return prepared;
+      const { proof } = prepared.value;
+      if (initial.status === "empty") {
+        await binding.value.migrateLegacyWorldOnly(
+          proof.plan,
+          proof.canonicalSource,
+          proof.createdAt,
+          { sourceKey: proof.sourceKey, sourceFormat: proof.sourceFormat },
         );
       }
-      return ok(recovery);
+      const reopened = await binding.value.recoverAndHydrate(proof);
+      if (reopened.status !== "hydrated" || !reopened.compatibility || !reopened.migration) {
+        const message = reopened.status === "blocked"
+          ? reopened.message
+          : "Native Rust migration did not reopen with its durable source and semantic attestation.";
+        return fail("corrupt", `Native Rust recovery was blocked: ${message}`, this.dataKey(catalogWorldId));
+      }
+      const promoted = this.promoteNativeLegacyMigrationTarget(
+        catalogWorldId,
+        binding.value.worldId,
+        prepared.value,
+      );
+      if (!promoted.ok) return promoted;
+      return ok(reopened);
     } catch (error) { return this.nativePersistenceFailure(catalogWorldId, "hydrate", error); }
   }
 
@@ -823,6 +889,26 @@ export class WorldStorage {
   }
 
   saveWorld(id: string, input: SaveWorldInput): WorldStorageResult<WorldMetadata> {
+    return this.saveWorldWithPersistencePolicy(id, input, "schedule");
+  }
+
+  /**
+   * Atomically commits the validated compatibility document and catalog only.
+   *
+   * This is the narrow durability seam used to prepare browser-side recovery
+   * state before a native command. It deliberately does not enqueue either
+   * generic journal persistence or a native runtime checkpoint; callers must
+   * request any later native save explicitly once their command phase allows it.
+   */
+  saveWorldLocalOnly(id: string, input: SaveWorldInput): WorldStorageResult<WorldMetadata> {
+    return this.saveWorldWithPersistencePolicy(id, input, "local-only");
+  }
+
+  private saveWorldWithPersistencePolicy(
+    id: string,
+    input: SaveWorldInput,
+    persistencePolicy: DocumentPersistencePolicy,
+  ): WorldStorageResult<WorldMetadata> {
     this.ensureCatalogCurrent();
     const cached = this.trustedDocumentShells.get(id);
     const shell = cached?.revision === documentRevision(this.storage, id) ? cached.shell : null;
@@ -853,7 +939,7 @@ export class WorldStorage {
       save,
     };
     const nextCatalog = this.copyCatalog({ worlds: this.catalog.worlds.map((entry) => entry.id === id ? metadata : entry) });
-    const committed = this.commitDocument(document, nextCatalog);
+    const committed = this.commitDocument(document, nextCatalog, persistencePolicy);
     return committed.ok ? ok({ ...metadata }) : committed;
   }
 
@@ -1002,7 +1088,7 @@ export class WorldStorage {
     // Imports are distinct world instances. Private runner notebooks must be
     // explicitly relinked instead of silently merging on seed equality.
     const save: WorldSave = { ...sourceSave, agentWorldFingerprint: `worldfp_import_${id}_${now.toString(36)}` };
-    const options = normalizeWorldOptions(value.world.options as Partial<WorldOptions>);
+    const options = migrateStoredWorldOptions(value.world.options, value.world.save);
     const metadata: WorldMetadata = {
       ...sourceMetadata,
       id,
@@ -1128,6 +1214,149 @@ export class WorldStorage {
     }
   }
 
+  private prepareNativeLegacyMigrationSource(
+    catalogWorldId: string,
+    nativeWorldId: string,
+  ): WorldStorageResult<Readonly<{
+    seed: string;
+    generationIdentity: WorldGenerationIdentityV1;
+    proof: RustNativeWorldCompatibilityProofV1;
+  }>> {
+    this.ensureCatalogCurrent();
+    const metadata = this.catalog.worlds.find((entry) => entry.id === catalogWorldId);
+    const key = this.dataKey(catalogWorldId);
+    if (!metadata) return fail("not-found", "That world does not exist on this device.", key);
+    if (!this.storage) return fail("unavailable", "World storage is unavailable in this browser session.", key);
+
+    let raw: string | null;
+    try { raw = this.storage.getItem(key); }
+    catch (error) { return { ok: false, error: classifyStorageError(error, key) }; }
+    if (!raw) return fail("corrupt", "This world's protected legacy source is missing.", key);
+
+    let stored: unknown;
+    try { stored = JSON.parse(raw); }
+    catch { return fail("corrupt", "This world's protected legacy source is corrupt.", key); }
+    if (!isRecord(stored) || stored.version !== WORLD_CATALOG_VERSION || !isRecord(stored.save)) {
+      return fail("unsupported-version", "This world does not contain a supported protected legacy source.", key);
+    }
+    const source = stored.save;
+    if (typeof source.seed !== "string" || source.seed !== metadata.seed) {
+      return fail("invalid", "The protected legacy source seed does not match its catalog target.", key);
+    }
+    if (!Number.isSafeInteger(source.generatorVersion)
+      || source.generatorVersion as number < 1
+      || source.generatorProfile !== "legacy-v14" && source.generatorProfile !== "world-below-v15") {
+      return fail("invalid", "The protected legacy source has no exact supported generator identity.", key);
+    }
+    const options = normalizeWorldOptions(isRecord(stored.options) ? stored.options : undefined);
+    const generationIdentity = deriveWorldGenerationIdentityV1(
+      source as Pick<WorldSave, "generatorProfile" | "generatorVersion">,
+      options,
+    );
+    if (metadata.generationIdentity
+      && (metadata.generationIdentity.generatorHash !== generationIdentity.generatorHash
+        || metadata.generationIdentity.terrainContentHash !== generationIdentity.terrainContentHash
+        || metadata.generationIdentity.generationOptionsJson !== generationIdentity.generationOptionsJson)) {
+      return fail("invalid", "The protected legacy source does not match its catalog generation target.", key);
+    }
+
+    const separator = nativeWorldId.lastIndexOf("@");
+    if (separator < 1 || separator === nativeWorldId.length - 1) {
+      return fail("invalid", "The native Rust persistence session has an invalid target identity.", key);
+    }
+    const createdAt = Number.isSafeInteger(source.savedAt) && (source.savedAt as number) >= 0
+      ? source.savedAt as number
+      : metadata.createdAt;
+    if (!Number.isSafeInteger(createdAt) || createdAt < 0) {
+      return fail("invalid", "The protected legacy source has no stable migration timestamp.", key);
+    }
+    try {
+      const plan = planRustLegacyWorldMigrationV1({
+        save: source,
+        address: {
+          universeId: nativeWorldId.slice(0, separator),
+          locationId: nativeWorldId.slice(separator + 1),
+        },
+      });
+      // This guard is intentionally present at the production call site: rich
+      // player/gameplay/entity saves remain byte-for-byte protected until a
+      // lossless adapter for those domains exists.
+      requireRustLegacyWorldOnlyMigrationV1(plan);
+      const canonicalSource = encodeCanonicalWorldSaveValueV1(source);
+      return ok(Object.freeze({
+        seed: source.seed,
+        generationIdentity,
+        proof: Object.freeze({
+          plan,
+          canonicalSource,
+          sourceKey: key,
+          sourceFormat: RUST_NATIVE_WORLD_LEGACY_SOURCE_FORMAT_V1,
+          createdAt,
+        }),
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "legacy migration planning failed";
+      return fail(
+        "invalid",
+        `This protected compatibility save is not eligible for world-only native migration: ${message}`,
+        key,
+      );
+    }
+  }
+
+  /**
+   * Promotes only the small catalog bootstrap identity after a fresh Rust
+   * semantic attestation. The protected compatibility document remains
+   * byte-for-byte untouched. Replanning synchronously closes the cross-tab
+   * window between the async native proof and this single-key catalog write.
+   */
+  private promoteNativeLegacyMigrationTarget(
+    catalogWorldId: string,
+    nativeWorldId: string,
+    expected: Readonly<{
+      seed: string;
+      generationIdentity: WorldGenerationIdentityV1;
+      proof: RustNativeWorldCompatibilityProofV1;
+    }>,
+  ): WorldStorageResult<true> {
+    const verified = this.prepareNativeLegacyMigrationSource(catalogWorldId, nativeWorldId);
+    if (!verified.ok) return verified;
+    const actual = verified.value;
+    const exactIdentity = (left: WorldGenerationIdentityV1, right: WorldGenerationIdentityV1) =>
+      left.schemaVersion === right.schemaVersion
+      && left.terrainContentHash === right.terrainContentHash
+      && left.generatorHash === right.generatorHash
+      && left.generationOptionsJson === right.generationOptionsJson;
+    const exactBytes = (left: Uint8Array, right: Uint8Array) =>
+      left.byteLength === right.byteLength && left.every((value, index) => value === right[index]);
+    if (actual.seed !== expected.seed
+      || !exactIdentity(actual.generationIdentity, expected.generationIdentity)
+      || actual.proof.sourceKey !== expected.proof.sourceKey
+      || actual.proof.sourceFormat !== expected.proof.sourceFormat
+      || actual.proof.createdAt !== expected.proof.createdAt
+      || actual.proof.plan.sourceSemanticHash !== expected.proof.plan.sourceSemanticHash
+      || actual.proof.plan.projection.projectionHash !== expected.proof.plan.projection.projectionHash
+      || !exactBytes(actual.proof.canonicalSource, expected.proof.canonicalSource)) {
+      return fail(
+        "invalid",
+        "The protected legacy source changed while its native migration was being attested.",
+        this.dataKey(catalogWorldId),
+      );
+    }
+    this.ensureCatalogCurrent();
+    const metadata = this.catalog.worlds.find((entry) => entry.id === catalogWorldId);
+    if (!metadata) return fail("not-found", "That world does not exist on this device.", this.dataKey(catalogWorldId));
+    if (metadata.generationIdentity) {
+      return exactIdentity(metadata.generationIdentity, expected.generationIdentity)
+        ? ok(true)
+        : fail("invalid", "The catalog generation target changed during native migration.", this.dataKey(catalogWorldId));
+    }
+    const promoted: WorldMetadata = { ...metadata, generationIdentity: expected.generationIdentity };
+    return this.commitCatalog(this.copyCatalog({
+      worlds: this.catalog.worlds.map((entry) => entry.id === catalogWorldId ? promoted : entry),
+    }));
+  }
+
   private readDocument(id: string): WorldStorageResult<StoredWorld> {
     this.ensureCatalogCurrent();
     const catalogMetadata = this.catalog.worlds.find((entry) => entry.id === id);
@@ -1148,16 +1377,12 @@ export class WorldStorage {
       return fail("corrupt", "This world's local data is corrupt. Other worlds were left untouched.", this.dataKey(id));
     }
     if (!isRecord(value) || value.version !== WORLD_CATALOG_VERSION) return fail("unsupported-version", "This world uses an unsupported storage version.", this.dataKey(id));
-    const sourceSave = isRecord(value.save) ? value.save : {};
-    const sourceGeneratorVersion = Math.trunc(finite(sourceSave.generatorVersion, -1));
     const save = migrateLegacyWorldSave(value.save);
     if (!save) return fail("corrupt", "This world's save payload is corrupt or incomplete.", this.dataKey(id));
     const document: StoredWorld = {
       version: WORLD_CATALOG_VERSION,
       metadata: { ...catalogMetadata, seed: save.seed, mode: save.mode },
-      options: normalizeWorldOptions(sourceGeneratorVersion > 0 && sourceGeneratorVersion < 17
-        ? { ...(isRecord(value.options) ? value.options : {}), settlementPattern: "legacy-scattered-v1" }
-        : value.options as Partial<WorldOptions>),
+      options: migrateStoredWorldOptions(value.options, value.save),
       save,
     };
     this.rememberDocumentShell(document);
@@ -1205,7 +1430,11 @@ export class WorldStorage {
     }
   }
 
-  private commitDocument(document: StoredWorld, nextCatalog: WorldCatalog): WorldStorageResult<true> {
+  private commitDocument(
+    document: StoredWorld,
+    nextCatalog: WorldCatalog,
+    persistencePolicy: DocumentPersistencePolicy = "schedule",
+  ): WorldStorageResult<true> {
     if (!this.storage) return fail("unavailable", "World storage is unavailable in this browser session.", this.dataKey(document.metadata.id));
     const key = this.dataKey(document.metadata.id);
     let previousDocument: string | null = null;
@@ -1223,7 +1452,7 @@ export class WorldStorage {
       this.observedCatalogRevision = revisions.catalog;
       this.catalogDirty = false;
       this.rememberDocumentShell(document, revisions.documents.get(document.metadata.id) ?? 0);
-      this.schedulePersistence(document);
+      if (persistencePolicy === "schedule") this.schedulePersistence(document);
       return ok(true);
     } catch (error) {
       try {

@@ -66,19 +66,73 @@ class MemoryStorageEvents {
   }
 }
 
-function nativePersistenceFixture(worldId: string, recovery: "hydrated" | "empty" = "hydrated") {
+class TrackingWorldPersistenceCoordinatorV1 extends WorldPersistenceCoordinatorV1 {
+  readonly persistedSeeds: string[] = [];
+
+  constructor() {
+    super(new MemoryPersistenceAdapterV1(), () => 1_000);
+  }
+
+  override persistWorld(worldId: string, worldSave: WorldSave) {
+    this.persistedSeeds.push(worldSave.seed);
+    return super.persistWorld(worldId, worldSave);
+  }
+}
+
+function nativePersistenceFixture(worldId: string, recovery: "hydrated" | "empty" | "migrated" = "hydrated") {
   const operations: string[] = [];
+  let migrated = recovery === "migrated";
   const saved = Object.freeze({
     worldId: `universe:${worldId}@overworld`, saveId: "native.save.fixture", checkpointId: "checkpoint:fixture",
     checkpointHash: "1".repeat(32), journalSequence: 1, records: 5, commits: 5, requestBytes: 50, responseBytes: 60,
   });
   const session = {
+    worldId: saved.worldId,
     async initializeNewWorld(createdAt: number) { operations.push(`initialize:${createdAt}`); return saved; },
-    async recoverAndHydrate() {
-      operations.push("hydrate");
-      return recovery === "empty"
-        ? Object.freeze({ status: "empty" as const, worldId: saved.worldId })
+    async recoverAndHydrate(proof?: Readonly<{
+      plan: Readonly<{ sourceSemanticHash: string; projection: Readonly<{ projectionHash: string }> }>;
+      canonicalSource: Uint8Array;
+    }>) {
+      operations.push(proof ? "hydrate:proof" : "hydrate");
+      if (recovery === "empty" && !migrated) {
+        return Object.freeze({ status: "empty" as const, worldId: saved.worldId });
+      }
+      if (migrated && !proof) return Object.freeze({
+        status: "hydrated" as const,
+        worldId: saved.worldId,
+        checkpointId: saved.checkpointId,
+        fallbackDepth: 0,
+        nativeDomains: 6,
+        checkpointRecords: 9,
+        compatibility: null,
+        migration: Object.freeze({ descriptorHash: "2".repeat(32) }),
+      });
+      return proof
+        ? Object.freeze({
+          status: "hydrated" as const,
+          worldId: saved.worldId,
+          checkpointId: saved.checkpointId,
+          fallbackDepth: 0,
+          nativeDomains: 6,
+          checkpointRecords: 9,
+          compatibility: Object.freeze({
+            sourceSemanticHash: proof.plan.sourceSemanticHash,
+            chunks: 1,
+            bytes: proof.canonicalSource.byteLength,
+          }),
+          migration: Object.freeze({ descriptorHash: "2".repeat(32) }),
+        })
         : Object.freeze({ status: "hydrated" as const, worldId: saved.worldId, checkpointId: saved.checkpointId, fallbackDepth: 0, nativeDomains: 5, checkpointRecords: 5 });
+    },
+    async migrateLegacyWorldOnly(
+      _plan: unknown,
+      source: Uint8Array,
+      createdAt: number,
+      identity: Readonly<{ sourceKey: string; sourceFormat: string }>,
+    ) {
+      operations.push(`migrate:${createdAt}:${identity.sourceKey}:${identity.sourceFormat}:${source.byteLength}`);
+      migrated = true;
+      return Object.freeze({ status: "migrated" as const });
     },
     async saveNative(createdAt: number) { operations.push(`save:${createdAt}`); return saved; },
     async flush() { operations.push("flush"); },
@@ -113,8 +167,178 @@ test("WorldStorage binds native create/load/save execution and keeps compatibili
   assert.equal(worlds.bindNativePersistence(created.value.id, compatibilityOnly.session).ok, true);
   const blocked = await worlds.hydrateNativeWorld(created.value.id);
   assert.equal(blocked.ok, false);
-  if (!blocked.ok) assert.match(blocked.error.message, /lossless migration adapter/u);
+  if (!blocked.ok) assert.match(blocked.error.message, /not eligible for world-only native migration/u);
   await worlds.shutdownNativePersistence();
+});
+
+test("WorldStorage migrates an eligible world-only source and a fresh session reopens its durable proof", async () => {
+  const storage = new MemoryStorage();
+  const creator = new WorldStorage(storage, {
+    now: () => 99_999,
+    idFactory: () => "legacy-world-only",
+    persistenceCoordinator: null,
+  });
+  const created = creator.createWorld({ save: save("WORLD-ONLY") });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const key = `${WORLD_DATA_PREFIX}${created.value.id}`;
+  const stored = JSON.parse(storage.getItem(key)!);
+  stored.save = {
+    version: 2,
+    generatorVersion: GENERATOR_VERSION,
+    generatorProfile: "world-below-v15",
+    lastSavedGameVersion: "1.12.0",
+    seed: "WORLD-ONLY",
+    savedAt: 900,
+    edits: { "0,0": [[17, 3]] },
+    blockFacings: { "1,-64,1": 2 },
+  };
+  const protectedDocument = JSON.stringify(stored);
+  storage.setItem(key, protectedDocument);
+  const catalog = JSON.parse(storage.getItem(WORLD_CATALOG_KEY)!);
+  catalog.worlds[0].generationIdentity = null;
+  storage.setItem(WORLD_CATALOG_KEY, JSON.stringify(catalog));
+  creator.dispose();
+  const worlds = new WorldStorage(storage, {
+    now: () => 99_999,
+    idFactory: () => "unused",
+    persistenceCoordinator: null,
+  });
+  const preflight = worlds.prepareNativeLegacyWorldMigration(created.value.id);
+  assert.equal(preflight.ok, true);
+  assert.equal(storage.getItem(key), protectedDocument, "read-only preflight must not rewrite the protected source");
+  assert.equal(worlds.listWorlds()[0]?.generationIdentity, null, "read-only preflight must not promote the catalog");
+
+  const first = nativePersistenceFixture(created.value.id, "empty");
+  assert.equal(worlds.bindNativePersistence(created.value.id, first.session).ok, true);
+  const migrated = await worlds.hydrateNativeWorld(created.value.id);
+  assert.equal(migrated.ok, true);
+  if (!migrated.ok) return;
+  assert.equal(migrated.value.status, "hydrated");
+  assert.equal(first.operations[0], "hydrate");
+  assert.match(first.operations[1], new RegExp(`^migrate:900:${key}:blockwild-world-save-canonical-v1:`));
+  assert.equal(first.operations[2], "hydrate:proof");
+  assert.equal(storage.getItem(key), protectedDocument, "successful promotion must keep protected document bytes exact");
+  assert.deepEqual(
+    worlds.listWorlds()[0]?.generationIdentity,
+    preflight.ok ? preflight.value.generationIdentity : null,
+    "catalog identity is promoted only after fresh native semantic attestation",
+  );
+  worlds.unbindNativePersistence(first.session);
+
+  const restarted = nativePersistenceFixture(created.value.id, "migrated");
+  assert.equal(worlds.bindNativePersistence(created.value.id, restarted.session).ok, true);
+  const reopened = await worlds.hydrateNativeWorld(created.value.id);
+  assert.equal(reopened.ok, true);
+  assert.deepEqual(
+    restarted.operations,
+    ["hydrate"],
+    "a new session trusts the Rust-owned descriptor after catalog promotion and never dispatches a second migration",
+  );
+});
+
+test("legacy migration catalog promotion is atomic and retry-safe after native attestation", async () => {
+  const storage = new MemoryStorage();
+  const creator = new WorldStorage(storage, {
+    now: () => 44_000,
+    idFactory: () => "legacy-promotion-retry",
+    persistenceCoordinator: null,
+  });
+  const created = creator.createWorld({ save: save("PROMOTION-RETRY") });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  const key = `${WORLD_DATA_PREFIX}${created.value.id}`;
+  const stored = JSON.parse(storage.getItem(key)!);
+  stored.save = {
+    version: 2,
+    generatorVersion: GENERATOR_VERSION,
+    generatorProfile: "world-below-v15",
+    lastSavedGameVersion: "1.12.0",
+    seed: "PROMOTION-RETRY",
+    savedAt: 901,
+    edits: { "0,0": [[17, 3]] },
+    blockFacings: { "1,-64,1": 2 },
+  };
+  const protectedDocument = JSON.stringify(stored);
+  storage.setItem(key, protectedDocument);
+  const catalog = JSON.parse(storage.getItem(WORLD_CATALOG_KEY)!);
+  catalog.worlds[0].generationIdentity = null;
+  const nullCatalog = JSON.stringify(catalog);
+  storage.setItem(WORLD_CATALOG_KEY, nullCatalog);
+  creator.dispose();
+
+  const worlds = new WorldStorage(storage, { now: () => 99_999, persistenceCoordinator: null });
+  const native = nativePersistenceFixture(created.value.id, "empty");
+  assert.equal(worlds.bindNativePersistence(created.value.id, native.session).ok, true);
+  storage.failingKeys.add(WORLD_CATALOG_KEY);
+  const failed = await worlds.hydrateNativeWorld(created.value.id);
+  assert.equal(failed.ok, false);
+  if (!failed.ok) assert.equal(failed.error.code, "quota");
+  assert.equal(storage.getItem(key), protectedDocument, "promotion failure cannot rewrite the protected source");
+  assert.equal(storage.getItem(WORLD_CATALOG_KEY), nullCatalog, "promotion failure leaves the null catalog exact");
+  assert.equal(worlds.listWorlds()[0]?.generationIdentity, null);
+
+  storage.failingKeys.delete(WORLD_CATALOG_KEY);
+  const retried = await worlds.hydrateNativeWorld(created.value.id);
+  assert.equal(retried.ok, true);
+  assert.equal(native.operations.filter((entry) => entry.startsWith("migrate:")).length, 1);
+  assert.equal(storage.getItem(key), protectedDocument);
+  assert.notEqual(worlds.listWorlds()[0]?.generationIdentity, null);
+});
+
+test("local-only world saves commit atomically without scheduling generic or native persistence", async () => {
+  const storage = new MemoryStorage();
+  const persistence = new TrackingWorldPersistenceCoordinatorV1();
+  let now = 8_000;
+  const worlds = new WorldStorage(storage, {
+    now: () => now,
+    idFactory: () => "local-only-world",
+    persistenceCoordinator: persistence,
+  });
+  const created = worlds.createWorld({ name: "Local Journal", save: save("LOCAL-INITIAL") });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+  await worlds.flushPersistence();
+  persistence.persistedSeeds.length = 0;
+
+  now += 1;
+  assert.equal(worlds.saveWorld(created.value.id, { save: save("GENERIC-NORMAL") }).ok, true);
+  assert.deepEqual(persistence.persistedSeeds, ["GENERIC-NORMAL"], "ordinary unbound saves must keep scheduling the generic journal");
+  await worlds.flushPersistence();
+
+  now += 1;
+  const genericLocalOnly = worlds.saveWorldLocalOnly(created.value.id, { save: save("GENERIC-LOCAL-ONLY") });
+  assert.equal(genericLocalOnly.ok, true);
+  assert.deepEqual(persistence.persistedSeeds, ["GENERIC-NORMAL"], "local-only commits must not schedule the generic journal");
+  const locallyLoaded = worlds.loadWorld(created.value.id, false);
+  assert.equal(locallyLoaded.ok && locallyLoaded.value.save.seed, "GENERIC-LOCAL-ONLY", "the local document must still commit synchronously");
+
+  const native = nativePersistenceFixture(created.value.id);
+  assert.equal(worlds.bindNativePersistence(created.value.id, native.session).ok, true);
+  now += 1;
+  assert.equal(worlds.saveWorld(created.value.id, { save: save("NATIVE-NORMAL") }).ok, true);
+  assert.deepEqual(native.operations, ["save:8003"], "ordinary bound saves must keep scheduling the native checkpoint");
+
+  now += 1;
+  const nativeLocalOnly = worlds.saveWorldLocalOnly(created.value.id, { save: save("NATIVE-LOCAL-ONLY") });
+  assert.equal(nativeLocalOnly.ok, true);
+  assert.deepEqual(native.operations, ["save:8003"], "local-only commits must not schedule the bound native session");
+  assert.deepEqual(persistence.persistedSeeds, ["GENERIC-NORMAL"], "local-only native commits must not fall through to generic persistence");
+
+  storage.failingKeys.add(WORLD_CATALOG_KEY);
+  const failed = worlds.saveWorldLocalOnly(created.value.id, { save: save("LOCAL-FAILED") });
+  assert.equal(failed.ok, false);
+  if (!failed.ok) assert.equal(failed.error.code, "quota");
+  storage.failingKeys.clear();
+  const afterFailure = worlds.loadWorld(created.value.id, false);
+  assert.equal(afterFailure.ok && afterFailure.value.save.seed, "NATIVE-LOCAL-ONLY", "failed local-only commits must restore the prior document");
+  assert.deepEqual(native.operations, ["save:8003"]);
+  assert.deepEqual(persistence.persistedSeeds, ["GENERIC-NORMAL"]);
+
+  now += 1;
+  const explicitNative = await worlds.saveNativeWorld(created.value.id, now);
+  assert.equal(explicitNative.ok, true, "local-only commits must leave explicit native saves available");
+  assert.deepEqual(native.operations, ["save:8003", "save:8005"]);
 });
 
 test("browser-primary loads hydrate the Rust journal while preserving the compatibility document", async () => {
@@ -385,6 +609,36 @@ test("world metadata freezes an exact origin-free terrain generation identity", 
   assert.deepEqual(parsed.enabledFactions, ["goblins", "dwarves"]);
 });
 
+test("the build-only worldgen profile never enters exact generator-v18 save or world identity", () => {
+  assert.equal(GENERATOR_VERSION, 18);
+  const storage = new MemoryStorage();
+  const worlds = new WorldStorage(storage, { now: () => 1_800, idFactory: () => "profile-neutral-v18" });
+  const original = save("PROFILE-NEUTRAL-V18");
+  const created = worlds.createWorld({ save: original, options: { biomeScale: 1.75 } });
+  assert.equal(created.ok, true);
+  if (!created.ok) return;
+
+  const persisted = storage.getItem(`${WORLD_DATA_PREFIX}${created.value.id}`) ?? "";
+  const catalog = storage.getItem(WORLD_CATALOG_KEY) ?? "";
+  const exported = worlds.exportWorld(created.value.id);
+  assert.equal(exported.ok, true);
+  if (!exported.ok) return;
+  for (const serialized of [persisted, catalog, exported.value]) {
+    assert.doesNotMatch(serialized, /worldgenBuildProfile|rust-primary|typescript-rollback|BLOCKWILD_WORLDGEN_BUILD_PROFILE/u);
+  }
+
+  const reopened = new WorldStorage(storage, { now: () => 1_801, idFactory: () => "unused" });
+  const loaded = reopened.loadWorld(created.value.id, false);
+  assert.equal(loaded.ok, true);
+  if (!loaded.ok) return;
+  assert.equal(loaded.value.save.generatorVersion, 18);
+  assert.deepEqual(loaded.value.save.edits, original.edits);
+  assert.deepEqual(
+    loaded.value.metadata.generationIdentity,
+    deriveWorldGenerationIdentityV1(loaded.value.save, loaded.value.options),
+  );
+});
+
 test("device-local catalog supports synchronous CRUD, active selection, metadata, and sorting", () => {
   const storage = new MemoryStorage();
   let now = 1_000;
@@ -612,6 +866,55 @@ test("world exports validate on import and use collision-safe local IDs", () => 
   const unsupported = JSON.stringify({ ...parsed, version: 999 });
   assert.equal(worlds.importWorld(unsupported).ok, false);
 });
+
+for (const [sourceVersion, sourcePattern] of [
+  [2, undefined], [14, undefined], [15, undefined], [16, undefined], [17, undefined], [GENERATOR_VERSION, undefined],
+  [16, "heartlands-v2"],
+] as const) {
+  test(`importing generator v${sourceVersion} (${sourcePattern ?? "missing pattern"}) preserves its settlement mode and edited terrain identity`, context => {
+    const storage = new MemoryStorage();
+    const worlds = new WorldStorage(storage, { now: () => 5_000, idFactory: () => "import-origin" });
+    context.after(() => worlds.dispose());
+    const created = worlds.createWorld({ save: save("IMPORT-LEGACY-TERRAIN") });
+    assert(created.ok);
+    const exported = worlds.exportWorld(created.value.id);
+    assert(exported.ok);
+    // Synthetic historical-shape input tests the public import boundary; this is
+    // not a claim of real-browser old-save migration acceptance.
+    const source = JSON.parse(exported.value);
+    source.world.save = save("IMPORT-LEGACY-TERRAIN", "survival", sourceVersion);
+    source.world.save.edits = { "-8,3": [[17, 0], [8_192, 13]] };
+    source.world.options = { biomeScale: 2.5, structures: false, keepInventory: true,
+      ...(sourcePattern ? { settlementPattern: sourcePattern } : {}) };
+    delete source.world.metadata.generationIdentity;
+    const input = JSON.stringify(source);
+    const expectedPattern = sourceVersion < 17 ? "legacy-scattered-v1" : "heartlands-v2";
+    const expectedProfile = sourceVersion < 15 ? "legacy-v14" : "world-below-v15";
+    const imported = worlds.importWorld(input);
+    assert(imported.ok);
+    const loaded = worlds.loadWorld(imported.value.id, false);
+    assert(loaded.ok);
+    assert.equal(loaded.value.options.settlementPattern, expectedPattern);
+    assert.equal(loaded.value.options.biomeScale, 2.5);
+    assert.equal(loaded.value.options.structures, false);
+    assert.equal(loaded.value.options.keepInventory, true);
+    assert.equal(loaded.value.save.generatorProfile, expectedProfile);
+    assert.equal(loaded.value.save.generatorVersion, GENERATOR_VERSION);
+    assert.deepEqual(loaded.value.save.edits["-8,3"], sourceVersion === 2 ? [[8_209, 0], [16_384, 13]] : [[17, 0], [8_192, 13]]);
+    assert.equal(imported.value.generationIdentity?.generationOptionsJson,
+      canonicalWorldGenerationOptionsJsonV1({ biomeScale: 2.5, structures: false, keepInventory: true,
+        settlementPattern: expectedPattern }, expectedProfile));
+    const reexported = worlds.exportWorld(imported.value.id);
+    assert(reexported.ok);
+    const reimported = worlds.importWorld(reexported.value);
+    assert(reimported.ok);
+    const restored = worlds.loadWorld(reimported.value.id, false);
+    assert(restored.ok);
+    assert.equal(restored.value.options.settlementPattern, expectedPattern);
+    assert.deepEqual(restored.value.save.edits, loaded.value.save.edits, "the v2 coordinate migration must not run twice");
+    assert.deepEqual(reimported.value.generationIdentity, imported.value.generationIdentity);
+  });
+}
 
 test("corrupt data is isolated and quota failures roll back without losing the previous world", () => {
   const corruptCatalog = new MemoryStorage();

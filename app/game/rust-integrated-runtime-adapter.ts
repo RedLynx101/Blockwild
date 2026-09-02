@@ -67,6 +67,7 @@ export class RustIntegratedRuntimeBrowserAdapterV1 {
     return this.service.extract(afterRevision, maxBytes, view);
   }
   pollBulkPlatform(maxBytes?: number) { return this.service.pollBulkPlatform(maxBytes); }
+  persistenceStatus(payload: Uint8Array) { return this.service.persistenceStatus(payload); }
   completeBulkPlatform(transferToken: number, response: Uint8Array) { return this.service.completeBulkPlatform(transferToken, response); }
   stageCompatibilitySaveChunk(stageId: string, chunkIndex: number, chunkCount: number, totalBytes: number, payload: Uint8Array) {
     return this.service.stageCompatibilitySaveChunk(stageId, chunkIndex, chunkCount, totalBytes, payload);

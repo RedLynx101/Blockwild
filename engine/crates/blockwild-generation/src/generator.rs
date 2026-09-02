@@ -10,11 +10,16 @@ use crate::features::{
 use crate::noise::{continent_offset, fbm_2, mix, smoothstep, value_noise_2, value_noise_3};
 use crate::underground::{carve_graph_caves, cave_feature_at, safe_cave_entrance_floor};
 use blockwild_types::{MIN_Y, WORLD_HEIGHT, fnv1a_utf16, hash2, hash3};
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::fmt;
+use std::sync::Mutex;
 
 const SEA_LEVEL: i32 = 32;
 const ORE_MULTIPLIER: f64 = 1.25;
 const SURFACE_REGION_CELL_SIZE: f64 = 420.0;
+// Covers a chunk plus broad feature-planning probes while bounding every active request.
+const COLUMN_SAMPLE_CACHE_CAPACITY: usize = 16_384;
 const REGIONAL_BIOMES: [BiomeId; 36] = [
     BiomeId::Meadow,
     BiomeId::Wildwood,
@@ -66,11 +71,95 @@ pub struct ColumnSample {
     pub mountain: f64,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Default)]
+struct ColumnSampleCache {
+    entries: HashMap<(i32, i32), ColumnSample>,
+    insertion_order: VecDeque<(i32, i32)>,
+    #[cfg(test)]
+    hits: usize,
+    #[cfg(test)]
+    disabled: bool,
+}
+
+impl ColumnSampleCache {
+    fn get(&mut self, x: i32, z: i32) -> Option<ColumnSample> {
+        #[cfg(test)]
+        if self.disabled {
+            return None;
+        }
+        let sample = self.entries.get(&(x, z)).copied();
+        #[cfg(test)]
+        if sample.is_some() {
+            self.hits = self.hits.saturating_add(1);
+        }
+        sample
+    }
+
+    fn insert(&mut self, x: i32, z: i32, sample: ColumnSample) {
+        #[cfg(test)]
+        if self.disabled {
+            return;
+        }
+        let key = (x, z);
+        if matches!(self.entries.entry(key), Entry::Occupied(_)) {
+            return;
+        }
+        // Eviction follows this explicit queue, never HashMap iteration order.
+        while self.entries.len() >= COLUMN_SAMPLE_CACHE_CAPACITY {
+            let Some(evicted) = self.insertion_order.pop_front() else {
+                return;
+            };
+            self.entries.remove(&evicted);
+        }
+        self.entries.insert(key, sample);
+        self.insertion_order.push_back(key);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.insertion_order.clear();
+        #[cfg(test)]
+        {
+            self.hits = 0;
+        }
+    }
+
+    #[cfg(test)]
+    fn disable(&mut self) {
+        self.clear();
+        self.disabled = true;
+    }
+}
+
+impl fmt::Debug for ColumnSampleCache {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ColumnSampleCache")
+            .field("len", &self.entries.len())
+            .field("capacity", &COLUMN_SAMPLE_CACHE_CAPACITY)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
 pub struct TerrainGeneratorV18 {
     seed: u32,
     options: GenerationOptions,
+    column_sample_cache: Mutex<ColumnSampleCache>,
 }
+
+impl Clone for TerrainGeneratorV18 {
+    fn clone(&self) -> Self {
+        Self {
+            seed: self.seed,
+            options: self.options.clone(),
+            column_sample_cache: Mutex::new(ColumnSampleCache::default()),
+        }
+    }
+}
+
+fn assert_send_and_sync<T: Send + Sync>() {}
+const _: fn() = assert_send_and_sync::<TerrainGeneratorV18>;
 
 #[derive(Clone, Copy)]
 struct RegionSample {
@@ -86,12 +175,15 @@ impl TerrainGeneratorV18 {
         Self {
             seed: fnv1a_utf16(&seed_text),
             options: options.normalized(),
+            column_sample_cache: Mutex::new(ColumnSampleCache::default()),
         }
     }
 
-    #[must_use]
-    pub fn from_request(request: &GenerateChunkRequestV2) -> Self {
-        Self::new(&request.seed_text, parse_flat_options(&request.generation_options_json))
+    pub fn from_request(request: &GenerateChunkRequestV2) -> Result<Self, GenerationError> {
+        Ok(Self::new(
+            &request.seed_text,
+            parse_flat_options(&request.generation_options_json)?,
+        ))
     }
 
     #[must_use]
@@ -126,6 +218,23 @@ impl TerrainGeneratorV18 {
 
     #[must_use]
     pub fn sample_column(&self, x: i32, z: i32) -> ColumnSample {
+        if let Some(sample) = self
+            .column_sample_cache
+            .lock()
+            .expect("column sample cache mutex poisoned")
+            .get(x, z)
+        {
+            return sample;
+        }
+        let sample = self.sample_column_uncached(x, z);
+        self.column_sample_cache
+            .lock()
+            .expect("column sample cache mutex poisoned")
+            .insert(x, z, sample);
+        sample
+    }
+
+    fn sample_column_uncached(&self, x: i32, z: i32) -> ColumnSample {
         let biome_scale = if self.options.profile == GenerationProfile::LegacyV14 {
             1.0
         } else {
@@ -360,7 +469,7 @@ impl TerrainGeneratorV18 {
             }
         } else if variant > 0.8 && mountain > 0.12 && temperature > 0.4 {
             BiomeId::Volcanic
-        } else if mountain > 0.52 && temperature < 0.58 {
+        } else if (mountain > 0.52 || height >= 76) && temperature < 0.58 {
             BiomeId::SnowcapRange
         } else if mountain > 0.36 || height >= 68 {
             if temperature < 0.35 || height > 78 {
@@ -372,10 +481,30 @@ impl TerrainGeneratorV18 {
             BiomeId::Snowfield
         } else if temperature < 0.36 && moisture >= 0.42 {
             BiomeId::Frostpine
+        } else if height < 68
+            && (0.38..=0.7).contains(&temperature)
+            && (0.33..=0.76).contains(&moisture)
+            && (0.7..=0.93).contains(&variant)
+        {
+            BiomeId::SugarplumVale
+        } else if (0.32..=0.55).contains(&temperature) && moisture >= 0.64 && (0.18..=0.43).contains(&variant) {
+            BiomeId::Glimmerwood
+        } else if temperature > 0.62 && moisture < 0.2 && variant > 0.52 {
+            BiomeId::Badlands
         } else if temperature > 0.64 && moisture < 0.3 {
             BiomeId::Desert
         } else if temperature > 0.58 && moisture < 0.54 {
             BiomeId::Savanna
+        } else if (42..=66).contains(&height)
+            && (0.3..=0.55).contains(&temperature)
+            && (0.68..=0.92).contains(&moisture)
+            && variant < 0.58
+        {
+            BiomeId::CloudreedGlen
+        } else if temperature > 0.57 && moisture > 0.72 && variant < 0.78 {
+            BiomeId::RainveilJungle
+        } else if (0.34..=0.62).contains(&temperature) && moisture > 0.55 && variant > 0.42 && variant < 0.68 {
+            BiomeId::SakurabloomGrove
         } else if moisture > 0.74 && height < SEA_LEVEL + 14 {
             if variant > 0.74 {
                 BiomeId::MushroomFen
@@ -419,6 +548,12 @@ impl TerrainGeneratorV18 {
         {
             return Err(GenerationError::UnsupportedGenerator(request.namespace.clone()));
         }
+        // A generator is normally created per request, but callers may reuse one.
+        // Reset here so memoized probes remain request-scoped in both cases.
+        self.column_sample_cache
+            .lock()
+            .expect("column sample cache mutex poisoned")
+            .clear();
         let mut blocks = vec![Block::AIR; CELL_COUNT];
         let mut heightmap = vec![0_i16; COLUMN_COUNT];
         let mut biomes = vec![0_u8; COLUMN_COUNT];
@@ -738,19 +873,23 @@ impl TerrainGeneratorV18 {
             self.seed ^ 0x0123_4567,
         );
         let detail = hash3(x, y, z, self.seed ^ 0x89ab_cdef);
+        let mut block = fallback;
         if y < 66 && cell > 1.0 - 0.008 * abundance && detail > 0.25 {
-            Block::COAL_ORE
-        } else if y < 48 && cell < 0.008 * abundance && detail > 0.3 {
-            Block::IRON_ORE
-        } else if y < 54 && (cell - 0.985).abs() < 0.002 * abundance && detail > 0.35 {
-            Block::COPPER_ORE
-        } else if y < 8 && (cell - 0.97725).abs() < 0.00125 * abundance && detail > 0.4 {
-            Block::GOLD_ORE
-        } else if y < -24 && (cell - 0.97075).abs() < 0.00075 * abundance && detail > 0.5 {
-            Block::CRYSTAL_ORE
-        } else {
-            fallback
+            block = Block::COAL_ORE;
         }
+        if y < 48 && cell < 0.008 * abundance && detail > 0.3 {
+            block = Block::IRON_ORE;
+        }
+        if y < 54 && (cell - 0.985).abs() < 0.002 * abundance && detail > 0.35 {
+            block = Block::COPPER_ORE;
+        }
+        if y < 8 && (cell - 0.97725).abs() < 0.00125 * abundance && detail > 0.4 {
+            block = Block::GOLD_ORE;
+        }
+        if y < -24 && (cell - 0.97075).abs() < 0.00075 * abundance && detail > 0.5 {
+            block = Block::CRYSTAL_ORE;
+        }
+        block
     }
 
     pub(crate) fn surface_blocks(&self, column: ColumnSample) -> (u16, u16) {
@@ -1265,6 +1404,145 @@ mod tests {
     use super::*;
     use crate::service::fixture_request;
 
+    fn cache_sample(height: i32) -> ColumnSample {
+        ColumnSample {
+            height,
+            waterline: SEA_LEVEL,
+            biome: BiomeId::Meadow,
+            temperature: 0.5,
+            moisture: 0.5,
+            continental: 0.0,
+            river: 0.0,
+            mountain: 0.0,
+        }
+    }
+
+    #[test]
+    fn column_sample_cache_preserves_send_and_sync() {
+        assert_send_and_sync::<TerrainGeneratorV18>();
+    }
+
+    #[test]
+    fn column_sample_cache_memoizes_exact_coordinates() {
+        let generator = TerrainGeneratorV18::new("column-cache-hit", GenerationOptions::default());
+        let expected = generator.sample_column_uncached(-117, 293);
+
+        assert_eq!(generator.sample_column(-117, 293), expected);
+        assert_eq!(
+            generator
+                .column_sample_cache
+                .lock()
+                .expect("column sample cache mutex poisoned")
+                .entries
+                .len(),
+            1
+        );
+        assert_eq!(
+            generator
+                .column_sample_cache
+                .lock()
+                .expect("column sample cache mutex poisoned")
+                .hits,
+            0
+        );
+
+        assert_eq!(generator.sample_column(-117, 293), expected);
+        let cache = generator
+            .column_sample_cache
+            .lock()
+            .expect("column sample cache mutex poisoned");
+        assert_eq!(cache.entries.len(), 1);
+        assert_eq!(cache.hits, 1);
+    }
+
+    #[test]
+    fn column_sample_cache_has_a_hard_fifo_bound() {
+        let mut cache = ColumnSampleCache::default();
+        for x in 0..COLUMN_SAMPLE_CACHE_CAPACITY {
+            cache.insert(x as i32, 0, cache_sample(x as i32));
+        }
+        assert_eq!(cache.entries.len(), COLUMN_SAMPLE_CACHE_CAPACITY);
+        assert_eq!(cache.insertion_order.len(), COLUMN_SAMPLE_CACHE_CAPACITY);
+
+        cache.insert(COLUMN_SAMPLE_CACHE_CAPACITY as i32, 0, cache_sample(i32::MAX));
+
+        assert_eq!(cache.entries.len(), COLUMN_SAMPLE_CACHE_CAPACITY);
+        assert_eq!(cache.insertion_order.len(), COLUMN_SAMPLE_CACHE_CAPACITY);
+        assert!(!cache.entries.contains_key(&(0, 0)));
+        assert!(cache.entries.contains_key(&(1, 0)));
+        assert!(cache.entries.contains_key(&(COLUMN_SAMPLE_CACHE_CAPACITY as i32, 0)));
+        assert_eq!(cache.insertion_order.front(), Some(&(1, 0)));
+    }
+
+    #[test]
+    fn column_sample_cache_is_empty_on_generator_clone() {
+        let generator = TerrainGeneratorV18::new("column-cache-clone", GenerationOptions::default());
+        let expected = generator.sample_column(41, -73);
+        assert_eq!(
+            generator
+                .column_sample_cache
+                .lock()
+                .expect("column sample cache mutex poisoned")
+                .entries
+                .len(),
+            1
+        );
+
+        let clone = generator.clone();
+        assert!(
+            clone
+                .column_sample_cache
+                .lock()
+                .expect("column sample cache mutex poisoned")
+                .entries
+                .is_empty()
+        );
+        assert_eq!(clone.sample_column(41, -73), expected);
+        assert_eq!(
+            clone
+                .column_sample_cache
+                .lock()
+                .expect("column sample cache mutex poisoned")
+                .entries
+                .len(),
+            1
+        );
+        assert_eq!(
+            generator
+                .column_sample_cache
+                .lock()
+                .expect("column sample cache mutex poisoned")
+                .entries
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn column_sample_cache_preserves_whole_generation_bytes() {
+        let request = fixture_request("column-cache-byte-parity", -31, 47, 1);
+        let cached_generator = TerrainGeneratorV18::from_request(&request).unwrap();
+        let uncached_generator = TerrainGeneratorV18::from_request(&request).unwrap();
+        uncached_generator
+            .column_sample_cache
+            .lock()
+            .expect("column sample cache mutex poisoned")
+            .disable();
+
+        let cached = cached_generator.generate(&request, || false).unwrap();
+        let uncached = uncached_generator.generate(&request, || false).unwrap();
+
+        assert_eq!(cached, uncached);
+        assert!(
+            uncached_generator
+                .column_sample_cache
+                .lock()
+                .expect("column sample cache mutex poisoned")
+                .entries
+                .is_empty()
+        );
+    }
+
     #[test]
     fn generation_is_repeatable_for_positive_and_negative_chunks() {
         for &(seed, cx, cz) in &[
@@ -1273,7 +1551,7 @@ mod tests {
             ("unicode-🌿", -250, 251),
         ] {
             let request = fixture_request(seed, cx, cz, 1);
-            let generator = TerrainGeneratorV18::from_request(&request);
+            let generator = TerrainGeneratorV18::from_request(&request).unwrap();
             let first = generator.generate(&request, || false).unwrap();
             let second = generator.generate(&request, || false).unwrap();
             assert_eq!(first, second);
@@ -1288,6 +1566,7 @@ mod tests {
         request.edits = vec![(0, Block::WATER), ((CELL_COUNT - 1) as u32, Block::STONE)];
         request.request_hash = request.canonical_hash().to_hex();
         let chunk = TerrainGeneratorV18::from_request(&request)
+            .unwrap()
             .generate(&request, || false)
             .unwrap();
         assert_eq!(chunk.blocks[0], Block::WATER);
@@ -1297,7 +1576,7 @@ mod tests {
     #[test]
     fn cancellation_is_checked_per_column_slice() {
         let request = fixture_request("cancel", 1, 1, 1);
-        let generator = TerrainGeneratorV18::from_request(&request);
+        let generator = TerrainGeneratorV18::from_request(&request).unwrap();
         assert_eq!(generator.generate(&request, || true), Err(GenerationError::Cancelled));
     }
 
@@ -1309,6 +1588,7 @@ mod tests {
             let cz = 2_046 - case.wrapping_mul(3_571).rem_euclid(4_093);
             let request = fixture_request(&format!("corpus-{}", case.rem_euclid(17)), cx, cz, case as u32 + 1);
             let chunk = TerrainGeneratorV18::from_request(&request)
+                .unwrap()
                 .generate(&request, || false)
                 .unwrap();
             assert_eq!(chunk.heightmap.len(), COLUMN_COUNT);
@@ -1333,6 +1613,7 @@ mod tests {
             let request = fixture_request(&format!("corpus-{}", case.rem_euclid(17)), cx, cz, case as u32 + 1);
             reverse.push(
                 TerrainGeneratorV18::from_request(&request)
+                    .unwrap()
                     .generate(&request, || false)
                     .unwrap()
                     .chunk_hash,
@@ -1340,5 +1621,162 @@ mod tests {
         }
         reverse.reverse();
         assert_eq!(forward, reverse);
+    }
+
+    #[test]
+    fn legacy_beach_flora_matches_the_typescript_oracle_vector() {
+        let mut request = fixture_request("HEARTHROADS", -130, -191, 132);
+        request.generation_options_json = r#"{"biomeScale":1.35,"caveFrequency":1,"enabledFactions":["hobbits","goblins","atlantians","sugarcourt","wood-elves","dwarves"],"largeTownFrequency":"balanced","profile":"legacy-v14","resourceAbundance":1,"roadCoverage":"regional","settlementClustering":"regional","settlementDensity":1,"settlementPattern":"heartlands-v2","structures":true}"#.into();
+        request.edits = vec![(0, 7), (24_576, 13), (49_151, 3)];
+        request.request_hash = request.canonical_hash().to_hex();
+
+        let chunk = TerrainGeneratorV18::from_request(&request)
+            .unwrap()
+            .generate(&request, || false)
+            .unwrap();
+        let saltbrush = chunk
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &block)| (block == Block::SALTBRUSH).then_some(index))
+            .collect::<Vec<_>>();
+        let coast_aster = chunk
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &block)| (block == Block::COAST_ASTER).then_some(index))
+            .collect::<Vec<_>>();
+
+        assert_eq!(saltbrush, vec![25_517, 25_551, 25_558, 25_596]);
+        assert_eq!(coast_aster, vec![25_116, 25_298, 25_535]);
+    }
+
+    #[test]
+    fn high_resource_abundance_preserves_typescript_ore_precedence() {
+        let request = fixture_request("RESOURCE-OPTIONS", -1, -1, 138);
+        let generator = TerrainGeneratorV18::new(
+            "RESOURCE-OPTIONS",
+            GenerationOptions {
+                resource_abundance: 4.0,
+                ..GenerationOptions::default()
+            },
+        );
+
+        // The TypeScript oracle evaluates ore branches independently. At the
+        // maximum supported abundance, later Copper and Gold matches therefore
+        // replace an earlier Coal match when their threshold windows overlap.
+        assert_eq!(generator.ore_at(-13, -60, -9, Block::BASALT), Block::COPPER_ORE);
+
+        let chunk = generator.generate(&request, || false).unwrap();
+        let count = |block| chunk.blocks.iter().filter(|&&value| value == block).count();
+        assert_eq!(count(Block::COAL_ORE), 62);
+        assert_eq!(count(Block::IRON_ORE), 135);
+        assert_eq!(count(Block::COPPER_ORE), 70);
+        assert_eq!(count(Block::GOLD_ORE), 5);
+        assert_eq!(count(Block::CRYSTAL_ORE), 0);
+        assert_eq!(count(Block::LIVING_VEIN), 56);
+        assert_eq!(count(Block::VEINMETAL_HEART), 1);
+    }
+
+    #[test]
+    fn legacy_biome_cascade_matches_the_typescript_oracle_vectors() {
+        let options = GenerationOptions {
+            profile: GenerationProfile::LegacyV14,
+            ..GenerationOptions::default()
+        };
+        let generator = TerrainGeneratorV18::new("LOCATOR-LEGACY", options);
+        let vectors = [
+            (
+                -24_000,
+                -19_326,
+                ColumnSample {
+                    height: 40,
+                    waterline: 32,
+                    biome: BiomeId::SugarplumVale,
+                    temperature: 0.418_172_342_784_653_9,
+                    moisture: 0.549_661_775_411_619_1,
+                    continental: 0.160_938_599_898_645_26,
+                    river: 0.0,
+                    mountain: 0.0,
+                },
+            ),
+            (
+                -24_000,
+                -9_281,
+                ColumnSample {
+                    height: 36,
+                    waterline: 32,
+                    biome: BiomeId::Glimmerwood,
+                    temperature: 0.512_737_615_583_777_8,
+                    moisture: 0.740_960_606_958_747_7,
+                    continental: 0.101_409_472_106_043_17,
+                    river: 0.0,
+                    mountain: 0.0,
+                },
+            ),
+            (
+                -20_966,
+                1_748,
+                ColumnSample {
+                    height: 37,
+                    waterline: 32,
+                    biome: BiomeId::Badlands,
+                    temperature: 0.629_809_537_339_318_9,
+                    moisture: 0.192_928_387_937_938_98,
+                    continental: 0.085_255_501_581_667_02,
+                    river: 0.0,
+                    mountain: 0.0,
+                },
+            ),
+            (
+                -24_000,
+                21_797,
+                ColumnSample {
+                    height: 45,
+                    waterline: 32,
+                    biome: BiomeId::CloudreedGlen,
+                    temperature: 0.531_260_340_054_715_3,
+                    moisture: 0.680_788_556_027_849_9,
+                    continental: 0.358_009_160_706_987_6,
+                    river: 0.0,
+                    mountain: 0.0,
+                },
+            ),
+            (
+                -24_000,
+                -9_158,
+                ColumnSample {
+                    height: 37,
+                    waterline: 32,
+                    biome: BiomeId::RainveilJungle,
+                    temperature: 0.582_587_794_438_985_2,
+                    moisture: 0.789_849_271_697_562_2,
+                    continental: 0.274_936_144_092_677_36,
+                    river: 0.0,
+                    mountain: 0.0,
+                },
+            ),
+            (
+                -24_000,
+                -19_490,
+                ColumnSample {
+                    height: 36,
+                    waterline: 32,
+                    biome: BiomeId::SakurabloomGrove,
+                    temperature: 0.377_629_184_584_261_1,
+                    moisture: 0.662_627_323_516_613_1,
+                    continental: 0.045_697_793_378_344_3,
+                    river: 0.0,
+                    mountain: 0.0,
+                },
+            ),
+        ];
+        for (x, z, expected) in vectors {
+            assert_eq!(
+                generator.sample_column(x, z),
+                expected,
+                "legacy sample ({x}, {z}) drifted"
+            );
+        }
     }
 }

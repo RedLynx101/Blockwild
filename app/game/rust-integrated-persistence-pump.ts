@@ -1,10 +1,11 @@
 import {
+  RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_MAX_PACKET_BYTES_V1,
   RUST_INTEGRATED_PERSISTENCE_REQUEST_TYPE_V1,
   type RustIntegratedRuntimeBulkResponseV1,
 } from "./rust-integrated-runtime-bulk-platform";
 import { RustPersistenceBrowserRuntimeV1 } from "./rust-persistence-runtime-adapter";
 
-export const RUST_INTEGRATED_PERSISTENCE_PUMP_DEFAULT_MAX_BYTES_V1 = 8 * 1024 * 1024;
+export const RUST_INTEGRATED_PERSISTENCE_PUMP_DEFAULT_MAX_BYTES_V1 = RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_MAX_PACKET_BYTES_V1;
 export const RUST_INTEGRATED_PERSISTENCE_PUMP_DEFAULT_MAX_OPERATIONS_V1 = 256;
 
 export interface RustIntegratedPersistenceBulkServiceV1 {

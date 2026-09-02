@@ -60,6 +60,8 @@ export type RustRendererDiagnosticsR11 = Readonly<{
   lastError: string | null;
 }>;
 
+export type RustRendererDiagnosticsListenerR11 = (diagnostics: RustRendererDiagnosticsR11) => void;
+
 type MutableDiagnosticsR11 = { -readonly [K in keyof RustRendererDiagnosticsR11]: RustRendererDiagnosticsR11[K] };
 export type RustRendererReplayLimitsR11 = Readonly<{
   maxBytes: number;
@@ -191,6 +193,7 @@ export class RustRendererServiceR11 {
   private initializingLifecycle: RustRendererLifecycleR11 | null = null;
   private replayOnReady = false;
   private readyDeferred: ReadyDeferredR11 | null = null;
+  private readonly diagnosticsListeners = new Set<RustRendererDiagnosticsListenerR11>();
   private readonly replayLimits: RustRendererReplayLimitsR11;
   private diagnostics: MutableDiagnosticsR11 = {
     state: "idle", epoch: BigInt(0), surfaceGeneration: 0, recoveryGeneration: 0,
@@ -237,6 +240,7 @@ export class RustRendererServiceR11 {
       lastPresentedSequence: null, lastError: null };
     try { this.startWorker(canvas, width, height); }
     catch (error) { this.fail(this.errorMessage(error, "renderer worker initialization transfer failed")); }
+    this.publishDiagnostics();
   }
 
   ready() {
@@ -264,9 +268,12 @@ export class RustRendererServiceR11 {
     this.replayOnReady = true;
     this.readyDeferred = this.createReadyDeferred();
     this.diagnostics.state = "starting"; this.diagnostics.lastError = null;
+    this.diagnostics.lastPresentedSequence = null;
+    this.diagnostics.latestSkipReason = null;
     this.diagnostics.replacementSurfaceRequired = false; this.diagnostics.workerRestarts += 1;
     try { this.startWorker(canvas, width, height); }
     catch (error) { this.fail(this.errorMessage(error, "replacement renderer surface transfer failed")); }
+    this.publishDiagnostics();
   }
 
   applyResources(value: RenderResourceBatchV2 | Uint8Array) {
@@ -339,11 +346,14 @@ export class RustRendererServiceR11 {
     this.replayPages.clear(); this.pending = null; this.inFlight = null; this.sentResourceRevision = BigInt(0);
     this.diagnostics = { ...this.diagnostics, epoch: nextEpoch, resourceRevision: BigInt(0), resourceBytes: 0,
       replayedResourceBytes: 0, replayPages: 0, replayPressurePermille: 0,
-      lastPresentedSequence: null, state: starting ? "starting" : "recovering" };
+      lastPresentedSequence: null, latestSkipReason: null, state: starting ? "starting" : "recovering" };
     this.recoveryGeneration += 1;
     this.recoveryInFlight = true;
     this.diagnostics.recoveryGeneration = this.recoveryGeneration;
     this.diagnostics.deviceRecoveries += 1;
+    // The visible-canvas shell must hide old-world pixels before the recovery
+    // command can race a later paint or acknowledgement.
+    this.publishDiagnostics();
     if (!starting) this.sendRecovery();
     return true;
   }
@@ -363,11 +373,23 @@ export class RustRendererServiceR11 {
     this.diagnostics.replacementSurfaceRequired = false;
     this.diagnostics.replayPages = 0;
     this.diagnostics.replayPressurePermille = 0;
+    this.publishDiagnostics();
   }
 
   snapshot(): RustRendererDiagnosticsR11 { return Object.freeze({ ...this.diagnostics }); }
 
+  /**
+   * Lifecycle-only observer used by the visible-canvas shell. It intentionally
+   * receives immutable snapshots and cannot influence renderer authority.
+   */
+  subscribe(listener: RustRendererDiagnosticsListenerR11) {
+    this.diagnosticsListeners.add(listener);
+    listener(this.snapshot());
+    return () => { this.diagnosticsListeners.delete(listener); };
+  }
+
   private handle(event: RustRendererWorkerEventR11) {
+    try {
     if (event.type === "ready") {
       const expected = this.initializingLifecycle;
       if (!expected || event.surfaceGeneration !== expected.surfaceGeneration) { this.markStaleLifecycleEvent(); return; }
@@ -401,8 +423,7 @@ export class RustRendererServiceR11 {
       this.diagnostics.replacementSurfaceRequired = false;
       this.sendPendingSize(); this.sendUnsentResources(this.replayOnReady); this.replayOnReady = false;
       this.flush(); this.resolveReady();
-    }
-    else if (event.type === "frame-presented") {
+    } else if (event.type === "frame-presented") {
       if (!this.isCurrentSurfaceEvent(event)) { this.markStaleLifecycleEvent(); return; }
       const inFlight = this.inFlight;
       if (!inFlight || event.sequence !== inFlight.sequence || event.epoch !== inFlight.epoch
@@ -465,6 +486,9 @@ export class RustRendererServiceR11 {
       this.fail(`${event.operation}: ${event.message}`);
     } else if (!this.isCurrentSurfaceEvent(event)) {
       this.markStaleLifecycleEvent();
+    }
+    } finally {
+      this.publishDiagnostics();
     }
   }
 
@@ -544,8 +568,11 @@ export class RustRendererServiceR11 {
     this.recoveryInFlight = false;
     this.diagnostics.state = "failed";
     this.diagnostics.lastError = message;
+    this.diagnostics.lastPresentedSequence = null;
+    this.diagnostics.latestSkipReason = null;
     this.diagnostics.replacementSurfaceRequired = true;
     this.rejectReady(new Error(message));
+    this.publishDiagnostics();
   }
 
   private beginRecovery(reason: string, sendImmediately: boolean) {
@@ -555,7 +582,10 @@ export class RustRendererServiceR11 {
     this.diagnostics.recoveryGeneration = this.recoveryGeneration;
     this.diagnostics.state = sendImmediately ? "recovering" : "starting";
     this.diagnostics.lastError = reason;
+    this.diagnostics.lastPresentedSequence = null;
+    this.diagnostics.latestSkipReason = null;
     this.diagnostics.deviceRecoveries += 1;
+    this.publishDiagnostics();
     if (sendImmediately) this.sendRecovery();
     return true;
   }
@@ -587,6 +617,15 @@ export class RustRendererServiceR11 {
     const bytePressure = Math.floor(this.diagnostics.resourceBytes * 1_000 / this.replayLimits.maxBytes);
     const pagePressure = Math.floor(this.replayPages.size * 1_000 / this.replayLimits.maxPages);
     this.diagnostics.replayPressurePermille = Math.max(bytePressure, pagePressure);
+  }
+
+  private publishDiagnostics() {
+    if (this.diagnosticsListeners.size === 0) return;
+    const snapshot = this.snapshot();
+    for (const listener of this.diagnosticsListeners) {
+      try { listener(snapshot); }
+      catch { /* Diagnostics observers cannot break renderer lifecycle. */ }
+    }
   }
 
   private createReadyDeferred(): ReadyDeferredR11 {

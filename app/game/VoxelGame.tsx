@@ -37,6 +37,7 @@ import {
   type OverlayKind,
   type Recipe,
   type RecipePlanResult,
+  type WorldOriginPreviewV1,
 } from "./engine";
 import { BUTTERFLY_ORDER } from "./mobs";
 import type { AgentCapability, AgentChatMessage, AgentSessionRecord, AgentTaskRecord, AgentWaypointRecord } from "./agent-platform";
@@ -63,12 +64,18 @@ import {
   preferredRelationshipFood,
 } from "./creature-relationships";
 import { GAME_RELEASE_NAME, GAME_VERSION, GAME_VERSION_LABEL } from "./version";
+import { COMPILED_WORLDGEN_BUILD_PROFILE } from "./build-info";
 import { BASIC_RENDER_DISTANCE_ENABLED } from "./performance";
 import {
   CLOSED_RENDERER_PROMOTION_GATES_R11,
   RendererCutoverRuntimeR11,
+  RendererVisibleCanvasLifecycleR11,
+  rendererCanvasEffectivePixelRatioR11,
+  rendererCanvasMetricsR11,
   rendererRequestFromSearchR11,
+  type RendererSurfaceReplacementRequestR11,
 } from "./renderer-cutover-r11";
+import { configuredRustLivePlayerAuthoritySelectionR5 } from "./rust-live-player-authority-selection-r5";
 import { WHEAT_MILL_CYCLE_SECONDS } from "./wheat-mill";
 import {
   DEFAULT_WORLD_OPTIONS,
@@ -357,6 +364,7 @@ type MultiplayerViewState = {
   reasons: string[];
   status: string;
   role: "host" | "guest" | null;
+  guestWorldReady: boolean;
   peers: MultiplayerPeerView[];
   inviteCode: string;
   answerCode: string;
@@ -374,6 +382,7 @@ export function multiplayerViewStatesEqual(left: MultiplayerViewState, right: Mu
   if (left.supported !== right.supported
     || left.status !== right.status
     || left.role !== right.role
+    || left.guestWorldReady !== right.guestWorldReady
     || left.inviteCode !== right.inviteCode
     || left.answerCode !== right.answerCode
     || left.roomCode !== right.roomCode
@@ -427,7 +436,7 @@ type MultiplayerEngineApi = {
   createMultiplayerRoom?: (roomCode: string, playerName: string) => Promise<{ roomCode: string }>;
   joinMultiplayerRoom?: (roomCode: string, playerName: string) => Promise<{ hostName: string; seed?: string; worldReady?: boolean }>;
   suggestMultiplayerRoomCode?: () => string;
-  disconnectMultiplayer?: () => void | Promise<void>;
+  disconnectMultiplayer?: (reason?: string) => void | Promise<void>;
   downloadMultiplayerDiagnostics?: () => unknown;
   approveAgent?: (agentId: string, grants?: readonly AgentCapability[]) => boolean;
   setAgentCapability?: (agentId: string, capability: AgentCapability, granted: boolean) => boolean;
@@ -478,6 +487,7 @@ type HearthroadsEngineApi = {
   sellStockShares?: (symbol: StockSymbol, shares: GoldAmount) => boolean;
   setSettlementRoleWaypoint?: (profession: ResidentProfession) => boolean;
   setNearestFactionTownWaypoint?: () => string | null;
+  setNearestFactionTownWaypointAuthoritative?: () => Promise<string | null>;
   selectSettlementResident?: (residentId: string) => string | null;
   shareCartographyMaps?: () => boolean;
   commandActiveFollower?: (command: string) => boolean;
@@ -491,6 +501,7 @@ const EMPTY_MULTIPLAYER_STATE: MultiplayerViewState = {
   reasons: [],
   status: "idle",
   role: null,
+  guestWorldReady: false,
   peers: [],
   inviteCode: "",
   answerCode: "",
@@ -828,6 +839,36 @@ export async function runSingleFlight<T>(gate: SingleFlightGate, operation: () =
   }
 }
 
+export type TitleGuestWorldDisposition = "inactive" | "pending" | "ready" | "failed";
+
+export function titleGuestWorldDisposition(
+  returnTo: "title" | "pause",
+  state: Readonly<{
+    role: "host" | "guest" | null;
+    guestWorldReady: boolean;
+    error: string | null;
+  }>,
+): TitleGuestWorldDisposition {
+  if (returnTo !== "title" || state.role !== "guest") return "inactive";
+  if (state.guestWorldReady === true) return "ready";
+  return state.error ? "failed" : "pending";
+}
+
+export async function runTitleGuestCleanup(options: Readonly<{
+  disconnect: () => void | Promise<void>;
+  reset: () => void;
+  reportFailure: (message: string) => void;
+}>) {
+  try {
+    await options.disconnect();
+  } catch (error) {
+    options.reportFailure(formatMultiplayerError(error));
+    return false;
+  }
+  options.reset();
+  return true;
+}
+
 export function formatMultiplayerError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   if (/user[- ]initiated.*(?:abort|close)|(?:abort|close).*called|session (?:changed|closed)|setup was cancelled/iu.test(message)) {
@@ -865,6 +906,31 @@ export function prepareFirstPersonHeldPresentation(engine: VoxelEngine) {
   if ("offhandItemCode" in engine) engine.offhandItemCode = -1;
   engine.heldRoot.visible = true;
   if (engine.offhandRoot) engine.offhandRoot.visible = true;
+}
+
+export type QuitToTitleUiResult = "completed" | "failed" | "superseded";
+
+export function formatQuitToTitleFailure(error: unknown) {
+  if (error instanceof Error && error.message.trim()) return error.message;
+  if (typeof error === "string" && error.trim()) return error;
+  return "Save & Quit could not finish the native checkpoint.";
+}
+
+export async function runQuitToTitleWithUiRecovery(options: {
+  quitToTitle: () => Promise<void>;
+  isCurrentEngine: () => boolean;
+  restoreHeldPresentation: () => void;
+  reportFailure: (message: string) => void;
+}): Promise<QuitToTitleUiResult> {
+  try {
+    await options.quitToTitle();
+  } catch (error) {
+    if (!options.isCurrentEngine()) return "superseded";
+    options.restoreHeldPresentation();
+    options.reportFailure(formatQuitToTitleFailure(error));
+    return "failed";
+  }
+  return options.isCurrentEngine() ? "completed" : "superseded";
 }
 
 export function normalizeMultiplayerRoomCode(value: string) {
@@ -1623,7 +1689,16 @@ const RESOURCE_ASSET_AUDIT_ITEMS = new Set<ItemCode>([
 
 export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: boolean }>) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rendererPrimaryCanvasRef = useRef<HTMLCanvasElement>(null);
   const rendererShadowCanvasRef = useRef<HTMLCanvasElement>(null);
+  const rendererCutoverRef = useRef<RendererCutoverRuntimeR11 | null>(null);
+  const rendererCanvasLifecycleRef = useRef<RendererVisibleCanvasLifecycleR11 | null>(null);
+  const rendererReplacementPendingRef = useRef<Readonly<{
+    runtime: RendererCutoverRuntimeR11;
+    lifecycle: RendererVisibleCanvasLifecycleR11;
+    request: RendererSurfaceReplacementRequestR11;
+    canvasGeneration: number;
+  }> | null>(null);
   const engineRef = useRef<VoxelEngine | null>(null);
   const worldStorageRef = useRef<WorldStorage | null>(null);
   const characterStoreRef = useRef<CharacterProfileStore | null>(null);
@@ -1637,6 +1712,10 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
   const lookPointerRef = useRef<{ id: number; x: number; y: number } | null>(null);
   const activePetDraftIdRef = useRef<number | null>(null);
   const multiplayerFlightRef = useRef<Promise<unknown> | null>(null);
+  const multiplayerReturnRef = useRef<"title" | "pause">("title");
+  const titleGuestAttemptRef = useRef(false);
+  const titleGuestJoinDetailsRef = useRef<Readonly<{ hostName?: string; seed?: string }> | null>(null);
+  const closeMultiplayerPanelRef = useRef<() => void>(() => undefined);
   const worldFlightRef = useRef<Promise<unknown> | null>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
   const chatOpenRef = useRef(false);
@@ -1659,6 +1738,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
   const itemGuideOpenRef = useRef(false);
 
   const [overlay, setOverlayState] = useState<Overlay>("title");
+  const [rendererPrimarySurfaceKey, setRendererPrimarySurfaceKey] = useState(0);
   const [titleMenuView, setTitleMenuViewState] = useState<TitleMenuView>("main");
   const [started, setStarted] = useState(false);
   const [hasSave, setHasSave] = useState(false);
@@ -1674,8 +1754,9 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     ...DEFAULT_WORLD_OPTIONS,
     enabledFactions: [...DEFAULT_WORLD_OPTIONS.enabledFactions],
   }));
-  const [originPreview, setOriginPreview] = useState<ReturnType<VoxelEngine["previewWorldOrigin"]>>(null);
+  const [originPreview, setOriginPreview] = useState<WorldOriginPreviewV1 | null>(null);
   const [originPreviewPending, setOriginPreviewPending] = useState(false);
+  const [originPreviewError, setOriginPreviewError] = useState("");
   const [originSearchRadius, setOriginSearchRadius] = useState(DEFAULT_SETTLEMENT_ORIGIN_SEARCH_RADIUS);
   const [worldNotice, setWorldNotice] = useState("");
   const [worldBusy, setWorldBusy] = useState(false);
@@ -1761,18 +1842,28 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     if (overlay !== "new" || worldOptions.origin.mode === "wilderness" || !worldOptions.structures || worldOptions.settlementDensity <= 0) {
       setOriginPreview(null);
       setOriginPreviewPending(false);
+      setOriginPreviewError("");
       return;
     }
+    setOriginPreview(null);
     setOriginPreviewPending(true);
+    setOriginPreviewError("");
+    const controller = new AbortController();
     let cancelled = false;
     const timer = window.setTimeout(() => {
-      const preview = engineRef.current?.previewWorldOrigin(seed, worldOptions, originSearchRadius) ?? null;
-      if (!cancelled) {
-        setOriginPreview(preview);
-        setOriginPreviewPending(false);
-      }
+      void (engineRef.current?.previewWorldOriginAuthoritative(seed, worldOptions, originSearchRadius, controller.signal)
+        ?? Promise.resolve(null)).then((preview) => {
+        if (!cancelled) setOriginPreview(preview);
+      }).catch((error: unknown) => {
+        if (!cancelled && !controller.signal.aborted) {
+          setOriginPreview(null);
+          setOriginPreviewError(error instanceof Error ? error.message : "The authoritative regional chart could not be read.");
+        }
+      }).finally(() => {
+        if (!cancelled) setOriginPreviewPending(false);
+      });
     }, 180);
-    return () => { cancelled = true; window.clearTimeout(timer); };
+    return () => { cancelled = true; controller.abort(); window.clearTimeout(timer); };
   }, [activeCharacterProfile.id, originSearchRadius, overlay, seed, worldOptions]);
 
   useEffect(() => {
@@ -1929,6 +2020,17 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     toastTimerRef.current = window.setTimeout(() => setToast(""), durationMs);
   }, []);
 
+  const setRendererPrimaryCanvas = useCallback((canvas: HTMLCanvasElement | null) => {
+    rendererPrimaryCanvasRef.current = canvas;
+    if (!canvas) return;
+    const pending = rendererReplacementPendingRef.current;
+    if (!pending || rendererCutoverRef.current !== pending.runtime || rendererCanvasLifecycleRef.current !== pending.lifecycle) return;
+    const metrics = pending.lifecycle.installReplacementCanvas(canvas, pending.canvasGeneration);
+    if (!metrics) return;
+    rendererReplacementPendingRef.current = null;
+    void pending.runtime.replaceSurface(canvas, pending.request.token);
+  }, []);
+
   const refreshWorldCatalog = useCallback((storage = worldStorageRef.current) => {
     if (!storage) return;
     const nextWorlds = storage.listWorlds({ sortBy: "lastPlayedAt", direction: "desc" });
@@ -1943,22 +2045,65 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
 
   useEffect(() => {
     const canvas = canvasRef.current;
+    const rendererPrimaryCanvas = rendererPrimaryCanvasRef.current;
     const rendererShadowCanvas = rendererShadowCanvasRef.current;
-    if (!canvas || !rendererShadowCanvas) return;
+    if (!canvas || !rendererPrimaryCanvas || !rendererShadowCanvas) return;
+    const rustLivePlayerAuthoritySelection = configuredRustLivePlayerAuthoritySelectionR5();
     const rendererRequest = agentMode ? "three" : rendererRequestFromSearchR11(window.location.search);
     const rendererEpoch = BigInt(Date.now()) * BigInt(1_000) + BigInt(Math.floor(performance.now()) % 1_000);
+    const rendererMetrics = rendererCanvasMetricsR11(canvas, window.devicePixelRatio || 1);
+    rendererShadowCanvas.width = rendererMetrics.pixelWidth;
+    rendererShadowCanvas.height = rendererMetrics.pixelHeight;
+    let rendererCanvasLifecycle: RendererVisibleCanvasLifecycleR11 | null = null;
     const rendererCutover = new RendererCutoverRuntimeR11({
       request: rendererRequest,
-      canvas: rendererShadowCanvas,
-      canvasRole: "shadow",
+      canvas: rendererRequest === "wgpu" ? rendererPrimaryCanvas : rendererShadowCanvas,
+      canvasRole: rendererRequest === "wgpu" ? "primary" : "shadow",
       epoch: rendererEpoch,
-      width: Math.max(1, canvas.clientWidth || canvas.width),
-      height: Math.max(1, canvas.clientHeight || canvas.height),
-      allowWgpuShadow: rendererRequest === "wgpu-shadow",
+      width: rendererMetrics.pixelWidth,
+      height: rendererMetrics.pixelHeight,
+      // R10 camera extraction is currently native-player-owned. A renderer
+      // shadow request without the matching experimental player authority
+      // would start a surface that can never receive a canonical frame.
+      allowWgpuShadow: rendererRequest === "wgpu-shadow"
+        && rustLivePlayerAuthoritySelection.mode === "experimental-r5",
       allowWgpuPrimary: false,
       promotionGates: CLOSED_RENDERER_PROMOTION_GATES_R11,
+      onPrimaryPresentation: (presentation, reason) => {
+        rendererCanvasLifecycle?.setPresentation(presentation, reason);
+      },
+      onSurfaceReplacementRequired: (request) => {
+        if (!rendererCanvasLifecycle || rendererCutoverRef.current !== rendererCutover) return;
+        // Reveal the continuously rendered Three surface synchronously before
+        // React removes the transferred WGPU node. The new keyed node is never
+        // shown until its worker presents a non-skipped frame.
+        const canvasGeneration = rendererCanvasLifecycle.prepareReplacement(request.reason);
+        if (canvasGeneration === null) return;
+        rendererReplacementPendingRef.current = Object.freeze({
+          runtime: rendererCutover,
+          lifecycle: rendererCanvasLifecycle,
+          request,
+          canvasGeneration,
+        });
+        setRendererPrimarySurfaceKey((current) => current + 1);
+      },
     });
-    void rendererCutover.start();
+    rendererCanvasLifecycle = new RendererVisibleCanvasLifecycleR11({
+      threeCanvas: canvas,
+      wgpuCanvas: rendererPrimaryCanvas,
+      resize: (width, height) => rendererCutover.resize(width, height),
+      devicePixelRatio: () => rendererCanvasEffectivePixelRatioR11(canvas, window.devicePixelRatio || 1),
+      windowTarget: window,
+      documentTarget: document,
+      createResizeObserver: typeof ResizeObserver === "undefined"
+        ? undefined
+        : (listener) => new ResizeObserver(listener),
+      createMutationObserver: typeof MutationObserver === "undefined"
+        ? undefined
+        : (listener) => new MutationObserver(listener),
+    });
+    rendererCutoverRef.current = rendererCutover;
+    rendererCanvasLifecycleRef.current = rendererCanvasLifecycle;
     let browserStorage: Storage | null = null;
     try { browserStorage = window.localStorage; } catch { /* WorldStorage reports browser storage unavailability. */ }
     // Native R8 owns durable world domains. This one compatibility catalog is
@@ -2032,8 +2177,13 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
           window.queueMicrotask(() => { void (async () => {
             if (engineRef.current !== engine) return;
             clearFirstPersonHeldPresentation(engine);
-            await engine.quitToTitleAsync();
-            if (engineRef.current !== engine) return;
+            const quitResult = await runQuitToTitleWithUiRecovery({
+              quitToTitle: () => engine.quitToTitleAsync(),
+              isCurrentEngine: () => engineRef.current === engine,
+              restoreHeldPresentation: () => prepareFirstPersonHeldPresentation(engine),
+              reportFailure: showToast,
+            });
+            if (quitResult !== "completed") return;
             engine.previewWorld("WILDERNESS");
             startedRef.current = false;
             setStarted(false);
@@ -2050,22 +2200,29 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
         agentTestAdmin: agentMode && new URLSearchParams(window.location.search).get("testAdmin") === "1",
         rustRenderSink: rendererCutover.needsExtraction ? rendererCutover : undefined,
         rustRenderEpoch: rendererCutover.needsExtraction ? rendererEpoch : undefined,
+        rustLivePlayerAuthorityMode: rustLivePlayerAuthoritySelection.mode,
         worldStorage: storage,
       });
     } catch {
       storage.dispose();
+      rendererCanvasLifecycle.dispose();
       rendererCutover.stop();
+      if (rendererCutoverRef.current === rendererCutover) rendererCutoverRef.current = null;
+      if (rendererCanvasLifecycleRef.current === rendererCanvasLifecycle) rendererCanvasLifecycleRef.current = null;
       window.queueMicrotask(() => setWebglError(true));
       return;
     }
     (engine as VoxelEngine & { setCharacterProfile?: (profile: CharacterProfile) => void }).setCharacterProfile?.(selectedCharacter);
     engine.localPlayerModel.setAppearance(selectedCharacter.appearance).setPlayerName(selectedCharacter.name);
     engineRef.current = engine;
+    rendererCanvasLifecycle.start();
+    void rendererCutover.start();
     const automationWindow = window as Window & {
       render_game_to_text?: () => string;
       advanceTime?: (milliseconds: number) => Promise<void>;
       blockwildAgent?: AgentBrowserBridge;
       set_game_key?: (code: string, down: boolean) => void;
+      pulse_game_key?: (code: string, frameCount?: number) => Promise<unknown>;
       render_renderer_cutover_to_text?: () => string;
       render_rust_runtime_to_text?: () => string;
       request_renderer_recovery?: (reason?: string) => boolean;
@@ -2073,17 +2230,22 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     };
     automationWindow.render_game_to_text = () => engine.renderGameToText();
     automationWindow.set_game_key = (code, down) => engine.setVirtualKey(code, down);
+    automationWindow.pulse_game_key = (code, frameCount) => engine.pulseRustLiveMovementForAutomationR5(code, frameCount);
     automationWindow.advanceTime = async (milliseconds: number) => {
       engine.advanceSimulation(milliseconds);
       await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
     };
     automationWindow.render_renderer_cutover_to_text = () => JSON.stringify({
       ...rendererCutover.diagnostics(),
+      canvasLifecycle: rendererCanvasLifecycle?.diagnostics() ?? null,
       producer: engine.getRustLiveRenderDiagnosticsR10(),
       engineErrors: engine.renderExtractionErrors,
       engineLastError: engine.renderExtractionLastError,
     }, (_, value) => typeof value === "bigint" ? value.toString() : value);
-    automationWindow.render_rust_runtime_to_text = () => JSON.stringify(engine.getRustRuntimeDiagnostics());
+    automationWindow.render_rust_runtime_to_text = () => JSON.stringify(
+      engine.getRustRuntimeDiagnostics(),
+      (_, value) => typeof value === "bigint" ? value.toString() : value,
+    );
     automationWindow.request_renderer_recovery = (reason) => rendererCutover.requestRecovery(reason);
     automationWindow.freeze_renderer_evidence = (frozen) => engine.setRendererEvidenceFreezeR11(frozen);
     if (agentMode) automationWindow.blockwildAgent = createAgentBrowserBridge({
@@ -2230,6 +2392,10 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     return () => {
       window.clearTimeout(toastTimerRef.current);
       if (treeFallTimer !== undefined) window.clearTimeout(treeFallTimer);
+      rendererReplacementPendingRef.current = null;
+      if (rendererCutoverRef.current === rendererCutover) rendererCutoverRef.current = null;
+      if (rendererCanvasLifecycleRef.current === rendererCanvasLifecycle) rendererCanvasLifecycleRef.current = null;
+      rendererCanvasLifecycle.dispose();
       void engine.shutdown().catch(() => undefined).finally(() => rendererCutover.stop());
       engineRef.current = null;
       worldStorageRef.current = null;
@@ -2238,6 +2404,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       delete automationWindow.advanceTime;
       delete automationWindow.blockwildAgent;
       delete automationWindow.set_game_key;
+      delete automationWindow.pulse_game_key;
       delete automationWindow.render_renderer_cutover_to_text;
       delete automationWindow.render_rust_runtime_to_text;
       delete automationWindow.request_renderer_recovery;
@@ -2468,6 +2635,10 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       }
       if (current !== null) {
         if (["inventory", "crafting", "furnace", "wheat-mill", "chest", "apiary", "aquarium", "orb-rack", "healing-station", "waygrid-items", "waygrid-creatures", "pet", "dragon", "library", "incubator"].includes(current)) engine?.closeContainer();
+        if (current === "multiplayer" && !startedRef.current) {
+          closeMultiplayerPanelRef.current();
+          return;
+        }
         if (startedRef.current) {
           if (current === "pause") { setOverlay(null); engine?.activate(); }
           else if (current === "settings" || current === "help" || current === "bestiary" || current === "multiplayer") setOverlay("pause");
@@ -2571,7 +2742,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
         showToast("WASD move · Space jump/swim · Shift crouch · Ctrl sprint · V camera · Left harvest/attack · Right use/build · E inventory · Esc menu", 8500);
       } catch (error) {
         activeWorldIdRef.current = null;
-        setWorldNotice(error instanceof Error ? error.message : "The Rust world runtime could not start.");
+        setWorldNotice(error instanceof Error ? error.message : "The world could not start.");
       } finally {
         if (engineRef.current === engine) setWorldBusy(false);
       }
@@ -2606,7 +2777,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
         if (loaded.warnings?.length) setWorldNotice(loaded.warnings.map((warning) => warning.message).join(" "));
         showToast(`Welcome back to ${loaded.value.metadata.name}. The horizon kept going without you.`);
       } catch (error) {
-        setWorldNotice(error instanceof Error ? error.message : "The Rust world runtime could not restore this world.");
+        setWorldNotice(error instanceof Error ? error.message : "The world could not be restored.");
       } finally {
         if (engineRef.current === engine) setWorldBusy(false);
       }
@@ -2749,7 +2920,13 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     if (!engine) return;
     if (telemetryLogRef.current.running) stopTelemetry("save-and-quit");
     clearFirstPersonHeldPresentation(engine);
-    await engine.quitToTitleAsync();
+    try {
+      await engine.quitToTitleAsync();
+    } catch (error) {
+      prepareFirstPersonHeldPresentation(engine);
+      showToast(error instanceof Error ? error.message : "Save & Quit could not finish the native checkpoint.");
+      return;
+    }
     if (engineRef.current !== engine) return;
     startedRef.current = false;
     setStarted(false);
@@ -2791,6 +2968,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
           reasons: Array.isArray(state.reasons) ? state.reasons : [],
           status: typeof state.status === "string" ? state.status : "idle",
           role: state.role === "host" || state.role === "guest" ? state.role : null,
+          guestWorldReady: state.guestWorldReady === true,
           peers: Array.isArray(state.peers) ? state.peers : [],
           inviteCode: typeof state.inviteCode === "string" ? state.inviteCode : current.inviteCode,
           answerCode: typeof state.answerCode === "string" ? state.answerCode : current.answerCode,
@@ -2857,10 +3035,108 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
   };
 
   const openMultiplayer = (returnTo: "title" | "pause") => {
+    multiplayerReturnRef.current = returnTo;
+    if (returnTo === "title") titleGuestAttemptRef.current = false;
     setMultiplayerReturn(returnTo);
     setMultiplayerState((current) => ({ ...current, error: null }));
     setOverlay("multiplayer");
   };
+
+  const resetTitleGuestDraft = useCallback((error: string | null = null) => {
+    titleGuestAttemptRef.current = false;
+    titleGuestJoinDetailsRef.current = null;
+    setMultiplayerRoomCode("");
+    setMultiplayerInvite("");
+    setMultiplayerAnswer("");
+    setMultiplayerState((current) => ({
+      ...EMPTY_MULTIPLAYER_STATE,
+      supported: current.supported,
+      reasons: current.reasons,
+      error,
+    }));
+  }, []);
+
+  const abandonTitleGuestAttempt = useCallback(async (options: Readonly<{
+    closePanel: boolean;
+    error?: string | null;
+  }>) => {
+    const api = engineRef.current as unknown as MultiplayerEngineApi | null;
+    if (!api?.disconnectMultiplayer) {
+      setMultiplayerState((current) => ({ ...current, error: "Disconnect is unavailable in this engine build." }));
+      return false;
+    }
+    const flight = await runMultiplayerAction(() => runTitleGuestCleanup({
+      disconnect: async () => {
+        await api.disconnectMultiplayer!("title-guest-abandoned");
+        if (engineRef.current) engineRef.current.previewWorld("WILDERNESS");
+      },
+      reset: () => resetTitleGuestDraft(options.error ?? null),
+      reportFailure: (message) => setMultiplayerState((current) => ({ ...current, error: message })),
+    }));
+    if (!flight.started || !flight.value) return false;
+    if (options.closePanel) setOverlay("title");
+    return true;
+  }, [resetTitleGuestDraft, runMultiplayerAction, setOverlay]);
+
+  const enterReadyTitleGuestWorld = useCallback(() => {
+    const engine = engineRef.current;
+    const api = engine as unknown as MultiplayerEngineApi | null;
+    const exact = api?.getMultiplayerState?.();
+    // Never infer readiness from WebRTC state. The engine exposes this bit only
+    // after the initial authoritative host snapshot has been fully applied.
+    if (!engine || exact?.role !== "guest" || exact.guestWorldReady !== true) return false;
+    const details = titleGuestJoinDetailsRef.current;
+    titleGuestAttemptRef.current = false;
+    titleGuestJoinDetailsRef.current = null;
+    prepareFirstPersonHeldPresentation(engine);
+    startedRef.current = true;
+    setStarted(true);
+    activeWorldIdRef.current = null;
+    setCurrentWorldSeed(details?.seed ?? engine.world.seedText);
+    setOverlay(null);
+    engine.activate();
+    showToast(details?.hostName
+      ? `Joined ${details.hostName}'s world. The host owns this session save.`
+      : "Joined the host's world. The host owns this session save.");
+    return true;
+  }, [setOverlay, showToast]);
+
+  const closeMultiplayerPanel = useCallback(() => {
+    if (multiplayerReturnRef.current === "pause") {
+      setOverlay("pause");
+      return;
+    }
+    const api = engineRef.current as unknown as MultiplayerEngineApi | null;
+    const engineRole = api?.getMultiplayerState?.().role;
+    if (titleGuestAttemptRef.current || engineRole === "guest") {
+      void abandonTitleGuestAttempt({ closePanel: true });
+      return;
+    }
+    resetTitleGuestDraft();
+    setOverlay("title");
+  }, [abandonTitleGuestAttempt, resetTitleGuestDraft, setOverlay]);
+
+  useEffect(() => {
+    closeMultiplayerPanelRef.current = closeMultiplayerPanel;
+    return () => {
+      if (closeMultiplayerPanelRef.current === closeMultiplayerPanel) {
+        closeMultiplayerPanelRef.current = () => undefined;
+      }
+    };
+  }, [closeMultiplayerPanel]);
+
+  useEffect(() => {
+    if (overlay !== "multiplayer" || multiplayerBusy || started) return;
+    const disposition = titleGuestWorldDisposition(multiplayerReturn, multiplayerState);
+    if (disposition === "ready") {
+      enterReadyTitleGuestWorld();
+      return;
+    }
+    if (disposition === "failed" && titleGuestAttemptRef.current) {
+      const message = multiplayerState.error ?? "The host connection failed before its world arrived.";
+      void abandonTitleGuestAttempt({ closePanel: false, error: message });
+    }
+  }, [abandonTitleGuestAttempt, enterReadyTitleGuestWorld, multiplayerBusy, multiplayerReturn, multiplayerState, overlay, started]);
 
   const suggestMultiplayerCode = () => {
     const api = engineRef.current as unknown as MultiplayerEngineApi | null;
@@ -2904,24 +3180,24 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       return;
     }
     applyCharacterProfile(activeCharacterProfile);
+    if (multiplayerReturn === "title") {
+      titleGuestAttemptRef.current = true;
+      titleGuestJoinDetailsRef.current = null;
+    }
     try {
       const flight = await runMultiplayerAction(() => api.joinMultiplayerRoom!(roomCode, multiplayerName.trim() || "Trailkeeper"));
       if (!flight.started) return;
       const result = flight.value;
+      if (multiplayerReturn === "title") {
+        titleGuestJoinDetailsRef.current = { hostName: result.hostName, ...(result.seed ? { seed: result.seed } : {}) };
+      }
       setMultiplayerState((current) => ({ ...current, roomCode, rendezvousStatus: "exchanging", error: null }));
       refreshMultiplayerState();
-      if (multiplayerReturn === "title" && result.worldReady) {
-        if (engineRef.current) prepareFirstPersonHeldPresentation(engineRef.current);
-        startedRef.current = true;
-        setStarted(true);
-        activeWorldIdRef.current = null;
-        if (result.seed) setCurrentWorldSeed(result.seed);
-        setOverlay(null);
-        engineRef.current?.activate();
-        showToast(`Joined ${result.hostName}'s world. The host owns this session save.`);
-      }
     } catch (error) {
-      setMultiplayerState((current) => ({ ...current, rendezvousStatus: "error", error: formatMultiplayerError(error) }));
+      const message = formatMultiplayerError(error);
+      if (multiplayerReturn === "title") {
+        await abandonTitleGuestAttempt({ closePanel: false, error: message });
+      } else setMultiplayerState((current) => ({ ...current, rendezvousStatus: "error", error: message }));
     }
   };
 
@@ -2937,13 +3213,20 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       return;
     }
     applyCharacterProfile(activeCharacterProfile);
+    if (multiplayerReturn === "title") {
+      titleGuestAttemptRef.current = true;
+      titleGuestJoinDetailsRef.current = null;
+    }
     try {
       const result = await runMultiplayerAction(() => Promise.resolve(api.joinMultiplayer!(inviteCode, multiplayerName.trim() || "Trailkeeper")));
       if (!result.started) return;
       recordMultiplayerResult(result.value, "answerCode");
       refreshMultiplayerState();
     } catch (error) {
-      setMultiplayerState((current) => ({ ...current, error: formatMultiplayerError(error) }));
+      const message = formatMultiplayerError(error);
+      if (multiplayerReturn === "title") {
+        await abandonTitleGuestAttempt({ closePanel: false, error: message });
+      } else setMultiplayerState((current) => ({ ...current, error: message }));
     }
   };
 
@@ -2987,8 +3270,16 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       if (wasGuest && engineRef.current) {
         clearFirstPersonHeldPresentation(engineRef.current);
         const engine = engineRef.current;
-        await engine.quitToTitleAsync();
-        if (engineRef.current !== engine) return;
+        const quitResult = await runQuitToTitleWithUiRecovery({
+          quitToTitle: () => engine.quitToTitleAsync(),
+          isCurrentEngine: () => engineRef.current === engine,
+          restoreHeldPresentation: () => prepareFirstPersonHeldPresentation(engine),
+          reportFailure: (message) => {
+            setMultiplayerState((current) => ({ ...current, error: message }));
+            showToast(message);
+          },
+        });
+        if (quitResult !== "completed") return;
         engine.previewWorld("WILDERNESS");
         startedRef.current = false;
         setStarted(false);
@@ -3933,14 +4224,31 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
   return (
     <main
       className={`game-shell ${showTouchControls ? "touch-controls-active" : ""}${agentMode ? " agent-client-mode" : ""}`}
+      data-worldgen-build-profile={COMPILED_WORLDGEN_BUILD_PROFILE}
       onContextMenu={(event) => {
         if (shouldSuppressGameContextMenu(started, event.target)) event.preventDefault();
       }}
     >
-      <canvas ref={canvasRef} className="game-canvas" aria-label="Blockwild endless 3D game world" />
+      <canvas
+        ref={canvasRef}
+        className="game-canvas"
+        aria-label="Blockwild endless 3D game world"
+        data-renderer-canvas-role="three-input"
+        data-renderer-input-target="primary"
+      />
+      <canvas
+        key={`renderer-wgpu-primary-${rendererPrimarySurfaceKey}`}
+        ref={setRendererPrimaryCanvas}
+        className="game-canvas"
+        aria-hidden="true"
+        data-testid="renderer-wgpu-primary-canvas"
+        data-renderer-canvas-role="wgpu-primary"
+        style={{ opacity: 0, pointerEvents: "none", visibility: "visible" }}
+      />
       <canvas ref={rendererShadowCanvasRef} hidden aria-hidden="true" data-testid="renderer-wgpu-shadow-canvas" />
       <div className="sky-vignette" aria-hidden="true" />
       {agentMode && <aside className="agent-client-badge" aria-label="Lightweight companion client"><strong>COMPANION DRONE</strong><span>SEMANTIC CLIENT · RENDER 4 · SIM 3</span><small>Use <code>window.blockwildAgent</code> through the repository skill. Host approval is required.</small></aside>}
+      {started && COMPILED_WORLDGEN_BUILD_PROFILE === "typescript-rollback" && <aside className="worldgen-rollback-badge" role="status" aria-label="TypeScript terrain rollback build; changing terrain authority requires a reload"><strong>ROLLBACK BUILD</strong><span>TYPESCRIPT TERRAIN · RELOAD REQUIRED</span></aside>}
 
       {started && overlay === null && (
         <div className={`game-hud${settings.showMinimap ? " minimap-enabled" : ""}`} aria-live="polite">
@@ -4009,7 +4317,8 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
               Chunks: {hud.loadedChunks} loaded · {hud.queuedChunks} queued · simulation {hud.simulationDistance}<br />
               Light: S{hud.lighting.sky} / R{hud.lighting.red} G{hud.lighting.green} B{hud.lighting.blue} / cave {Math.round(hud.lighting.subterraneanBlend * 100)}%<br />
               Light work: {hud.lighting.queuedSections} sections / {(hud.lighting.derivedBytes / 1048576).toFixed(1)} MB derived<br />
-              Performance: {hud.averageFps.toFixed(0)} FPS
+              Performance: {hud.averageFps.toFixed(0)} FPS<br />
+              Worldgen build: {COMPILED_WORLDGEN_BUILD_PROFILE}
             </div>
           )}
           {settings.showFps && <div className="fps-counter" role="status" aria-label={`${Math.round(hud.averageFps)} frames per second`}>{Math.round(hud.averageFps)} FPS</div>}
@@ -4048,7 +4357,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
             <div className="xp-bar" aria-label={`Level ${hud.level}, ${hud.xp} of ${xpNeeded} experience`}><span style={{ width: `${Math.min(100, hud.xp / xpNeeded * 100)}%` }} /><b>{hud.level || ""}</b></div>
             <div className="hotbar" role="toolbar" aria-label="Item hotbar">
               {hud.inventory.slice(0, 9).map((slot, index) => (
-                <button type="button" key={`hotbar-${index}`} className={`hotbar-slot ${hud.selected === index ? "selected" : ""}`} aria-pressed={hud.selected === index} aria-label={`Slot ${index + 1}: ${slot ? itemHoverText(slot) : "empty"}`} title={slot ? itemHoverText(slot) : `Empty hotbar slot ${index + 1}`} onClick={() => engineRef.current?.selectSlot(index)}>
+                <button type="button" key={`hotbar-${index}`} className={`hotbar-slot ${hud.selected === index ? "selected" : ""}`} aria-pressed={hud.selected === index} aria-label={`Slot ${index + 1}: ${slot ? itemHoverText(slot) : "empty"}`} title={slot ? itemHoverText(slot) : `Empty hotbar slot ${index + 1}`} onClick={() => engineRef.current?.selectSlotFromPlayerInput(index)}>
                   <span className="slot-number">{index + 1}</span>
                   <SlotContents slot={slot} />
                 </button>
@@ -4108,7 +4417,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
         <section className="menu-overlay title-overlay" aria-labelledby="game-title">
           <div className="title-mist" />
           <div className="title-screen-utility">
-            <span className="game-version-badge"><b>{GAME_VERSION_LABEL}</b> {GAME_RELEASE_NAME}</span>
+            <span className="game-version-badge"><b>{GAME_VERSION_LABEL}</b> {GAME_RELEASE_NAME}{COMPILED_WORLDGEN_BUILD_PROFILE === "typescript-rollback" && <em> · TERRAIN ROLLBACK</em>}</span>
             <span className="title-screen-actions"><a href="/wiki">WIKI</a><button type="button" onClick={() => engineRef.current?.toggleFullscreen()} aria-label={hud.fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>{hud.fullscreen ? "EXIT FULLSCREEN" : "FULLSCREEN"}</button></span>
           </div>
           <div ref={titleContentRef} className={`title-content ${titleMenuView === "main" ? "" : "title-submenu-open"}`}>
@@ -4125,9 +4434,10 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
                 <PixelButton className="title-menu-choice" onClick={beginNewWorld}><strong>Create New World</strong><small>Begin a fresh endless world</small></PixelButton>
                 <PixelButton className="title-menu-choice" onClick={() => setTitleMenuView("worlds")}><strong>Worlds</strong><small>{worlds.length} saved in this browser</small></PixelButton>
                 <PixelButton className="title-menu-choice" onClick={() => setTitleMenuView("characters")}><strong>Characters</strong><small>{activeCharacterProfile.name}</small></PixelButton>
-                <PixelButton className="title-menu-choice title-join-button" onClick={() => openMultiplayer("title")}><strong>Multiplayer</strong><small>Join or host with an invite code</small></PixelButton>
+                <PixelButton className="title-menu-choice title-join-button" onClick={() => openMultiplayer("title")}><strong>Multiplayer</strong><small>Join a host with an invite code</small></PixelButton>
                 <PixelButton className="title-menu-choice" onClick={() => setOverlay("help")}><strong>How to Play</strong></PixelButton>
                 <PixelButton className="title-menu-choice" onClick={() => openSettings("title")}><strong>Settings</strong></PixelButton>
+                {worldNotice && <p className="world-catalog-notice" role="alert">{worldNotice}</p>}
               </nav>}
               {titleMenuView === "characters" && <section className="title-submenu title-character-submenu" aria-labelledby="title-characters-heading">
                 <header className="title-submenu-header">
@@ -4340,6 +4650,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
                 {worldOptions.origin.mode !== "wilderness" && worldOptions.structures && worldOptions.settlementDensity > 0 ? <output className={`origin-preview ${originPreview ? "resolved" : originPreviewPending ? "pending" : "missing"}`} aria-live="polite">
                   {originPreviewPending ? <><strong>Reading the regional charts…</strong><span>The seed-derived settlement index is resolving a safe public arrival.</span></>
                     : originPreview ? <><strong>{FACTIONS[originPreview.candidate.factionId].name} {originPreview.candidate.size}</strong><span>{originPreview.candidate.biome.replaceAll("-", " ")} · {originPreview.anchorKind.replaceAll("-", " ")} · {Math.round(originPreview.distanceBlocks)} blocks from world center</span></>
+                      : originPreviewError ? <><strong>The authoritative regional chart could not be read.</strong><span>{originPreviewError}</span></>
                       : <><strong>No valid starting settlement found nearby.</strong><span>Keep the culture exact: search farther, randomize the seed, or return to wild country.</span><button type="button" onClick={() => setOriginSearchRadius((current) => Math.min(MAX_SETTLEMENT_ORIGIN_SEARCH_RADIUS, current + 12))}>Search farther</button></>}
                 </output> : null}
               </section>
@@ -4348,9 +4659,10 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
               <span><b>∞</b> STREAMED WORLD</span><span><b>{Object.keys(BIOME_NAMES).length}</b> SURFACE BIOMES</span><span><b>6</b> CAVE ECOLOGIES</span><span><b>{MOB_ORDER.length}</b> CREATURES</span><span><b>192</b> BLOCKS TALL</span>
             </div>
             <p className="browser-ownership-note setup-ownership-note">This world will belong to this browser on this host device. Export it to make a backup or move it.</p>
+            {worldNotice && <p className="world-catalog-notice" role="alert">{worldNotice}</p>}
             <div className="panel-actions">
               <PixelButton className="secondary-button" onClick={() => setOverlay("title")}>Cancel</PixelButton>
-              <PixelButton className="gold-button" disabled={worldBusy || (worldOptions.origin.mode !== "wilderness" && (originPreviewPending || !originPreview))} onClick={() => void createWorld()}>{worldBusy ? "Starting Rust Runtime…" : "Generate World"}</PixelButton>
+              <PixelButton className="gold-button" disabled={worldBusy || (worldOptions.origin.mode !== "wilderness" && (originPreviewPending || !originPreview))} onClick={() => void createWorld()}>{worldBusy ? COMPILED_WORLDGEN_BUILD_PROFILE === "typescript-rollback" ? "Generating World…" : "Starting Rust Runtime…" : "Generate World"}</PixelButton>
             </div>
           </div>
         </section>
@@ -4924,8 +5236,10 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
               else if (choiceId === "quests") setOverlay("quests");
               else if (choiceId === "settlement") setOverlay("settlement");
               else if (choiceId === "directions") {
-                const markerId = hearthroadsApi?.setNearestFactionTownWaypoint?.() ?? null;
-                if (markerId) setTrackedNavigationId(markerId);
+                const pendingMarkerId = hearthroadsApi?.setNearestFactionTownWaypointAuthoritative
+                  ? hearthroadsApi.setNearestFactionTownWaypointAuthoritative()
+                  : Promise.resolve(hearthroadsApi?.setNearestFactionTownWaypoint?.() ?? null);
+                void pendingMarkerId.then((markerId) => { if (markerId) setTrackedNavigationId(markerId); });
               }
               else if (choiceId === "follower") setOverlay("follower");
               else if (choiceId === "claim") {
@@ -5144,16 +5458,16 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
               <p className={`multiplayer-rendezvous status-${multiplayerState.rendezvousStatus}`} role="status"><b>{multiplayerState.rendezvousStatus.toUpperCase()}</b><span>{multiplayerState.rendezvousStatus === "waiting" ? (multiplayerState.role === "host" ? "Room open · waiting for a guest" : "Waiting for the host room to finish opening") : multiplayerState.rendezvousStatus === "retrying" ? "Host found · retrying the secure exchange" : multiplayerState.rendezvousStatus === "exchanging" ? "Guest found · securing the direct connection" : multiplayerState.rendezvousStatus === "connected" ? "Connected · the host world is live" : multiplayerReturn === "title" ? "Enter the host code, then Join" : "Choose Host or Join to begin"}</span></p>
             </section>
 
-            {multiplayerReturn === "pause" && <details className="multiplayer-advanced">
-              <summary>Advanced direct connection fallback</summary>
-              <p>Use this only if the one-code rendezvous service cannot be reached. It requires one offer and one return answer.</p>
+            <details className="multiplayer-advanced">
+              <summary>{multiplayerReturn === "title" ? "Advanced direct guest connection" : "Advanced direct connection fallback"}</summary>
+              <p>{multiplayerReturn === "title" ? "Paste the host's direct offer, create one return answer, then wait here until the authoritative host world is ready." : "Use this only if the one-code rendezvous service cannot be reached. It requires one offer and one return answer."}</p>
               <div className="multiplayer-connection-grid">
-                <section>
+                {multiplayerReturn === "pause" && <section>
                   <span className="panel-eyebrow">HOST OFFER</span>
                   <PixelButton disabled={multiplayerBusy || !multiplayerState.supported || multiplayerState.role === "guest"} onClick={() => void hostMultiplayer()}>Create direct offer</PixelButton>
                   {multiplayerState.inviteCode && <div className="connection-code"><label>Host offer</label><textarea readOnly value={multiplayerState.inviteCode} aria-label="Host offer code" /><button type="button" onClick={() => void copyMultiplayerCode(multiplayerState.inviteCode)}>COPY OFFER</button></div>}
                   {(multiplayerState.role === "host" || multiplayerState.inviteCode) && <div className="connection-code"><label htmlFor="guest-answer-code">Guest answer</label><textarea id="guest-answer-code" value={multiplayerAnswer} onChange={(event) => setMultiplayerAnswer(event.target.value)} placeholder="Paste the guest answer" /><button type="button" disabled={multiplayerBusy || !multiplayerAnswer.trim()} onClick={() => void acceptMultiplayerAnswer()}>ACCEPT ANSWER</button></div>}
-                </section>
+                </section>}
                 <section>
                   <span className="panel-eyebrow">JOIN OFFER</span>
                   <div className="connection-code"><label htmlFor="host-invite-code">Host offer</label><textarea id="host-invite-code" value={multiplayerInvite} onChange={(event) => setMultiplayerInvite(event.target.value)} placeholder="Paste the host offer" /></div>
@@ -5161,7 +5475,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
                   {multiplayerState.answerCode && <div className="connection-code guest-answer-output"><label>Answer for the host</label><textarea readOnly value={multiplayerState.answerCode} aria-label="Guest answer code" /><button type="button" onClick={() => void copyMultiplayerCode(multiplayerState.answerCode)}>COPY ANSWER</button></div>}
                 </section>
               </div>
-            </details>}
+            </details>
 
             {multiplayerState.peers.length > 0 && <section className="multiplayer-peer-list"><span className="panel-eyebrow">SESSION PLAYERS</span>{multiplayerState.peers.map((peer, index) => <div key={peer.id ?? peer.token ?? index}><span className="peer-cube" aria-hidden="true" /><strong>{peer.identity?.name ?? peer.name ?? peer.id ?? `Player ${index + 1}`}</strong><small>{(peer.state ?? "connected").toUpperCase()}{typeof peer.latencyMs === "number" ? ` · ${Math.round(peer.latencyMs)}ms` : ""}</small>{peer.identity?.peerKind === "agent" && <button type="button" onClick={() => {
               const agentId = peer.identity!.id ?? peer.id ?? peer.token;
@@ -5207,7 +5521,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
 
             <p className="multiplayer-ownership-note">{multiplayerReturn === "title" ? "The host browser owns this world save. Joining creates no local world and never changes your existing catalog." : "Your world save stays owned by this browser on the host device. Guests receive session state; they do not become owners of the host's local catalog entry."} Share connection codes only with people you trust.</p>
             <div className="panel-actions multiplayer-actions">
-              <PixelButton className="secondary-button" disabled={multiplayerBusy} onClick={() => setOverlay(multiplayerReturn)}>Back</PixelButton>
+              <PixelButton className="secondary-button" disabled={multiplayerBusy} onClick={closeMultiplayerPanel}>Back</PixelButton>
               <PixelButton className="secondary-button" onClick={() => (engineRef.current as unknown as MultiplayerEngineApi | null)?.downloadMultiplayerDiagnostics?.()}>Download diagnostics</PixelButton>
               {multiplayerReturn === "pause" && <PixelButton className="danger-button" disabled={multiplayerBusy || ["idle", "disconnected", "closed"].includes(multiplayerState.status)} onClick={() => void disconnectMultiplayer()}>Disconnect Session</PixelButton>}
             </div>

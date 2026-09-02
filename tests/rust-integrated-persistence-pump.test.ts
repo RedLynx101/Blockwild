@@ -7,7 +7,11 @@ import {
   RUST_INTEGRATED_PERSISTENCE_RESPONSE_TYPE_V1,
   type RustIntegratedRuntimeBulkResponseV1,
 } from "../app/game/rust-integrated-runtime-bulk-platform.ts";
-import { RustIntegratedPersistencePumpV1, type RustIntegratedPersistenceBulkServiceV1 } from "../app/game/rust-integrated-persistence-pump.ts";
+import {
+  RUST_INTEGRATED_PERSISTENCE_PUMP_DEFAULT_MAX_BYTES_V1,
+  RustIntegratedPersistencePumpV1,
+  type RustIntegratedPersistenceBulkServiceV1,
+} from "../app/game/rust-integrated-persistence-pump.ts";
 import { RustPersistenceBrowserRuntimeV1 } from "../app/game/rust-persistence-runtime-adapter.ts";
 import { decodeRustPersistenceResponseV1 } from "../app/game/rust-persistence-runtime-contract.ts";
 
@@ -17,9 +21,11 @@ const STATE = Object.freeze({ revision: Object.freeze({ epoch: 1, world: 1, enti
 test("policy-free persistence pump drains opaque BWPR and returns exact BWPA token", async () => {
   const queue = [Uint8Array.from(BWPR)];
   const completions: Array<Readonly<{ token: number; payload: Uint8Array }>> = [];
+  const pollByteBounds: number[] = [];
   const empty = (): RustIntegratedRuntimeBulkResponseV1 => ({ type: "runtime-bulk-empty-v1", requestId: 1, clientEpoch: 1, workerEpoch: 1, current: STATE });
   const service: RustIntegratedPersistenceBulkServiceV1 = {
-    async pollBulkPlatform() {
+    async pollBulkPlatform(maxBytes) {
+      pollByteBounds.push(maxBytes ?? 0);
       const payload = queue.shift();
       return payload ? { type: "runtime-bulk-platform-request-v1", requestId: 1, clientEpoch: 1, workerEpoch: 1, current: STATE, transferToken: 77, typeId: RUST_INTEGRATED_PERSISTENCE_REQUEST_TYPE_V1, payload } : empty();
     },
@@ -33,6 +39,10 @@ test("policy-free persistence pump drains opaque BWPR and returns exact BWPA tok
   assert.equal(result.operations, 1);
   assert.equal(result.idle, true);
   assert.equal(completions[0].token, 77);
+  assert.deepEqual(pollByteBounds, [
+    RUST_INTEGRATED_PERSISTENCE_PUMP_DEFAULT_MAX_BYTES_V1,
+    RUST_INTEGRATED_PERSISTENCE_PUMP_DEFAULT_MAX_BYTES_V1,
+  ]);
   assert.equal(decodeRustPersistenceResponseV1(completions[0].payload).kind, "commit");
   assert.notEqual(RUST_INTEGRATED_PERSISTENCE_REQUEST_TYPE_V1, RUST_INTEGRATED_PERSISTENCE_RESPONSE_TYPE_V1);
   await pump.shutdown();

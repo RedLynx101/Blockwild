@@ -12,6 +12,108 @@ export const TERRAIN_GENERATION_CELL_COUNT_V2 = TERRAIN_GENERATION_CHUNK_SIZE_V2
 export const TERRAIN_GENERATION_COLUMN_COUNT_V2 = TERRAIN_GENERATION_CHUNK_SIZE_V2 ** 2;
 export const TERRAIN_GENERATION_SECTION_COUNT_V2 = TERRAIN_GENERATION_WORLD_HEIGHT_V2
   / TERRAIN_GENERATION_SECTION_HEIGHT_V2;
+export const TERRAIN_GENERATION_PROMOTION_CORPUS_CASES_V2 = 155 as const;
+export const TERRAIN_GENERATION_PROMOTION_CORPUS_HASH_V2 = "5d4e6b1445b00f3430164d1a8093d8dc" as const;
+export const TERRAIN_LOCATOR_SCHEMA_V1 = 1 as const;
+export const TERRAIN_LOCATOR_MAX_EXCLUSIONS_V1 = 4_096 as const;
+export const TERRAIN_LOCATOR_MAX_SETTLEMENT_RESULTS_V1 = 32 as const;
+export const TERRAIN_LOCATOR_MAX_ORIGIN_MILLIS_V1 = BigInt("2147400000000");
+export const TERRAIN_LOCATOR_MAX_SEED_BYTES_V1 = 2_048 as const;
+export const TERRAIN_LOCATOR_MAX_OPTIONS_BYTES_V1 = 8_192 as const;
+/** Immutable identity recomputed by the checked-in TypeScript/native locator corpus and candidate Wasm gate. */
+export const TERRAIN_LOCATOR_PROMOTION_CORPUS_HASH_V1 = "85d6e080c27222b8d06d25812d7d5535" as const;
+export const TERRAIN_LOCATOR_PROMOTION_SETTLEMENT_CASES_V1 = 114 as const;
+export const TERRAIN_LOCATOR_PROMOTION_LAIR_CASES_V1 = 16 as const;
+export const TERRAIN_LOCATOR_PROMOTION_MINIMUM_SETTLEMENT_CASES_V1 = 24 as const;
+export const TERRAIN_LOCATOR_PROMOTION_MINIMUM_LAIR_CASES_V1 = 12 as const;
+
+export type TerrainSettlementFactionV1 = "atlantians" | "dwarves" | "goblins" | "hobbits" | "sugarcourt" | "wood-elves";
+export type TerrainSettlementSizeV1 = "hamlet" | "town" | "village";
+export type TerrainSettlementEnvironmentV1 = "surface" | "underground" | "underwater";
+export type TerrainSettlementBiomeV1 = "badlands" | "cloudreed-glen" | "deep-ocean" | "flower-meadow"
+  | "forest" | "glimmerwood" | "highlands" | "lumen-trench" | "snowcap-range" | "sugarplum-vale" | "wildwood";
+export type TerrainDragonSurveyTypeV1 = "fire" | "gold" | "ice" | "sea" | "silver" | "steel";
+
+export type SettlementLocatorRequestV1 = Readonly<{
+  schemaVersion: typeof TERRAIN_LOCATOR_SCHEMA_V1;
+  epoch: number;
+  taskId: number;
+  seedText: string;
+  optionsJson: string;
+  originXMillis: bigint;
+  originZMillis: bigint;
+  factionIds?: readonly TerrainSettlementFactionV1[];
+  sizes?: readonly TerrainSettlementSizeV1[];
+  environments?: readonly TerrainSettlementEnvironmentV1[];
+  excludeIds: readonly string[];
+  maxRegionRadius: number;
+  limit: number;
+  breathesWater: boolean;
+  requestHash: string;
+}>;
+
+export type SettlementLocatorResultV1 = Readonly<{
+  schemaVersion: typeof TERRAIN_LOCATOR_SCHEMA_V1;
+  epoch: number;
+  taskId: number;
+  requestHash: string;
+  entries: readonly Readonly<{
+    id: string;
+    factionId: TerrainSettlementFactionV1;
+    size: TerrainSettlementSizeV1;
+    environment: TerrainSettlementEnvironmentV1;
+    biome: TerrainSettlementBiomeV1;
+    regionX: number;
+    regionZ: number;
+    x: number;
+    z: number;
+    floorY: number | null;
+    distanceSquaredMillis: bigint;
+    publicArrival: Readonly<{ x: number; yMillis: number; z: number; anchorKind: string }> | null;
+  }>[];
+  resultHash: string;
+}>;
+
+export type DragonLairLocatorRequestV1 = Readonly<{
+  schemaVersion: typeof TERRAIN_LOCATOR_SCHEMA_V1;
+  epoch: number;
+  taskId: number;
+  seedText: string;
+  optionsJson: string;
+  originXMillis: bigint;
+  originZMillis: bigint;
+  dragonType: TerrainDragonSurveyTypeV1;
+  minimumStage: 3 | 4 | 5;
+  excludeIds: readonly string[];
+  maxRegionRadius: number;
+  requestHash: string;
+}>;
+
+export type DragonLairLocatorResultV1 = Readonly<{
+  schemaVersion: typeof TERRAIN_LOCATOR_SCHEMA_V1;
+  epoch: number;
+  taskId: number;
+  requestHash: string;
+  entry: Readonly<{
+    id: string;
+    dragonType: TerrainDragonSurveyTypeV1;
+    stage: 3 | 4 | 5;
+    sex: "female" | "male";
+    x: number;
+    y: number;
+    z: number;
+    distanceSquaredMillis: bigint;
+  }> | null;
+  resultHash: string;
+}>;
+
+export type TerrainLocatorParityCertificateV1 = Readonly<{
+  schemaVersion: typeof TERRAIN_LOCATOR_SCHEMA_V1;
+  corpusHash: string;
+  settlementCases: number;
+  lairCases: number;
+  byteEqual: boolean;
+}>;
 
 export type TerrainGenerationEditPair = readonly [index: number, blockType: number];
 export type TerrainGenerationMarkerEntry = readonly [key: string, marker: StructureMarker];
@@ -94,6 +196,8 @@ export type GeneratedChunkV2Payload = Readonly<{
 
 export type TerrainGenerationWorkerRequestV2 =
   | Readonly<{ type: "generate-chunk-v2"; request: GenerateChunkRequestV2 }>
+  | Readonly<{ type: "query-settlements-v1"; request: SettlementLocatorRequestV1 }>
+  | Readonly<{ type: "query-dragon-lair-v1"; request: DragonLairLocatorRequestV1 }>
   | Readonly<{ type: "cancel-generate-chunk-v2"; epoch: number; taskId: number }>;
 
 export type TerrainGenerationWorkerResponseV2 =
@@ -103,8 +207,20 @@ export type TerrainGenerationWorkerResponseV2 =
     requestSchemaVersion: number;
     resultSchemaVersion: number;
     backend: "typescript-compatibility-oracle" | "rust-wasm-shadow" | "rust-wasm-authoritative";
+    certificate?: Readonly<{
+      generatorVersion: number;
+      generatorHash: string;
+      contentHash: string;
+      corpusHash: string;
+      corpusCases: number;
+      byteEqual: boolean;
+    }>;
+    locatorCertificate?: TerrainLocatorParityCertificateV1;
   }>
+  | Readonly<{ type: "terrain-generation-startup-error-v2"; message: string }>
   | Readonly<{ type: "generated-chunk-v2"; epoch: number; taskId: number; result: GeneratedChunkV2 }>
+  | Readonly<{ type: "settlement-locator-result-v1"; epoch: number; taskId: number; result: SettlementLocatorResultV1 }>
+  | Readonly<{ type: "dragon-lair-locator-result-v1"; epoch: number; taskId: number; result: DragonLairLocatorResultV1 }>
   | Readonly<{ type: "generate-chunk-error-v2"; epoch: number; taskId: number; message: string }>
   | Readonly<{ type: "generate-chunk-cancelled-v2"; epoch: number; taskId: number }>;
 
@@ -123,7 +239,7 @@ const HIGH_LANE_SALT = BigInt("11562461410679940143");
 const HIGH_LANE_PRIME = FNV_64_PRIME ^ BigInt("315");
 const BYTE_MASK = BigInt("255");
 
-class CanonicalGenerationHasher {
+export class CanonicalGenerationHasher {
   private low = FNV_64_OFFSET;
   private high = FNV_64_OFFSET ^ HIGH_LANE_SALT;
 
@@ -148,7 +264,11 @@ class CanonicalGenerationHasher {
 
   writeI32(value: number) { this.writeU32(value); }
 
-  writeU64(value: number) {
+  writeI64(value: bigint) { this.writeU64(BigInt.asUintN(64, value)); }
+
+  writeU8(value: number) { this.writeRawByte(value & 0xff); }
+
+  writeU64(value: number | bigint) {
     let remaining = BigInt(value);
     for (let index = 0; index < 8; index += 1) {
       this.writeRawByte(Number(remaining & BYTE_MASK));
@@ -178,6 +298,172 @@ class CanonicalGenerationHasher {
     }
     return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   }
+}
+
+const SETTLEMENT_FACTIONS_V1 = ["atlantians", "dwarves", "goblins", "hobbits", "sugarcourt", "wood-elves"] as const;
+const SETTLEMENT_SIZES_V1 = ["hamlet", "town", "village"] as const;
+const SETTLEMENT_ENVIRONMENTS_V1 = ["surface", "underground", "underwater"] as const;
+const DRAGON_SURVEY_TYPES_V1 = ["fire", "gold", "ice", "sea", "silver", "steel"] as const;
+
+function canonicalLocatorStringList<T extends string>(
+  values: readonly T[] | undefined,
+  allowed: readonly T[],
+  label: string,
+  maximum = allowed.length,
+) {
+  if (values === undefined) return undefined;
+  if (values.length > maximum) throw new TerrainGenerationContractError([`${label} exceeds ${maximum}`]);
+  const result = [...values].sort(compareCanonicalText);
+  for (let index = 0; index < result.length; index += 1) {
+    if (!allowed.includes(result[index])) throw new TerrainGenerationContractError([`${label} contains an invalid value`]);
+    if (index > 0 && result[index - 1] === result[index]) throw new TerrainGenerationContractError([`${label} must be unique`]);
+  }
+  return Object.freeze(result);
+}
+
+function canonicalLocatorExclusions(values: ReadonlySet<string> | readonly string[] | undefined, label: string) {
+  const result = [...(values instanceof Set ? values : values ?? [])].sort(compareCanonicalText);
+  if (result.length > TERRAIN_LOCATOR_MAX_EXCLUSIONS_V1) {
+    throw new TerrainGenerationContractError([`${label} exceeds ${TERRAIN_LOCATOR_MAX_EXCLUSIONS_V1}`]);
+  }
+  for (let index = 0; index < result.length; index += 1) {
+    if (!/^[a-z0-9:_-]+$/.test(result[index]) || result[index].length > 128) {
+      throw new TerrainGenerationContractError([`${label} contains a non-canonical or oversized ID`]);
+    }
+    if (index > 0 && result[index - 1] === result[index]) throw new TerrainGenerationContractError([`${label} must be unique`]);
+  }
+  return Object.freeze(result);
+}
+
+function boundedLocatorInteger(value: unknown, fallback: number, minimum: number, maximum: number, label: string) {
+  const candidate = value === undefined ? fallback : value;
+  if (typeof candidate !== "number" || !Number.isFinite(candidate)) {
+    throw new TerrainGenerationContractError([`${label} must be finite`]);
+  }
+  return Math.max(minimum, Math.min(maximum, Math.floor(candidate)));
+}
+
+function canonicalOriginMillis(value: number, label: string) {
+  if (!Number.isFinite(value) || !Number.isSafeInteger(Math.round(value * 1_000))) {
+    throw new TerrainGenerationContractError([`${label} must round to a bounded integer milliblock`]);
+  }
+  const result = BigInt(Math.round(value * 1_000));
+  if (result < -TERRAIN_LOCATOR_MAX_ORIGIN_MILLIS_V1 || result > TERRAIN_LOCATOR_MAX_ORIGIN_MILLIS_V1) {
+    throw new TerrainGenerationContractError([`${label} must round to a bounded integer milliblock`]);
+  }
+  return result;
+}
+
+function hashOptionalLocatorSet(hasher: CanonicalGenerationHasher, values: readonly string[] | undefined) {
+  hasher.writeU16(values === undefined ? 0 : 1);
+  if (values === undefined) return;
+  hasher.writeU16(values.length);
+  for (const value of values) hasher.writeString(value);
+}
+
+const TERRAIN_LOCATOR_TEXT_ENCODER_V1 = new TextEncoder();
+
+/** Mirrors the native locator reader's UTF-8 limits before hashing or transport. */
+export function assertTerrainLocatorTextBoundsV1(seedText: string, optionsJson: string) {
+  const seedBytes = TERRAIN_LOCATOR_TEXT_ENCODER_V1.encode(seedText).byteLength;
+  const optionsBytes = TERRAIN_LOCATOR_TEXT_ENCODER_V1.encode(optionsJson).byteLength;
+  const issues: string[] = [];
+  if (new TextDecoder().decode(TERRAIN_LOCATOR_TEXT_ENCODER_V1.encode(seedText)) !== seedText) {
+    issues.push("locator seed must be well-formed Unicode");
+  }
+  if (seedBytes === 0 || seedBytes > TERRAIN_LOCATOR_MAX_SEED_BYTES_V1) {
+    issues.push(`locator seed must contain 1-${TERRAIN_LOCATOR_MAX_SEED_BYTES_V1} UTF-8 bytes`);
+  }
+  if (optionsBytes === 0 || optionsBytes > TERRAIN_LOCATOR_MAX_OPTIONS_BYTES_V1) {
+    issues.push(`locator options must contain 1-${TERRAIN_LOCATOR_MAX_OPTIONS_BYTES_V1} UTF-8 bytes`);
+  }
+  if (issues.length > 0) throw new TerrainGenerationContractError(issues);
+}
+
+export function hashSettlementLocatorRequestV1(request: Omit<SettlementLocatorRequestV1, "epoch" | "taskId" | "requestHash">) {
+  assertTerrainLocatorTextBoundsV1(request.seedText, request.optionsJson);
+  const hasher = new CanonicalGenerationHasher("blockwild-settlement-query-v1");
+  hasher.writeString(request.seedText);
+  hasher.writeString(request.optionsJson);
+  hasher.writeI64(request.originXMillis);
+  hasher.writeI64(request.originZMillis);
+  hashOptionalLocatorSet(hasher, request.factionIds);
+  hashOptionalLocatorSet(hasher, request.sizes);
+  hashOptionalLocatorSet(hasher, request.environments);
+  hasher.writeU16(request.excludeIds.length);
+  for (const value of request.excludeIds) hasher.writeString(value);
+  hasher.writeU16(request.maxRegionRadius);
+  hasher.writeU16(request.limit);
+  hasher.writeU16(request.breathesWater ? 1 : 0);
+  return hasher.finish();
+}
+
+export function createSettlementLocatorRequestV1(input: Readonly<{
+  epoch: number; taskId: number; seedText: string; generationOptions: Readonly<Record<string, unknown>>;
+  origin: Readonly<{ x: number; z: number }>; factionIds?: readonly TerrainSettlementFactionV1[];
+  sizes?: readonly TerrainSettlementSizeV1[]; environments?: readonly TerrainSettlementEnvironmentV1[];
+  excludeIds?: ReadonlySet<string> | readonly string[]; maxRegionRadius?: number; limit?: number; breathesWater?: boolean;
+}>) {
+  if (!validU32(input.epoch) || !validU32(input.taskId) || !input.seedText) {
+    throw new TerrainGenerationContractError(["settlement locator authority identity is invalid"]);
+  }
+  const withoutHash = {
+    schemaVersion: TERRAIN_LOCATOR_SCHEMA_V1,
+    epoch: input.epoch,
+    taskId: input.taskId,
+    seedText: input.seedText,
+    optionsJson: stableTerrainGenerationJsonV2(input.generationOptions),
+    originXMillis: canonicalOriginMillis(input.origin.x, "origin.x"),
+    originZMillis: canonicalOriginMillis(input.origin.z, "origin.z"),
+    factionIds: canonicalLocatorStringList(input.factionIds, SETTLEMENT_FACTIONS_V1, "factionIds"),
+    sizes: canonicalLocatorStringList(input.sizes, SETTLEMENT_SIZES_V1, "sizes"),
+    environments: canonicalLocatorStringList(input.environments, SETTLEMENT_ENVIRONMENTS_V1, "environments"),
+    excludeIds: canonicalLocatorExclusions(input.excludeIds, "excludeIds"),
+    maxRegionRadius: boundedLocatorInteger(input.maxRegionRadius, 24, 0, 96, "maxRegionRadius"),
+    limit: boundedLocatorInteger(input.limit, 1, 1, TERRAIN_LOCATOR_MAX_SETTLEMENT_RESULTS_V1, "limit"),
+    breathesWater: input.breathesWater === true,
+  } as const;
+  return Object.freeze({ ...withoutHash, requestHash: hashSettlementLocatorRequestV1(withoutHash) });
+}
+
+export function hashDragonLairLocatorRequestV1(request: Omit<DragonLairLocatorRequestV1, "epoch" | "taskId" | "requestHash">) {
+  assertTerrainLocatorTextBoundsV1(request.seedText, request.optionsJson);
+  const hasher = new CanonicalGenerationHasher("blockwild-lair-query-v1");
+  hasher.writeString(request.seedText);
+  hasher.writeString(request.optionsJson);
+  hasher.writeI64(request.originXMillis);
+  hasher.writeI64(request.originZMillis);
+  hasher.writeString(request.dragonType);
+  hasher.writeU16(request.minimumStage);
+  hasher.writeU16(request.excludeIds.length);
+  for (const value of request.excludeIds) hasher.writeString(value);
+  hasher.writeU16(request.maxRegionRadius);
+  return hasher.finish();
+}
+
+export function createDragonLairLocatorRequestV1(input: Readonly<{
+  epoch: number; taskId: number; seedText: string; generationOptions: Readonly<Record<string, unknown>>;
+  origin: Readonly<{ x: number; z: number }>; dragonType: TerrainDragonSurveyTypeV1; minimumStage: 3 | 4 | 5;
+  excludeIds?: ReadonlySet<string> | readonly string[]; maxRegionRadius?: number;
+}>) {
+  if (!validU32(input.epoch) || !validU32(input.taskId) || !input.seedText || !DRAGON_SURVEY_TYPES_V1.includes(input.dragonType)
+    || ![3, 4, 5].includes(input.minimumStage)) {
+    throw new TerrainGenerationContractError(["dragon-lair locator authority identity or filters are invalid"]);
+  }
+  const withoutHash = {
+    schemaVersion: TERRAIN_LOCATOR_SCHEMA_V1,
+    epoch: input.epoch,
+    taskId: input.taskId,
+    seedText: input.seedText,
+    optionsJson: stableTerrainGenerationJsonV2(input.generationOptions),
+    originXMillis: canonicalOriginMillis(input.origin.x, "origin.x"),
+    originZMillis: canonicalOriginMillis(input.origin.z, "origin.z"),
+    dragonType: input.dragonType,
+    minimumStage: input.minimumStage,
+    excludeIds: canonicalLocatorExclusions(input.excludeIds, "excludeIds"),
+    maxRegionRadius: boundedLocatorInteger(input.maxRegionRadius, 24, 1, 64, "maxRegionRadius"),
+  } as const;
+  return Object.freeze({ ...withoutHash, requestHash: hashDragonLairLocatorRequestV1(withoutHash) });
 }
 
 function bytesOf(view: ArrayBufferView) {

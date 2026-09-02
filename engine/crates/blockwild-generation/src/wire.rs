@@ -274,11 +274,40 @@ mod tests {
     use crate::generator::TerrainGeneratorV18;
     use crate::service::fixture_request;
 
+    fn encode_request_without_validation(request: &GenerateChunkRequestV2) -> Vec<u8> {
+        let mut writer = Writer::new(REQUEST_MAGIC);
+        writer.u16(request.protocol_version);
+        writer.u16(request.schema_version);
+        writer.u32(request.epoch);
+        writer.u32(request.task_id);
+        writer.u32(request.revision);
+        for value in [
+            &request.namespace,
+            &request.content_hash,
+            &request.generator_hash,
+            &request.seed_text,
+            &request.generation_options_json,
+            &request.key,
+        ] {
+            writer.string(value).unwrap();
+        }
+        writer.i32(request.cx);
+        writer.i32(request.cz);
+        writer.u32(request.edits.len() as u32);
+        for &(index, block) in &request.edits {
+            writer.u32(index);
+            writer.u16(block);
+        }
+        writer.string(&request.request_hash).unwrap();
+        writer.finish().unwrap()
+    }
+
     #[test]
     fn request_and_result_round_trip_without_platform_types() {
         let request = fixture_request("wire", -7, 11, 9);
         assert_eq!(decode_request(&encode_request(&request).unwrap()).unwrap(), request);
         let result = TerrainGeneratorV18::from_request(&request)
+            .unwrap()
             .generate(&request, || false)
             .unwrap();
         assert_eq!(decode_result(&encode_result(&result).unwrap()).unwrap(), result);
@@ -291,5 +320,15 @@ mod tests {
         let mut bytes = encode_request(&request).unwrap();
         bytes.push(0);
         assert!(decode_request(&bytes).is_err());
+    }
+
+    #[test]
+    fn decode_rejects_a_correctly_rehashed_nested_option_spoof() {
+        let mut request = fixture_request("wire-spoof", 0, 0, 1);
+        request.generation_options_json = r#"{"origin":{"profile":"legacy-v14"}}"#.into();
+        request.request_hash = request.canonical_hash().to_hex();
+        assert_eq!(request.canonical_hash().to_hex(), request.request_hash);
+        assert!(encode_request(&request).is_err());
+        assert!(decode_request(&encode_request_without_validation(&request)).is_err());
     }
 }

@@ -4,6 +4,11 @@ import {
   DEFAULT_SWIM_RULES,
   LIQUID_SIMULATION_STEP_SECONDS,
   LiquidSimulator,
+  SHORE_MANTLE_SUSTAIN_SECONDS,
+  loadedBodyCollisionAt,
+  loadedLiquidSurfaceY,
+  loadedLowBankShoreLedgeHeight,
+  projectBodyOntoForwardMotion,
   stepSwimming,
   waterAnimationPhase,
   waterSurfaceSample,
@@ -130,6 +135,11 @@ test("swimming drains oxygen, applies drowning ticks, and boosts a same-level sh
   assert.equal(shore.shoreBoosted, true);
   assert.ok(shore.state.velocityY >= 7.4);
   assert.ok(shore.horizontalSpeedScale < 1);
+  assert.equal(shore.state.surfaceBreachReady, false);
+  assert.equal(shore.state.shoreExitReady, false);
+  assert.equal(shore.state.surfaceBreachSeconds, SHORE_MANTLE_SUSTAIN_SECONDS);
+  assert.equal(shore.state.surfaceStrokeCooldownSeconds, 0);
+  assert.equal(shore.state.surfaceBobActive, false);
 
   const drowning = stepSwimming(
     { velocityY: 0, oxygenSeconds: 0, drowningAccumulator: 1.4 },
@@ -139,6 +149,313 @@ test("swimming drains oxygen, applies drowning ticks, and boosts a same-level sh
   );
   assert.equal(drowning.damage, 1);
   assert.ok(drowning.state.drowningAccumulator < 0.2);
+});
+
+test("a held shore attempt emits once and sustains one bounded mantle", () => {
+  const input = { jumpHeld: true, movingForward: true };
+  const shore = {
+    submersion: 0.75,
+    headSubmerged: false,
+    horizontalCollision: true,
+    shoreLedgeHeight: 1,
+    surfaceGap: 0.3,
+    surfaceClearance: 0.1,
+  };
+  let state: SwimmerState = {
+    velocityY: -0.4,
+    oxygenSeconds: DEFAULT_SWIM_RULES.maxOxygenSeconds,
+    drowningAccumulator: 0,
+    entryMomentumSpeed: 0,
+    surfaceBreachReady: true,
+    shoreExitReady: true,
+    surfaceBreachSeconds: 0,
+    surfaceStrokeCooldownSeconds: 0,
+    surfaceBobActive: false,
+  };
+  const dt = 1 / 60;
+  const accepted = stepSwimming(state, input, shore, dt);
+  assert.equal(accepted.shoreBoosted, true);
+  assert.equal(accepted.state.velocityY, DEFAULT_SWIM_RULES.shoreExitVelocity);
+  assert.equal(accepted.state.surfaceBreachSeconds, SHORE_MANTLE_SUSTAIN_SECONDS);
+  assert.equal(accepted.state.surfaceStrokeCooldownSeconds, 0);
+  assert.equal(accepted.state.surfaceBobActive, false);
+  state = accepted.state;
+
+  let sustainedFrames = 0;
+  while ((state.surfaceBreachSeconds ?? 0) > 0 && sustainedFrames < 30) {
+    const priorSeconds = state.surfaceBreachSeconds ?? 0;
+    const continued = stepSwimming(state, input, { ...shore, horizontalCollision: false }, dt);
+    assert.equal(continued.shoreBoosted, false, "sustaining a consumed attempt must not emit another cue");
+    assert.ok(continued.state.velocityY >= DEFAULT_SWIM_RULES.shoreExitVelocity);
+    assert.ok((continued.state.surfaceBreachSeconds ?? 0) < priorSeconds);
+    assert.equal(continued.state.surfaceBreachReady, false, "ordinary surface breach cannot rearm the active mantle");
+    assert.equal(continued.state.surfaceStrokeCooldownSeconds, 0);
+    assert.equal(continued.state.surfaceBobActive, false);
+    state = continued.state;
+    sustainedFrames += 1;
+  }
+
+  assert.ok(sustainedFrames >= 12 && sustainedFrames <= 13, `0.20s mantle lasted ${sustainedFrames} fixed steps`);
+  assert.equal(state.surfaceBreachSeconds, 0);
+  assert.equal(state.shoreExitReady, false);
+
+  const exhausted = stepSwimming(state, input, shore, dt);
+  assert.equal(exhausted.shoreBoosted, false, "a held press must stay consumed after the sustain timer expires");
+  assert.equal(exhausted.state.shoreExitReady, false);
+});
+
+test("releasing W aborts a mantle without rearming, while releasing Space rearms", () => {
+  const input = { jumpHeld: true, movingForward: true };
+  const shore = {
+    submersion: 0.75,
+    headSubmerged: false,
+    horizontalCollision: true,
+    shoreLedgeHeight: 1,
+    surfaceGap: 0.3,
+    surfaceClearance: 0.1,
+  };
+  const initial = stepSwimming(
+    { velocityY: -0.4, oxygenSeconds: 12, drowningAccumulator: 0 },
+    input,
+    shore,
+    1 / 60,
+  );
+  const forwardReleased = stepSwimming(
+    initial.state,
+    { jumpHeld: true, movingForward: false },
+    shore,
+    1 / 60,
+  );
+  assert.equal(forwardReleased.shoreBoosted, false);
+  assert.equal(forwardReleased.state.surfaceBreachSeconds, 0);
+  assert.equal(forwardReleased.state.shoreExitReady, false, "W release must not rearm the attempt latch");
+
+  const sameSpacePress = stepSwimming(forwardReleased.state, input, shore, 1 / 60);
+  assert.equal(sameSpacePress.shoreBoosted, false, "W re-press under the same Space press must remain consumed");
+  assert.equal(sameSpacePress.state.shoreExitReady, false);
+
+  const released = stepSwimming(sameSpacePress.state, { jumpHeld: false, movingForward: true }, shore, 1 / 60);
+  assert.deepEqual(
+    {
+      surfaceBreachReady: released.state.surfaceBreachReady,
+      shoreExitReady: released.state.shoreExitReady,
+      surfaceBreachSeconds: released.state.surfaceBreachSeconds,
+      surfaceStrokeCooldownSeconds: released.state.surfaceStrokeCooldownSeconds,
+      surfaceBobActive: released.state.surfaceBobActive,
+    },
+    {
+      surfaceBreachReady: true,
+      shoreExitReady: true,
+      surfaceBreachSeconds: 0,
+      surfaceStrokeCooldownSeconds: 0,
+      surfaceBobActive: false,
+    },
+  );
+  const repressed = stepSwimming(released.state, input, shore, 1 / 60);
+  assert.equal(repressed.shoreBoosted, true, "release and re-press must start a new shore attempt");
+  assert.equal(repressed.state.surfaceBreachReady, false);
+  assert.equal(repressed.state.shoreExitReady, false);
+});
+
+test("shore qualification checks the complete loaded standing capsule", () => {
+  const cellKey = (x: number, y: number, z: number) => `${x},${y},${z}`;
+  const supportKey = cellKey(0, 1, 0);
+  const probe = (
+    overrides: ReadonlyMap<string, BlockId | undefined> = new Map(),
+    radius = 0.3,
+  ) => loadedLowBankShoreLedgeHeight({
+    surfaceY: 0.5,
+    forwardX: 0.38,
+    forwardZ: 0,
+    radius,
+    height: 1.8,
+    getBlock: (x, y, z) => {
+      const key = cellKey(x, y, z);
+      if (overrides.has(key)) return overrides.get(key);
+      return key === supportKey ? BlockId.Dirt : BlockId.Air;
+    },
+  });
+
+  assert.equal(probe(), 1);
+  assert.equal(probe(new Map([[cellKey(0, 2, 0), BlockId.Stone]])), undefined, "tall wall");
+  assert.equal(probe(new Map([[cellKey(0, 3, 0), BlockId.Stone]])), undefined, "blocked upper headroom");
+  assert.equal(probe(new Map([[cellKey(1, 2, 0), BlockId.Stone]]), 0.6), undefined, "intersecting adjacent overhang");
+  assert.equal(probe(new Map([[cellKey(1, 2, 0), BlockId.WildwoodTable]]), 0.6), undefined, "partial-shape solids remain native full cells");
+  assert.equal(probe(new Map([[cellKey(1, 2, 0), undefined]]), 0.6), undefined, "intersecting adjacent unloaded clearance");
+  assert.equal(probe(new Map([[supportKey, undefined]])), undefined, "unknown support");
+  assert.equal(probe(new Map([[supportKey, BlockId.Air]])), undefined, "no bank");
+});
+
+test("actual projected-body collision is loaded, full-cell, and separate from ledge selection", () => {
+  const cellKey = (x: number, y: number, z: number) => `${x},${y},${z}`;
+  const collision = (overrides: ReadonlyMap<string, BlockId | undefined> = new Map()) => loadedBodyCollisionAt({
+    x: 0,
+    y: 0.51,
+    z: 0,
+    radius: 0.3,
+    height: 1.8,
+    getBlock: (x, y, z) => {
+      const key = cellKey(x, y, z);
+      return overrides.has(key) ? overrides.get(key) : BlockId.Air;
+    },
+  });
+  assert.equal(collision(), "clear", "a bank probe ahead cannot substitute for collision this tick");
+  assert.equal(collision(new Map([[cellKey(0, 1, 0), BlockId.Stone]])), "solid");
+  assert.equal(collision(new Map([[cellKey(0, 1, 0), BlockId.WildwoodTable]])), "solid", "native treats solid shapes as full cells");
+  assert.equal(collision(new Map([[cellKey(0, 2, 0), undefined]])), "unknown");
+  assert.equal(collision(new Map([
+    [cellKey(0, 1, 0), BlockId.Stone],
+    [cellKey(0, 2, 0), undefined],
+  ])), "unknown", "unknown clearance wins over a coincident solid hit");
+});
+
+test("projected shore collision strips strafe and backward motion", () => {
+  const forward = projectBodyOntoForwardMotion(4, -5, 5, -3, 0, 0.1);
+  assert.equal(forward.x, 4);
+  assert.ok(Math.abs(forward.z - -5.3) <= 1e-12);
+  assert.ok(Math.abs(forward.attemptedDistance - 0.3) <= 1e-12);
+  assert.deepEqual(projectBodyOntoForwardMotion(4, -5, 5, 0, 0, 0.1), {
+    x: 4,
+    z: -5,
+    attemptedDistance: 0,
+  });
+  assert.deepEqual(projectBodyOntoForwardMotion(4, -5, 0, 3, 0, 0.1), {
+    x: 4,
+    z: -5,
+    attemptedDistance: 0,
+  });
+});
+
+test("bounded liquid-surface probes fail closed unless they reach loaded open clearance", () => {
+  const column = (...blocks: Array<BlockId | undefined>) => loadedLiquidSurfaceY(0, 4, (y) => blocks[y]);
+  assert.equal(column(BlockId.Water, BlockId.Air), 0.5);
+  assert.equal(column(BlockId.Water, BlockId.Water, BlockId.Water, BlockId.Air), 2.5);
+  assert.equal(column(BlockId.Water, BlockId.Honey, BlockId.Air), 1.5, "all contiguous liquid kinds remain submerged");
+  assert.equal(column(BlockId.Water, BlockId.Stone), undefined, "solid ceiling");
+  assert.equal(column(BlockId.Water, BlockId.Water, undefined), undefined, "unloaded boundary");
+  let invalidLimitReads = 0;
+  assert.equal(loadedLiquidSurfaceY(0, Number.POSITIVE_INFINITY, () => {
+    invalidLimitReads += 1;
+    return BlockId.Water;
+  }), undefined, "an unbounded request fails closed");
+  assert.equal(invalidLimitReads, 0);
+  let boundedReads = 0;
+  assert.equal(loadedLiquidSurfaceY(0, Number.MAX_SAFE_INTEGER, () => {
+    boundedReads += 1;
+    return BlockId.Water;
+  }), undefined);
+  assert.equal(boundedReads, 513, "even a huge finite request is capped at 512 cells above the start");
+  const cappedSurface = column(
+    BlockId.Water,
+    BlockId.Water,
+    BlockId.Water,
+    BlockId.Water,
+    BlockId.Water,
+    BlockId.Air,
+  );
+  assert.equal(cappedSurface, undefined, "open air beyond the four-cell cap is not authoritative");
+  assert.equal(loadedLowBankShoreLedgeHeight({
+    surfaceY: cappedSurface,
+    forwardX: 0,
+    forwardZ: 0,
+    radius: 0.3,
+    height: 1.8,
+    getBlock: () => BlockId.Air,
+  }), undefined, "a capped liquid stack cannot qualify a shore ledge");
+});
+
+test("shore boost rejects tall cliffs, head submersion, and unclassified collision", () => {
+
+  const state = { velocityY: -0.4, oxygenSeconds: 12, drowningAccumulator: 0 };
+  const input = { jumpHeld: true, movingForward: true };
+  const lowBank = {
+    submersion: 0.75,
+    headSubmerged: false,
+    horizontalCollision: true,
+    shoreLedgeHeight: 1,
+    surfaceGap: 0.3,
+    surfaceClearance: 0.1,
+  };
+  for (const [label, environment] of [
+    ["tall cliff", { ...lowBank, shoreLedgeHeight: 2 }],
+    ["head submerged", { ...lowBank, submersion: 1, headSubmerged: true }],
+    ["no classified collision", { ...lowBank, horizontalCollision: false, shoreLedgeHeight: undefined }],
+  ] as const) {
+    const rejected = stepSwimming(state, input, environment, 1 / 60);
+    assert.equal(rejected.shoreBoosted, false, label);
+    assert.equal(rejected.state.shoreExitReady, true, label);
+  }
+});
+
+test("reaching dry ground clears mantle state without rearming a held Space press", () => {
+  const input = { jumpHeld: true, movingForward: true };
+  const shore = {
+    submersion: 0.75,
+    headSubmerged: false,
+    horizontalCollision: true,
+    shoreLedgeHeight: 1,
+    surfaceGap: 0.3,
+    surfaceClearance: 0.1,
+  };
+  const accepted = stepSwimming(
+    { velocityY: 0, oxygenSeconds: 12, drowningAccumulator: 0 },
+    input,
+    shore,
+    1 / 60,
+  );
+  const dry = stepSwimming(
+    accepted.state,
+    input,
+    { ...shore, submersion: 0, horizontalCollision: false, shoreLedgeHeight: undefined },
+    1 / 60,
+  );
+  assert.equal(dry.shoreBoosted, false);
+  assert.equal(dry.state.surfaceBreachSeconds, 0);
+  assert.equal(dry.state.surfaceStrokeCooldownSeconds, 0);
+  assert.equal(dry.state.surfaceBobActive, false);
+  assert.equal(dry.state.surfaceBreachReady, false);
+  assert.equal(dry.state.shoreExitReady, false, "dry contact alone must not rearm the held press");
+});
+
+test("alternating liquid, head, and bank contact cannot re-arm a held shore exit", () => {
+  const input = { jumpHeld: true, movingForward: true };
+  const bank = {
+    submersion: 0.75,
+    headSubmerged: false,
+    horizontalCollision: true,
+    shoreLedgeHeight: 1,
+    surfaceGap: 0.3,
+    surfaceClearance: 0.1,
+  };
+  const environments = [
+    bank,
+    { ...bank, horizontalCollision: false },
+    { ...bank, submersion: 1, headSubmerged: true, horizontalCollision: false, surfaceClearance: -0.2 },
+    bank,
+    { ...bank, submersion: 0, horizontalCollision: false },
+    { ...bank, submersion: 1, headSubmerged: true, surfaceClearance: -0.2 },
+    bank,
+  ];
+  let state: SwimmerState = {
+    velocityY: -0.4,
+    oxygenSeconds: DEFAULT_SWIM_RULES.maxOxygenSeconds,
+    drowningAccumulator: 0,
+    shoreExitReady: true,
+  };
+  let boosts = 0;
+  for (const environment of environments) {
+    const step = stepSwimming(state, input, environment, 1 / 60);
+    boosts += Number(step.shoreBoosted);
+    assert.equal(step.state.surfaceBreachReady, false, "contact oscillation must not rearm surface breach during mantle");
+    state = step.state;
+  }
+  assert.equal(boosts, 1);
+  assert.equal(state.shoreExitReady, false);
+  assert.equal(
+    stepSwimming(state, { ...input, jumpHeld: false }, bank, 1 / 60).state.shoreExitReady,
+    true,
+    "only a sampled Space release rearms the press latch",
+  );
 });
 
 test("an idle swimmer settles downward while an intentional swim stroke rises", () => {

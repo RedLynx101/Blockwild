@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <link rel="icon" href="data:,">
+  <title>Blockwild wire convergence</title>
+  <style>
+    body { margin: 32px 48px; background: #f5f4ef; color: #18312b; font: 16px/1.4 system-ui, sans-serif; }
+    main { max-width: 1000px; }
+    h1 { margin-bottom: 8px; font-size: 32px; }
+    button { padding: 12px 20px; font: inherit; color: white; background: #18312b; border: 0; border-radius: 6px; }
+    #status { font-weight: 650; }
+    li { margin: 6px 0; }
+    code { overflow-wrap: anywhere; font-size: 14px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>Blockwild wire convergence</h1>
+  <p>Entity hashes, complete gameplay commands and persistence through real Wasm. No production cutover.</p>
+  <button id="run">Run isolated checks</button>
+  <p id="status">Ready</p>
+  <ol id="checks"></ol>
+  <code id="artifact"></code>
+</main>
+<script type="module">
+  import {
+    encodeRustIntegratedPersistenceDispatchV1, decodeRustIntegratedPersistenceDispatchV1,
+    encodeRustIntegratedPersistenceDispatchReceiptV1, decodeRustIntegratedPersistenceDispatchReceiptV1,
+  } from "/app/game/rust-integrated-runtime-persistence.ts";
+  import {
+    encodeRustIntegratedRuntimeRequestV1, decodeRustIntegratedRuntimeResponseV1,
+    createRustIntegratedRuntimeCommandBatchV1, createRustIntegratedRuntimeDomainOperationV1,
+    rustIntegratedRuntimeWireChecksumV1,
+  } from "/app/game/rust-integrated-runtime-codec.ts";
+  import { RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1 } from "/app/game/rust-integrated-runtime-contract.ts";
+  import { rustIntegratedRuntimeDomainWireFamilyV1 } from "/app/game/rust-integrated-runtime-domain-schema.generated.ts";
+  import {
+    computeRustEntityAuthorityHashR6V2, assertRustEntityAuthorityHashR6V2,
+    decodeAndVerifyRustEntityAuthoritySnapshotR6V2,
+  } from "/app/game/rust-entity-authority-hash-r6.ts";
+  import {
+    decodeRustIntegratedEntityAuthorityImportV2, encodeRustIntegratedEntityAuthorityImportV2,
+    encodeRustIntegratedEntityAuthorityExportV1, decodeRustIntegratedEntityAuthorityImportReceiptV1,
+    validateRustIntegratedEntityAuthorityImportReceiptV1,
+  } from "/app/game/rust-integrated-runtime-entities.ts";
+  import {
+    decodeRustIntegratedGameplayBatchWireV1, encodeRustIntegratedGameplayBatchWireV1,
+    rustIntegratedGameplayCommandHashV1, decodeRustIntegratedGameplayActorGrantReceiptV1,
+    decodeRustIntegratedGameplayActorGrantV1, encodeRustIntegratedGameplayActorGrantV1,
+    decodeRustIntegratedGameplayReceiptWireV1, encodeRustIntegratedGameplayReceiptWireV1,
+  } from "/app/game/rust-integrated-runtime-gameplay-wire.ts";
+
+  const state = { status: "ready", checks: [], artifactHash: null, runtimeDestroyed: false };
+  const assert = (condition, message) => { if (!condition) throw new Error(message); };
+  const rejects = (action, message) => { let rejected = false; try { action(); } catch { rejected = true; } assert(rejected, message); };
+  const hex = bytes => [...bytes].map(byte => byte.toString(16).padStart(2, "0")).join("");
+  const bytes = text => Uint8Array.from(text.match(/../g) ?? [], value => Number.parseInt(value, 16));
+  const passed = message => { state.checks.push(message); const li = document.createElement("li"); li.textContent = message; document.querySelector("#checks").append(li); };
+  let running = Promise.resolve();
+  window.render_game_to_text = () => JSON.stringify(state);
+  window.advanceTime = () => running;
+
+  async function run() {
+    state.status = "running";
+    document.querySelector("#run").disabled = true;
+    document.querySelector("#status").textContent = "Running…";
+    const fixture = await (await fetch("/tests/fixtures/rust-engine/integrated-runtime-v1/r8-persistence-dispatch-wire-v1.json")).json();
+    for (const vector of fixture.requests) {
+      const packet = bytes(vector.hex);
+      assert(hex(encodeRustIntegratedPersistenceDispatchV1(decodeRustIntegratedPersistenceDispatchV1(packet))) === vector.hex, vector.name);
+    }
+    for (const value of [fixture.receiptHex, fixture.noRequestReceiptHex]) {
+      assert(hex(encodeRustIntegratedPersistenceDispatchReceiptV1(decodeRustIntegratedPersistenceDispatchReceiptV1(bytes(value)))) === value, "native receipt bytes");
+    }
+    passed("14 native request vectors and both receipt branches round-trip exactly in Chromium.");
+    const entities = await (await fetch("/tests/fixtures/rust-engine/r6/entity-authority-hashes-v2.json")).json();
+    assert(entities.vectors.length === 6, "R6 semantic hash fixture coverage changed");
+    for (const vector of entities.vectors) {
+      const snapshot = decodeAndVerifyRustEntityAuthoritySnapshotR6V2(bytes(vector.snapshotHex), vector.hash);
+      assert(computeRustEntityAuthorityHashR6V2(snapshot) === vector.hash, `${vector.name}: native authority hash`);
+      decodeRustIntegratedEntityAuthorityImportReceiptV1(bytes(vector.receiptHex), decodeRustIntegratedEntityAuthorityImportV2(bytes(vector.requestHex)));
+      if (snapshot.hot.length) {
+        const changed = structuredClone(snapshot);
+        changed.hot[0].record.ageTicks += 1n;
+        rejects(() => assertRustEntityAuthorityHashR6V2(changed, vector.hash), `${vector.name}: semantic tamper accepted`);
+      }
+    }
+    passed("Six native entity states recompute exactly; changed entity fields fail semantic attestation.");
+    const gameplay = await (await fetch("/tests/fixtures/rust-engine/integrated-runtime-v1/r7-gameplay-command-wire-v1.json")).json();
+    assert(gameplay.vectors.length === 92, "full R7 command fixture coverage changed");
+    for (const vector of gameplay.vectors) {
+      const batch = decodeRustIntegratedGameplayBatchWireV1(bytes(vector.hex));
+      assert(rustIntegratedGameplayCommandHashV1(batch.commands) === vector.commandHash, `${vector.name}: gameplay command hash`);
+      assert(hex(encodeRustIntegratedGameplayBatchWireV1(batch)) === vector.hex, `${vector.name}: gameplay command bytes`);
+    }
+    const zeroActorGrant = decodeRustIntegratedGameplayActorGrantV1(bytes(gameplay.zeroActorGrantHex));
+    assert(zeroActorGrant.playerId === 0n && zeroActorGrant.entityId === 0n, "present zero actor IDs were not preserved");
+    assert(hex(encodeRustIntegratedGameplayActorGrantV1(zeroActorGrant)) === gameplay.zeroActorGrantHex, "native zero-actor grant bytes differ");
+    passed(`${gameplay.vectors.length} native gameplay command vectors round-trip with independent command hashes.`);
+    const root = "/engine-schema-candidate";
+    const index = await (await fetch(`${root}/manifest.json`)).json();
+    const artifact = index.artifacts.compatibility;
+    assert(/^[a-f0-9]{64}$/.test(artifact.hash) && artifact.directory === artifact.hash, "invalid candidate index");
+    const manifest = await (await fetch(`${root}/${artifact.directory}/manifest.json`)).json();
+    const wasmBytes = new Uint8Array(await (await fetch(`${root}/${artifact.directory}/engine_bg.wasm`)).arrayBuffer());
+    const digest = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", wasmBytes)));
+    assert(digest === manifest.files.find(file => file.path === "engine_bg.wasm").sha256, "Wasm digest mismatch");
+    state.artifactHash = artifact.hash;
+    document.querySelector("#artifact").textContent = `Isolated artifact: ${artifact.hash}`;
+    const engine = await import(/* @vite-ignore */ `${root}/${artifact.directory}/engine.js`);
+    await engine.default({ module_or_path: wasmBytes });
+    passed("Content-addressed candidate Wasm digest matches its manifest.");
+    const ready = decodeRustIntegratedRuntimeResponseV1(engine.blockwild_runtime_create_v2(encodeRustIntegratedRuntimeRequestV1({
+      type: "runtime-create-v1", requestId: 1, clientEpoch: 1,
+      config: { worldSeed: "schema-browser", universeId: "schema-browser", locationId: "surface", sessionId: "schema-browser",
+        contentHash: "1".repeat(32), generatorHash: "2".repeat(32), ...RUST_INTEGRATED_RUNTIME_DEFAULT_TERRAIN_CONFIG_V1,
+        waterBlockId: 7, directionalBlockIds: [], waterloggedBlockIds: [] },
+    })));
+    assert(ready.type === "runtime-ready-v1", `create returned ${ready.type}`);
+    let identity = ready.identity;
+    let sequence = 2;
+    const receiptFamily = rustIntegratedRuntimeDomainWireFamilyV1("persistence-dispatch-receipt-v1");
+    const dispatch = (domain, familyName, payload) => {
+      const family = rustIntegratedRuntimeDomainWireFamilyV1(familyName);
+      const id = `schema:${sequence}`;
+      return decodeRustIntegratedRuntimeResponseV1(engine.blockwild_runtime_command_v2(ready.runtimeHandle, encodeRustIntegratedRuntimeRequestV1({
+        type: "runtime-command-v1", requestId: sequence++, clientEpoch: 1,
+        batch: createRustIntegratedRuntimeCommandBatchV1({ commandId: id, idempotencyKey: id, actorId: "platform:schema", expected: identity,
+          operations: [createRustIntegratedRuntimeDomainOperationV1({ domain, typeId: family.typeId, schema: family.operationSchema, payload })] }),
+      })));
+    };
+    const acceptedOperation = (domain, requestFamily, responseFamily, payload) => {
+      const result = dispatch(domain, requestFamily, payload);
+      assert(result.type === "runtime-command-receipt-v1" && result.receipt.status === "accepted", `${requestFamily}: ${JSON.stringify(result)}`);
+      identity = result.receipt.after;
+      const descriptor = rustIntegratedRuntimeDomainWireFamilyV1(responseFamily);
+      const operation = result.receipt.domainReceipts[0];
+      assert(result.receipt.domainReceipts.length === 1 && operation.domain === domain && operation.typeId === descriptor.typeId && operation.schema === descriptor.operationSchema, `${requestFamily}: wrong response descriptor`);
+      assert(operation.payloadHash === rustIntegratedRuntimeWireChecksumV1(operation.payload), `${requestFamily}: response checksum`);
+      return operation;
+    };
+    try {
+      const malformed = encodeRustIntegratedPersistenceDispatchV1({ kind: "estimate", worldId: "wørld:水" });
+      malformed[malformed.length - 1] ^= 0x80;
+      const rejected = dispatch("persistence", "persistence-dispatch-v1", malformed);
+      assert(rejected.type === "runtime-command-receipt-v1" && rejected.receipt.status === "rejected", "corrupt command was not rejected");
+      assert(JSON.stringify(rejected.receipt.current) === JSON.stringify(identity), "rejection changed authority state");
+      passed("Rechecksummed outer command rejects corrupt inner bytes without changing authority state.");
+      const accepted = dispatch("persistence", "persistence-dispatch-v1", encodeRustIntegratedPersistenceDispatchV1({ kind: "estimate", worldId: "wørld:水" }));
+      assert(accepted.type === "runtime-command-receipt-v1" && accepted.receipt.status === "accepted", "estimate dispatch failed");
+      identity = accepted.receipt.after;
+      const receipt = accepted.receipt.domainReceipts[0];
+      assert(accepted.receipt.domainReceipts.length === 1 && receipt.domain === "persistence" && receipt.typeId === receiptFamily.typeId && receipt.schema === receiptFamily.operationSchema, "wrong receipt descriptor");
+      assert(receipt.payloadHash === rustIntegratedRuntimeWireChecksumV1(receipt.payload), "receipt payload hash mismatch");
+      const decoded = decodeRustIntegratedPersistenceDispatchReceiptV1(receipt.payload);
+      assert(decoded.requestId !== null && decoded.pending === 1 && !decoded.closed, "estimate was not queued");
+      assert(hex(encodeRustIntegratedPersistenceDispatchReceiptV1(decoded)) === hex(receipt.payload), "real Wasm receipt byte mismatch");
+      passed("BWRQ estimate crosses real Wasm; BWRS/BWA8 receipt decodes and re-encodes exactly.");
+      const entityVector = entities.vectors.find(vector => vector.name === "plain-optionals-absent");
+      assert(entityVector, "runtime-compatible R6 fixture missing");
+      const importRequest = { expectedRevision: BigInt(identity.revision.entities), snapshot: bytes(entityVector.snapshotHex) };
+      const imported = acceptedOperation("entities", "entity-authority-import-v2", "entity-authority-import-receipt-v1", encodeRustIntegratedEntityAuthorityImportV2(importRequest));
+      const attested = validateRustIntegratedEntityAuthorityImportReceiptV1(imported, importRequest);
+      assert(attested.stateHash === entityVector.hash, "real Wasm import authority hash differs");
+      const exported = acceptedOperation("entities", "entity-authority-export-v1", "entity-authority-snapshot-v2", encodeRustIntegratedEntityAuthorityExportV1({ expectedRevision: attested.revision }));
+      decodeAndVerifyRustEntityAuthoritySnapshotR6V2(exported.payload, entityVector.hash);
+      assert(hex(exported.payload) === entityVector.snapshotHex, "real Wasm snapshot was not preserved exactly");
+      passed("Real Wasm entity import/export preserves exact state and independently verified authority hash.");
+      const lifecycle = gameplay.browserLifecycle;
+      const grantPayload = bytes(lifecycle.grantHex);
+      const granted = acceptedOperation("gameplay", "gameplay-actor-grant-v1", "gameplay-actor-grant-receipt-v1", grantPayload);
+      decodeRustIntegratedGameplayActorGrantReceiptV1(granted.payload, rustIntegratedRuntimeWireChecksumV1(grantPayload), identity.stateHash);
+      const custody = decodeRustIntegratedGameplayBatchWireV1(bytes(lifecycle.batchHex));
+      const committed = acceptedOperation("gameplay", "gameplay-command-v1", "gameplay-receipt-v1", encodeRustIntegratedGameplayBatchWireV1(custody));
+      const nativeReceipt = decodeRustIntegratedGameplayReceiptWireV1(committed.payload);
+      assert(nativeReceipt.status === "accepted", "nonschedule gameplay command did not commit");
+      assert(hex(encodeRustIntegratedGameplayReceiptWireV1(nativeReceipt)) === lifecycle.receiptHex && hex(committed.payload) === lifecycle.receiptHex, "real Wasm gameplay receipt differs from native authority");
+      passed("A granted nonschedule gameplay command commits in real Wasm with the exact native receipt.");
+    } finally {
+      const shutdown = decodeRustIntegratedRuntimeResponseV1(engine.blockwild_runtime_destroy_v2(ready.runtimeHandle, encodeRustIntegratedRuntimeRequestV1({ type: "runtime-shutdown-v1", requestId: sequence++, clientEpoch: 1, expected: null })));
+      assert(shutdown.type === "runtime-shutdown-v1", "runtime cleanup failed");
+      state.runtimeDestroyed = true;
+    }
+    passed("Native runtime destroyed; no browser storage or production artifact was changed.");
+    state.status = "passed";
+    document.querySelector("#status").textContent = "PASS — all nine browser checks completed";
+  }
+  document.querySelector("#run").addEventListener("click", () => {
+    running = run().catch(error => { state.status = "failed"; state.error = String(error); document.querySelector("#status").textContent = `FAIL — ${error}`; console.error(error); });
+  });
+</script>
+</body>
+</html>

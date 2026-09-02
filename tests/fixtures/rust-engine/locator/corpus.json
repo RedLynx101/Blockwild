@@ -1,0 +1,323 @@
+{
+  "schema": 1,
+  "description": "Exact Rust-required settlement and dragon-lair locator promotion corpus. The focused parity test derives request bytes from this manifest and compares TypeScript semantics, native packet bytes, and the checked-in Wasm artifact without replacing it.",
+  "requiredSettlementCoverage": [
+    "any-culture", "all-factions", "all-sizes", "surface", "underwater", "underground",
+    "negative-region", "fractional-origin", "high-i64-origin", "radius-18", "radius-64",
+    "multi-result", "exclusion", "absent-filter", "present-empty-filter", "no-result", "underwater-rejected-then-valid",
+    "breathes-water-false", "breathes-water-true", "origin-near-any", "origin-culture",
+    "slider-minima", "slider-maxima", "slider-interior", "deterministic-early-exit", "distance-order-adversarial",
+    "guild-hall-expanded-underwater-materialization", "max-exclusions-4096"
+  ],
+  "requiredLairCoverage": [
+    "fire", "ice", "steel", "gold", "silver", "sea", "stage-3", "stage-4", "stage-5",
+    "female", "male", "negative-region", "fractional-origin", "high-i64-origin", "radius-18",
+    "radius-64", "exclusion", "minimum-stage", "no-result", "non-abyssal-rejection",
+    "deterministic-early-exit", "max-exclusions-4096"
+  ],
+  "settlementOptionSweeps": [
+    { "field": "caveFrequency", "values": [0, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3] },
+    { "field": "biomeScale", "values": [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3, 3.25, 3.5, 3.75, 4] },
+    { "field": "resourceAbundance", "values": [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 2.75, 3, 3.25, 3.5, 3.75, 4] },
+    { "field": "settlementDensity", "values": [0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1, 1.05, 1.1, 1.15, 1.2, 1.25, 1.3, 1.35, 1.4, 1.45, 1.5, 1.55, 1.6, 1.65, 1.7, 1.75, 1.8, 1.85, 1.9, 1.95, 2] }
+  ],
+  "settlements": [
+    {
+      "id": "any-multi-fractional-negative",
+      "seed": "LOCATOR-ANY-MULTI",
+      "origin": [-513.25, 777.75],
+      "maxRegionRadius": 18,
+      "limit": 6,
+      "coverage": ["any-culture", "multi-result", "fractional-origin", "negative-region", "radius-18", "absent-filter", "deterministic-early-exit"]
+    },
+    {
+      "id": "exact-distance-id-tie",
+      "seed": "LOCATOR-TIE",
+      "origin": [1280, 1237.5],
+      "options": { "settlementDensity": 1.45 },
+      "maxRegionRadius": 64,
+      "limit": 32,
+      "expectedTieIds": ["freehold-2-3-1t0kjro", "tidehold-2-1-14n2ksg"],
+      "coverage": ["distance-order-adversarial"]
+    },
+    {
+      "id": "all-factions-and-sizes-radius64",
+      "seed": "LOCATOR-ALL-FILTERS",
+      "origin": [-12000.125, -9700.875],
+      "factionIds": ["atlantians", "dwarves", "goblins", "hobbits", "sugarcourt", "wood-elves"],
+      "sizes": ["hamlet", "town", "village"],
+      "environments": ["surface", "underground", "underwater"],
+      "maxRegionRadius": 64,
+      "limit": 12,
+      "expectedRejectedIds": ["tidehold--f--d-1hoh2dk"],
+      "coverage": ["all-factions", "all-sizes", "surface", "underwater", "underground", "negative-region", "radius-64", "underwater-rejected-then-valid"]
+    },
+    {
+      "id": "atlantians-air-arrival",
+      "seed": "LOCATOR-FACTION-atlantians",
+      "origin": [-513.25, 777.75],
+      "options": { "enabledFactions": ["atlantians"], "settlementDensity": 1.45, "origin": { "factionId": "atlantians", "minimumSize": "hamlet", "mode": "culture-settlement" } },
+      "factionIds": ["atlantians"],
+      "environments": ["underwater"],
+      "maxRegionRadius": 64,
+      "limit": 3,
+      "breathesWater": false,
+      "coverage": ["underwater", "breathes-water-false", "origin-culture"]
+    },
+    {
+      "id": "atlantians-water-arrival",
+      "seed": "LOCATOR-FACTION-atlantians",
+      "origin": [-513.25, 777.75],
+      "options": { "enabledFactions": ["atlantians"], "settlementDensity": 1.45, "origin": { "factionId": "atlantians", "minimumSize": "hamlet", "mode": "culture-settlement" } },
+      "factionIds": ["atlantians"],
+      "environments": ["underwater"],
+      "maxRegionRadius": 64,
+      "limit": 3,
+      "breathesWater": true,
+      "coverage": ["underwater", "breathes-water-true", "origin-culture"]
+    },
+    {
+      "id": "atlantians-guild-hall-expanded-footprint",
+      "seed": "LOCATOR-ALL-FILTERS",
+      "origin": [-2484, -5974],
+      "factionIds": ["atlantians"],
+      "environments": ["underwater"],
+      "maxRegionRadius": 18,
+      "limit": 1,
+      "expectedFirstId": "tidehold--5--c-ubgd6u",
+      "expectedGuildHallId": "guild-hall:settlement-cluster:-2:-3:tideglass",
+      "coverage": ["guild-hall-expanded-underwater-materialization"]
+    },
+    {
+      "id": "dwarves-underground",
+      "seed": "LOCATOR-FACTION-dwarves",
+      "origin": [-513.25, 777.75],
+      "options": { "enabledFactions": ["dwarves"], "settlementDensity": 1.45, "origin": { "factionId": "dwarves", "minimumSize": "hamlet", "mode": "culture-settlement" } },
+      "factionIds": ["dwarves"],
+      "environments": ["underground"],
+      "maxRegionRadius": 64,
+      "limit": 3,
+      "coverage": ["underground", "origin-culture"]
+    },
+    {
+      "id": "goblins-surface",
+      "seed": "LOCATOR-FACTION-goblins",
+      "origin": [-513.25, 777.75],
+      "options": { "enabledFactions": ["goblins"], "settlementDensity": 1.45 },
+      "factionIds": ["goblins"],
+      "environments": ["surface"],
+      "maxRegionRadius": 64,
+      "limit": 3,
+      "coverage": ["surface"]
+    },
+    {
+      "id": "hobbits-surface",
+      "seed": "LOCATOR-FACTION-hobbits",
+      "origin": [-513.25, 777.75],
+      "options": { "enabledFactions": ["hobbits"], "settlementDensity": 1.45 },
+      "factionIds": ["hobbits"],
+      "maxRegionRadius": 64,
+      "limit": 3,
+      "coverage": ["surface"]
+    },
+    {
+      "id": "sugarcourt-surface",
+      "seed": "LOCATOR-FACTION-sugarcourt",
+      "origin": [-513.25, 777.75],
+      "options": { "enabledFactions": ["sugarcourt"], "settlementDensity": 1.45 },
+      "factionIds": ["sugarcourt"],
+      "maxRegionRadius": 64,
+      "limit": 3,
+      "coverage": ["surface"]
+    },
+    {
+      "id": "wood-elves-surface",
+      "seed": "LOCATOR-FACTION-wood-elves",
+      "origin": [-513.25, 777.75],
+      "options": { "enabledFactions": ["wood-elves"], "settlementDensity": 1.45 },
+      "factionIds": ["wood-elves"],
+      "maxRegionRadius": 64,
+      "limit": 3,
+      "coverage": ["surface"]
+    },
+    {
+      "id": "size-hamlet",
+      "seed": "LOCATOR-SIZE-hamlet-0",
+      "origin": [-123.125, -456.875],
+      "options": { "settlementDensity": 1.45 },
+      "sizes": ["hamlet"],
+      "maxRegionRadius": 64,
+      "limit": 1,
+      "coverage": ["all-sizes"]
+    },
+    {
+      "id": "size-village",
+      "seed": "LOCATOR-SIZE-village-0",
+      "origin": [-123.125, -456.875],
+      "options": { "settlementDensity": 1.45 },
+      "sizes": ["village"],
+      "maxRegionRadius": 64,
+      "limit": 1,
+      "coverage": ["all-sizes"]
+    },
+    {
+      "id": "size-town",
+      "seed": "LOCATOR-SIZE-town-0",
+      "origin": [-123.125, -456.875],
+      "options": { "settlementDensity": 1.45 },
+      "sizes": ["town"],
+      "maxRegionRadius": 64,
+      "limit": 1,
+      "coverage": ["all-sizes"]
+    },
+    {
+      "id": "exclude-nearest",
+      "seed": "LOCATOR-SIZE-hamlet-0",
+      "origin": [-123.125, -456.875],
+      "options": { "settlementDensity": 1.45 },
+      "sizes": ["hamlet"],
+      "excludeIds": ["freehold--7--1-1bvtbvh"],
+      "maxRegionRadius": 64,
+      "limit": 1,
+      "coverage": ["exclusion"]
+    },
+    {
+      "id": "present-empty-faction-no-result",
+      "seed": "LOCATOR-EMPTY-FILTER",
+      "origin": [0, 0],
+      "factionIds": [],
+      "maxRegionRadius": 18,
+      "limit": 4,
+      "expectNoResult": true,
+      "coverage": ["present-empty-filter", "no-result"]
+    },
+    {
+      "id": "structures-disabled-no-result",
+      "seed": "LOCATOR-NO-STRUCTURES",
+      "origin": [0, 0],
+      "options": { "structures": false },
+      "maxRegionRadius": 64,
+      "limit": 4,
+      "expectNoResult": true,
+      "coverage": ["no-result"]
+    },
+    {
+      "id": "near-any-origin-options",
+      "seed": "LOCATOR-NEAR-ANY",
+      "origin": [0.125, -0.125],
+      "options": { "origin": { "mode": "near-any-settlement" } },
+      "maxRegionRadius": 18,
+      "limit": 2,
+      "coverage": ["origin-near-any"]
+    },
+    {
+      "id": "high-positive-i64",
+      "seed": "LOCATOR-HIGH-I64",
+      "origin": [2000000000.125, -1999999999.875],
+      "options": { "settlementDensity": 1.45 },
+      "maxRegionRadius": 18,
+      "limit": 2,
+      "coverage": ["high-i64-origin", "deterministic-early-exit"]
+    },
+    {
+      "id": "high-negative-i64",
+      "seed": "LOCATOR-HIGH-I64",
+      "origin": [-2000000000.375, 1999999999.625],
+      "options": { "settlementDensity": 1.45 },
+      "maxRegionRadius": 18,
+      "limit": 2,
+      "coverage": ["high-i64-origin", "negative-region"]
+    },
+    {
+      "id": "slider-minima",
+      "seed": "LOCATOR-SLIDER-MIN",
+      "origin": [-100.5, 100.5],
+      "options": { "biomeScale": 0.25, "caveFrequency": 0, "resourceAbundance": 0.25, "settlementDensity": 0.05, "largeTownFrequency": "rare", "roadCoverage": "none", "settlementClustering": "even" },
+      "maxRegionRadius": 64,
+      "limit": 1,
+      "coverage": ["slider-minima", "slider-interior"]
+    },
+    {
+      "id": "slider-maxima",
+      "seed": "LOCATOR-SLIDER-MAX",
+      "origin": [100.5, -100.5],
+      "options": { "biomeScale": 4, "caveFrequency": 3, "resourceAbundance": 4, "settlementDensity": 2, "largeTownFrequency": "frequent", "roadCoverage": "dense", "settlementClustering": "strong" },
+      "maxRegionRadius": 18,
+      "limit": 4,
+      "coverage": ["slider-maxima"]
+    },
+    {
+      "id": "slider-decimal-055",
+      "seed": "LOCATOR-SLIDER-055",
+      "origin": [-512.375, -512.625],
+      "options": { "settlementDensity": 0.55 },
+      "maxRegionRadius": 18,
+      "limit": 2,
+      "coverage": ["slider-interior"]
+    },
+    {
+      "id": "slider-decimal-110",
+      "seed": "LOCATOR-SLIDER-110",
+      "origin": [512.375, 512.625],
+      "options": { "settlementDensity": 1.1 },
+      "maxRegionRadius": 18,
+      "limit": 2,
+      "coverage": ["slider-interior"]
+    },
+    {
+      "id": "slider-decimal-115",
+      "seed": "LOCATOR-SLIDER-115",
+      "origin": [1024.375, -1024.625],
+      "options": { "settlementDensity": 1.15 },
+      "maxRegionRadius": 18,
+      "limit": 2,
+      "coverage": ["slider-interior"]
+    },
+    {
+      "id": "legacy-profile",
+      "seed": "LOCATOR-LEGACY",
+      "origin": [-4100.125, 3200.875],
+      "options": { "profile": "legacy-v14", "settlementPattern": "legacy-scattered-v1", "origin": { "mode": "wilderness" } },
+      "maxRegionRadius": 18,
+      "limit": 3,
+      "coverage": ["deterministic-early-exit"]
+    },
+    {
+      "id": "categorical-local-road",
+      "seed": "LOCATOR-CATEGORICAL-LOCAL",
+      "origin": [-256.5, 256.5],
+      "options": { "roadCoverage": "local" },
+      "maxRegionRadius": 18,
+      "limit": 2,
+      "coverage": ["slider-interior"]
+    },
+    {
+      "id": "maximum-exclusions-bound",
+      "seed": "LOCATOR-MAX-EXCLUSIONS",
+      "origin": [0, 0],
+      "generatedExclusionCount": 4096,
+      "maxRegionRadius": 0,
+      "limit": 1,
+      "allowNoResult": true,
+      "coverage": ["max-exclusions-4096"]
+    }
+  ],
+  "lairs": [
+    { "id": "fire-stage4-negative", "seed": "LOCATOR-fire-0", "origin": [-213.125, 491.875], "dragonType": "fire", "minimumStage": 3, "maxRegionRadius": 18, "expectedStage": 4, "coverage": ["fire", "stage-4", "negative-region", "fractional-origin", "radius-18", "deterministic-early-exit"] },
+    { "id": "ice-stage4-negative", "seed": "LOCATOR-ice-0", "origin": [-213.125, 491.875], "dragonType": "ice", "minimumStage": 3, "maxRegionRadius": 18, "expectedStage": 4, "coverage": ["ice", "stage-4", "negative-region"] },
+    { "id": "steel-stage4", "seed": "LOCATOR-steel-0", "origin": [-213.125, 491.875], "dragonType": "steel", "minimumStage": 3, "maxRegionRadius": 18, "expectedStage": 4, "coverage": ["steel", "stage-4"] },
+    { "id": "gold-stage4-negative", "seed": "LOCATOR-gold-0", "origin": [-213.125, 491.875], "dragonType": "gold", "minimumStage": 3, "maxRegionRadius": 18, "expectedStage": 4, "coverage": ["gold", "stage-4", "negative-region"] },
+    { "id": "silver-stage4-negative", "seed": "LOCATOR-silver-0", "origin": [-213.125, 491.875], "dragonType": "silver", "minimumStage": 3, "maxRegionRadius": 18, "expectedStage": 4, "coverage": ["silver", "stage-4", "negative-region"] },
+    { "id": "sea-stage3", "seed": "LOCATOR-sea-0", "origin": [-213.125, 491.875], "dragonType": "sea", "minimumStage": 3, "maxRegionRadius": 64, "expectedStage": 3, "expectedRejectedSeaCandidate": { "id": "sea-nest--2--2-139q2e", "x": -1068, "z": -1072 }, "coverage": ["sea", "stage-3", "radius-64", "non-abyssal-rejection"] },
+    { "id": "fire-stage5-male", "seed": "LOCATOR-STAGE5-fire-0", "origin": [-421.625, -333.375], "dragonType": "fire", "minimumStage": 5, "maxRegionRadius": 32, "expectedStage": 5, "expectedSex": "male", "coverage": ["fire", "stage-5", "male", "minimum-stage"] },
+    { "id": "ice-stage5-male", "seed": "LOCATOR-STAGE5-ice-0", "origin": [-421.625, -333.375], "dragonType": "ice", "minimumStage": 5, "maxRegionRadius": 32, "expectedStage": 5, "expectedSex": "male", "coverage": ["ice", "stage-5", "male"] },
+    { "id": "steel-stage5-female", "seed": "LOCATOR-STAGE5-steel-0", "origin": [-421.625, -333.375], "dragonType": "steel", "minimumStage": 5, "maxRegionRadius": 32, "expectedStage": 5, "expectedSex": "female", "coverage": ["steel", "stage-5", "female"] },
+    { "id": "gold-stage5-male", "seed": "LOCATOR-STAGE5-gold-0", "origin": [-421.625, -333.375], "dragonType": "gold", "minimumStage": 5, "maxRegionRadius": 32, "expectedStage": 5, "expectedSex": "male", "coverage": ["gold", "stage-5", "male"] },
+    { "id": "silver-stage5-female", "seed": "LOCATOR-STAGE5-silver-0", "origin": [-421.625, -333.375], "dragonType": "silver", "minimumStage": 5, "maxRegionRadius": 32, "expectedStage": 5, "expectedSex": "female", "coverage": ["silver", "stage-5", "female"] },
+    { "id": "sea-stage5", "seed": "LOCATOR-STAGE5-sea-0", "origin": [-421.625, -333.375], "dragonType": "sea", "minimumStage": 5, "maxRegionRadius": 64, "expectedStage": 5, "coverage": ["sea", "stage-5", "radius-64"] },
+    { "id": "exclude-nearest-fire", "seed": "LOCATOR-fire-0", "origin": [-213.125, 491.875], "dragonType": "fire", "minimumStage": 3, "excludeIds": ["dragon-lair:fire:-1:0"], "maxRegionRadius": 18, "coverage": ["exclusion"] },
+    { "id": "impossible-gold-radius1", "seed": "LOCATOR-NO-LAIR", "origin": [0, 0], "dragonType": "gold", "minimumStage": 5, "maxRegionRadius": 1, "expectNoResult": true, "coverage": ["no-result"] },
+    { "id": "high-i64-lair", "seed": "LOCATOR-HIGH-LAIR", "origin": [2000000000.125, -1999999999.875], "dragonType": "steel", "minimumStage": 3, "maxRegionRadius": 18, "coverage": ["high-i64-origin", "deterministic-early-exit"] },
+    { "id": "maximum-exclusions-bound", "seed": "LOCATOR-MAX-LAIR-EXCLUSIONS", "origin": [0, 0], "dragonType": "fire", "minimumStage": 3, "generatedExclusionCount": 4096, "maxRegionRadius": 1, "allowNoResult": true, "coverage": ["max-exclusions-4096"] }
+  ]
+}

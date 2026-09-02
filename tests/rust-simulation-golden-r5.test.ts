@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { integrateSailboat } from "../app/game/boats.ts";
-import { stepSwimming } from "../app/game/liquids.ts";
+import { SHORE_MANTLE_SUSTAIN_SECONDS, stepSwimming } from "../app/game/liquids.ts";
 
 type GoldenRow = Readonly<Record<string, unknown>>;
 
@@ -20,6 +20,29 @@ function scenario(name: string, predicate: (row: GoldenRow) => boolean = () => t
 function close(actual: number, expected: unknown, label: string, tolerance = 1e-9) {
   if (typeof expected !== "number") throw new TypeError(`${label} fixture must be numeric`);
   assert.ok(Math.abs(actual - expected) <= tolerance, `${label}: ${actual} != ${expected}`);
+}
+
+function assertSwimmingGolden(
+  result: ReturnType<typeof stepSwimming>,
+  golden: GoldenRow,
+  label: string,
+) {
+  close(result.state.velocityY, golden.velocityY, `${label} velocity`);
+  close(result.state.oxygenSeconds, golden.oxygen, `${label} oxygen`);
+  close(result.state.drowningAccumulator, golden.drowningAccumulator, `${label} drowning accumulator`);
+  close(result.state.entryMomentumSpeed ?? Number.NaN, golden.entryMomentumSpeed, `${label} entry momentum`);
+  assert.equal(result.state.surfaceBreachReady, golden.surfaceBreachReady, `${label} breach latch`);
+  assert.equal(result.state.shoreExitReady, golden.shoreExitReady, `${label} shore latch`);
+  close(result.state.surfaceBreachSeconds ?? Number.NaN, golden.surfaceBreachSeconds, `${label} mantle timer`);
+  close(
+    result.state.surfaceStrokeCooldownSeconds ?? Number.NaN,
+    golden.surfaceStrokeCooldownSeconds,
+    `${label} stroke cooldown`,
+  );
+  assert.equal(result.state.surfaceBobActive, golden.surfaceBobActive, `${label} bob state`);
+  assert.equal(result.shoreBoosted, golden.shoreBoosted, `${label} cue`);
+  close(result.damage, golden.damage, `${label} damage`);
+  close(result.horizontalSpeedScale, golden.horizontalSpeedScale, `${label} horizontal scale`);
 }
 
 function legacyFlightStep(
@@ -72,6 +95,7 @@ test("Rust shore exit golden matches the shipping TypeScript swimming oracle", (
       drowningAccumulator: 0,
       entryMomentumSpeed: 0,
       surfaceBreachReady: true,
+      shoreExitReady: true,
       surfaceBreachSeconds: 0,
       surfaceStrokeCooldownSeconds: 0,
       surfaceBobActive: false,
@@ -89,9 +113,23 @@ test("Rust shore exit golden matches the shipping TypeScript swimming oracle", (
     1 / 60,
   );
   const golden = scenario("shore-exit");
-  close(result.state.velocityY, golden.velocityY, "shore velocity");
-  close(result.state.oxygenSeconds, golden.oxygen, "shore oxygen");
-  assert.equal(result.shoreBoosted, golden.shoreBoosted);
+  assertSwimmingGolden(result, golden, "shore exit");
+  close(SHORE_MANTLE_SUSTAIN_SECONDS, golden.surfaceBreachSeconds, "shore mantle constant");
+
+  const sustained = stepSwimming(
+    result.state,
+    { jumpHeld: true, movingForward: true, crouching: false, sprinting: true },
+    {
+      submersion: 0.68,
+      headSubmerged: false,
+      horizontalCollision: false,
+      surfaceGap: 0.72,
+      surfaceClearance: 0.1,
+      enteredFromAir: false,
+    },
+    1 / 60,
+  );
+  assertSwimmingGolden(sustained, scenario("shore-exit-sustain"), "shore sustain");
 });
 
 test("Rust boat golden matches the shipping TypeScript low-frequency integrator", () => {

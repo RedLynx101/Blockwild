@@ -7,6 +7,7 @@ import {
   readFileSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -15,6 +16,7 @@ import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   contentAddressForFiles,
+  createRustEngineSourceSnapshot,
   describeArtifactFiles,
   summarizeSamples,
   validatePublishedArtifacts,
@@ -25,8 +27,19 @@ import {
 } from "../scripts/benchmark-rust-browser.mjs";
 import {
   acquireRustEngineBuildLock,
+  assertExpectedArtifactHashBeforePublication,
   releaseRustEngineBuildLock,
+  validateExistingArtifactDestination,
 } from "../scripts/build-rust-engine.mjs";
+import {
+  rewriteRustEngineCandidateRequestUrl,
+  rustEngineCandidateAliasPlugin,
+} from "../vite.config.ts";
+import {
+  resolveR3BrowserOutputPath,
+  resolveR3BrowserPublicDirectory,
+  selectR3BrowserArtifact,
+} from "../scripts/verify-rust-generation-r3-browser.ts";
 
 const repositoryRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const temporaryDirectories = [];
@@ -64,6 +77,11 @@ function createPublishedFixture() {
     schema: 1,
     artifactHash: hash,
     variant: "compatibility",
+    sourceSnapshot: {
+      schema: 1,
+      digest: "c".repeat(64),
+      fileCount: 3,
+    },
     files,
   });
   writeJson(path.join(root, "manifest.json"), {
@@ -77,7 +95,23 @@ function createPublishedFixture() {
       },
     },
   });
-  return { root, hash, directory };
+  return { root, hash, directory, files };
+}
+
+function createSourceSnapshotFixture(label, reverseCreationOrder = false) {
+  const root = temporaryDirectory(label);
+  const entries = [
+    ["engine/Cargo.toml", "[workspace]\nmembers = []\n"],
+    ["engine/src/lib.rs", "pub fn heartbeat() -> u32 { 1 }\n"],
+    ["scripts/build-rust-engine.mjs", "export const build = true;\n"],
+    ["scripts/rust-engine-common.mjs", "export const common = true;\n"],
+  ];
+  for (const [relativePath, contents] of reverseCreationOrder ? [...entries].reverse() : entries) {
+    const absolute = path.join(root, ...relativePath.split("/"));
+    mkdirSync(path.dirname(absolute), { recursive: true });
+    writeFileSync(absolute, contents);
+  }
+  return root;
 }
 
 test("content addresses are stable regardless of manifest ordering", () => {
@@ -99,6 +133,28 @@ test("artifact validator accepts a complete content-addressed package", () => {
   assert.equal(selected.wasm.path, "engine_bg.wasm");
 });
 
+test("R3 browser selection validates the exact artifact hash and source provenance", () => {
+  const fixture = createPublishedFixture();
+  const selected = selectR3BrowserArtifact(fixture.root, fixture.hash);
+  assert.equal(selected.hash, fixture.hash);
+  assert.equal(selected.sourceSnapshot.digest, "c".repeat(64));
+  assert.equal(selected.sourceSnapshot.fileCount, 3);
+  assert.throws(
+    () => selectR3BrowserArtifact(fixture.root, "d".repeat(64)),
+    /artifact hash mismatch/,
+  );
+
+  const missingProvenance = createPublishedFixture();
+  const manifestPath = path.join(missingProvenance.directory, "manifest.json");
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  delete manifest.sourceSnapshot;
+  writeJson(manifestPath, manifest);
+  assert.throws(
+    () => selectR3BrowserArtifact(missingProvenance.root, missingProvenance.hash),
+    /lacks a valid source snapshot/,
+  );
+});
+
 test("artifact validator rejects checksum drift", () => {
   const fixture = createPublishedFixture();
   writeFileSync(path.join(fixture.directory, "engine_bg.wasm"), Buffer.from([1, 2, 3]));
@@ -117,6 +173,69 @@ test("artifact validator rejects stale files and unreferenced directories", () =
   assert.throws(() => validatePublishedArtifacts(fixture.root), /Stale unreferenced/);
 });
 
+test("Rust engine source snapshots are sorted, stable, and detect source changes", () => {
+  const firstRoot = createSourceSnapshotFixture("rust-source-a");
+  const secondRoot = createSourceSnapshotFixture("rust-source-b", true);
+  const initial = createRustEngineSourceSnapshot(firstRoot);
+  assert.deepEqual(initial, createRustEngineSourceSnapshot(firstRoot));
+  assert.deepEqual(initial, createRustEngineSourceSnapshot(secondRoot));
+  assert.equal(initial.fileCount, 4);
+
+  for (const excluded of ["target", "work", ".sites-runtime"]) {
+    const generated = path.join(firstRoot, "engine", excluded, "generated.bin");
+    mkdirSync(path.dirname(generated), { recursive: true });
+    writeFileSync(generated, `ignored ${excluded}`);
+  }
+  assert.deepEqual(createRustEngineSourceSnapshot(firstRoot), initial);
+
+  writeFileSync(path.join(firstRoot, "engine", "src", "lib.rs"), "pub fn heartbeat() -> u32 { 2 }\n");
+  assert.notEqual(createRustEngineSourceSnapshot(firstRoot).digest, initial.digest);
+});
+
+test("existing same-hash destinations require a complete byte-for-byte file list", () => {
+  const complete = createPublishedFixture();
+  assert.equal(
+    validateExistingArtifactDestination(complete.directory, {
+      artifactHash: complete.hash,
+      files: complete.files,
+    }).files.length,
+    complete.files.length,
+  );
+
+  writeFileSync(path.join(complete.directory, "stale.tmp"), "stale");
+  assert.throws(
+    () => validateExistingArtifactDestination(complete.directory, {
+      artifactHash: complete.hash,
+      files: complete.files,
+    }),
+    /file list mismatch/,
+  );
+
+  const drifted = createPublishedFixture();
+  writeFileSync(path.join(drifted.directory, "engine_bg.wasm"), Buffer.from([1, 2, 3, 4]));
+  assert.throws(
+    () => validateExistingArtifactDestination(drifted.directory, {
+      artifactHash: drifted.hash,
+      files: drifted.files,
+    }),
+    /mismatch for engine_bg\.wasm/,
+  );
+});
+
+test("expected artifact mismatch is rejected by the pure pre-publication guard", () => {
+  const root = temporaryDirectory("rust-artifact-hash-guard");
+  const publicationRoot = path.join(root, "public", "engine");
+  assert.throws(
+    () => assertExpectedArtifactHashBeforePublication("a".repeat(64), "b".repeat(64)),
+    /artifact hash mismatch before publication/,
+  );
+  assert.equal(existsSync(publicationRoot), false, "the pure hash guard cannot mutate a publication path");
+  assert.equal(
+    assertExpectedArtifactHashBeforePublication("a".repeat(64), "a".repeat(64)),
+    "a".repeat(64),
+  );
+});
+
 test("browser benchmark inputs and summaries are deterministic", () => {
   assert.deepEqual(parseTransferSizes("4194304,65536,1048576,65536"), [65536, 1048576, 4194304]);
   assert.deepEqual(summarizeSamples([4, 1, 3, 2]), {
@@ -133,6 +252,10 @@ test("browser benchmark inputs and summaries are deterministic", () => {
 test("build fails clearly without an engine workspace and does not install tools", () => {
   const fixtureRoot = temporaryDirectory("rust-missing-workspace");
   mkdirSync(path.join(fixtureRoot, "docs"));
+  mkdirSync(path.join(fixtureRoot, "engine"));
+  mkdirSync(path.join(fixtureRoot, "scripts"));
+  writeFileSync(path.join(fixtureRoot, "scripts", "build-rust-engine.mjs"), "export const build = true;\n");
+  writeFileSync(path.join(fixtureRoot, "scripts", "rust-engine-common.mjs"), "export const common = true;\n");
   writeJson(path.join(fixtureRoot, "package.json"), { name: "fixture" });
   const result = spawnSync(process.execPath, [
     path.join(repositoryRoot, "scripts", "build-rust-engine.mjs"),
@@ -146,6 +269,120 @@ test("build fails clearly without an engine workspace and does not install tools
   });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /No Rust workspace was found/);
+});
+
+test("an expected source mismatch fails before Cargo or publication", () => {
+  const fixtureRoot = createSourceSnapshotFixture("rust-source-mismatch");
+  mkdirSync(path.join(fixtureRoot, "docs"));
+  writeJson(path.join(fixtureRoot, "package.json"), { name: "fixture" });
+  const result = spawnSync(process.execPath, [
+    path.join(repositoryRoot, "scripts", "build-rust-engine.mjs"),
+    "--repo-root",
+    fixtureRoot,
+    "--expected-source-digest",
+    "0".repeat(64),
+  ], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /source digest mismatch before build/);
+  assert.equal(existsSync(path.join(fixtureRoot, "public")), false, "a failed provenance check does not create a publication root");
+});
+
+test("R3 browser CLI rejects artifact roots outside the canonical and candidate paths", () => {
+  const result = spawnSync(process.execPath, [
+    "--import",
+    "tsx",
+    path.join(repositoryRoot, "scripts", "verify-rust-generation-r3-browser.ts"),
+    "--public-dir",
+    "public/engine-r5-candidate",
+    "--expected-artifact-hash",
+    "a".repeat(64),
+    "--output",
+    "work/r3-browser-path-rejection.json",
+  ], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 20_000,
+  });
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /must resolve to public\/engine or public\/engine-locator-candidate/);
+});
+
+test("R3 browser evidence output stays canonical, JSON, and non-symlinked beneath work", () => {
+  const root = temporaryDirectory("r3-output-boundary");
+  mkdirSync(path.join(root, "work"));
+  const valid = path.join(root, "work", "r3", "evidence.json");
+  assert.equal(resolveR3BrowserOutputPath("work/r3/evidence.json", root), valid);
+  assert.throws(
+    () => resolveR3BrowserOutputPath("outside/evidence.json", root),
+    /strictly inside/,
+  );
+  assert.throws(
+    () => resolveR3BrowserOutputPath("work/r3/evidence.txt", root),
+    /lowercase \.json extension/,
+  );
+
+  const target = path.join(root, "symlink-target");
+  mkdirSync(target);
+  const linkedOutput = path.join(root, "work", "linked.json");
+  symlinkSync(target, linkedOutput, process.platform === "win32" ? "junction" : "dir");
+  assert.throws(
+    () => resolveR3BrowserOutputPath(linkedOutput, root),
+    /may not traverse or replace a symlink/,
+  );
+});
+
+test("R3 browser public roots must be real directories at the exact approved path", () => {
+  const validRoot = temporaryDirectory("r3-public-valid");
+  mkdirSync(path.join(validRoot, "public", "engine"), { recursive: true });
+  assert.equal(
+    resolveR3BrowserPublicDirectory("public/engine", validRoot),
+    path.join(validRoot, "public", "engine"),
+  );
+
+  const linkedRoot = temporaryDirectory("r3-public-linked");
+  const target = path.join(linkedRoot, "artifact-target");
+  mkdirSync(path.join(linkedRoot, "public"));
+  mkdirSync(target);
+  symlinkSync(target, path.join(linkedRoot, "public", "engine"), process.platform === "win32" ? "junction" : "dir");
+  assert.throws(
+    () => resolveR3BrowserPublicDirectory("public/engine", linkedRoot),
+    /real non-symlink directory/,
+  );
+});
+
+test("candidate alias is serve-only and rewrites only the /engine URL space", () => {
+  assert.equal(rewriteRustEngineCandidateRequestUrl("/engine"), "/engine-locator-candidate");
+  assert.equal(rewriteRustEngineCandidateRequestUrl("/engine?cache=off"), "/engine-locator-candidate?cache=off");
+  assert.equal(
+    rewriteRustEngineCandidateRequestUrl("/engine/abc/engine.js?cache=off"),
+    "/engine-locator-candidate/abc/engine.js?cache=off",
+  );
+  for (const untouched of [
+    "/engine-room",
+    "/engine%2Fengine.js",
+    "/api/audit?path=/engine/engine.js",
+    "/public/engine/engine.js",
+  ]) {
+    assert.equal(rewriteRustEngineCandidateRequestUrl(untouched), untouched);
+  }
+
+  const plugin = rustEngineCandidateAliasPlugin(true);
+  assert.equal(plugin.apply, "serve", "candidate alias cannot participate in build output");
+  assert.equal(plugin.enforce, "pre");
+  let middleware;
+  plugin.configureServer({ middlewares: { use(handler) { middleware = handler; } } });
+  assert.equal(typeof middleware, "function");
+  const request = { url: "/engine/manifest.json?v=1" };
+  let continued = false;
+  middleware(request, {}, () => { continued = true; });
+  assert.equal(request.url, "/engine-locator-candidate/manifest.json?v=1");
+  assert.equal(continued, true);
 });
 
 test("publisher recovers only a verified stale lock and always releases its replacement", () => {

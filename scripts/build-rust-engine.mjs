@@ -19,9 +19,11 @@ import {
   RustEngineToolError,
   assertContainedPath,
   assertRegularFile,
+  assertSha256,
   assertVersion,
   cargoLockPackageVersion,
   contentAddressForFiles,
+  createRustEngineSourceSnapshot,
   describeArtifactFiles,
   discoverEngineWorkspace,
   findRepositoryRoot,
@@ -49,6 +51,8 @@ const OPTIONS = {
   "wasm-bindgen": { type: "string", default: process.env.BLOCKWILD_WASM_BINDGEN ?? "wasm-bindgen" },
   "wasm-opt": { type: "string", default: process.env.BLOCKWILD_WASM_OPT ?? null },
   "public-dir": { type: "string", default: "public/engine" },
+  "expected-source-digest": { type: "string", default: null },
+  "expected-artifact-hash": { type: "string", default: null },
 };
 
 function safeRemoveTree(parentDirectory, targetDirectory) {
@@ -102,6 +106,70 @@ function writeJson(filePath, value) {
   writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
+function replaceJsonAtomically(filePath, value) {
+  const temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}-${process.pid}-${Date.now()}.tmp`);
+  try {
+    writeJson(temporary, value);
+    renameSync(temporary, filePath);
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
+
+function artifactFileMap(files, label) {
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new RustEngineToolError(`${label} must contain at least one file.`);
+  }
+  const result = new Map();
+  for (const file of files) {
+    if (!file || typeof file !== "object" || typeof file.path !== "string" || result.has(file.path)) {
+      throw new RustEngineToolError(`${label} contains an invalid or duplicate file path.`);
+    }
+    result.set(file.path, file);
+  }
+  return result;
+}
+
+function assertArtifactFileListsMatch(expectedFiles, actualFiles, label) {
+  const expected = artifactFileMap(expectedFiles, `${label} expected file list`);
+  const actual = artifactFileMap(actualFiles, `${label} actual file list`);
+  if (expected.size !== actual.size) {
+    throw new RustEngineToolError(`${label} file list mismatch: expected ${expected.size} files, found ${actual.size}.`);
+  }
+  for (const [relativePath, expectedFile] of expected) {
+    const actualFile = actual.get(relativePath);
+    if (!actualFile) throw new RustEngineToolError(`${label} is missing ${relativePath}.`);
+    for (const field of ["sha256", "bytes", "role", "mimeType"]) {
+      if (actualFile[field] !== expectedFile[field]) {
+        throw new RustEngineToolError(`${label} ${field} mismatch for ${relativePath}.`);
+      }
+    }
+  }
+}
+
+export function validateExistingArtifactDestination(destination, { artifactHash, files }) {
+  assertSha256(artifactHash, "Existing Rust engine artifact hash");
+  const manifestPath = path.join(destination, "manifest.json");
+  const manifestFile = assertRegularFile(manifestPath, "Existing Rust engine artifact manifest");
+  let manifest;
+  try {
+    manifest = JSON.parse(readFileSync(manifestFile, "utf8"));
+  } catch (error) {
+    throw new RustEngineToolError(`Existing Rust engine artifact manifest is invalid JSON: ${error.message}`);
+  }
+  if (manifest.schema !== RUST_ENGINE_ARTIFACT_SCHEMA || manifest.artifactHash !== artifactHash) {
+    throw new RustEngineToolError(`Existing content-addressed artifact ${destination} does not match ${artifactHash}.`);
+  }
+  const actualFiles = describeArtifactFiles(destination);
+  assertArtifactFileListsMatch(files, actualFiles, "Existing Rust engine artifact bytes");
+  assertArtifactFileListsMatch(manifest.files, actualFiles, "Existing Rust engine artifact manifest");
+  const actualHash = contentAddressForFiles(actualFiles);
+  if (actualHash !== artifactHash) {
+    throw new RustEngineToolError(`Existing Rust engine artifact content address mismatch: expected ${artifactHash}, found ${actualHash}.`);
+  }
+  return { manifest, files: actualFiles };
+}
+
 function publishIndex(publicEngineDirectory, index) {
   const target = path.join(publicEngineDirectory, "manifest.json");
   const temporary = path.join(publicEngineDirectory, `.manifest-${process.pid}-${Date.now()}.tmp`);
@@ -112,7 +180,7 @@ function publishIndex(publicEngineDirectory, index) {
 function readExistingIndex(publicEngineDirectory) {
   const manifestPath = path.join(publicEngineDirectory, "manifest.json");
   if (!existsSync(manifestPath)) return null;
-  return validatePublishedArtifacts(publicEngineDirectory).index;
+  return validatePublishedArtifacts(publicEngineDirectory, { allowBuildLock: true }).index;
 }
 
 function pruneUnreferencedArtifacts(publicEngineDirectory, index) {
@@ -169,12 +237,36 @@ export function releaseRustEngineBuildLock(lockPath, descriptor) {
   if (existsSync(lockPath)) unlinkSync(lockPath);
 }
 
+export function assertExpectedArtifactHashBeforePublication(actualArtifactHash, expectedArtifactHash = null) {
+  const actual = assertSha256(actualArtifactHash, "Generated Rust engine artifact hash");
+  if (!expectedArtifactHash) return actual;
+  const expected = assertSha256(expectedArtifactHash, "Expected Rust engine artifact hash");
+  if (actual !== expected) {
+    throw new RustEngineToolError(
+      `Rust engine artifact hash mismatch before publication: expected ${expected}, found ${actual}.`,
+    );
+  }
+  return actual;
+}
+
 export function buildRustEngine(argv = process.argv) {
   const options = parseCommandLine(argv, OPTIONS);
   if (!/^[a-z][a-z0-9-]*$/.test(options.variant)) {
     throw new RustEngineToolError(`Invalid artifact variant ${options.variant}. Use lowercase letters, digits, and hyphens.`);
   }
   const repositoryRoot = findRepositoryRoot(options["repo-root"] ?? process.cwd());
+  const expectedSourceDigest = options["expected-source-digest"]
+    ? assertSha256(options["expected-source-digest"], "Expected Rust engine source digest")
+    : null;
+  const expectedArtifactHash = options["expected-artifact-hash"]
+    ? assertSha256(options["expected-artifact-hash"], "Expected Rust engine artifact hash")
+    : null;
+  const sourceSnapshotBeforeBuild = createRustEngineSourceSnapshot(repositoryRoot);
+  if (expectedSourceDigest && sourceSnapshotBeforeBuild.digest !== expectedSourceDigest) {
+    throw new RustEngineToolError(
+      `Rust engine source digest mismatch before build: expected ${expectedSourceDigest}, found ${sourceSnapshotBeforeBuild.digest}.`,
+    );
+  }
   const { workspaceRoot, metadata } = discoverEngineWorkspace({
     repositoryRoot,
     workspace: options.workspace,
@@ -202,16 +294,8 @@ export function buildRustEngine(argv = process.argv) {
   if (publicEngineDirectory !== path.join(publicDirectory, "engine") && !publicEngineDirectory.startsWith(`${publicDirectory}${path.sep}`)) {
     throw new RustEngineToolError(`Published engine artifacts must remain inside ${publicDirectory}.`);
   }
-  mkdirSync(publicEngineDirectory, { recursive: true });
-  const existingIndex = readExistingIndex(publicEngineDirectory);
   const lockPath = path.join(publicEngineDirectory, ".build-lock");
   let lockDescriptor;
-  try {
-    lockDescriptor = acquireRustEngineBuildLock(lockPath);
-  } catch (error) {
-    if (error instanceof RustEngineToolError) throw error;
-    throw new RustEngineToolError(`Rust engine build lock could not be acquired (${lockPath}).`, { cause: error.message });
-  }
 
   let buildRoot;
   let stagingRoot;
@@ -261,9 +345,19 @@ export function buildRustEngine(argv = process.argv) {
       renameSync(optimized, wasmOutput);
     }
 
+    const sourceSnapshotAfterBuild = createRustEngineSourceSnapshot(repositoryRoot);
+    if (
+      sourceSnapshotAfterBuild.digest !== sourceSnapshotBeforeBuild.digest
+      || sourceSnapshotAfterBuild.fileCount !== sourceSnapshotBeforeBuild.fileCount
+    ) {
+      throw new RustEngineToolError(
+        `Rust engine source changed during the artifact build: before ${sourceSnapshotBeforeBuild.digest}/${sourceSnapshotBeforeBuild.fileCount} files, after ${sourceSnapshotAfterBuild.digest}/${sourceSnapshotAfterBuild.fileCount} files.`,
+      );
+    }
     const files = describeArtifactFiles(packageDirectory);
     if (files.length === 0) throw new RustEngineToolError("wasm-bindgen produced no browser artifacts.");
     const artifactHash = contentAddressForFiles(files);
+    assertExpectedArtifactHashBeforePublication(artifactHash, expectedArtifactHash);
     const totals = compressedTotals(packageDirectory, files);
     const artifactManifest = {
       schema: RUST_ENGINE_ARTIFACT_SCHEMA,
@@ -280,10 +374,23 @@ export function buildRustEngine(argv = process.argv) {
       wasmBindgenVersion: bindgenVersion,
       wasmOpt: options["wasm-opt"] ? runChecked(options["wasm-opt"], ["--version"], { cwd: workspaceRoot }).stdout : null,
       createdAt: new Date().toISOString(),
+      sourceSnapshot: sourceSnapshotBeforeBuild,
       totals,
       files,
     };
     writeJson(path.join(packageDirectory, "manifest.json"), artifactManifest);
+
+    // Publication begins only after both the source snapshot and expected
+    // artifact hash have passed. The lock therefore protects the destination
+    // and index mutation without creating public state for a rejected build.
+    mkdirSync(publicEngineDirectory, { recursive: true });
+    try {
+      lockDescriptor = acquireRustEngineBuildLock(lockPath);
+    } catch (error) {
+      if (error instanceof RustEngineToolError) throw error;
+      throw new RustEngineToolError(`Rust engine build lock could not be acquired (${lockPath}).`, { cause: error.message });
+    }
+    const existingIndex = readExistingIndex(publicEngineDirectory);
 
     const destination = assertContainedPath(
       publicEngineDirectory,
@@ -291,10 +398,8 @@ export function buildRustEngine(argv = process.argv) {
       "Published artifact directory",
     );
     if (existsSync(destination)) {
-      const existingManifest = JSON.parse(readFileSync(path.join(destination, "manifest.json"), "utf8"));
-      if (existingManifest.artifactHash !== artifactHash) {
-        throw new RustEngineToolError(`Existing content-addressed artifact ${destination} does not match ${artifactHash}.`);
-      }
+      validateExistingArtifactDestination(destination, { artifactHash, files });
+      replaceJsonAtomically(path.join(destination, "manifest.json"), artifactManifest);
       safeRemoveTree(stagingRoot, packageDirectory);
     } else {
       renameSync(packageDirectory, destination);
@@ -327,6 +432,7 @@ export function buildRustEngine(argv = process.argv) {
       indexPath: path.join(publicEngineDirectory, "manifest.json"),
       files,
       totals,
+      sourceSnapshot: sourceSnapshotBeforeBuild,
       toolchain: {
         rustc: toolchain.rustcVersion,
         cargo: toolchain.cargoVersion,
@@ -335,7 +441,7 @@ export function buildRustEngine(argv = process.argv) {
       },
     };
   } finally {
-    releaseRustEngineBuildLock(lockPath, lockDescriptor);
+    if (lockDescriptor !== undefined) releaseRustEngineBuildLock(lockPath, lockDescriptor);
     if (stagingRoot && existsSync(stagingRoot)) safeRemoveTree(buildRoot, stagingRoot);
   }
 

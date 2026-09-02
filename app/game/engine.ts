@@ -16,7 +16,7 @@ import {
 } from "./creature-render-admission";
 import { SynthAudio, type SampleKind } from "./audio";
 import { BasicWorldRenderer, disabledBasicWorldRendererStats, type BasicWorldRendererStats } from "./basic-world-renderer";
-import { currentBuildIdentity } from "./build-info";
+import { currentBuildIdentity, worldgenBuildUsesRustRuntime } from "./build-info";
 import {
   OPEN_CAMERA_ENVIRONMENT,
   cameraEnvironmentTarget as deriveCameraEnvironmentTarget,
@@ -97,11 +97,17 @@ import {
   BiomeId,
   ChunkWorld,
   adventureBiomeFromId,
+  blockIndex,
+  chunkKey,
   createAtlasBlockGeometry,
   guildHallBlockPalette,
+  splitCoordinate,
   type ChunkEditSave,
   type ChunkWorkFrameReport,
 } from "./world";
+import type {
+  SettlementLocatorResultV1,
+} from "./terrain-generation-contract";
 import { BUTTERFLY_ORDER, MOB_DEFS, MOB_ORDER, type ButterflyKind, type CoreMobKind, type MobDefinition, type MobKind, type SummonedCreatureKind } from "./mobs";
 import { creatureProfile } from "./creature-profiles";
 import { evaluateCaptureReadiness, type CaptureReadiness } from "./creature-capture";
@@ -565,6 +571,10 @@ import {
   LIQUID_SIMULATION_STEP_SECONDS,
   liquidBlockForKind,
   liquidKindForBlock,
+  loadedBodyCollisionAt,
+  loadedLiquidSurfaceY,
+  loadedLowBankShoreLedgeHeight,
+  projectBodyOntoForwardMotion,
   stepSwimming,
   type LiquidCell,
 } from "./liquids";
@@ -626,12 +636,16 @@ import {
 } from "./player-model";
 import {
   MultiplayerSession,
+  MultiplayerPeerTransportUnavailableError,
+  DEFAULT_MULTIPLAYER_AUTHORITY_TIMEOUT_MS,
   MULTIPLAYER_PROTOCOL_NAME,
   MULTIPLAYER_PROTOCOL_VERSION,
+  MULTIPLAYER_PRESENTATION_SCHEDULING_SLACK_MS,
   createPeerIdentity,
   detectMultiplayerSupport,
   isMultiplayerOperationCancellation,
   parseMultiplayerLatencyRange,
+  validatePlayerProgressionSnapshot,
   type BlockAction,
   type BlockEdit,
   type BoatAction,
@@ -663,8 +677,20 @@ import {
 import {
   bindReadyRustMultiplayerRuntimeV2,
   createRustMultiplayerGuestAuthorityFactoryV2,
+  parseRustMultiplayerRuntimeDescriptorV2,
+  RustMultiplayerRuntimeBootstrapErrorV1,
   type RustMultiplayerAuthorityInterestInputV1,
 } from "./rust-multiplayer-runtime-bootstrap";
+import type { RustMultiplayerNativePoseReceiptV1 } from "./rust-multiplayer-authority";
+import {
+  RUST_MULTIPLAYER_PRESENTATION_KIND_V2,
+  RUST_MULTIPLAYER_PRESENTATION_SCHEMA_V2,
+  decodeRustMultiplayerWorldPresentationV2,
+  encodeRustMultiplayerWorldPresentationV2,
+  rustMultiplayerPresentationRecordIdV2,
+  type RustMultiplayerProgressionReceiptV2,
+  type RustMultiplayerWorldPresentationV2,
+} from "./rust-multiplayer-presentation";
 import {
   createRustWorldRuntimeLiveConfigV1,
   createRustWorldRuntimeSessionIdV1,
@@ -673,19 +699,56 @@ import {
   RustWorldRuntimeManagerV1,
   type RustWorldRuntimeManagedHostV1,
 } from "./rust-world-runtime-manager";
+import { rustNativePersistenceWorldIdV1 } from "./rust-world-runtime-host";
 import {
   RUST_RUNTIME_INPUT_BUTTON_MASK_V1,
   RUST_RUNTIME_INPUT_BUTTON_V1,
   RUST_RUNTIME_INPUT_FLAG_MASK_V1,
   RUST_RUNTIME_INPUT_FLAG_V1,
+  rustIntegratedRuntimeIdentityEqualsV1,
   type RustIntegratedRuntimeExtractionV1,
   type RustIntegratedRuntimeExtractionViewV1,
+  type RustIntegratedRuntimeIdentityV1,
 } from "./rust-integrated-runtime-contract";
+import type {
+  RustNativeWorldPersistenceDiagnosticsV1,
+  RustNativeWorldPersistenceSaveV1,
+  RustNativeWorldPersistenceSessionV1,
+} from "./rust-native-world-persistence";
 import {
   executeRustIntegratedPlayerBootstrapV1,
   validateRustIntegratedPlayerCombatBootstrapV1,
   type RustIntegratedPlayerBootstrapObservationV1,
 } from "./rust-integrated-runtime-player-bootstrap";
+import type {
+  RustIntegratedContainerKeyV1,
+  RustIntegratedPlayerInventoryStackV1,
+} from "./rust-integrated-runtime-player-inventory";
+import type {
+  RustIntegratedPlayerCreativeSlotSetV1,
+} from "./rust-integrated-runtime-player-creative-slot";
+import {
+  executeRustLivePlayerGameModeSetV1,
+  validateRustLivePlayerGameModeSetAfterCommandV1,
+  validateRustLivePlayerGameModeSetRestoredStateV1,
+} from "./rust-integrated-runtime-player-game-mode";
+import {
+  rehydrateRustLiveLocatorItemConsumePlanV1,
+  rustIntegratedContainerViewKeyV1,
+  type RustIntegratedPlayerLocatorItemConsumeV1,
+} from "./rust-integrated-runtime-player-locator-consume";
+import {
+  appendRustTerrainLocatorAppliedEffectIdV1,
+  createRustTerrainDragonLairEffectV1,
+  createRustTerrainLocatorEffectJournalV1,
+  createRustTerrainSettlementChartEffectV1,
+  normalizeRustTerrainLocatorAppliedEffectIdsV1,
+  rehydrateRustTerrainLocatorEffectJournalV1,
+  rustTerrainLocatorEffectIdV1,
+  rustTerrainLocatorEffectWasAppliedV1,
+  type RustTerrainLocatorEffectV1,
+  type RustTerrainLocatorEffectJournalV1,
+} from "./rust-terrain-locator-effect-journal";
 import { queryRustIntegratedRuntimeContextContinuityV2 } from "./rust-integrated-runtime-context-continuity-v2";
 import {
   createRustPlayerBootstrapNewWorldCompatibilityV1,
@@ -703,15 +766,63 @@ import {
   RUST_LIVE_INPUT_AXIS_DIVISOR_R5,
   type RustLiveInputIntentR5,
   type RustLiveInputPumpR5,
+  type RustLiveInputPumpDiagnosticsR5,
+  type RustLiveInputPumpBasicDirtActionDeliveryV1,
+  type RustLiveInputPumpNativeBlockEditDeliveryV1,
+  type RustLiveInputPumpDropPickupDeliveryV1,
+  type RustLiveInputPumpPlayerDropDeliveryV1,
+  type RustLiveInputPumpDeathRespawnDeliveryV1,
+  type RustLiveInputPumpPlayerRespawnResultV1,
+  type RustLiveInputPumpLocatorItemConsumeResultV1,
 } from "./rust-live-input-pump-r5";
 import {
+  planRustBasicDirtBrowserProjectionV1,
+  rustBasicDirtCompatibilityStackMatchesV1,
+  rustBasicDirtCompatibilityStackV1,
+} from "./rust-basic-dirt-browser-projection";
+import {
+  planRustNativeBlockEditBrowserProjectionV1,
+  rustNativeBlockEditCompatibilityStackMatchesV1,
+} from "./rust-native-block-edit-browser-projection";
+import type {
+  RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2,
+} from "./rust-integrated-runtime-native-block-edit";
+import {
+  planRustNativeDropPickupBrowserProjectionV1,
+  type RustNativeDropPickupBrowserProjectionPlanV1,
+} from "./rust-native-drop-pickup-projection";
+import {
+  planRustNativePlayerDropBrowserProjectionV1,
+} from "./rust-native-player-drop-projection";
+import {
+  planRustNativePlayerDeathRespawnBrowserProjectionV1,
+  type RustNativePlayerDeathRespawnBrowserProjectionPlanV1,
+} from "./rust-native-player-death-respawn-projection";
+import {
+  rehydrateRustLivePlayerRespawnPlanV1,
+  rustLivePlayerRespawnPlanRecordV1,
+  executeRustLivePlayerRespawnPlanV1,
+  type RustIntegratedPlayerRespawnV1,
+  type RustLivePlayerRespawnPlanRecordV1,
+  type RustLivePlayerRespawnPlanV1,
+} from "./rust-integrated-runtime-player-respawn";
+import {
   decodeRustLivePlayerViewR10,
+  rustLivePlayerEffectJournalContinuesR10,
+  rustLivePlayerRespawnDiagnosticsR10,
+  type RustLivePlayerRespawnDiagnosticsR10,
   type RustLivePlayerViewR10,
 } from "./rust-live-player-view-r10";
+import type { RustLivePlayerAuthorityModeR5 } from "./rust-live-player-authority-selection-r5";
 import {
   decodeRustLiveCameraViewR10,
   type RustLiveCameraViewR10,
 } from "./rust-live-camera-view-r10";
+import {
+  planRustDroppedHotTransformsR10,
+  type RustDroppedHotTransformFrameR10,
+  type RustDroppedHotTransformR10,
+} from "./rust-authoritative-extraction-r10";
 import {
   createRustLiveRenderRuntimeR10,
   type RustLiveRenderRuntimeR10,
@@ -1153,6 +1264,53 @@ import {
 
 export { BLOCKS, CREATIVE_BLOCKS, CREATIVE_ITEMS, ITEMS, Item, RECIPES, BlockId, BIOME_NAMES, MOB_DEFS, MOB_ORDER, WorldStorage, DEFAULT_WORLD_OPTIONS, type WorldOptions, type WorldMetadata, type GameMode, type InventorySlot, type ItemCode, type Recipe, type EquipmentSlot, type MobKind, type SleepTarget, type PlayerVariant };
 
+type TerrainSettlementLocatorEntryV1 = SettlementLocatorResultV1["entries"][number];
+
+export type WorldOriginPreviewV1 = Readonly<{
+  candidate: Readonly<{
+    id: string;
+    factionId: TerrainSettlementLocatorEntryV1["factionId"];
+    size: TerrainSettlementLocatorEntryV1["size"];
+    environment: TerrainSettlementLocatorEntryV1["environment"];
+    biome: string;
+    center: Readonly<{ x: number; y?: number; z: number }>;
+  }>;
+  position: Readonly<{ x: number; y: number; z: number }>;
+  anchorKind: string;
+  distanceBlocks: number;
+}>;
+
+type PreparedRustSettlementOriginV1 = Readonly<{
+  entry: TerrainSettlementLocatorEntryV1;
+  position: Readonly<{ x: number; y: number; z: number }>;
+  markerY: number;
+}>;
+
+type RustWorldCreateRollbackBaselineV1 = Readonly<{
+  engineActiveWorldId: string | null;
+  catalogActiveWorldId: string | null;
+  persistent: boolean;
+  titleMode: boolean;
+}>;
+
+type RustWorldTransitionPreflightBaselineV1 = Readonly<{
+  operationsBlocked: boolean;
+  hydration: RustLiveRuntimeDiagnosticsV1["hydration"];
+  playerAuthorityState: RustLivePlayerAuthorityStateR5;
+  running: boolean;
+  paused: boolean;
+}>;
+
+class RustWorldTransitionPreflightError extends Error {
+  readonly failure: unknown;
+
+  constructor(failure: unknown) {
+    super(failure instanceof Error ? failure.message : String(failure));
+    this.name = "RustWorldTransitionPreflightError";
+    this.failure = failure;
+  }
+}
+
 export const SAVE_KEY = "blockwild-world-v2";
 export const SETTINGS_KEY = "blockwild-settings-v2";
 export const CLOVERBACK_MILK_COOLDOWN_SECONDS = 90;
@@ -1514,6 +1672,21 @@ function migrateLanternPiehouseCreature(saved: SavedCreature) {
   return { ...saved, x: origin.x, z: origin.z - 3, profession: "brewer" } satisfies SavedCreature;
 }
 
+function creatureRestoreTerrainCell(saved: Pick<SavedCreature, "x" | "z">) {
+  const cellX = Math.round(saved.x);
+  const cellZ = Math.round(saved.z);
+  return {
+    cellX,
+    cellZ,
+    chunkX: Math.floor(cellX / CHUNK_SIZE),
+    chunkZ: Math.floor(cellZ / CHUNK_SIZE),
+  } as const;
+}
+
+function isRestorableSavedCreature(saved: SavedCreature) {
+  return saved.kind in MOB_DEFS && !BUTTERFLY_ORDER.includes(saved.kind as ButterflyKind);
+}
+
 /** Load-time compatibility for Piehouses activated before the indoor anchor. */
 export function migrateLanternPiehouseSaveState(
   creatures: readonly SavedCreature[],
@@ -1550,6 +1723,29 @@ export function migrateLanternPiehouseSaveState(
   }
   return { creatures: migratedCreatures, merchants: migratedMerchants } as const;
 }
+
+type WorldDropSaveCommon = Readonly<{
+  item: ItemCode;
+  count: number;
+  durability?: number;
+  metadata?: Record<string, unknown>;
+  x: number;
+  y: number;
+  z: number;
+  age: number;
+}>;
+
+export type WorldDropSave = WorldDropSaveCommon & (
+  | Readonly<{ rustEntityId?: never }>
+  | Readonly<{
+    rustEntityId: string;
+    rotationY: number;
+    vx: number;
+    vy: number;
+    vz: number;
+    pickupDelay: number;
+  }>
+);
 
 export type WorldSave = {
   version: 2;
@@ -1606,6 +1802,22 @@ export type WorldSave = {
   sugarworks?: Record<string, SugarworksState>;
   mapKnowledge?: MapKnowledge;
   questBook?: QuestBook;
+  /** Prepared browser half of one native locator-item transaction. */
+  rustTerrainLocatorEffectJournal?: RustTerrainLocatorEffectJournalV1 | null;
+  /** Bounded idempotence ledger committed in the same world document as locator effects. */
+  rustTerrainLocatorAppliedEffectIds?: readonly string[];
+  /** Browser projection cursor committed atomically with each durable native Dirt action receipt. */
+  rustBasicDirtActionProjection?: RustBasicDirtActionProjectionCursorV1 | null;
+  /** Browser projection cursor committed atomically with every supported native single-cell block edit. */
+  rustNativeBlockEditProjection?: RustNativeBlockEditProjectionCursorV1 | null;
+  /** Browser projection cursor committed atomically with each durable native drop-pickup receipt. */
+  rustNativeDropPickupProjection?: RustNativeDropPickupProjectionCursorV1 | null;
+  /** Browser projection cursor committed atomically with each durable native player-drop receipt. */
+  rustNativePlayerDropProjection?: RustNativePlayerDropProjectionCursorV1 | null;
+  /** Browser projection cursor committed with each false-policy native death/respawn parent. */
+  rustNativePlayerDeathRespawnProjection?: RustNativePlayerDeathRespawnProjectionCursorV1 | null;
+  /** Exact pre-dispatch BWD7 bytes retained until the respawn and browser projection are durable. */
+  rustNativePlayerRespawnPlan?: RustLivePlayerRespawnPlanRecordV1 | null;
   sideQuestDefinitions?: QuestDefinition[];
   blueprints?: BlueprintState;
   plantBestiary?: PlantBestiaryState;
@@ -1626,7 +1838,7 @@ export type WorldSave = {
   skillState?: SkillState;
   archiveShelves?: Record<string, ArchiveShelfState>;
   tomeDisplays?: Record<string, TomeDisplayState>;
-  drops?: Array<{ item: ItemCode; count: number; durability?: number; metadata?: Record<string, unknown>; x: number; y: number; z: number; age: number }>;
+  drops?: WorldDropSave[];
   options?: Partial<WorldOptions>;
   playerVariant?: PlayerVariant;
   liquidLevels?: Array<[string, LiquidCell]>;
@@ -1656,6 +1868,116 @@ export type WorldSave = {
   savedAt: number;
 };
 
+export type RustBasicDirtActionProjectionCursorV1 = Readonly<{
+  schema: 1;
+  cursor: number;
+  lastReceiptHash: string | null;
+}>;
+
+export type RustNativeBlockEditProjectionCursorV1 = Readonly<{
+  schema: 1;
+  cursor: number;
+  lastReceiptHash: string | null;
+}>;
+
+export type RustNativeDropPickupProjectionCursorV1 = Readonly<{
+  schema: 1;
+  cursor: number;
+  lastReceiptHash: string | null;
+}>;
+
+export type RustNativePlayerDropProjectionCursorV1 = Readonly<{
+  schema: 1;
+  cursor: number;
+  lastReceiptHash: string | null;
+}>;
+
+export type RustNativePlayerDeathRespawnProjectionCursorV1 = Readonly<{
+  schema: 1;
+  cursor: number;
+  lastReceiptHash: string | null;
+}>;
+
+export function normalizeRustBasicDirtActionProjectionCursorV1(
+  value: RustBasicDirtActionProjectionCursorV1 | null | undefined,
+) {
+  if (value === undefined || value === null) return null;
+  if (value.schema !== 1 || !Number.isSafeInteger(value.cursor) || value.cursor < 0
+    || value.cursor > Number.MAX_SAFE_INTEGER
+    || value.lastReceiptHash !== null
+      && (typeof value.lastReceiptHash !== "string" || !/^[0-9a-f]{32}$/u.test(value.lastReceiptHash))) {
+    throw new Error("Saved native Dirt action projection cursor is malformed");
+  }
+  if (value.cursor === 0 && value.lastReceiptHash !== null) {
+    throw new Error("Saved native Dirt action projection cursor contradicts its last receipt hash");
+  }
+  return Object.freeze({ schema: 1 as const, cursor: value.cursor, lastReceiptHash: value.lastReceiptHash });
+}
+
+export function normalizeRustNativeBlockEditProjectionCursorV1(
+  value: RustNativeBlockEditProjectionCursorV1 | null | undefined,
+) {
+  if (value === undefined || value === null) return null;
+  if (value.schema !== 1 || !Number.isSafeInteger(value.cursor) || value.cursor < 0
+    || value.cursor > Number.MAX_SAFE_INTEGER
+    || value.lastReceiptHash !== null
+      && (typeof value.lastReceiptHash !== "string" || !/^[0-9a-f]{32}$/u.test(value.lastReceiptHash))) {
+    throw new Error("Saved native block-edit projection cursor is malformed");
+  }
+  if (value.cursor === 0 && value.lastReceiptHash !== null) {
+    throw new Error("Saved native block-edit projection cursor contradicts its last receipt hash");
+  }
+  return Object.freeze({ schema: 1 as const, cursor: value.cursor, lastReceiptHash: value.lastReceiptHash });
+}
+
+export function normalizeRustNativeDropPickupProjectionCursorV1(
+  value: RustNativeDropPickupProjectionCursorV1 | null | undefined,
+) {
+  if (value === undefined || value === null) return null;
+  if (value.schema !== 1 || !Number.isSafeInteger(value.cursor) || value.cursor < 0
+    || value.cursor > Number.MAX_SAFE_INTEGER
+    || value.lastReceiptHash !== null
+      && (typeof value.lastReceiptHash !== "string" || !/^[0-9a-f]{32}$/u.test(value.lastReceiptHash))) {
+    throw new Error("Saved native drop pickup projection cursor is malformed");
+  }
+  if (value.cursor === 0 && value.lastReceiptHash !== null) {
+    throw new Error("Saved native drop pickup projection cursor contradicts its last receipt hash");
+  }
+  return Object.freeze({ schema: 1 as const, cursor: value.cursor, lastReceiptHash: value.lastReceiptHash });
+}
+
+export function normalizeRustNativePlayerDropProjectionCursorV1(
+  value: RustNativePlayerDropProjectionCursorV1 | null | undefined,
+) {
+  if (value === undefined || value === null) return null;
+  if (value.schema !== 1 || !Number.isSafeInteger(value.cursor) || value.cursor < 0
+    || value.cursor > Number.MAX_SAFE_INTEGER
+    || value.lastReceiptHash !== null
+      && (typeof value.lastReceiptHash !== "string" || !/^[0-9a-f]{32}$/u.test(value.lastReceiptHash))) {
+    throw new Error("Saved native player-drop projection cursor is malformed");
+  }
+  if (value.cursor === 0 && value.lastReceiptHash !== null) {
+    throw new Error("Saved native player-drop projection cursor contradicts its last receipt hash");
+  }
+  return Object.freeze({ schema: 1 as const, cursor: value.cursor, lastReceiptHash: value.lastReceiptHash });
+}
+
+export function normalizeRustNativePlayerDeathRespawnProjectionCursorV1(
+  value: RustNativePlayerDeathRespawnProjectionCursorV1 | null | undefined,
+) {
+  if (value === undefined || value === null) return null;
+  if (value.schema !== 1 || !Number.isSafeInteger(value.cursor) || value.cursor < 0
+    || value.cursor > Number.MAX_SAFE_INTEGER
+    || value.lastReceiptHash !== null
+      && (typeof value.lastReceiptHash !== "string" || !/^[0-9a-f]{32}$/u.test(value.lastReceiptHash))) {
+    throw new Error("Saved native player death-respawn projection cursor is malformed");
+  }
+  if (value.cursor === 0 && value.lastReceiptHash !== null) {
+    throw new Error("Saved native player death-respawn projection cursor contradicts its last receipt hash");
+  }
+  return Object.freeze({ schema: 1 as const, cursor: value.cursor, lastReceiptHash: value.lastReceiptHash });
+}
+
 export type OverlayKind = "inventory" | "crafting" | "furnace" | "wheat-mill" | "chest" | "apiary" | "morph-loom" | "orb-rack" | "healing-station" | "waygrid-items" | "waygrid-creatures" | "aquarium" | "golem-forge" | "bestiary" | "creature-camp" | "multiplayer" | "sleep" | "pet" | "dragon" | "magic" | "skills" | "spell-wheel" | "library" | "incubator" | "map" | "quests" | "guilds" | "cardforge" | "cartography" | "alchemy" | "distillery" | "sugarworks" | "sentient" | "trade" | "bank" | "settlement" | "follower";
 export type CameraMode = "first" | "third-rear" | "third-front";
 
@@ -1664,6 +1986,8 @@ export type MultiplayerUiState = {
   reasons: string[];
   status: MultiplayerSessionState;
   role: "host" | "guest" | null;
+  /** True only after a guest has applied the host's initial authoritative world. */
+  guestWorldReady: boolean;
   peers: PeerInfo[];
   inviteCode: string;
   answerCode: string;
@@ -1676,6 +2000,13 @@ export type MultiplayerUiState = {
   agentTasks: AgentTaskRecord[];
   agentWaypoints: AgentWaypointRecord[];
 };
+
+export function isMultiplayerGuestWorldReady(
+  role: MultiplayerUiState["role"],
+  receivedSnapshot: boolean,
+) {
+  return role === "guest" && receivedSnapshot === true;
+}
 
 export type CreatureTransferOfferView = Readonly<{
   offerId: string;
@@ -1738,6 +2069,11 @@ export type VoxelEngineOptions = Readonly<{
   rustWorldHydration?: RustWorldHydrationHookV1;
   /** Test-only lifecycle seam. Production always uses the exact BWS5/bootstrap/terrain/input gate below. */
   rustLivePlayerAuthorityActivation?: RustLivePlayerAuthorityActivationHookV1;
+  /**
+   * Explicit product-policy selector. Rust terrain does not implicitly transfer
+   * player/gameplay custody; the reduced R5 path remains experimental opt-in.
+   */
+  rustLivePlayerAuthorityMode?: RustLivePlayerAuthorityModeR5;
 }>;
 
 export type RustWorldHydrationHookV1 = (input: Readonly<{
@@ -1749,14 +2085,192 @@ export type RustWorldHydrationHookV1 = (input: Readonly<{
 
 export type RustLivePlayerAuthorityActivationHookV1 = (input: Readonly<{
   generation: number;
-  kind: "create" | "load";
+  kind: "create" | "load" | "multiplayer-guest";
   save: WorldSave | null;
   host: RustWorldRuntimeManagedHostV1;
 }>) => Promise<void>;
 
 export type RustLivePlayerAuthorityStateR5 = "none" | "starting" | "ready" | "blocked";
 
+type RustMultiplayerRejectionDiagnosticV1 = Readonly<{
+  messageType: string;
+  commandId: string;
+  code: string;
+  expected: Readonly<{ revision: Readonly<{ epoch: number; world: number; entities: number; gameplay: number; persistence: number }>; stateHash: string }>;
+  current: Readonly<{ revision: Readonly<{ epoch: number; world: number; entities: number; gameplay: number; persistence: number }>; stateHash: string }>;
+}>;
+
 const RUST_LIVE_RENDER_EXTRACTION_QUEUE_CAP_R10 = 4;
+
+type RustNativeCheckpointWitnessV1 = Readonly<{
+  identityBefore: RustIntegratedRuntimeIdentityV1;
+  identityAfter: RustIntegratedRuntimeIdentityV1;
+  persistenceBefore: RustNativeWorldPersistenceDiagnosticsV1;
+  persistenceAfter: RustNativeWorldPersistenceDiagnosticsV1;
+  checkpoint: RustNativeWorldPersistenceSaveV1;
+}>;
+
+export type RustNativePlayerDropCheckpointWitnessV1 = RustNativeCheckpointWitnessV1 & Readonly<{
+  schema: 1;
+  cursorBefore: number;
+  cursorAfter: number;
+  receiptHash: string;
+  queryIdentityHash: string;
+}>;
+
+export type RustNativeDropPickupCheckpointWitnessV1 = RustNativeCheckpointWitnessV1 & Readonly<{
+  schema: 1;
+  cursorBefore: number;
+  cursorAfter: number;
+  receiptHash: string;
+  queryIdentityHash: string;
+  rustEntityId: string;
+}>;
+
+export type RustNativePlayerDeathRespawnCheckpointWitnessV1 = RustNativeCheckpointWitnessV1 & Readonly<{
+  schema: 1;
+  cursorBefore: number;
+  cursorAfter: number;
+  receiptHash: string;
+  queryIdentityHash: string;
+  deathSequence: string;
+  generatedDropCount: number;
+}>;
+
+export type RustNativeBlockEditCheckpointWitnessV1 = RustNativeCheckpointWitnessV1 & Readonly<{
+  schema: 1;
+  protocolVersion: 1 | 2;
+  legacyFallback: "v1-capability" | "v2-pre-v14" | null;
+  cursorBefore: number;
+  cursorAfter: number;
+  receiptHash: string;
+  queryIdentityHash: string;
+  dirty: RustIntegratedRuntimeNativeBlockEditDirtyEvidenceV2 | null;
+  action: "mine" | "place";
+  cell: Readonly<{
+    x: number;
+    y: number;
+    z: number;
+    previousBlockId: number;
+    blockId: number;
+    previousFacing: BlockFacing;
+    facing: BlockFacing;
+    mutated: boolean;
+  }>;
+}>;
+
+export type RustNativeBlockEditFinalizeStateV1 = Readonly<{
+  schema: 1; state: "awaiting-local-save"; attempts: number; lastError: string;
+  protocolVersion: 1 | 2; legacyFallback: "v1-capability" | "v2-pre-v14" | null;
+  cursorBefore: number; cursorAfter: number; receiptHash: string;
+}>;
+
+type RustNativeBlockEditPendingFinalizeV1 = RustNativeBlockEditFinalizeStateV1 & Readonly<{
+  generation: number; host: RustWorldRuntimeManagedHostV1; pump: RustLiveInputPumpR5;
+  delivery: RustLiveInputPumpNativeBlockEditDeliveryV1;
+  projection: RustNativeBlockEditProjectionCursorV1;
+  checkpoint: RustNativeBlockEditCheckpointWitnessV1;
+  selectedSlot: number; mode: GameMode; saveSuppressed: boolean;
+  activeWorldId: string | null; persistent: boolean; retryNotBefore: number;
+  inventoryAfter: InventorySlot | null;
+  cell: RustNativeBlockEditCheckpointWitnessV1["cell"];
+  nativeDrops: readonly WorldDropSave[];
+  playerView: RustLivePlayerViewR10; cameraView: RustLiveCameraViewR10;
+  droppedView: RustDroppedHotTransformFrameR10 | null;
+  extraction: RustIntegratedRuntimeExtractionV1; viewRevision: number;
+}>;
+
+type RustNativeBlockEditFinalizeDiagnosticsV1 = RustNativeBlockEditFinalizeStateV1 & Readonly<{
+  pendingSelectedSlot: number | null;
+}>;
+
+export type RustNativePlayerDeathRespawnFinalizeStateV1 = Readonly<{
+  schema: 1;
+  state: "awaiting-local-save";
+  attempts: number;
+  lastError: string;
+  cursorBefore: number;
+  cursorAfter: number;
+  receiptHash: string;
+  deathSequence: string;
+  generatedDropCount: number;
+}>;
+
+type RustNativePlayerDeathRespawnPendingFinalizeR5 =
+  RustNativePlayerDeathRespawnFinalizeStateV1 & Readonly<{
+    generation: number;
+    host: RustWorldRuntimeManagedHostV1;
+    pump: RustLiveInputPumpR5;
+    delivery: RustLiveInputPumpDeathRespawnDeliveryV1;
+    plan: RustNativePlayerDeathRespawnBrowserProjectionPlanV1;
+    projection: RustNativePlayerDeathRespawnProjectionCursorV1;
+    checkpoint: RustNativePlayerDeathRespawnCheckpointWitnessV1;
+    activeWorldId: string;
+    nativePersistenceWorldId: string;
+    universeId: string;
+    locationId: string;
+    sessionId: string;
+    persistent: true;
+    saveSuppressed: false;
+    mode: "survival";
+    selectedSlot: number;
+    retryNotBefore: number;
+    inventoryAfter: readonly (InventorySlot | null)[];
+    nativeDrops: readonly WorldDropSave[];
+    playerView: RustLivePlayerViewR10;
+    cameraView: RustLiveCameraViewR10;
+    droppedView: RustDroppedHotTransformFrameR10 | null;
+    extraction: RustIntegratedRuntimeExtractionV1;
+    viewRevision: number;
+    spawnProtectionAfter: number;
+    hungerAfter: number;
+  }>;
+
+type RustLivePlayerRespawnTransactionTokenR5 = Readonly<{
+  generation: number;
+  host: RustWorldRuntimeManagedHostV1;
+  pump: RustLiveInputPumpR5;
+  pending: RustLivePlayerViewR10;
+}>;
+
+export type RustNativeDropPickupFinalizeStateV1 = Readonly<{
+  schema: 1;
+  state: "awaiting-local-save";
+  attempts: number;
+  lastError: string;
+  cursorBefore: number;
+  cursorAfter: number;
+  receiptHash: string;
+  rustEntityId: string;
+}>;
+
+type RustNativeDropPickupPendingFinalizeV1 = RustNativeDropPickupFinalizeStateV1 & Readonly<{
+  generation: number;
+  host: RustWorldRuntimeManagedHostV1;
+  pump: RustLiveInputPumpR5;
+  delivery: RustLiveInputPumpDropPickupDeliveryV1;
+  plan: RustNativeDropPickupBrowserProjectionPlanV1;
+  projection: RustNativeDropPickupProjectionCursorV1;
+  checkpoint: RustNativeDropPickupCheckpointWitnessV1;
+  activeWorldId: string | null;
+  nativePersistenceWorldId: string | null;
+  persistent: boolean;
+  saveSuppressed: boolean;
+  mode: GameMode;
+  selectedSlot: number;
+  universeId: string;
+  locationId: string;
+  sessionId: string;
+  retryNotBefore: number;
+  inventoryAfter: readonly (InventorySlot | null)[];
+  inventoryAfterJson: string;
+  nativeDrops: readonly WorldDropSave[];
+  playerView: RustLivePlayerViewR10;
+  cameraView: RustLiveCameraViewR10;
+  droppedView: RustDroppedHotTransformFrameR10 | null;
+  extraction: RustIntegratedRuntimeExtractionV1;
+  viewRevision: number;
+}>;
 
 type RustLiveRendererExtractionQueueEntryR10 = Readonly<{
   generation: number;
@@ -1764,6 +2278,74 @@ type RustLiveRendererExtractionQueueEntryR10 = Readonly<{
   pump: RustLiveInputPumpR5;
   viewRevision: number;
   extraction: RustIntegratedRuntimeExtractionV1;
+}>;
+
+type RustLivePlayerGameModeSetDiagnosticsV1 = Readonly<{
+  schema: 1;
+  requestPayloadHash: string;
+  receiptHash: string;
+  priorMode: GameMode;
+  resultingMode: GameMode;
+  priorFlags: number;
+  resultingFlags: number;
+  identityBefore: Readonly<{ simulationRevision: number; stateHash: string }>;
+  identityAfter: Readonly<{ simulationRevision: number; stateHash: string }>;
+  checkpoint: Readonly<{
+    checkpointId: string;
+    checkpointHash: string;
+    commits: number;
+    savesBefore: number;
+    savesAfter: number;
+    platformOperationsBefore: number;
+    platformOperationsAfter: number;
+    persistenceRevisionBefore: number;
+    persistenceRevisionAfter: number;
+  }>;
+}>;
+
+export type RustMultiplayerOutboundPoseDiagnosticsV1 = Readonly<{
+  producer: "typescript-compatibility" | "rust-live-player-view-r10-kinematics";
+  playerId: string;
+  tick: number;
+  position: Readonly<{ x: number; y: number; z: number }>;
+  velocity: Readonly<{ x: number; y: number; z: number }>;
+  yaw: number;
+  pitch: number;
+  grounded: boolean;
+  crouching: boolean;
+  sprinting: boolean;
+  selected: number;
+  nativeSource: Readonly<{
+    extractionRevision: string;
+    authorityTick: string;
+    entityRevision: string;
+    lastInputSequence: string;
+  }> | null;
+}>;
+
+export type RustSaveAndQuitNativeCheckpointAttestationV1 = Readonly<{
+  schema: 1;
+  binding: Readonly<{
+    catalogWorldId: string;
+    nativeWorldId: string;
+    universeId: string;
+    locationId: string;
+    runtimeSessionId: string;
+  }>;
+  checkpoint: RustNativeWorldPersistenceSaveV1;
+  persistence: Readonly<{
+    before: RustNativeWorldPersistenceDiagnosticsV1;
+    after: RustNativeWorldPersistenceDiagnosticsV1;
+  }>;
+  /** Exact blocked R5/R6/R7 presentation sampled after checkpoint and before teardown. */
+  terminalEnvironmentalSurvival: RustLivePlayerEnvironmentalSurvivalDiagnosticsR10 | null;
+}>;
+
+type RustSaveAndQuitNativeCheckpointContextV1 = Readonly<{
+  binding: RustSaveAndQuitNativeCheckpointAttestationV1["binding"];
+  host: RustWorldRuntimeManagedHostV1;
+  session: RustNativeWorldPersistenceSessionV1;
+  persistenceBefore: RustNativeWorldPersistenceDiagnosticsV1;
 }>;
 
 export type RustLiveRuntimeDiagnosticsV1 = Readonly<{
@@ -1775,13 +2357,65 @@ export type RustLiveRuntimeDiagnosticsV1 = Readonly<{
   activeLocationId: string | null;
   activeSessionId: string | null;
   nativePersistenceWorldId: string | null;
+  /** Survives successful Save & Quit teardown until another attempt or world activation begins. */
+  lastCompletedSaveAndQuitNativeCheckpoint: RustSaveAndQuitNativeCheckpointAttestationV1 | null;
   hydration: "new-world" | "restored" | "guest-bootstrap" | "blocked" | "none";
   manager: ReturnType<RustWorldRuntimeManagerV1["diagnostics"]>;
   playerAuthority: Readonly<{
     state: RustLivePlayerAuthorityStateR5;
     worldGeneration: number | null;
+    /** Runtime session captured from the exact host used to install the live input pump. */
+    runtimeSessionId: string | null;
     entityId: bigint | null;
     terrainChunkCount: number;
+    /** Successful restored-world mode CAS operations in this activation. */
+    gameModeSetCalls: number;
+    /** Sealed native CAS plus the exact persistence checkpoint that made it durable. */
+    lastGameModeSet: RustLivePlayerGameModeSetDiagnosticsV1 | null;
+    basicDirtProjection: RustBasicDirtActionProjectionCursorV1 | null;
+    nativeBlockEditProjection: RustNativeBlockEditProjectionCursorV1 | null;
+    nativeBlockEditCheckpoint: RustNativeBlockEditCheckpointWitnessV1 | null;
+    nativeBlockEditFinalize: RustNativeBlockEditFinalizeDiagnosticsV1 | null;
+    dropPickupProjection: RustNativeDropPickupProjectionCursorV1 | null;
+    dropPickupCheckpoint: RustNativeDropPickupCheckpointWitnessV1 | null;
+    dropPickupFinalize: RustNativeDropPickupFinalizeStateV1 | null;
+    playerDropProjection: RustNativePlayerDropProjectionCursorV1 | null;
+    playerDropCheckpoint: RustNativePlayerDropCheckpointWitnessV1 | null;
+    playerDeathRespawnProjection: RustNativePlayerDeathRespawnProjectionCursorV1 | null;
+    playerDeathRespawnCheckpoint: RustNativePlayerDeathRespawnCheckpointWitnessV1 | null;
+    playerDeathRespawnFinalize: RustNativePlayerDeathRespawnFinalizeStateV1 | null;
+    playerRespawnPlanPending: boolean;
+    /** JSON-safe BWX0 respawn markers and the complete latest BWE7 parent. */
+    nativeRespawn: RustLivePlayerRespawnDiagnosticsR10 | null;
+    /** Same-envelope R6 entity plus R7 combat parity used by HUD/audio as read-only projection. */
+    environmentalSurvival: RustLivePlayerEnvironmentalSurvivalDiagnosticsR10 | null;
+    /** Exact selected-slot custody from the latest accepted native player extraction. */
+    nativeInventory: Readonly<{
+      extractionRevision: string;
+      inventoryContainer: string;
+      inventoryContainerRevision: string;
+      selectedSlot: number;
+      held: Readonly<{
+        itemCode: number;
+        count: number;
+        durabilityMillionths: number | null;
+        metadataHash: string;
+      }> | null;
+    }> | null;
+    nativeDropTransforms: Readonly<{
+      extractionRevision: string;
+      authorityTick: string;
+      inventoryDomainRevision: string;
+      transforms: readonly Readonly<{
+        dropId: string;
+        entityId: string;
+        entityRevision: string;
+        position: Readonly<{ x: number; y: number; z: number }>;
+        velocity: Readonly<{ x: number; y: number; z: number }>;
+        yawRadians: number;
+        ageTicks: string;
+      }>[];
+    }> | null;
     advanceInFlight: boolean;
     pendingRendererExtraction: boolean;
     lastError: string | null;
@@ -1795,10 +2429,97 @@ export type RustLiveRuntimeDiagnosticsV1 = Readonly<{
     authorityRejections: number;
     recordProducer: "coarse-legacy-projection";
     pendingNativeProducer: true;
+    lastOutboundPose: RustMultiplayerOutboundPoseDiagnosticsV1 | null;
     lastStateHash: string | null;
     lastError: string | null;
+    lastRejection: RustMultiplayerRejectionDiagnosticV1 | null;
+    progression: MultiplayerProgressionDiagnosticsV1;
+    lastGracefulProgressionDrain: MultiplayerGracefulProgressionDrainDiagnosticsV1 | null;
+    presentation: MultiplayerPresentationDiagnosticsV1;
+    transport: ReturnType<MultiplayerSession["authorityTransportDiagnostics"]> | null;
   }>;
 }>;
+
+export type RustLivePlayerEnvironmentalSurvivalDiagnosticsR10 = Readonly<{
+  schema: 1;
+  producer: "rust-r5-r6-r7";
+  /** Must remain zero while native player authority is live. */
+  typescriptDamageAuthoringCalls: number;
+  suppressedLegacyDamageCalls: number;
+  projectedDamageEvents: number;
+  projectedDeathEvents: number;
+  extractionRevision: string;
+  authorityTick: string;
+  /** Persistent same-envelope native BWAU journal; never authored by TypeScript. */
+  effects: Readonly<{
+    schema: 1;
+    producer: "rust-bwau-v2";
+    playerExternalId: string;
+    authorityTick: string;
+    total: number;
+    selected: number;
+    omitted: number;
+    firstSequence: string | null;
+    lastSequence: string | null;
+    contiguous: true;
+    cues: readonly Readonly<{
+      sequence: string;
+      tick: string;
+      entityExternalId: string;
+      kind: "jump" | "land" | "fall-damage" | "drown-damage" | "liquid-enter" | "liquid-exit" | "shore-exit";
+      amount: number;
+    }>[];
+  }>;
+  r6: Readonly<{
+    entityId: string;
+    entityRevision: string;
+    health: number;
+    maximumHealth: number;
+    oxygenSeconds: number;
+    maximumOxygenSeconds: number;
+    inLiquid: boolean;
+    headSubmerged: boolean;
+    contactFlags: number;
+    drowningAccumulator: number;
+    fallDistance: number;
+    lastDamageTick: string;
+  }>;
+  r7: Readonly<{
+    entityId: string;
+    recordId: string;
+    rowRevision: string;
+    combatDomainRevision: string;
+    vitalUnits: "millihearts-v1";
+    health: number;
+    maxHealth: number;
+    alive: boolean;
+    crossDomainParity: true;
+  }>;
+}>;
+
+function snapshotRustNativePersistenceDiagnosticsV1(
+  diagnostics: RustNativeWorldPersistenceDiagnosticsV1,
+): RustNativeWorldPersistenceDiagnosticsV1 {
+  return Object.freeze({
+    ...diagnostics,
+    lastError: diagnostics.lastError ? Object.freeze({ ...diagnostics.lastError }) : null,
+  });
+}
+
+function snapshotRustEnvironmentalSurvivalDiagnosticsR10(
+  diagnostics: RustLivePlayerEnvironmentalSurvivalDiagnosticsR10 | null,
+): RustLivePlayerEnvironmentalSurvivalDiagnosticsR10 | null {
+  if (!diagnostics) return null;
+  return Object.freeze({
+    ...diagnostics,
+    effects: Object.freeze({
+      ...diagnostics.effects,
+      cues: Object.freeze(diagnostics.effects.cues.map((cue) => Object.freeze({ ...cue }))),
+    }),
+    r6: Object.freeze({ ...diagnostics.r6 }),
+    r7: Object.freeze({ ...diagnostics.r7 }),
+  });
+}
 
 export type RustLiveRenderEngineDiagnosticsR10 = Readonly<{
   schema: 1;
@@ -2060,7 +2781,140 @@ type PendingReliableRequest = {
 };
 
 type PlayerProgressionRecord = { revision: number; state: PlayerProgressionSnapshot };
+type PendingPlayerProgressionTransfer = Readonly<{
+  revision: number;
+  signature: string;
+  transferId: string;
+  transportComplete: boolean;
+  baseState: PlayerProgressionSnapshot;
+  requestState: PlayerProgressionSnapshot;
+}>;
+
+type RustPlayerProgressionReceiptBinding = Readonly<{
+  connectionToken: string;
+  receipt: RustMultiplayerProgressionReceiptV2;
+}>;
+
+type MultiplayerProgressionReceiptDiagnostic = Readonly<{
+  direction: "host-issued" | "guest-observed";
+  peerId: string;
+  connectionToken: string;
+  transferId: string;
+  status: RustMultiplayerProgressionReceiptV2["status"];
+  committedRevision: number;
+  observedAt: number;
+}>;
+
+export type MultiplayerProgressionDiagnosticsV1 = Readonly<{
+  pending: Readonly<{
+    transferId: string;
+    revision: number;
+    transportComplete: boolean;
+  }> | null;
+  outgoingRequestChunks: number;
+  outgoingRequestTransfers: number;
+  confirmed: boolean;
+  confirmedRevision: number | null;
+  localDirty: boolean | null;
+  latestReceipt: Readonly<{
+    direction: MultiplayerProgressionReceiptDiagnostic["direction"];
+    peerId: string;
+    transferId: string;
+    status: RustMultiplayerProgressionReceiptV2["status"];
+    committedRevision: number;
+    observedAt: number;
+    connectionCurrent: boolean | null;
+  }> | null;
+}>;
+
+export type MultiplayerGracefulProgressionDrainDiagnosticsV1 = Readonly<{
+  schema: 1;
+  observedAt: number;
+  exactReceiptCurrent: boolean;
+  progression: MultiplayerProgressionDiagnosticsV1;
+}>;
+
+export type MultiplayerPresentationDiagnosticsV1 = Readonly<{
+  guestQueued: number;
+  guestInFlight: number;
+  hostQueuedPeers: number;
+  hostPumpActive: boolean;
+  authorityOperations: number;
+}>;
+
+const MISSING_PROGRESSION_VALUE = Symbol("missing-progression-value");
+type MergeProgressionValue = unknown | typeof MISSING_PROGRESSION_VALUE;
+
+function isProgressionMergeRecord(value: MergeProgressionValue): value is Record<string, unknown> {
+  if (value === null || value === MISSING_PROGRESSION_VALUE || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function progressionValuesEqual(left: MergeProgressionValue, right: MergeProgressionValue): boolean {
+  if (Object.is(left, right)) return true;
+  if (left === MISSING_PROGRESSION_VALUE || right === MISSING_PROGRESSION_VALUE) return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((entry, index) => progressionValuesEqual(entry, right[index]));
+  }
+  if (!isProgressionMergeRecord(left) || !isProgressionMergeRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every((key, index) => key === rightKeys[index]
+      && progressionValuesEqual(left[key], right[key]));
+}
+
+function cloneProgressionMergeValue(value: MergeProgressionValue): MergeProgressionValue {
+  return value === MISSING_PROGRESSION_VALUE ? value : structuredClone(value);
+}
+
+function mergeProgressionValue(
+  base: MergeProgressionValue,
+  local: MergeProgressionValue,
+  authoritative: MergeProgressionValue,
+  path: string,
+): MergeProgressionValue {
+  if (progressionValuesEqual(local, authoritative)) return cloneProgressionMergeValue(local);
+  if (progressionValuesEqual(local, base)) return cloneProgressionMergeValue(authoritative);
+  if (progressionValuesEqual(authoritative, base)) return cloneProgressionMergeValue(local);
+  const records = [base, local, authoritative].filter((value) => value !== MISSING_PROGRESSION_VALUE);
+  if (records.every(isProgressionMergeRecord)) {
+    const keys = [...new Set(records.flatMap((value) => Object.keys(value)))].sort();
+    const merged = Object.create(null) as Record<string, unknown>;
+    for (const key of keys) {
+      const value = mergeProgressionValue(
+        isProgressionMergeRecord(base) && Object.prototype.hasOwnProperty.call(base, key) ? base[key] : MISSING_PROGRESSION_VALUE,
+        isProgressionMergeRecord(local) && Object.prototype.hasOwnProperty.call(local, key) ? local[key] : MISSING_PROGRESSION_VALUE,
+        isProgressionMergeRecord(authoritative) && Object.prototype.hasOwnProperty.call(authoritative, key)
+          ? authoritative[key]
+          : MISSING_PROGRESSION_VALUE,
+        `${path}.${key}`,
+      );
+      if (value !== MISSING_PROGRESSION_VALUE) merged[key] = value;
+    }
+    return merged;
+  }
+  throw new Error(`Conflicting player progression changes at ${path.slice(0, 240)}`);
+}
+
+export function mergePlayerProgressionSnapshots(
+  base: PlayerProgressionSnapshot,
+  local: PlayerProgressionSnapshot,
+  authoritative: PlayerProgressionSnapshot,
+) {
+  const merged = mergeProgressionValue(base, local, authoritative, "$progression");
+  if (!validatePlayerProgressionSnapshot(merged)) {
+    throw new Error("Merged player progression is invalid");
+  }
+  return structuredClone(merged);
+}
+
 type PlayerProgressTransfer = {
+  peerToken: string;
   actorId: string;
   revision: number;
   chunkCount: number;
@@ -2087,6 +2941,13 @@ type RemotePlayer = {
   pose: PlayerPose;
   target: PlayerPose;
   lastUpdate: number;
+  nativePoseCustody?: Readonly<{
+    connectionGeneration: number;
+    commandSequence: number;
+    recordRevision: number;
+    receiptHash: string;
+    recordHash: string;
+  }>;
 };
 
 type AgentRuntimeTask = {
@@ -2149,6 +3010,8 @@ type FallingTree = {
 
 type DropEntity = {
   id: number;
+  /** Exact native entity identity; browser numeric ids remain presentation-only. */
+  rustEntityId?: string;
   item: ItemCode;
   count: number;
   durability?: number;
@@ -2163,14 +3026,97 @@ type DropEntity = {
   pickupDelay: number;
 };
 
-type DropSpawnOptions = Readonly<{
+export type DropSpawnOptions = Readonly<{
   allowMerge?: boolean;
   exactPosition?: boolean;
   id?: number;
+  rustEntityId?: string;
+  rotationY?: number;
   velocity?: Readonly<{ x: number; y: number; z: number }>;
   pickupDelay?: number;
+  exactIdempotentRecovery?: boolean;
   networkReplica?: boolean;
 }>;
+
+type WorldDropSaveSource = Readonly<{
+  item: ItemCode;
+  count: number;
+  durability?: number;
+  metadata?: Record<string, unknown>;
+  position: Readonly<{ x: number; y: number; z: number }>;
+  rotationY: number;
+  velocity: Readonly<{ x: number; y: number; z: number }>;
+  age: number;
+  pickupDelay: number;
+  rustEntityId?: string;
+}>;
+
+const RUST_DROP_ENTITY_ID_MAX = BigInt("18446744073709551615");
+
+function validRustDropEntityId(value: unknown): value is string {
+  if (typeof value !== "string" || !/^[1-9]\d{0,19}$/u.test(value)) return false;
+  try { return BigInt(value) <= RUST_DROP_ENTITY_ID_MAX; } catch { return false; }
+}
+
+function finiteVector3(value: Readonly<{ x: number; y: number; z: number }>) {
+  return Number.isFinite(value.x) && Number.isFinite(value.y) && Number.isFinite(value.z);
+}
+
+/** Serializes one compatibility drop without widening legacy save records. */
+export function serializeWorldDropSave(source: WorldDropSaveSource): WorldDropSave {
+  const slot = normalizeCaptureOrbInventorySlot({
+    item: source.item,
+    count: source.count,
+    ...(source.durability !== undefined ? { durability: source.durability } : {}),
+    ...(source.metadata ? { metadata: source.metadata } : {}),
+  });
+  if (!slot) throw new Error("World drop cannot be serialized as an inventory stack");
+  const common = {
+    item: slot.item,
+    count: slot.count,
+    ...(slot.durability !== undefined ? { durability: slot.durability } : {}),
+    ...(slot.metadata ? { metadata: slot.metadata } : {}),
+    x: source.position.x,
+    y: source.position.y,
+    z: source.position.z,
+    age: source.age,
+  };
+  if (source.rustEntityId === undefined) return common;
+  if (!validRustDropEntityId(source.rustEntityId)
+    || !finiteVector3(source.position)
+    || !finiteVector3(source.velocity)
+    || !Number.isFinite(source.rotationY)
+    || !Number.isFinite(source.pickupDelay) || source.pickupDelay < 0) {
+    throw new Error("Native world drop presentation is not exactly serializable");
+  }
+  return {
+    ...common,
+    rustEntityId: source.rustEntityId,
+    rotationY: source.rotationY,
+    vx: source.velocity.x,
+    vy: source.velocity.y,
+    vz: source.velocity.z,
+    pickupDelay: source.pickupDelay,
+  };
+}
+
+/** Returns exact spawn options only for a complete, canonical native save row. */
+export function rustDropSpawnOptionsFromSave(saved: WorldDropSave): DropSpawnOptions | null {
+  if (saved.rustEntityId === undefined
+    || !validRustDropEntityId(saved.rustEntityId)
+    || !Number.isFinite(saved.x) || !Number.isFinite(saved.y) || !Number.isFinite(saved.z)
+    || !Number.isFinite(saved.rotationY)
+    || !Number.isFinite(saved.vx) || !Number.isFinite(saved.vy) || !Number.isFinite(saved.vz)
+    || !Number.isFinite(saved.pickupDelay) || saved.pickupDelay < 0) return null;
+  return Object.freeze({
+    allowMerge: false,
+    exactPosition: true,
+    rustEntityId: saved.rustEntityId,
+    rotationY: saved.rotationY,
+    velocity: Object.freeze({ x: saved.vx, y: saved.vy, z: saved.vz }),
+    pickupDelay: saved.pickupDelay,
+  });
+}
 
 type Particle = {
   mesh: THREE.Mesh;
@@ -2238,6 +3184,8 @@ export const ENVIRONMENT_LIGHT_POOL_SIZE = Object.freeze({ desktop: 16, touch: 8
 const PLAYER_HEIGHT = 1.8;
 const CROUCH_HEIGHT = 1.48;
 const PLAYER_RADIUS = 0.3;
+const SHORE_PROBE_CLEARANCE = 0.32;
+const SHORE_SURFACE_SCAN_CELLS = 4;
 export const WORLD_DROP_PICKUP_RADIUS = 1.45;
 const WORLD_DROP_PICKUP_LAG_TOLERANCE = 4;
 const PLAYER_BODY_MASS = 1.15;
@@ -3732,7 +4680,13 @@ export function normalizeMultiplayerPlayerProgression(value: Partial<PlayerProgr
     questBook: normalizeQuestBook(rawProgression?.questBook),
     sideQuestDefinitions: Array.isArray(rawProgression?.sideQuestDefinitions)
       ? structuredClone(rawProgression.sideQuestDefinitions.slice(0, 128)) : [],
-    mapKnowledge: normalizeMapKnowledge(rawProgression?.mapKnowledge, "multiplayer-world", playerId),
+    // A progression can arrive through a legacy browser-id key or from an
+    // untrusted peer. Preserve its bounded map contents, but never preserve a
+    // stale/foreign player identity when rebinding it to the canonical peer.
+    mapKnowledge: {
+      ...normalizeMapKnowledge(rawProgression?.mapKnowledge, worldId, playerId),
+      playerId,
+    },
     bestiary,
     plantBestiary: normalizePlantBestiaryState(rawProgression?.plantBestiary),
     blueprints: normalizeBlueprintState(rawProgression?.blueprints),
@@ -4197,12 +5151,20 @@ export class VoxelEngine {
   private rustRenderExtractionRevision = 0;
   private rustRenderFrameSequence = BigInt(0);
   private rustRenderExtractionPoll: Promise<void> | null = null;
-  private readonly rustLivePlayerAuthorityActivation: RustLivePlayerAuthorityActivationHookV1;
+  private readonly rustLivePlayerAuthorityRequestedR5: boolean;
+  private readonly rustLivePlayerAuthorityActivation: RustLivePlayerAuthorityActivationHookV1 | null;
   private readonly rustLivePlayerAuthorityProductionGate: boolean;
   private rustLivePlayerAuthorityState: RustLivePlayerAuthorityStateR5 = "none";
   private rustLivePlayerAuthorityGeneration: number | null = null;
+  private rustLivePlayerRuntimeSessionId: string | null = null;
   private rustLivePlayerEntityId: bigint | null = null;
   private rustLivePlayerTerrainChunkCount = 0;
+  private rustLivePlayerGameModeSetCalls = 0;
+  private rustLivePlayerLastGameModeSet: RustLivePlayerGameModeSetDiagnosticsV1 | null = null;
+  private rustLiveTypeScriptDamageAuthoringCallsR5 = 0;
+  private rustLiveSuppressedLegacyDamageCallsR5 = 0;
+  private rustLiveProjectedDamageEventsR10 = 0;
+  private rustLiveProjectedDeathEventsR10 = 0;
   private rustLivePlayerAuthorityLastError: string | null = null;
   private rustLivePlayerAttestationR10: Readonly<{
     externalEntityId: string;
@@ -4212,6 +5174,8 @@ export class VoxelEngine {
     creativeMode: boolean;
     maximumOxygenSeconds: number;
     maximumHealth: number;
+    inventoryContainer: RustIntegratedContainerKeyV1;
+    equipmentContainer: RustIntegratedContainerKeyV1;
     radius: number;
     standingHeight: number;
     crouchingHeight: number;
@@ -4221,6 +5185,7 @@ export class VoxelEngine {
   private rustLivePlayerViewExtractionRevisionR10: bigint | null = null;
   private rustLiveCameraPresentationViewR10: RustLiveCameraViewR10 | null = null;
   private rustLiveCameraExtractionRevisionR10: bigint | null = null;
+  private rustDroppedHotTransformFrameR10: RustDroppedHotTransformFrameR10 | null = null;
   private rustLiveRenderViewR10: RustIntegratedRuntimeExtractionViewV1 | null = null;
   private rustLiveRenderViewRevisionR10 = 0;
   private rustLivePlayerInitialYawRadiansR10: number | null = null;
@@ -4231,6 +5196,7 @@ export class VoxelEngine {
   private rustLiveInputPump: RustLiveInputPumpR5 | null = null;
   private rustLiveInputAdvance: Promise<void> | null = null;
   private rustLiveViewRefresh: Promise<void> | null = null;
+  private rustLiveAutomationPulseR5 = false;
   private rustLiveRendererExtractionQueue: RustLiveRendererExtractionQueueEntryR10[] = [];
   private rustSecondaryUseHeld = false;
   private rustCreativeFlightTogglePulse = false;
@@ -4261,19 +5227,73 @@ export class VoxelEngine {
   private rustRuntimeHost: RustWorldRuntimeManagedHostV1 | null = null;
   private rustRuntimeOperationsBlocked = true;
   private rustRuntimeTransitionGeneration = 0;
+  /** True only after the adopted guest binding has released its manager host. */
+  private rustGuestRuntimeManagerReleased = false;
+  private rustOriginPreflightGeneration = 0;
+  private rustOriginPreflightAbort: AbortController | null = null;
+  private terrainGenerationReadinessAbort: AbortController | null = null;
+  private terrainLocatorConsumerAbort = new AbortController();
+  /** Prevents any fixed-step, camera, or view operation from entering the pump between BWX7 and its native checkpoint. */
+  private rustTerrainLocatorCommitLocked = false;
+  private pendingSettlementChart: Promise<void> | null = null;
+  private pendingDragonLairSurvey: Promise<void> | null = null;
+  private pendingFactionGuide: Promise<string | null> | null = null;
+  private preparedRustNewWorld: Readonly<{
+    seedText: string;
+    optionsSignature: string;
+    spawn: Readonly<{ x: number; z: number }>;
+    settlementOrigin: PreparedRustSettlementOriginV1 | null;
+  }> | null = null;
+  private preparedRustLoadedWorld: Readonly<{
+    seedText: string;
+    optionsSignature: string;
+    playerX: number;
+    playerZ: number;
+  }> | null = null;
   private rustRuntimeHydrationState: RustLiveRuntimeDiagnosticsV1["hydration"] = "none";
   private rustNativePersistenceWorldId: string | null = null;
+  private rustLastCompletedSaveAndQuitNativeCheckpoint: RustSaveAndQuitNativeCheckpointAttestationV1 | null = null;
+  private rustNativeSaveOperation: Promise<RustNativeWorldPersistenceSaveV1 | null> | null = null;
+  private rustNativeSaveQueued = false;
+  /**
+   * Native persistence is deliberately single-runtime and network-pristine.
+   * Once multiplayer authority is admitted, that Rust runtime can no longer
+   * issue a valid native save even after every peer disconnects. Browser
+   * compatibility documents remain writable; only a fresh single-player
+   * runtime activation may clear this latch.
+  */
+  private rustNativeSaveSuppressedForMultiplayerRuntime = false;
+  /**
+   * A freshly created guest session may consume one final native checkpoint
+   * while it is still unbound and its local runtime is network-pristine. The
+   * admission is consumed when that checkpoint starts; it never reopens the
+   * runtime-lifetime save latch for active or previously networked sessions.
+   */
+  private rustPristineGuestTransitionCheckpointAdmitted = false;
   private rustRuntimeShutdown: Promise<void> | null = null;
   private rustInterestSequence = 0;
   private readonly rustPeerInterestCenters = new Map<string, string>();
-  private readonly rustPeerDeltaSequences = new Map<string, number>();
-  private readonly rustPeerDeltaInFlight = new Set<string>();
+  private readonly rustPeerDeltaSequences = new Map<string, Readonly<{
+    connectionToken: string;
+    sequence: number;
+  }>>();
+  private readonly rustPeerPresentationRecordRevisions = new Map<string, number>();
+  private readonly rustAuthorityPresentationRequests = new Map<string, {
+    keyframe: boolean;
+    waiters: Array<Readonly<{ resolve: () => void; reject: (error: unknown) => void }>>;
+  }>();
+  private rustAuthorityPresentationPump: Promise<void> | null = null;
+  private rustAuthorityPresentationInFlight = 0;
+  private rustGuestPresentationQueue: Promise<void> = Promise.resolve();
+  private rustGuestPresentationQueueDepth = 0;
+  private rustGuestPresentationInFlight = 0;
   private rustAuthorityOperations = new Set<Promise<unknown>>();
   private rustAuthorityDeltaApplied = 0;
   private rustAuthorityResyncs = 0;
   private rustAuthorityRejections = 0;
   private rustAuthorityLastStateHash: string | null = null;
   private rustAuthorityLastError: string | null = null;
+  private rustAuthorityLastRejection: RustMultiplayerRejectionDiagnosticV1 | null = null;
   activeWorldId: string | null = null;
   worldOptions: WorldOptions = normalizeWorldOptions();
   startingSettlementId: string | null = null;
@@ -4285,6 +5305,7 @@ export class VoxelEngine {
   drowningAccumulator = 0;
   waterEntryMomentumSpeed = 0;
   waterSurfaceBreachReady = true;
+  waterShoreExitReady = true;
   waterSurfaceBreachSeconds = 0;
   waterSurfaceStrokeCooldownSeconds = 0;
   waterSurfaceBobActive = false;
@@ -4424,6 +5445,25 @@ export class VoxelEngine {
   archiveShelves = new Map<string, ArchiveShelfState>();
   tomeDisplays = new Map<string, TomeDisplayState>();
   mapKnowledge: MapKnowledge = createMapKnowledge("world", "local");
+  private rustTerrainLocatorEffectJournal: RustTerrainLocatorEffectJournalV1 | null = null;
+  private rustTerrainLocatorAppliedEffectIds: readonly string[] = Object.freeze([]);
+  private rustBasicDirtActionProjection: RustBasicDirtActionProjectionCursorV1 | null = null;
+  private rustNativeBlockEditProjection: RustNativeBlockEditProjectionCursorV1 | null = null;
+  private rustNativeBlockEditCheckpoint: RustNativeBlockEditCheckpointWitnessV1 | null = null;
+  private rustNativeBlockEditPendingFinalize: RustNativeBlockEditPendingFinalizeV1 | null = null;
+  private rustNativeBlockEditQueuedSelectedSlotR5: number | null = null;
+  private rustNativeDropPickupProjection: RustNativeDropPickupProjectionCursorV1 | null = null;
+  private rustNativeDropPickupCheckpoint: RustNativeDropPickupCheckpointWitnessV1 | null = null;
+  private rustNativeDropPickupPendingFinalize: RustNativeDropPickupPendingFinalizeV1 | null = null;
+  private rustNativeDropPickupFinalizeRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private rustNativePlayerDropProjection: RustNativePlayerDropProjectionCursorV1 | null = null;
+  private rustNativePlayerDropCheckpoint: RustNativePlayerDropCheckpointWitnessV1 | null = null;
+  private rustNativePlayerDeathRespawnProjection: RustNativePlayerDeathRespawnProjectionCursorV1 | null = null;
+  private rustNativePlayerDeathRespawnCheckpoint: RustNativePlayerDeathRespawnCheckpointWitnessV1 | null = null;
+  private rustNativePlayerDeathRespawnPendingFinalize: RustNativePlayerDeathRespawnPendingFinalizeR5 | null = null;
+  private rustNativePlayerRespawnPlan: RustLivePlayerRespawnPlanRecordV1 | null = null;
+  private rustLivePlayerRespawnPendingR5: RustLivePlayerViewR10 | null = null;
+  private rustLivePlayerRespawnTransactionR5: RustLivePlayerRespawnTransactionTokenR5 | null = null;
   mapSurfaceSurveyedThisSession = new Set<string>();
   questBook: QuestBook = createQuestBook();
   sideQuestDefinitions: QuestDefinition[] = [];
@@ -4605,6 +5645,7 @@ export class VoxelEngine {
     ...detectMultiplayerSupport(),
     status: "idle",
     role: null,
+    guestWorldReady: false,
     peers: [],
     inviteCode: "",
     answerCode: "",
@@ -4619,14 +5660,38 @@ export class VoxelEngine {
   };
   multiplayerTick = 0;
   multiplayerPoseTimer = 0;
+  multiplayerPoseHeartbeatTimer = 0;
+  multiplayerPoseSignature: string | null = null;
+  private multiplayerLastOutboundPose: RustMultiplayerOutboundPoseDiagnosticsV1 | null = null;
   multiplayerWorldTimer = 0;
   multiplayerSnapshotTimer = 0;
   multiplayerReceivedSnapshot = false;
+  private multiplayerTerrainReadinessGeneration = 0;
+  private multiplayerTerrainReadinessAbort: AbortController | null = null;
   multiplayerPlayerStates = new Map<string, PlayerSessionSnapshot>();
   creatureTransferOffers = new Map<string, CreatureTransferOfferView>();
   multiplayerPlayerProgressions = new Map<string, PlayerProgressionRecord>();
   multiplayerProgressTransfers = new Map<string, PlayerProgressTransfer>();
   multiplayerProgressOutgoing: Array<{ action: PlayerProgressAction; peerId?: string }> = [];
+  private multiplayerPendingProgressionTransfer: PendingPlayerProgressionTransfer | null = null;
+  private multiplayerProgressionConfirmedState: PlayerProgressionSnapshot | null = null;
+  private rustPlayerProgressionReceipts = new Map<string, RustPlayerProgressionReceiptBinding>();
+  private multiplayerLatestProgressionReceipt: MultiplayerProgressionReceiptDiagnostic | null = null;
+  /** Retained across teardown so acceptance can prove the exact pre-disposal state. */
+  private multiplayerLastGracefulProgressionDrain: MultiplayerGracefulProgressionDrainDiagnosticsV1 | null = null;
+  /** Optional deterministic/test override; production derives from the active authority session. */
+  private multiplayerProgressionDrainTimeoutMs: number | null = null;
+  /**
+   * Graceful guest shutdown keeps transport/presentation updates alive while
+   * freezing local gameplay producers. Without this boundary, map discovery
+   * can create a fresh progression revision after every exact host receipt.
+   */
+  private multiplayerProgressionDrainDepth = 0;
+  private multiplayerProgressionDrainOperation: Readonly<{
+    session: MultiplayerSession;
+    promise: Promise<void>;
+  }> | null = null;
+  private multiplayerProgressionTransferSequence = 0;
   multiplayerProgressionRevision = 0;
   multiplayerProgressionReceived = false;
   multiplayerProgressionTimer = 0;
@@ -4694,6 +5759,13 @@ export class VoxelEngine {
   pendingGuestCreatureInventoryRequests = new Map<string, number>();
   /** Suppresses generic pack uploads until the host resolves optimistic placement costs. */
   pendingGuestPlacementRequests = new Map<string, number>();
+  /** Reliable block actions wait here until every edit and teardown/drop halo is resident. */
+  deferredRemoteBlockActions = new Map<string, {
+    action: BlockAction;
+    peer: PeerInfo;
+    session: MultiplayerSession;
+    terrainGeneration: number;
+  }>();
   /** Killed mobs stay tombstoned until a host snapshot confirms omission. */
   pendingNetworkMobDeaths = new Set<number>();
   activeCharacterProfile: CharacterProfile | null = null;
@@ -4705,9 +5777,12 @@ export class VoxelEngine {
     this.worldStorage = options.worldStorage ?? new WorldStorage(undefined, { persistenceCoordinator: null });
     this.rustRuntimeManager = options.rustRuntimeManager ?? new RustWorldRuntimeManagerV1();
     this.rustWorldHydration = options.rustWorldHydration ?? ((input) => this.hydrateRustWorldPersistence(input));
-    this.rustLivePlayerAuthorityActivation = options.rustLivePlayerAuthorityActivation
-      ?? ((input) => this.activateRustLivePlayerAuthorityR5(input));
-    this.rustLivePlayerAuthorityProductionGate = options.rustLivePlayerAuthorityActivation === undefined;
+    this.rustLivePlayerAuthorityRequestedR5 = options.rustLivePlayerAuthorityMode === "experimental-r5";
+    this.rustLivePlayerAuthorityActivation = this.rustLivePlayerAuthorityRequestedR5
+      ? options.rustLivePlayerAuthorityActivation ?? ((input) => this.activateRustLivePlayerAuthorityR5(input))
+      : null;
+    this.rustLivePlayerAuthorityProductionGate = this.rustLivePlayerAuthorityRequestedR5
+      && options.rustLivePlayerAuthorityActivation === undefined;
     this.agentMode = options.agentMode === true;
     const rustRenderSink = options.rustRenderSink ?? null;
     const rustRenderEpoch = options.rustRenderEpoch ?? null;
@@ -4945,7 +6020,8 @@ export class VoxelEngine {
   private currentRustLiveRenderViewR10() { return this.rustLiveRenderViewR10; }
 
   private rustLivePlayerAuthorityEnabledR5() {
-    return !this.rustRuntimeOperationsBlocked
+    return this.rustLivePlayerAuthorityRequestedR5
+      && !this.rustRuntimeOperationsBlocked
       && this.rustLivePlayerAuthorityState === "ready"
       && this.rustLivePlayerAuthorityGeneration === this.rustRuntimeTransitionGeneration
       && this.rustLiveInputPump?.state === "ready"
@@ -4965,6 +6041,26 @@ export class VoxelEngine {
     if (!this.rustLivePlayerAttestationR10) {
       throw new Error(`Rust live player view lost its bootstrap attestation during ${stage}`);
     }
+  }
+
+  /**
+   * The R9 network adapter and R5 player pump share one integrated runtime.
+   * Reserve the adapter's authority queue while the pump adopts an exact
+   * network-only successor and performs the operation that depends on it.
+   */
+  private runRustLivePumpNetworkExclusiveR5<T>(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+    stage: string,
+    operation: () => Promise<T>,
+  ) {
+    return host.multiplayerAuthority().runExclusiveMutation(async () => {
+      this.assertRustLivePlayerViewContextR10(generation, host, pump, `${stage} network adoption`);
+      await pump.adoptExternalNetworkSuccessor(generation);
+      this.assertRustLivePlayerViewContextR10(generation, host, pump, `${stage} network exclusion`);
+      return await operation();
+    });
   }
 
   private projectRustLivePlayerViewR10(view: RustLivePlayerViewR10) {
@@ -4997,6 +6093,61 @@ export class VoxelEngine {
       || view.health < 0 || view.health > view.maximumHealth) {
       throw new Error("Rust live player view does not use the exact 10-heart player-health contract");
     }
+    if (!view.combat || view.combat.entityId !== view.entityId
+      || view.combat.recordId !== view.actorId
+      || view.combat.ownerId !== view.actorId
+      || view.combat.vitalUnits !== "millihearts-v1"
+      || view.combat.crossDomainParity !== true
+      || view.maximumHealth !== Math.fround(view.combat.maxHealth / 1_000)
+      || view.health !== Math.fround(view.combat.health / 1_000)
+      || view.combat.alive !== (view.health > 0)) {
+      throw new Error("Rust live player view lost exact R6/R7 combat-vital parity");
+    }
+    if (view.respawnAuthoritySchema !== 1
+      || view.gameplaySequence === null || view.gameplaySequence === undefined
+      || view.gameplayCombatRevision === null || view.gameplayCombatRevision === undefined
+      || view.combat.combatantRevision === null || view.combat.combatantRevision === undefined
+      || view.queuedInputsEmpty === null || view.queuedInputsEmpty === undefined
+      || view.pendingContextCommandsEmpty === null || view.pendingContextCommandsEmpty === undefined
+      || view.pendingMovementResultEmpty === null || view.pendingMovementResultEmpty === undefined
+      || view.miningStateEmpty === null || view.miningStateEmpty === undefined) {
+      throw new Error("Rust live player view omitted its complete native death/respawn authority schema");
+    }
+    if (!Number.isSafeInteger(view.contactFlags) || view.contactFlags < 0 || view.contactFlags > 0x03ff
+      || !Number.isFinite(view.drowningAccumulator) || view.drowningAccumulator < 0
+      || !Number.isFinite(view.fallDistance) || view.fallDistance < 0
+      || view.headSubmerged && !view.inLiquid) {
+      throw new Error("Rust live player view contains invalid environmental survival state");
+    }
+    const effectJournal = view.effects;
+    const effectCues = effectJournal?.cues;
+    if (!effectJournal
+      || effectJournal.schema !== 1
+      || effectJournal.producer !== "rust-bwau-v2"
+      || effectJournal.playerExternalId !== view.externalEntityId
+      || effectJournal.authorityTick !== view.authorityTick
+      || !Number.isSafeInteger(effectJournal.total) || effectJournal.total < 0
+      || !Number.isSafeInteger(effectJournal.selected) || effectJournal.selected < 0
+      || !Number.isSafeInteger(effectJournal.omitted) || effectJournal.omitted !== 0
+      || !Array.isArray(effectCues)
+      || effectJournal.selected !== effectCues.length
+      || effectJournal.selected + effectJournal.omitted !== effectJournal.total
+      || effectJournal.contiguous !== true
+      || effectJournal.firstSequence !== (effectCues.at(0)?.sequence ?? null)
+      || effectJournal.lastSequence !== (effectCues.at(-1)?.sequence ?? null)) {
+      throw new Error("Rust live player view has an incomplete or inconsistent native BWAU effect journal");
+    }
+    for (let index = 0; index < effectCues.length; index += 1) {
+      const cue = effectCues[index]!;
+      const previousCue = effectCues[index - 1];
+      if (typeof cue.sequence !== "bigint" || cue.sequence <= BigInt(0)
+        || typeof cue.tick !== "bigint" || cue.tick > view.authorityTick
+        || typeof cue.entityExternalId !== "string" || cue.entityExternalId.length === 0
+        || !Number.isFinite(cue.amount)
+        || previousCue && cue.sequence !== previousCue.sequence + BigInt(1)) {
+        throw new Error("Rust live player view has a malformed or discontinuous native BWAU effect cue");
+      }
+    }
     const initialYaw = this.rustLivePlayerInitialYawRadiansR10;
     if ((view.lookYaw === null) !== (view.lastInputSequence === BigInt(0))) {
       throw new Error("Rust live player view look fields contradict its input continuity");
@@ -5013,6 +6164,13 @@ export class VoxelEngine {
     }
 
     const previousSelected = this.selected;
+    const previousView = this.rustLivePlayerPresentationViewR10;
+    const advancingProjection = previousView !== null
+      && view.extractionRevision > previousView.extractionRevision;
+    const projectedDamage = advancingProjection && view.health < previousView.health;
+    const projectedDeath = projectedDamage
+      && previousView.combat?.alive === true
+      && view.combat.alive === false;
     const selectedIntent = this.rustLiveSelectedSlotIntentR5;
     const selectedAcknowledged = this.rustLiveSelectedSlotIntentPendingR5
       && selectedIntent === view.selectedSlot;
@@ -5026,6 +6184,9 @@ export class VoxelEngine {
     this.velocity.set(view.velocity.x, view.velocity.y, view.velocity.z);
     this.grounded = view.grounded;
     this.crouching = view.crouching;
+    this.headSubmerged = view.headSubmerged;
+    this.drowningAccumulator = view.drowningAccumulator;
+    this.fallDistance = view.fallDistance;
     this.oxygenSeconds = view.oxygenSeconds;
     this.health = view.health;
     this.mode = attestation.creativeMode ? "builder" : "survival";
@@ -5040,11 +6201,46 @@ export class VoxelEngine {
       this.rustLiveSelectedSlotIntentR5 = view.selectedSlot;
       this.rustLiveSelectedSlotIntentPendingR5 = false;
     }
+    if (selectedAcknowledged && this.rustNativeSaveQueued && !this.rustNativeSaveOperation) {
+      // An autosave may have arrived after the compatibility hotbar moved but
+      // before this authoritative extraction acknowledged that intent. Resume
+      // only on the acknowledgement edge so the strict native/browser custody
+      // comparison remains fail-closed without leaving the save stranded.
+      queueMicrotask(() => {
+        if (!this.rustLiveSelectedSlotIntentPendingR5
+          && this.rustNativeSaveQueued && !this.rustNativeSaveOperation) {
+          this.scheduleRustNativeSaveCheckpoint();
+        }
+      });
+    }
     if (!this.rustLiveLookIntentPendingR5 || lookAcknowledged) {
       this.yaw = yawRadians;
       this.pitch = pitchRadians;
       this.rustLiveLookIntentR5 = Object.freeze({ yawRadians, pitchRadians });
       this.rustLiveLookIntentPendingR5 = false;
+    }
+    if (projectedDamage) {
+      this.rustLiveProjectedDamageEventsR10 += 1;
+      this.audio.play("hurt");
+    }
+    if (projectedDeath) {
+      this.rustLiveProjectedDeathEventsR10 += 1;
+      this.events.onDeath();
+    }
+    if (!view.combat.alive) {
+      const deathSequence = view.deathSequence;
+      if (deathSequence === null || deathSequence === undefined
+        || deathSequence <= (view.lastRespawnSequence ?? BigInt(0))) {
+        throw new Error("Rust live dead player has no unconsumed native death sequence");
+      }
+      const pending = this.rustLivePlayerRespawnPendingR5;
+      if (pending?.deathSequence !== null && pending?.deathSequence !== undefined
+        && deathSequence < pending.deathSequence) {
+        throw new Error("Rust live player death sequence regressed while respawn was pending");
+      }
+      this.rustLivePlayerRespawnPendingR5 = view;
+      this.clearInput();
+      queueMicrotask(() => this.scheduleRustLiveInputAdvanceR5());
     }
     if (previousSelected !== this.selected) this.events.onSelectedSlot?.(this.selected);
   }
@@ -5079,6 +6275,9 @@ export class VoxelEngine {
       || view.backSlot !== priorView.backSlot
       || view.lastInputSequence < priorView.lastInputSequence)) {
       throw new Error("Rust live player view regressed its authoritative player or custody continuity");
+    }
+    if (priorView && !rustLivePlayerEffectJournalContinuesR10(priorView.effects, view.effects)) {
+      throw new Error("Rust live player view omitted or regressed native BWAU effect continuity");
     }
     const diagnostics = pump.diagnostics();
     if (view.authorityTick !== BigInt(diagnostics.lastAuthorityTick)
@@ -5126,6 +6325,95 @@ export class VoxelEngine {
     return view;
   }
 
+  private stageRustDroppedHotTransformsR10(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+    extraction: RustIntegratedRuntimeExtractionV1,
+  ) {
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "native drop transform decode");
+    const frame = planRustDroppedHotTransformsR10(extraction, this.rustDroppedHotTransformFrameR10);
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "native drop transform staging");
+    if (frame.source.identity.universeId !== host.config.universeId
+      || frame.source.identity.locationId !== host.config.locationId
+      || frame.source.authorityTick !== BigInt(frame.source.identity.tick)
+      || frame.source.extractionRevision !== BigInt(extraction.extractionRevision)) {
+      throw new Error("Rust native drop transform frame contradicts its active runtime source");
+    }
+    return frame;
+  }
+
+  private prepareRustDroppedHotTransformCommitR10(
+    frame: RustDroppedHotTransformFrameR10,
+    authorityTick: bigint,
+  ) {
+    if (frame.source.authorityTick !== authorityTick) {
+      throw new Error("Rust native drop transforms do not share the player-camera authority tick");
+    }
+    const nativeDrops = this.drops.filter((drop) => drop.rustEntityId !== undefined);
+    if (nativeDrops.length !== frame.transforms.length) {
+      throw new Error("Rust native drop transform frame does not cover the complete compatibility mirror");
+    }
+    const byEntity = new Map<string, DropEntity>();
+    for (const drop of nativeDrops) {
+      const rustEntityId = drop.rustEntityId!;
+      if (byEntity.has(rustEntityId)) {
+        throw new Error("Compatibility mirror contains a duplicate native drop entity");
+      }
+      byEntity.set(rustEntityId, drop);
+    }
+    const prepared: Array<Readonly<{
+      drop: DropEntity;
+      transform: RustDroppedHotTransformR10;
+      ageSeconds: number;
+    }>> = [];
+    for (const transform of frame.transforms) {
+      const drop = byEntity.get(transform.entityId.toString(10));
+      const metadataHash = this.rustTerrainLocatorHashHex(transform.metadataHash);
+      const expected = rustBasicDirtCompatibilityStackV1({
+        itemCode: transform.itemCode,
+        count: transform.count,
+        durabilityMillionths: transform.durabilityMillionths,
+        metadataHash,
+      }, `native drop ${transform.entityId} hot transform`);
+      if (!drop || !expected || !rustBasicDirtCompatibilityStackMatchesV1(drop, expected)) {
+        throw new Error("Rust native drop transform contradicts its compatibility stack or entity identity");
+      }
+      if (transform.rotationMicroturns.pitch !== 0 || transform.rotationMicroturns.roll !== 0
+        || !Number.isFinite(transform.position.x) || !Number.isFinite(transform.position.y)
+        || !Number.isFinite(transform.position.z) || !Number.isFinite(transform.velocity.x)
+        || !Number.isFinite(transform.velocity.y) || !Number.isFinite(transform.velocity.z)
+        || !Number.isFinite(transform.yawRadians)) {
+        throw new Error("Rust native drop transform cannot be represented by the compatibility mirror");
+      }
+      const exactAgeTicks = Number(transform.ageTicks);
+      if (!Number.isSafeInteger(exactAgeTicks) || BigInt(exactAgeTicks) !== transform.ageTicks) {
+        throw new Error("Rust native drop age exceeds the compatibility mirror's exact clock range");
+      }
+      prepared.push(Object.freeze({
+        drop,
+        transform,
+        ageSeconds: exactAgeTicks * 0.05,
+      }));
+      byEntity.delete(transform.entityId.toString(10));
+    }
+    if (byEntity.size !== 0) {
+      throw new Error("Compatibility mirror contains a native drop absent from authoritative extraction");
+    }
+    return Object.freeze(prepared);
+  }
+
+  private projectRustDroppedHotTransformsR10(
+    prepared: ReturnType<VoxelEngine["prepareRustDroppedHotTransformCommitR10"]>,
+  ) {
+    for (const { drop, transform, ageSeconds } of prepared) {
+      drop.mesh.position.set(transform.position.x, transform.position.y, transform.position.z);
+      drop.mesh.rotation.y = transform.yawRadians;
+      drop.velocity.set(transform.velocity.x, transform.velocity.y, transform.velocity.z);
+      drop.age = ageSeconds;
+    }
+  }
+
   private projectRustLiveCameraViewR10(view: RustLiveCameraViewR10) {
     const aspect = view.viewport.width / view.viewport.height;
     if (!Number.isFinite(aspect) || aspect <= 0) throw new Error("Rust live camera viewport has no finite aspect ratio");
@@ -5155,17 +6443,39 @@ export class VoxelEngine {
     const camera = this.stageRustLiveCameraExtractionR10(
       generation, host, pump, extraction, requestedView, pumpCamera,
     );
+    const dropped = this.stageRustDroppedHotTransformsR10(generation, host, pump, extraction);
+    return this.commitStagedRustLiveAuthorityViewsR10(generation, host, pump, player, camera, dropped);
+  }
+
+  private commitStagedRustLiveAuthorityViewsR10(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+    player: RustLivePlayerViewR10,
+    camera: RustLiveCameraViewR10,
+    dropped?: RustDroppedHotTransformFrameR10,
+  ) {
     if (player.authorityTick !== camera.authorityTick) {
       throw new Error("Rust live player and camera views do not share one authority tick");
     }
+    if (dropped && (dropped.source.authorityTick !== player.authorityTick
+      || dropped.source.extractionRevision !== player.extractionRevision
+      || dropped.source.extractionRevision !== camera.extractionRevision)) {
+      throw new Error("Rust native drop transforms do not share the player-camera extraction identity");
+    }
+    const preparedDrops = dropped
+      ? this.prepareRustDroppedHotTransformCommitR10(dropped, player.authorityTick)
+      : Object.freeze([]);
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "player, camera, and native drop view commit");
     this.projectRustLivePlayerViewR10(player);
     this.projectRustLiveCameraViewR10(camera);
-    this.assertRustLivePlayerViewContextR10(generation, host, pump, "player and camera view commit");
+    this.projectRustDroppedHotTransformsR10(preparedDrops);
     this.rustLivePlayerPresentationViewR10 = player;
     this.rustLivePlayerViewExtractionRevisionR10 = player.extractionRevision;
     this.rustLiveCameraPresentationViewR10 = camera;
     this.rustLiveCameraExtractionRevisionR10 = camera.extractionRevision;
-    return Object.freeze({ player, camera });
+    if (dropped) this.rustDroppedHotTransformFrameR10 = dropped;
+    return Object.freeze({ player, camera, dropped: dropped ?? null });
   }
 
   private applyRustLiveCameraExtractionR10(
@@ -5210,6 +6520,14 @@ export class VoxelEngine {
     const jump = this.keys.has("Space");
     const down = this.keys.has("ShiftLeft") || this.keys.has("ShiftRight");
     const look = this.rustLiveLookIntentR5 ?? Object.freeze({ yawRadians: this.yaw, pitchRadians: this.pitch });
+    // Native block-edit receipts currently have a single-runtime durable projection
+    // contract. Once network authority touches this runtime, do not author a
+    // block mutation that cannot legally enter that checkpoint lane.
+    const durableNativeBlockEditActions = !this.rustNativeSaveSuppressedForMultiplayerRuntime;
+    const durablePlayerDrop = durableNativeBlockEditActions
+      && this.mode === "survival"
+      && !this.multiplayer
+      && this.selectedSlot()?.item !== Item.LooseCard;
     return Object.freeze({
       moveX: (this.keys.has("KeyD") ? 1 : 0) - (this.keys.has("KeyA") ? 1 : 0),
       moveZ: (this.keys.has("KeyW") ? 1 : 0) - (this.keys.has("KeyS") ? 1 : 0),
@@ -5224,8 +6542,8 @@ export class VoxelEngine {
         descend: flying && down,
       }),
       actions: Object.freeze({
-        primaryAttack: this.mineHeld,
-        secondaryUse: this.rustSecondaryUseHeld,
+        primaryAttack: durableNativeBlockEditActions && this.mineHeld,
+        secondaryUse: durableNativeBlockEditActions && this.rustSecondaryUseHeld,
         // No existing browser gesture has an independent interact semantic;
         // right-click is secondary use. Keep this unsupported R5 action
         // fail-closed instead of dispatching two actions for one gesture.
@@ -5234,7 +6552,7 @@ export class VoxelEngine {
         // action would make an applied native mount impossible to present.
         mountToggle: false,
         creativeFlightToggle: this.rustCreativeFlightTogglePulse,
-        drop: this.rustDropPulse,
+        drop: durablePlayerDrop && this.rustDropPulse,
       }),
     });
   }
@@ -5251,12 +6569,697 @@ export class VoxelEngine {
     return true;
   }
 
+  private persistRustLivePlayerRespawnPlanR5(plan: RustLivePlayerRespawnPlanV1) {
+    if (!this.activeWorldId || !this.persistent) {
+      throw new Error("Native player respawn requires one persistent active browser world");
+    }
+    const record = rustLivePlayerRespawnPlanRecordV1(plan);
+    const previous = this.rustNativePlayerRespawnPlan;
+    if (previous !== null) {
+      if (JSON.stringify(previous) !== JSON.stringify(record)) {
+        throw new Error("A different durable native player respawn plan is already pending");
+      }
+      return;
+    }
+    this.rustNativePlayerRespawnPlan = record;
+    const saved = this.saveRustCompatibilityDocumentLocalOnly("a native player respawn command plan");
+    if (!saved.ok) {
+      this.rustNativePlayerRespawnPlan = previous;
+      throw new Error(`Native player respawn command plan could not be stored. ${saved.error.message}`);
+    }
+  }
+
+  private retainedRustKeepInventoryRespawnMatchesR5(
+    plan: RustLivePlayerRespawnPlanV1,
+    view: RustLivePlayerViewR10,
+    identity: RustIntegratedRuntimeIdentityV1,
+  ) {
+    const request = plan.request;
+    const combatantRevision = view.combat.combatantRevision;
+    const fixed = request.respawnPosition;
+    return request.keepInventory
+      && identity.universeId === request.expected.universeId
+      && identity.locationId === request.expected.locationId
+      && identity.revision.epoch === request.expected.revision.epoch
+      && identity.revision.world >= request.expected.revision.world
+      && identity.revision.entities === request.expected.revision.entities + 1
+      && identity.revision.gameplay === request.expected.revision.gameplay + 1
+      && identity.revision.persistence >= request.expected.revision.persistence
+      && identity.revision.network >= request.expected.revision.network
+      && identity.revision.simulation >= request.expected.revision.simulation + 1
+      && view.externalEntityId === request.externalEntityId
+      && view.actorId === request.actorId
+      && view.playerId === request.playerId
+      && view.entityId === request.entityId
+      && view.entityRevision === request.expectedEntityRevision + BigInt(1)
+      && view.gameplaySequence === request.expectedGameplaySequence + BigInt(1)
+      && view.gameplayCombatRevision === request.expectedGameplayCombatRevision + BigInt(1)
+      && combatantRevision === request.expectedCombatantRevision + BigInt(1)
+      && view.deathSequence === request.expectedDeathSequence
+      && view.lastRespawnSequence === request.expectedDeathSequence
+      && view.combat.alive
+      && view.combat.health === request.expectedMaxHealth
+      && view.combat.maxHealth === request.expectedMaxHealth
+      && Object.is(view.position.x, Math.fround(fixed.xMilli / 1_000))
+      && Object.is(view.position.y, Math.fround(fixed.yMilli / 1_000))
+      && Object.is(view.position.z, Math.fround(fixed.zMilli / 1_000))
+      && Object.is(view.velocity.x, 0)
+      && Object.is(view.velocity.y, 0)
+      && Object.is(view.velocity.z, 0)
+      && view.oxygenSeconds === view.maximumOxygenSeconds
+      && !view.grounded && !view.crouching
+      && view.fallDistance === 0 && view.drowningAccumulator === 0
+      && view.buttons === 0 && view.authoritativeFlags === 0 && view.contactFlags === 0
+      && view.queuedInputsEmpty === true
+      && view.pendingContextCommandsEmpty === true
+      && view.pendingMovementResultEmpty === true
+      && view.miningStateEmpty === true;
+  }
+
+  private rustLivePlayerRespawnIntentR5(
+    view: RustLivePlayerViewR10,
+    expected: RustIntegratedRuntimeIdentityV1,
+  ): RustIntegratedPlayerRespawnV1 {
+    const deathSequence = view.deathSequence;
+    const gameplaySequence = view.gameplaySequence;
+    const gameplayCombatRevision = view.gameplayCombatRevision;
+    const combatantRevision = view.combat.combatantRevision;
+    if (view.respawnAuthoritySchema !== 1 || view.combat.alive
+      || deathSequence === null || deathSequence === undefined
+      || gameplaySequence === null || gameplaySequence === undefined
+      || gameplayCombatRevision === null || gameplayCombatRevision === undefined
+      || combatantRevision === null || combatantRevision === undefined
+      || deathSequence <= (view.lastRespawnSequence ?? BigInt(0))) {
+      throw new Error("Native player respawn has no exact dead-player R5/R6/R7 CAS source");
+    }
+    const fixed = (value: number, label: string) => {
+      const result = Math.round(value * 1_000);
+      if (!Number.isSafeInteger(result)) throw new Error(`Native player respawn ${label} is not exact fixed point`);
+      return result;
+    };
+    return Object.freeze({
+      expected,
+      externalEntityId: view.externalEntityId,
+      actorId: view.actorId,
+      playerId: view.playerId,
+      entityId: view.entityId,
+      expectedEntityRevision: view.entityRevision,
+      expectedGameplaySequence: gameplaySequence,
+      expectedGameplayCombatRevision: gameplayCombatRevision,
+      expectedCombatantRevision: combatantRevision,
+      expectedDeathSequence: deathSequence,
+      expectedMaxHealth: view.combat.maxHealth,
+      respawnPosition: Object.freeze({
+        xMilli: fixed(this.spawn.x, "spawn x"),
+        yMilli: fixed(this.spawn.y, "spawn y"),
+        zMilli: fixed(this.spawn.z, "spawn z"),
+      }),
+      keepInventory: this.worldOptions.keepInventory,
+    });
+  }
+
+  private async commitRustNativePlayerDeathRespawnProjectionR5(input: Readonly<{
+    generation: number;
+    host: RustWorldRuntimeManagedHostV1;
+    pump: RustLiveInputPumpR5;
+    delivery: RustLiveInputPumpDeathRespawnDeliveryV1;
+    extraction: RustIntegratedRuntimeExtractionV1;
+    requestedView: RustIntegratedRuntimeExtractionViewV1;
+    camera: RustLiveCameraViewR10;
+  }>, authorityAccess: "acquire" | "already-exclusive" = "acquire") {
+    const { generation, host, pump, delivery, extraction, requestedView, camera: pumpCamera } = input;
+    if (this.rustTerrainLocatorCommitLocked || this.rustNativePlayerDeathRespawnPendingFinalize) {
+      throw new Error("Another native browser projection is already committing");
+    }
+    const activeWorldId = this.activeWorldId;
+    const nativePersistenceWorldId = this.rustNativePersistenceWorldId;
+    if (!activeWorldId || nativePersistenceWorldId !== activeWorldId
+      || !this.persistent || this.mode !== "survival"
+      || this.rustNativeSaveSuppressedForMultiplayerRuntime || this.multiplayer) {
+      throw new Error("Native death-respawn projection requires one persistent single-player Survival world");
+    }
+    const cursor = this.rustNativePlayerDeathRespawnProjection;
+    const attestation = this.rustLivePlayerAttestationR10;
+    if (!cursor || !attestation || delivery.worldGeneration !== generation
+      || delivery.cursorBefore !== cursor.cursor || delivery.cursorAfter !== cursor.cursor + 1
+      || delivery.parent.respawnSequence !== BigInt(delivery.cursorAfter)) {
+      throw new Error("Native death-respawn parent does not continue the active browser projection cursor");
+    }
+    if (this.inventory.slice(9).some((slot) => slot !== null)
+      || Object.values(this.equipment).some((slot) => slot !== null)
+      || this.offhand !== null || this.cursor !== null || this.trash !== null
+      || this.craftGrid.some((slot) => slot !== null)) {
+      throw new Error("Native death-respawn cannot cross unsupported compatibility custody");
+    }
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "native death-respawn projection preflight");
+    const stagedPlayer = this.stageRustLivePlayerExtractionR10(generation, host, pump, extraction);
+    const stagedCamera = this.stageRustLiveCameraExtractionR10(
+      generation, host, pump, extraction, requestedView, pumpCamera,
+    );
+    const stagedDrops = this.stageRustDroppedHotTransformsR10(generation, host, pump, extraction);
+    const nativeDropIds = this.drops.flatMap((drop) => drop.rustEntityId ? [drop.rustEntityId] : []);
+    const existingRustEntityIds = new Set(nativeDropIds);
+    if (existingRustEntityIds.size !== nativeDropIds.length) {
+      throw new Error("Compatibility mirror contains duplicate native drop identities before respawn");
+    }
+    const parent = delivery.parent;
+    const inventoryViewKey = rustIntegratedContainerViewKeyV1(attestation.inventoryContainer);
+    const equipmentViewKey = rustIntegratedContainerViewKeyV1(attestation.equipmentContainer);
+    const plan = planRustNativePlayerDeathRespawnBrowserProjectionV1({
+      receipt: parent,
+      hotFrame: stagedDrops,
+      cursorBefore: cursor.cursor,
+      expectedPlayerId: attestation.playerId,
+      expectedEntityId: attestation.entityId,
+      expectedInventoryContainer: inventoryViewKey,
+      expectedEquipmentContainer: equipmentViewKey,
+      priorInventoryRevision: parent.inventoryBeforeRevision,
+      priorEquipmentRevision: parent.equipmentBeforeRevision,
+      successorInventoryRevision: stagedPlayer.inventoryContainerRevision,
+      successorEquipmentRevision: stagedPlayer.equipmentContainerRevision,
+      compatibilityInventory: Object.freeze(Array.from(
+        { length: 9 }, (_, index) => cloneSlot(this.inventory[index] ?? null),
+      )),
+      compatibilityEquipment: Object.freeze(Array.from({ length: 8 }, () => null)),
+      existingRustEntityIds,
+      mode: this.mode,
+    });
+    const priorPlayer = this.rustLivePlayerPresentationViewR10;
+    if (priorPlayer && (priorPlayer.inventoryContainer !== inventoryViewKey
+      || priorPlayer.equipmentContainer !== equipmentViewKey
+      || priorPlayer.inventoryContainerRevision !== parent.inventoryBeforeRevision
+      || priorPlayer.equipmentContainerRevision !== parent.equipmentBeforeRevision
+      || priorPlayer.deathSequence !== parent.deathSequence
+      || priorPlayer.combat.alive)) {
+      throw new Error("Native death-respawn parent contradicts the previously presented dead player");
+    }
+    if (!stagedPlayer.combat.alive
+      || stagedPlayer.deathSequence !== parent.deathSequence
+      || stagedPlayer.lastRespawnSequence !== parent.deathSequence
+      || stagedPlayer.inventoryContainer !== inventoryViewKey
+      || stagedPlayer.equipmentContainer !== equipmentViewKey
+      || stagedPlayer.inventoryContainerRevision !== parent.inventoryAfterRevision
+      || stagedPlayer.equipmentContainerRevision !== parent.equipmentAfterRevision) {
+      throw new Error("Native death-respawn parent contradicts its authoritative live-player successor");
+    }
+
+    this.rustTerrainLocatorCommitLocked = true;
+    try {
+      const commit = async () => {
+        const rendererPoll = this.rustRenderExtractionPoll;
+        if (rendererPoll) await rendererPoll.catch(() => undefined);
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "native death-respawn checkpoint");
+        if (this.rustRenderExtractionPoll || cursor !== this.rustNativePlayerDeathRespawnProjection || this.disposed
+          || activeWorldId !== this.activeWorldId
+          || nativePersistenceWorldId !== this.rustNativePersistenceWorldId
+          || this.mode !== "survival" || this.rustNativeSaveSuppressedForMultiplayerRuntime
+          || this.multiplayer || plan.inventory.cleared.some((entry) =>
+            !rustBasicDirtCompatibilityStackMatchesV1(this.inventory[entry.slot] ?? null, entry.before))) {
+          throw new Error("Native death-respawn projection was superseded before its durable checkpoint");
+        }
+        const nativeCheckpoint = await this.checkpointRustLivePlayerNativeWitness(generation, host, pump);
+        if (!rustIntegratedRuntimeIdentityEqualsV1(nativeCheckpoint.identityBefore, delivery.queryIdentity)) {
+          throw new Error("Native death-respawn checkpoint does not continue the queried death-respawn identity");
+        }
+        const checkpointWitness = Object.freeze({
+          schema: 1,
+          cursorBefore: plan.cursorBefore,
+          cursorAfter: plan.cursorAfter,
+          receiptHash: plan.receiptHash,
+          queryIdentityHash: delivery.queryIdentity.stateHash,
+          deathSequence: plan.deathSequence.toString(10),
+          generatedDropCount: plan.drops.length,
+          ...nativeCheckpoint,
+        });
+        this.rustNativePlayerDeathRespawnCheckpoint = checkpointWitness;
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "native death-respawn compatibility commit");
+
+        for (const entry of plan.inventory.cleared) this.inventory[entry.slot] = null;
+        for (const drop of plan.drops) {
+          const projected = this.spawnDrop(
+            drop.item,
+            drop.count,
+            new THREE.Vector3(drop.position.x, drop.position.y, drop.position.z),
+            undefined,
+            undefined,
+            {
+              allowMerge: false,
+              exactPosition: true,
+              rustEntityId: drop.rustEntityId,
+              rotationY: drop.rotationY,
+              velocity: drop.velocity,
+              pickupDelay: drop.pickupDelay,
+              exactIdempotentRecovery: true,
+            },
+          );
+          if (!projected || projected.rustEntityId !== drop.rustEntityId) {
+            throw new Error("Native death drop did not enter the exact compatibility projection");
+          }
+        }
+        const committedViews = this.commitStagedRustLiveAuthorityViewsR10(
+          generation, host, pump, stagedPlayer, stagedCamera, stagedDrops,
+        );
+        const projection = Object.freeze({
+          schema: 1,
+          cursor: plan.cursorAfter,
+          lastReceiptHash: plan.receiptHash,
+        });
+        this.rustNativePlayerDeathRespawnProjection = projection;
+        this.rustLivePlayerRespawnPendingR5 = null;
+        this.rustNativePlayerRespawnPlan = null;
+        this.spawnProtection = 8;
+        this.hunger = Math.max(this.hunger, 6);
+        this.rustLiveRendererExtractionQueue.length = 0;
+        this.rustNativePlayerDeathRespawnPendingFinalize = Object.freeze({
+          schema: 1,
+          state: "awaiting-local-save",
+          attempts: 0,
+          lastError: "",
+          cursorBefore: plan.cursorBefore,
+          cursorAfter: plan.cursorAfter,
+          receiptHash: plan.receiptHash,
+          deathSequence: plan.deathSequence.toString(10),
+          generatedDropCount: plan.drops.length,
+          generation,
+          host,
+          pump,
+          delivery,
+          plan,
+          projection,
+          checkpoint: checkpointWitness,
+          activeWorldId,
+          nativePersistenceWorldId,
+          universeId: host.config.universeId,
+          locationId: host.config.locationId,
+          sessionId: host.config.sessionId,
+          persistent: true,
+          saveSuppressed: false,
+          mode: "survival",
+          selectedSlot: this.selected,
+          retryNotBefore: 0,
+          inventoryAfter: Object.freeze(this.inventory.map((slot) => {
+            const cloned = cloneSlot(slot);
+            return cloned ? Object.freeze(cloned) : null;
+          })),
+          nativeDrops: this.serializeRustNativeBlockEditDropsV1(),
+          playerView: committedViews.player,
+          cameraView: committedViews.camera,
+          droppedView: committedViews.dropped,
+          extraction,
+          viewRevision: requestedView.viewRevision,
+          spawnProtectionAfter: this.spawnProtection,
+          hungerAfter: this.hunger,
+        });
+        await this.finalizeRustNativePlayerDeathRespawnLocalSaveR5();
+      };
+      if (authorityAccess === "already-exclusive") await commit();
+      else await host.multiplayerAuthority().runExclusiveMutation(commit);
+    } finally {
+      if (!this.rustNativePlayerDeathRespawnPendingFinalize) this.rustTerrainLocatorCommitLocked = false;
+    }
+  }
+
+  private assertRustNativePlayerDeathRespawnPendingFinalizeR5(
+    pending: RustNativePlayerDeathRespawnPendingFinalizeR5,
+  ) {
+    const config = pending.host.config;
+    if (this.disposed || pending !== this.rustNativePlayerDeathRespawnPendingFinalize
+      || !this.rustTerrainLocatorCommitLocked
+      || pending.generation !== this.rustRuntimeTransitionGeneration
+      || pending.generation !== this.rustLivePlayerAuthorityGeneration
+      || pending.host !== this.rustRuntimeHost || pending.pump !== this.rustLiveInputPump
+      || pending.pump.state !== "ready" || pending.host.diagnostics().state !== "ready"
+      || pending.projection !== this.rustNativePlayerDeathRespawnProjection
+      || pending.checkpoint !== this.rustNativePlayerDeathRespawnCheckpoint
+      || pending.plan.cursorBefore !== pending.cursorBefore
+      || pending.plan.cursorAfter !== pending.cursorAfter
+      || pending.plan.receiptHash !== pending.receiptHash
+      || pending.plan.deathSequence.toString(10) !== pending.deathSequence
+      || pending.plan.drops.length !== pending.generatedDropCount
+      || pending.delivery.cursorBefore !== pending.cursorBefore
+      || pending.delivery.cursorAfter !== pending.cursorAfter
+      || pending.delivery.parent.receiptHash !== pending.receiptHash
+      || pending.delivery.parent.deathSequence.toString(10) !== pending.deathSequence
+      || pending.activeWorldId !== this.activeWorldId
+      || pending.nativePersistenceWorldId !== this.rustNativePersistenceWorldId
+      || pending.activeWorldId !== pending.nativePersistenceWorldId
+      || config.universeId !== pending.universeId || config.locationId !== pending.locationId
+      || config.sessionId !== pending.sessionId
+      || !this.persistent || this.persistent !== pending.persistent
+      || this.rustNativeSaveSuppressedForMultiplayerRuntime !== pending.saveSuppressed
+      || this.mode !== pending.mode || this.mode !== "survival" || this.multiplayer !== null
+      || this.selected !== pending.selectedSlot
+      || this.rustNativePlayerRespawnPlan !== null || this.rustLivePlayerRespawnPendingR5 !== null
+      || this.rustLivePlayerPresentationViewR10 !== pending.playerView
+      || this.rustLiveCameraPresentationViewR10 !== pending.cameraView
+      || this.rustDroppedHotTransformFrameR10 !== pending.droppedView
+      || this.spawnProtection !== pending.spawnProtectionAfter
+      || this.hunger !== pending.hungerAfter
+      || this.rustRenderExtractionPoll !== null
+      || this.rustLiveRendererExtractionQueue.length !== 0
+      || this.inventory.length !== pending.inventoryAfter.length
+      || this.inventory.some((slot, index) => !rustBasicDirtCompatibilityStackMatchesV1(
+        slot,
+        pending.inventoryAfter[index] ?? null,
+      ))
+      || Object.values(this.equipment).some((slot) => slot !== null)
+      || this.offhand !== null || this.cursor !== null || this.trash !== null
+      || this.craftGrid.some((slot) => slot !== null)) {
+      throw new Error("Native death-respawn pending finalize no longer matches its exact projected successor");
+    }
+    const diagnostic = pending.pump.diagnostics();
+    if (!diagnostic.deathRespawnQueryConfigured || diagnostic.deathRespawnLegacySeedPending
+      || diagnostic.deathRespawnCursor !== pending.cursorBefore
+      || diagnostic.lastAcknowledgedDeathRespawnSequence === pending.cursorAfter
+      || diagnostic.lastAcknowledgedDeathRespawnReceiptHash === pending.receiptHash
+      || diagnostic.pendingDeathRespawnSequence !== pending.cursorAfter
+      || diagnostic.pendingDeathRespawnReceiptHash !== pending.receiptHash
+      || diagnostic.pendingDeathRespawnIdentityHash !== pending.delivery.queryIdentity.stateHash) {
+      throw new Error("Native death-respawn pending finalize lost its exact pump delivery");
+    }
+    const currentNativeDrops = this.serializeRustNativeBlockEditDropsV1();
+    if (JSON.stringify(currentNativeDrops) !== JSON.stringify(pending.nativeDrops)) {
+      throw new Error("Native death-respawn pending finalize lost its exact projected drop set or transform");
+    }
+  }
+
+  private async finalizeRustNativePlayerDeathRespawnLocalSaveR5() {
+    const pending = this.rustNativePlayerDeathRespawnPendingFinalize;
+    if (!pending) throw new Error("No native death-respawn local save is awaiting finalize");
+    this.assertRustNativePlayerDeathRespawnPendingFinalizeR5(pending);
+    let saved;
+    try { saved = this.saveRustCompatibilityDocumentLocalOnly("a native death-respawn projection"); }
+    catch (error) { saved = { ok: false as const, error: error instanceof Error ? error : new Error(String(error)) }; }
+    if (!saved.ok) {
+      this.rustNativePlayerDeathRespawnPendingFinalize = Object.freeze({
+        ...pending,
+        attempts: pending.attempts + 1,
+        lastError: saved.error.message,
+        retryNotBefore: Date.now() + 1_000,
+      });
+      return this.rustNativePlayerDeathRespawnPendingFinalize;
+    }
+    if (!pending.pump.acknowledgeDeathRespawn(pending.generation, pending.delivery)) {
+      throw new Error("Native death-respawn pump did not acknowledge its exact committed parent");
+    }
+    this.rustNativePlayerDeathRespawnPendingFinalize = null;
+    this.rustTerrainLocatorCommitLocked = false;
+    if (pending.attempts > 0 && this.rustLiveRenderRuntime
+      && this.rustLiveRenderViewR10?.viewRevision === pending.viewRevision) {
+      this.enqueueRustLiveRendererExtractionR10({
+        generation: pending.generation,
+        host: pending.host,
+        pump: pending.pump,
+        viewRevision: pending.viewRevision,
+        extraction: pending.extraction,
+      });
+    }
+    this.events.onToast("The wild carried you home. Your dropped pack remains where you fell.");
+    this.emitHud(true);
+    return null;
+  }
+
+  private async retryRustNativePlayerDeathRespawnFinalizeR5() {
+    const pending = this.rustNativePlayerDeathRespawnPendingFinalize;
+    if (!pending) throw new Error("No native death-respawn local save is awaiting retry");
+    this.assertRustLivePlayerViewContextR10(
+      pending.generation,
+      pending.host,
+      pending.pump,
+      "native death-respawn local-save retry",
+    );
+    return await this.runRustLivePumpNetworkExclusiveR5(
+      pending.generation,
+      pending.host,
+      pending.pump,
+      "native death-respawn local-save retry",
+      async () => await this.finalizeRustNativePlayerDeathRespawnLocalSaveR5(),
+    );
+  }
+
+  private async commitRustLivePlayerRespawnResultR5(input: Readonly<{
+    generation: number;
+    host: RustWorldRuntimeManagedHostV1;
+    pump: RustLiveInputPumpR5;
+    result: RustLiveInputPumpPlayerRespawnResultV1;
+  }>, authorityAccess: "acquire" | "already-exclusive" = "acquire") {
+    const { generation, host, pump, result } = input;
+    if (result.discarded || !result.plan || !result.validated || !result.extraction
+      || !result.player || !result.camera || !result.view) {
+      throw new Error("Native player respawn omitted its complete BWD7/BWE7 player-camera result");
+    }
+    const retained = this.rustNativePlayerRespawnPlan;
+    if (!retained || JSON.stringify(retained) !== JSON.stringify(rustLivePlayerRespawnPlanRecordV1(result.plan))) {
+      throw new Error("Native player respawn result has no exact durable pre-dispatch plan");
+    }
+    if (!result.validated.respawn.keepInventory) {
+      if (!result.deathRespawn) {
+        throw new Error("False-policy native player respawn omitted its retained death-drop parent");
+      }
+      await this.commitRustNativePlayerDeathRespawnProjectionR5({
+        generation,
+        host,
+        pump,
+        delivery: result.deathRespawn,
+        extraction: result.extraction,
+        requestedView: result.view,
+        camera: result.camera,
+      }, authorityAccess);
+      return;
+    }
+    if (result.deathRespawn) {
+      throw new Error("Keep-inventory native player respawn unexpectedly emitted a death-drop parent");
+    }
+    if (this.rustTerrainLocatorCommitLocked || !this.activeWorldId || !this.persistent
+      || this.mode !== "survival" || this.rustNativeSaveSuppressedForMultiplayerRuntime || this.multiplayer) {
+      throw new Error("Native keep-inventory respawn requires one persistent single-player Survival world");
+    }
+    const stagedPlayer = this.stageRustLivePlayerExtractionR10(generation, host, pump, result.extraction);
+    const stagedCamera = this.stageRustLiveCameraExtractionR10(
+      generation, host, pump, result.extraction, result.view, result.camera,
+    );
+    const stagedDrops = this.stageRustDroppedHotTransformsR10(generation, host, pump, result.extraction);
+    const receipt = result.validated.respawn;
+    const prior = this.rustLivePlayerPresentationViewR10;
+    if (!prior || prior.combat.alive || prior.deathSequence !== receipt.deathSequence
+      || prior.inventoryContainerRevision !== receipt.inventoryBeforeRevision
+      || prior.equipmentContainerRevision !== receipt.equipmentBeforeRevision
+      || !stagedPlayer.combat.alive || stagedPlayer.deathSequence !== receipt.deathSequence
+      || stagedPlayer.lastRespawnSequence !== receipt.deathSequence
+      || stagedPlayer.inventoryContainerRevision !== receipt.inventoryAfterRevision
+      || stagedPlayer.equipmentContainerRevision !== receipt.equipmentAfterRevision
+      || stagedPlayer.extractionRevision !== result.player.extractionRevision) {
+      throw new Error("Native keep-inventory respawn does not join its exact dead and live player views");
+    }
+    this.rustTerrainLocatorCommitLocked = true;
+    try {
+      const commit = async () => {
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "native keep-inventory respawn checkpoint");
+        if (retained !== this.rustNativePlayerRespawnPlan || this.disposed
+          || this.mode !== "survival" || this.rustNativeSaveSuppressedForMultiplayerRuntime || this.multiplayer) {
+          throw new Error("Native keep-inventory respawn was superseded before its durable checkpoint");
+        }
+        await this.checkpointRustLivePlayerNativeWitness(generation, host, pump);
+        this.commitStagedRustLiveAuthorityViewsR10(
+          generation, host, pump, stagedPlayer, stagedCamera, stagedDrops,
+        );
+        this.rustLivePlayerRespawnPendingR5 = null;
+        this.rustNativePlayerRespawnPlan = null;
+        this.spawnProtection = 8;
+        this.hunger = Math.max(this.hunger, 6);
+        const saved = this.saveRustCompatibilityDocumentLocalOnly("a native keep-inventory respawn");
+        if (!saved.ok) throw new Error(`Native keep-inventory respawn could not be stored. ${saved.error.message}`);
+        this.events.onToast("The wild carried you home—with your inventory intact.");
+        this.emitHud(true);
+      };
+      if (authorityAccess === "already-exclusive") await commit();
+      else await host.multiplayerAuthority().runExclusiveMutation(commit);
+    } finally {
+      this.rustTerrainLocatorCommitLocked = false;
+    }
+  }
+
+  private startRustLivePlayerRespawnR5() {
+    const pending = this.rustLivePlayerRespawnPendingR5;
+    const pump = this.rustLiveInputPump;
+    const host = this.rustRuntimeHost;
+    const generation = this.rustLivePlayerAuthorityGeneration;
+    if (!pending || !pump || !host || generation === null || this.rustLiveInputAdvance
+      || this.rustTerrainLocatorCommitLocked || this.rustLivePlayerRespawnTransactionR5
+      || !this.rustLivePlayerAuthorityEnabledR5()) return null;
+    // Reserve browser-transaction admission synchronously, before the first
+    // authority-queue await. Locator and Creative commits consult this token,
+    // while this start path consults their shared commit lock, so either side
+    // can win admission without leaving a one-way race window.
+    const transaction = Object.freeze({ generation, host, pump, pending });
+    this.rustLivePlayerRespawnTransactionR5 = transaction;
+    const operation = (async () => {
+      try {
+        const result = await this.runRustLivePumpNetworkExclusiveR5(
+          generation,
+          host,
+          pump,
+          "player respawn",
+          async () => {
+            if (pending !== this.rustLivePlayerRespawnPendingR5) {
+              throw new Error("Native player respawn dead view was superseded before dispatch");
+            }
+            const retained = this.rustNativePlayerRespawnPlan;
+            let result: RustLiveInputPumpPlayerRespawnResultV1;
+            if (retained) {
+              result = await pump.retryPlayerRespawn(
+                generation,
+                rehydrateRustLivePlayerRespawnPlanV1(retained),
+              );
+            } else {
+              // Persist the exact dead-player CAS source before retaining BWD7.
+              // A crash anywhere after this point can restore the plan's expected
+              // identity and submit the same bytes before normal activation moves it.
+              await this.checkpointRustLivePlayerNativeWitness(generation, host, pump);
+              const intent = this.rustLivePlayerRespawnIntentR5(pending, host.runtimeService().identity());
+              result = await pump.respawnPlayer(generation, intent, {
+                beforeDispatch: async (plan) => this.persistRustLivePlayerRespawnPlanR5(plan),
+              });
+            }
+            // The respawn extraction's queried identity and its durable browser
+            // checkpoint must be adjacent on this same authority queue. Releasing
+            // here would admit autosave, camera, network, or future pump mutations
+            // between the native parent and its exact checkpoint witness.
+            await this.commitRustLivePlayerRespawnResultR5(
+              { generation, host, pump, result },
+              "already-exclusive",
+            );
+            return result;
+          },
+        );
+        if (!this.rustNativeDropPickupPendingFinalize
+          && !this.rustNativePlayerDeathRespawnPendingFinalize
+          && result.extraction && result.view && this.rustLiveRenderRuntime
+          && this.rustLiveRenderViewR10?.viewRevision === result.view.viewRevision) {
+          this.enqueueRustLiveRendererExtractionR10({
+            generation,
+            host,
+            pump,
+            viewRevision: result.view.viewRevision,
+            extraction: result.extraction,
+          });
+        }
+      } finally {
+        if (this.rustLivePlayerRespawnTransactionR5 === transaction) {
+          this.rustLivePlayerRespawnTransactionR5 = null;
+        }
+      }
+    })();
+    this.rustLiveInputAdvance = operation;
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error) => this.quarantineRustLivePlayerAuthorityR5(error, pump)).finally(() => {
+      if (this.rustLiveInputAdvance !== operation) return;
+      this.rustLiveInputAdvance = null;
+      if (this.rustLivePlayerRespawnPendingR5 && this.rustLivePlayerAuthorityEnabledR5()) {
+        this.scheduleRustLiveInputAdvanceR5();
+      }
+    });
+    return operation;
+  }
+
+  private startRustNativePlayerDeathRespawnFinalizeRetryR5() {
+    const pending = this.rustNativePlayerDeathRespawnPendingFinalize;
+    if (!pending || this.rustLiveInputAdvance) return null;
+    const operation = (async () => { await this.retryRustNativePlayerDeathRespawnFinalizeR5(); })();
+    this.rustLiveInputAdvance = operation;
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error: unknown) => {
+      this.quarantineRustLivePlayerAuthorityR5(error, pending.pump);
+    }).finally(() => {
+      if (this.rustLiveInputAdvance === operation) this.rustLiveInputAdvance = null;
+    });
+    return operation;
+  }
+
+  private startRustNativeDropPickupFinalizeRetryV1() {
+    const pending = this.rustNativeDropPickupPendingFinalize;
+    if (!pending || this.rustLiveInputAdvance) return null;
+    const operation = (async () => { await this.retryRustNativeDropPickupFinalizeV1(); })();
+    this.rustLiveInputAdvance = operation;
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error: unknown) => {
+      this.quarantineRustLivePlayerAuthorityR5(error, pending.pump);
+    }).finally(() => {
+      if (this.rustLiveInputAdvance !== operation) return;
+      this.rustLiveInputAdvance = null;
+      if (this.rustNativeDropPickupPendingFinalize || this.rustTerrainLocatorCommitLocked
+        || pending.pump !== this.rustLiveInputPump || pending.host !== this.rustRuntimeHost
+        || pending.generation !== this.rustLivePlayerAuthorityGeneration) return;
+      const currentView = this.rustLiveRenderViewR10;
+      if (currentView && currentView.viewRevision !== pending.viewRevision) {
+        this.scheduleRustLiveViewRefreshR10(currentView);
+      }
+    });
+    return operation;
+  }
+
+  private clearRustNativeDropPickupFinalizeRetryTimerV1() {
+    const timer = this.rustNativeDropPickupFinalizeRetryTimer;
+    if (timer === null) return;
+    clearTimeout(timer);
+    this.rustNativeDropPickupFinalizeRetryTimer = null;
+  }
+
+  private armRustNativeDropPickupFinalizeRetryTimerV1() {
+    const pending = this.rustNativeDropPickupPendingFinalize;
+    if (!pending || this.rustNativeDropPickupFinalizeRetryTimer !== null || this.disposed) return;
+    const delay = Math.max(0, pending.retryNotBefore - Date.now());
+    this.rustNativeDropPickupFinalizeRetryTimer = setTimeout(() => {
+      this.rustNativeDropPickupFinalizeRetryTimer = null;
+      if (this.disposed || pending !== this.rustNativeDropPickupPendingFinalize
+        || this.rustRuntimeOperationsBlocked) return;
+      this.scheduleRustLiveInputAdvanceR5();
+    }, delay);
+  }
+
+  private startRustNativeBlockEditFinalizeRetryV1() {
+    const pending = this.rustNativeBlockEditPendingFinalize;
+    if (!pending || this.rustLiveInputAdvance) return null;
+    const operation = (async () => { await this.retryRustNativeBlockEditFinalizeV1(); })();
+    this.rustLiveInputAdvance = operation;
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error: unknown) => {
+      this.quarantineRustLivePlayerAuthorityR5(error, pending.pump);
+    }).finally(() => {
+      if (this.rustLiveInputAdvance === operation) this.rustLiveInputAdvance = null;
+    });
+    return operation;
+  }
+
   private scheduleRustLiveInputAdvanceR5() {
     const pump = this.rustLiveInputPump;
     const host = this.rustRuntimeHost;
     const generation = this.rustLivePlayerAuthorityGeneration;
     const requestedView = this.rustLiveRenderViewR10;
-    if (!pump || !host || generation === null || !requestedView || !this.rustLivePlayerAuthorityEnabledR5()
+    if (this.rustNativeDropPickupPendingFinalize) {
+      if (this.rustLiveInputAdvance || !pump || !host || generation === null) return;
+      if (Date.now() < this.rustNativeDropPickupPendingFinalize.retryNotBefore) return;
+      this.startRustNativeDropPickupFinalizeRetryV1();
+      return;
+    }
+    if (this.rustNativePlayerDeathRespawnPendingFinalize) {
+      if (this.rustLiveInputAdvance || !pump || !host || generation === null) return;
+      if (Date.now() < this.rustNativePlayerDeathRespawnPendingFinalize.retryNotBefore) return;
+      this.startRustNativePlayerDeathRespawnFinalizeRetryR5();
+      return;
+    }
+    if (this.rustNativeBlockEditPendingFinalize) {
+      if (this.rustLiveInputAdvance || !pump || !host || generation === null) return;
+      if (Date.now() < this.rustNativeBlockEditPendingFinalize.retryNotBefore) return;
+      this.startRustNativeBlockEditFinalizeRetryV1();
+      return;
+    }
+    if (this.rustLivePlayerRespawnPendingR5) {
+      if (this.rustLiveInputAdvance || !pump || !host || generation === null) return;
+      this.startRustLivePlayerRespawnR5();
+      return;
+    }
+    if (this.rustTerrainLocatorCommitLocked || !pump || !host || generation === null || !requestedView || !this.rustLivePlayerAuthorityEnabledR5()
       || this.rustLiveInputAdvance) return;
     try {
       pump.sample(generation, this.rustLiveInputIntentR5(pump));
@@ -5267,25 +7270,119 @@ export class VoxelEngine {
       return;
     }
     const operation = (async () => {
-      let result = await pump.advance(generation, { view: requestedView });
-      if (result.discarded || generation !== this.rustRuntimeTransitionGeneration || this.disposed
-        || pump !== this.rustLiveInputPump || host !== this.rustRuntimeHost
-        || !this.rustLivePlayerAuthorityEnabledR5()) return;
-      let acceptedView = requestedView;
-      while (this.rustLiveRenderViewR10?.viewRevision !== acceptedView.viewRevision) {
-        const latest = this.rustLiveRenderViewR10;
-        if (!latest) return;
-        const refreshed = await pump.refreshView(generation, latest);
-        if (refreshed.discarded || generation !== this.rustRuntimeTransitionGeneration || this.disposed
-          || pump !== this.rustLiveInputPump || host !== this.rustRuntimeHost
-          || !this.rustLivePlayerAuthorityEnabledR5()) return;
-        if (!refreshed.extraction || !refreshed.camera || refreshed.cause !== "viewport") {
-          throw new Error("Rust in-flight authority resize did not return its latest camera extraction");
-        }
-        result = Object.freeze({ ...result, extraction: refreshed.extraction, camera: refreshed.camera });
-        acceptedView = latest;
+      const advanced = await this.runRustLivePumpNetworkExclusiveR5(
+        generation,
+        host,
+        pump,
+        "input advance",
+        async () => {
+          let result = await pump.advance(generation, { view: requestedView });
+          if (result.discarded || generation !== this.rustRuntimeTransitionGeneration || this.disposed
+            || pump !== this.rustLiveInputPump || host !== this.rustRuntimeHost
+            || !this.rustLivePlayerAuthorityEnabledR5()) return null;
+          let acceptedView = requestedView;
+          while (this.rustLiveRenderViewR10?.viewRevision !== acceptedView.viewRevision) {
+            const latest = this.rustLiveRenderViewR10;
+            if (!latest) return null;
+            const refreshed = await pump.refreshView(generation, latest);
+            if (refreshed.discarded || generation !== this.rustRuntimeTransitionGeneration || this.disposed
+              || pump !== this.rustLiveInputPump || host !== this.rustRuntimeHost
+              || !this.rustLivePlayerAuthorityEnabledR5()) return null;
+            if (!refreshed.extraction || !refreshed.camera || refreshed.cause !== "viewport") {
+              throw new Error("Rust in-flight authority resize did not return its latest camera extraction");
+            }
+            result = Object.freeze({
+              ...result,
+              extraction: refreshed.extraction,
+              cause: result.cause ?? refreshed.cause,
+              camera: refreshed.camera,
+            });
+            acceptedView = latest;
+          }
+          return Object.freeze({ result, acceptedView });
+        },
+      );
+      if (!advanced) return;
+      const { result, acceptedView } = advanced;
+      const durableReceiptCount = Number(Boolean(result.nativeBlockEdit))
+        + Number(Boolean(result.basicDirtAction))
+        + Number(Boolean(result.dropPickup))
+        + Number(Boolean(result.playerDrop))
+        + Number(Boolean(result.deathRespawn));
+      if (durableReceiptCount > 1) {
+        throw new Error("One Rust input step emitted simultaneous durable gameplay receipts that cannot share one browser checkpoint");
       }
-      if (result.extraction) {
+      if (result.nativeBlockEdit) {
+        if (!result.extraction || !result.camera || !result.cause
+          || result.cause !== "authority" && result.cause !== "initial") {
+          throw new Error("Native block-edit receipt omitted its authoritative player-camera extraction");
+        }
+        await this.commitRustNativeBlockEditProjectionV1({
+          generation,
+          host,
+          pump,
+          delivery: result.nativeBlockEdit,
+          extraction: result.extraction,
+          requestedView: acceptedView,
+          camera: result.camera,
+        });
+      } else if (result.dropPickup) {
+        if (!result.extraction || !result.camera || !result.cause
+          || result.cause !== "authority" && result.cause !== "initial") {
+          throw new Error("Native drop-pickup receipt omitted its authoritative player-camera extraction");
+        }
+        await this.commitRustNativeDropPickupProjectionV1({
+          generation,
+          host,
+          pump,
+          delivery: result.dropPickup,
+          extraction: result.extraction,
+          requestedView: acceptedView,
+          camera: result.camera,
+        });
+      } else if (result.basicDirtAction) {
+        if (!result.extraction || !result.camera || !result.cause
+          || result.cause !== "authority" && result.cause !== "initial") {
+          throw new Error("Native Dirt receipt omitted its authoritative player-camera extraction");
+        }
+        await this.commitRustBasicDirtActionProjectionV1({
+          generation,
+          host,
+          pump,
+          delivery: result.basicDirtAction,
+          extraction: result.extraction,
+          requestedView: acceptedView,
+          camera: result.camera,
+        });
+      } else if (result.playerDrop) {
+        if (!result.extraction || !result.camera || !result.cause
+          || result.cause !== "authority" && result.cause !== "initial") {
+          throw new Error("Native player-drop receipt omitted its authoritative player-camera extraction");
+        }
+        await this.commitRustNativePlayerDropProjectionV1({
+          generation,
+          host,
+          pump,
+          delivery: result.playerDrop,
+          extraction: result.extraction,
+          requestedView: acceptedView,
+          camera: result.camera,
+        });
+      } else if (result.deathRespawn) {
+        if (!result.extraction || !result.camera || !result.cause
+          || result.cause !== "authority" && result.cause !== "initial") {
+          throw new Error("Native death-respawn parent omitted its authoritative player-camera extraction");
+        }
+        await this.commitRustNativePlayerDeathRespawnProjectionR5({
+          generation,
+          host,
+          pump,
+          delivery: result.deathRespawn,
+          extraction: result.extraction,
+          requestedView: acceptedView,
+          camera: result.camera,
+        });
+      } else if (result.extraction) {
         if (!result.camera || !result.cause) throw new Error("Rust input extraction omitted its authoritative camera cause");
         if (result.cause === "authority" || result.cause === "initial") {
           this.applyRustLiveAuthorityExtractionR10(
@@ -5297,7 +7394,9 @@ export class VoxelEngine {
           );
         }
       }
-      if (result.extraction && this.rustLiveRenderRuntime
+      if (!this.rustNativeDropPickupPendingFinalize
+        && !this.rustNativePlayerDeathRespawnPendingFinalize
+        && !this.rustNativeBlockEditPendingFinalize && result.extraction && this.rustLiveRenderRuntime
         && this.rustLiveRenderViewR10?.viewRevision === acceptedView.viewRevision) {
         this.enqueueRustLiveRendererExtractionR10({
           generation, host, pump, viewRevision: acceptedView.viewRevision, extraction: result.extraction,
@@ -5309,6 +7408,10 @@ export class VoxelEngine {
     void operation.catch((error) => this.quarantineRustLivePlayerAuthorityR5(error, pump)).finally(() => {
       if (this.rustLiveInputAdvance !== operation) return;
       this.rustLiveInputAdvance = null;
+      if (this.rustLivePlayerRespawnPendingR5 && this.rustLivePlayerAuthorityEnabledR5()) {
+        this.scheduleRustLiveInputAdvanceR5();
+        return;
+      }
       const latest = this.rustLiveRenderViewR10;
       const accepted = pump.diagnostics().lastView;
       if (latest && this.rustLivePlayerAuthorityEnabledR5()
@@ -5337,13 +7440,19 @@ export class VoxelEngine {
 
   /** Resize authority is coalesced on top of the pump's single serialized service tail. */
   private scheduleRustLiveViewRefreshR10(view: RustIntegratedRuntimeExtractionViewV1) {
+    if (this.rustTerrainLocatorCommitLocked) return;
     this.armRustLiveRenderViewR10(view);
     if (this.rustLiveInputAdvance || this.rustLiveViewRefresh) return;
     const pump = this.rustLiveInputPump;
     const host = this.rustRuntimeHost;
     const generation = this.rustLivePlayerAuthorityGeneration;
     if (!pump || !host || generation === null) return;
-    const operation = (async () => {
+    const operation = this.runRustLivePumpNetworkExclusiveR5(
+      generation,
+      host,
+      pump,
+      "viewport refresh",
+      async () => {
       let requested = view;
       for (;;) {
         const result = await pump.refreshView(generation, requested);
@@ -5369,7 +7478,8 @@ export class VoxelEngine {
         if (!latest || latest.viewRevision === requested.viewRevision) return;
         requested = latest;
       }
-    })();
+      },
+    );
     this.rustLiveViewRefresh = operation;
     this.trackRustAuthorityOperation(operation);
     void operation.catch((error) => this.quarantineRustLivePlayerAuthorityR5(error, pump)).finally(() => {
@@ -5389,8 +7499,13 @@ export class VoxelEngine {
     const host = this.rustRuntimeHost;
     const generation = this.rustLivePlayerAuthorityGeneration;
     const view = this.rustLiveRenderViewR10;
-    if (!pump || !host || generation === null || !view || !this.rustLivePlayerAuthorityEnabledR5()) return;
-    const operation = (async () => {
+    if (this.rustTerrainLocatorCommitLocked || !pump || !host || generation === null || !view || !this.rustLivePlayerAuthorityEnabledR5()) return;
+    const operation = this.runRustLivePumpNetworkExclusiveR5(
+      generation,
+      host,
+      pump,
+      "camera mode",
+      async () => {
       const result = await pump.applyCameraConfig(generation, (current) => ({
         mode: current.mode === "first" ? "third-rear" : current.mode === "third-rear" ? "third-front" : "first",
       }), view);
@@ -5415,7 +7530,8 @@ export class VoxelEngine {
           this.emitHud(true);
         }
       }
-    })();
+      },
+    );
     this.trackRustAuthorityOperation(operation);
     void operation.catch((error) => this.quarantineRustLivePlayerAuthorityR5(error, pump));
   }
@@ -5437,7 +7553,10 @@ export class VoxelEngine {
     pending: RustLiveRendererExtractionQueueEntryR10,
     context: Readonly<{ animationTimeMicros: bigint; environment: RenderEnvironmentV2 }>,
   ) {
-    if (this.rustRenderExtractionPoll) return;
+    if (this.rustTerrainLocatorCommitLocked
+      || this.rustNativeDropPickupPendingFinalize
+      || this.rustNativePlayerDeathRespawnPendingFinalize
+      || this.rustRenderExtractionPoll) return;
     const { generation, host, pump, extraction } = pending;
     const operation = (async () => {
       const frameSequence = this.rustRenderFrameSequence + BigInt(1);
@@ -5505,7 +7624,10 @@ export class VoxelEngine {
 
   publishRendererExtractionR11(now: number) {
     const sink = this.renderExtraction;
-    if (!sink || now < this.renderExtractionNextAt) return;
+    if (!sink || this.rustTerrainLocatorCommitLocked
+      || this.rustNativeDropPickupPendingFinalize
+      || this.rustNativePlayerDeathRespawnPendingFinalize
+      || now < this.renderExtractionNextAt) return;
     this.renderExtractionNextAt = now + 1000 / 30;
     try {
       const runtime = this.rustLiveRenderRuntime;
@@ -5610,7 +7732,9 @@ export class VoxelEngine {
     if (!this.locked) {
       this.pointerLockMovementSuppression = 0;
       this.resetLookFrameBudget();
-      if (this.running && !this.touchMode) this.paused = !this.multiplayerSimulationActive();
+      if (this.running && !this.touchMode) {
+        this.paused = this.multiplayerProgressionGameplayFrozen() || !this.multiplayerSimulationActive();
+      }
       this.clearInput();
       this.mineHeld = false;
     } else {
@@ -5619,7 +7743,7 @@ export class VoxelEngine {
       this.pointerLockMovementSuppression = POINTER_LOCK_REACQUIRE_SUPPRESSION_EVENTS;
       this.resetLookFrameBudget();
       this.lastPresentedFrameTime = performance.now();
-      this.paused = false;
+      this.paused = this.multiplayerProgressionGameplayFrozen() || !this.running;
       this.titleMode = false;
       void this.audio.unlock();
     }
@@ -5669,6 +7793,7 @@ export class VoxelEngine {
         this.mineHeld = false;
       }
     } else if (event.button === 2) {
+      if (this.interceptRustTerrainLocatorSelectedUse()) return;
       if (this.rustLivePlayerAuthorityEnabledR5()) {
         this.rustSecondaryUseHeld = true;
         return;
@@ -5707,10 +7832,14 @@ export class VoxelEngine {
   onWheel = (event: WheelEvent) => {
     if (!this.running || this.titleMode || this.paused || this.gameplayOverlayOpen) return;
     event.preventDefault();
-    const selected = this.rustLivePlayerAuthorityEnabledR5()
-      ? this.rustLiveSelectedSlotIntentR5 ?? this.selected
+    const selected = this.rustNativeBlockEditPendingFinalize
+      ? this.rustNativeBlockEditQueuedSelectedSlotR5
+        ?? this.rustLiveSelectedSlotIntentR5
+        ?? this.selected
+      : this.rustLivePlayerAuthorityEnabledR5()
+        ? this.rustLiveSelectedSlotIntentR5 ?? this.selected
       : this.selected;
-    this.selectSlot(selected + (event.deltaY > 0 ? 1 : -1));
+    this.selectSlotFromPlayerInput(selected + (event.deltaY > 0 ? 1 : -1));
   };
 
   private openShellOverlayForKey(event: KeyboardEvent) {
@@ -5749,7 +7878,7 @@ export class VoxelEngine {
       // Once native player authority is live, unsupported legacy actions are
       // deliberately inert. Every branch below is part of the exact R5 input
       // vocabulary; shell-only overlays have already returned above.
-      if (event.code === "KeyG" && !event.repeat) this.rustDropPulse = true;
+      if (event.code === "KeyG" && !event.repeat) this.dropSelectedItem();
       else if (event.code === "KeyF") event.preventDefault();
       else if (event.code === "KeyV" && !event.repeat) {
         event.preventDefault();
@@ -5763,7 +7892,7 @@ export class VoxelEngine {
         this.emitHud(true);
       } else if (event.code.startsWith("Digit")) {
         const slot = Number(event.code.slice(5)) - 1;
-        if (slot >= 0 && slot < 9) this.selectSlot(slot);
+        if (slot >= 0 && slot < 9) this.selectSlotFromPlayerInput(slot);
       } else if (["KeyW", "KeyA", "KeyS", "KeyD", "Space", "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight"].includes(event.code)) {
         if (event.code === "KeyW" && !event.repeat && !this.keys.has("KeyW")) {
           const now = performance.now();
@@ -5816,7 +7945,7 @@ export class VoxelEngine {
     }
     if (event.code.startsWith("Digit")) {
       const slot = Number(event.code.slice(5)) - 1;
-      if (slot >= 0 && slot < 9) this.selectSlot(slot);
+      if (slot >= 0 && slot < 9) this.selectSlotFromPlayerInput(slot);
     }
     if (event.code === "KeyW" && !event.repeat && !this.keys.has("KeyW")) {
       const now = performance.now();
@@ -5960,12 +8089,287 @@ export class VoxelEngine {
     }
   }
 
+  private async awaitRustLiveInputAdvanceForAutomationR5() {
+    for (;;) {
+      const operation = this.rustLiveInputAdvance;
+      if (!operation) return;
+      await operation;
+      // The scheduler clears its owner in a chained finally. Yield once so an
+      // already-resolved operation cannot leave a stale non-null owner here.
+      await Promise.resolve();
+    }
+  }
+
+  private assertRustLiveMovementAutomationOwnerR5(pump: RustLiveInputPumpR5, generation: number) {
+    if (pump !== this.rustLiveInputPump || generation !== this.rustLivePlayerAuthorityGeneration
+      || !this.rustLivePlayerAuthorityEnabledR5() || !this.running || this.paused || this.titleMode) {
+      throw new Error("Rust movement automation lost its exact live authority generation");
+    }
+  }
+
+  private assertRustLiveMovementAutomationNeutralR5(pump: RustLiveInputPumpR5) {
+    const heldInput = [
+      "KeyW", "KeyA", "KeyS", "KeyD", "Space",
+      "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight",
+    ].find((code) => this.keys.has(code));
+    const diagnostics = pump.diagnostics();
+    if (heldInput || this.sprintLatched || this.mineHeld || this.rustSecondaryUseHeld
+      || this.rustCreativeFlightTogglePulse || this.rustDropPulse
+      || diagnostics.latchedActionTransitions !== 0
+      || (diagnostics.authoritativeFlags
+        & (RUST_RUNTIME_INPUT_FLAG_V1.flying | RUST_RUNTIME_INPUT_FLAG_V1.mounted)) !== 0) {
+      throw new Error("Rust movement automation requires an exact neutral non-movement/action state");
+    }
+  }
+
+  private awaitRustLiveMovementAutomationClockR5() {
+    return new Promise<void>((resolve) => {
+      if (typeof requestAnimationFrame === "function") {
+        const fallback = setTimeout(resolve, 100);
+        requestAnimationFrame(() => {
+          clearTimeout(fallback);
+          resolve();
+        });
+        return;
+      }
+      setTimeout(resolve, 0);
+    });
+  }
+
+  private async applyRustLiveMovementAutomationInputR5(
+    pump: RustLiveInputPumpR5,
+    generation: number,
+    before: RustLiveInputPumpDiagnosticsR5,
+    expected: Readonly<{ moveX: number; moveZ: number; buttons: number }> | null,
+    firstSchedule: () => void,
+    label: string,
+  ) {
+    if (before.state !== "ready" || before.lastError !== null) {
+      throw new Error(`Rust movement automation cannot start ${label} from a failed pump`);
+    }
+    const sequence = before.nextInputSequence;
+    const started = performance.now();
+    let attempts = 0;
+    const schedule = (first: boolean) => {
+      this.assertRustLiveMovementAutomationOwnerR5(pump, generation);
+      this.assertRustLiveMovementAutomationNeutralR5(pump);
+      if (first) firstSchedule();
+      else this.scheduleRustLiveInputAdvanceR5();
+      attempts += 1;
+      if (!this.rustLiveInputAdvance) {
+        throw new Error(`Rust movement automation could not schedule ${label}`);
+      }
+    };
+    schedule(true);
+    for (;;) {
+      await this.awaitRustLiveInputAdvanceForAutomationR5();
+      this.assertRustLiveMovementAutomationOwnerR5(pump, generation);
+      const after = pump.diagnostics();
+      if (after.state !== "ready" || after.lastError !== null) {
+        throw new Error(`Rust movement automation pump failed while applying ${label}`);
+      }
+      const elapsedMilliseconds = performance.now() - started;
+      if (elapsedMilliseconds > 10_000) {
+        throw new Error(`Rust movement automation timed out while applying ${label}`);
+      }
+      if (after.nextInputSequence === sequence + 1) {
+        if (after.nativeInputPending || after.pendingInputSequence !== null) {
+          throw new Error(`Rust movement automation retained ${label} after advancing its sequence`);
+        }
+        if (expected && (after.lastAppliedMoveX !== expected.moveX
+          || after.lastAppliedMoveZ !== expected.moveZ
+          || after.lastAppliedButtons !== expected.buttons)) {
+          throw new Error(`Rust movement automation did not apply its exact ${label}`);
+        }
+        return Object.freeze({
+          sequence,
+          moveX: after.lastAppliedMoveX,
+          moveZ: after.lastAppliedMoveZ,
+          buttons: after.lastAppliedButtons,
+          attempts,
+          elapsedMilliseconds,
+        });
+      }
+      if (after.nextInputSequence !== sequence || !after.nativeInputPending
+        || after.pendingInputSequence !== sequence) {
+        throw new Error(`Rust movement automation lost exact sequence custody while applying ${label}`);
+      }
+      if (attempts >= 32) {
+        throw new Error(`Rust movement automation timed out while applying ${label}`);
+      }
+      // A zero-step native call retains the exact sampled frame. Release the
+      // browser key, allow the real monotonic clock to advance, then retry the
+      // retained native frame with a zero browser sample.
+      await this.awaitRustLiveMovementAutomationClockR5();
+      schedule(false);
+    }
+  }
+
+  private async drainRustLiveMovementAutomationPendingR5(
+    pump: RustLiveInputPumpR5,
+    generation: number,
+  ) {
+    await this.awaitRustLiveInputAdvanceForAutomationR5();
+    this.assertRustLiveMovementAutomationOwnerR5(pump, generation);
+    let diagnostics = pump.diagnostics();
+    while (diagnostics.nativeInputPending) {
+      await this.applyRustLiveMovementAutomationInputR5(
+        pump,
+        generation,
+        diagnostics,
+        null,
+        () => this.scheduleRustLiveInputAdvanceR5(),
+        "retained pre-pulse input frame",
+      );
+      diagnostics = pump.diagnostics();
+    }
+    return diagnostics;
+  }
+
+  private async releaseRustLiveMovementAutomationInputR5(
+    pump: RustLiveInputPumpR5,
+    generation: number,
+    label: string,
+  ) {
+    let before = await this.drainRustLiveMovementAutomationPendingR5(pump, generation);
+    if (before.lastAppliedMoveX === 0 && before.lastAppliedMoveZ === 0 && before.lastAppliedButtons === 0) {
+      return null;
+    }
+    const release = await this.applyRustLiveMovementAutomationInputR5(
+      pump,
+      generation,
+      before,
+      Object.freeze({ moveX: 0, moveZ: 0, buttons: 0 }),
+      () => this.scheduleRustLiveInputAdvanceR5(),
+      label,
+    );
+    before = pump.diagnostics();
+    if (before.nativeInputPending) {
+      throw new Error(`Rust movement automation retained ${label} after its exact acknowledgement`);
+    }
+    return release;
+  }
+
+  /**
+   * Browser-acceptance seam for a bounded exact R5 movement burst. The
+   * virtual key exists only while each native sample is captured; it is never
+   * held across a Wasm, multiplayer, rendering, or Playwright await.
+   */
+  async pulseRustLiveMovementForAutomationR5(code: string, frameCount = 8) {
+    const axes = {
+      KeyW: { moveX: 0, moveZ: RUST_LIVE_INPUT_AXIS_DIVISOR_R5 },
+      KeyA: { moveX: -RUST_LIVE_INPUT_AXIS_DIVISOR_R5, moveZ: 0 },
+      KeyS: { moveX: 0, moveZ: -RUST_LIVE_INPUT_AXIS_DIVISOR_R5 },
+      KeyD: { moveX: RUST_LIVE_INPUT_AXIS_DIVISOR_R5, moveZ: 0 },
+    } as const;
+    const expected = axes[code as keyof typeof axes];
+    if (!expected) throw new Error("Rust movement automation requires exactly KeyW, KeyA, KeyS, or KeyD");
+    if (!Number.isSafeInteger(frameCount) || frameCount < 1 || frameCount > 32) {
+      throw new Error("Rust movement automation frame count must be an integer from 1 through 32");
+    }
+    if (this.rustLiveAutomationPulseR5) throw new Error("Rust movement automation pulse is already active");
+    if (["KeyW", "KeyA", "KeyS", "KeyD"].some((movementCode) => this.keys.has(movementCode))) {
+      throw new Error("Rust movement automation requires an idle movement-key set");
+    }
+    const pump = this.rustLiveInputPump;
+    const generation = this.rustLivePlayerAuthorityGeneration;
+    if (!pump || generation === null || !this.rustLivePlayerAuthorityEnabledR5()
+      || !this.running || this.paused || this.titleMode) {
+      throw new Error("Rust movement automation requires a live playing R5 authority");
+    }
+    this.rustLiveAutomationPulseR5 = true;
+    let inputSequenceBefore: number | null = null;
+    const frames: Array<Readonly<{
+      sequence: number;
+      moveX: number;
+      moveZ: number;
+      buttons: number;
+      attempts: number;
+      elapsedMilliseconds: number;
+    }>> = [];
+    let heldMilliseconds = 0;
+    try {
+      let clean = await this.drainRustLiveMovementAutomationPendingR5(pump, generation);
+      if (clean.lastAppliedMoveX !== 0 || clean.lastAppliedMoveZ !== 0 || clean.lastAppliedButtons !== 0) {
+        await this.releaseRustLiveMovementAutomationInputR5(pump, generation, "pre-pulse zero-input frame");
+        clean = pump.diagnostics();
+      }
+      inputSequenceBefore = clean.nextInputSequence;
+      for (let index = 0; index < frameCount; index += 1) {
+        await this.awaitRustLiveInputAdvanceForAutomationR5();
+        this.assertRustLiveMovementAutomationOwnerR5(pump, generation);
+        const before = pump.diagnostics();
+        const heldStarted = performance.now();
+        const frame = await this.applyRustLiveMovementAutomationInputR5(
+          pump,
+          generation,
+          before,
+          Object.freeze({ ...expected, buttons: 0 }),
+          () => {
+            this.keys.add(code);
+            try {
+              this.scheduleRustLiveInputAdvanceR5();
+            } finally {
+              this.keys.delete(code);
+              heldMilliseconds += performance.now() - heldStarted;
+            }
+          },
+          "native movement frame",
+        );
+        frames.push(frame);
+      }
+
+      await this.awaitRustLiveInputAdvanceForAutomationR5();
+      const releaseBefore = pump.diagnostics();
+      const release = await this.applyRustLiveMovementAutomationInputR5(
+        pump,
+        generation,
+        releaseBefore,
+        Object.freeze({ moveX: 0, moveZ: 0, buttons: 0 }),
+        () => this.scheduleRustLiveInputAdvanceR5(),
+        "zero-input release frame",
+      );
+      return Object.freeze({
+        schema: 1 as const,
+        key: code,
+        frameCount,
+        heldMilliseconds,
+        inputSequenceBefore,
+        frames: Object.freeze(frames),
+        release,
+      });
+    } catch (error) {
+      if (pump === this.rustLiveInputPump && generation === this.rustLivePlayerAuthorityGeneration
+        && pump.diagnostics().state === "ready") {
+        try {
+          await this.releaseRustLiveMovementAutomationInputR5(
+            pump,
+            generation,
+            "failure-path zero-input release frame",
+          );
+        } catch (releaseError) {
+          this.quarantineRustLivePlayerAuthorityR5(releaseError, pump);
+          throw new Error("Rust movement automation failed and could not commit its safe zero-input release", {
+            cause: error,
+          });
+        }
+      } else if (pump === this.rustLiveInputPump && generation === this.rustLivePlayerAuthorityGeneration) {
+        this.quarantineRustLivePlayerAuthorityR5(error, pump);
+      }
+      throw error;
+    } finally {
+      this.keys.delete(code);
+      this.rustLiveAutomationPulseR5 = false;
+    }
+  }
+
   setMining(down: boolean) {
     this.mineHeld = down;
     if (!down && !this.rustLivePlayerAuthorityEnabledR5()) this.miningProgress = 0;
   }
 
   setOffhandUse(down: boolean) {
+    if (down && this.interceptRustTerrainLocatorSelectedUse()) return;
     if (this.rustLivePlayerAuthorityEnabledR5()) {
       this.rustSecondaryUseHeld = down;
       return;
@@ -6031,7 +8435,64 @@ export class VoxelEngine {
     return `${first[Math.floor(Math.random() * first.length)]}-${second[Math.floor(Math.random() * second.length)]}-${Math.floor(100 + Math.random() * 900)}`;
   }
 
+  /** Selects a safe start using installed authoritative bytes only. */
+  private findSpawnInLoadedTerrain(authoritativeKeys: readonly string[]) {
+    const keySet = new Set(authoritativeKeys);
+    const friendly = new Set([BiomeId.Meadow, BiomeId.Wildwood, BiomeId.Birchlight, BiomeId.Savanna]);
+    const loadedColumn = (x: number, z: number) => {
+      const cx = Math.floor(x / CHUNK_SIZE);
+      const cz = Math.floor(z / CHUNK_SIZE);
+      const key = `${cx},${cz}`;
+      if (!keySet.has(key)) return null;
+      const chunk = this.world.chunks.get(key);
+      if (!chunk) return null;
+      const localX = x - cx * CHUNK_SIZE;
+      const localZ = z - cz * CHUNK_SIZE;
+      const index = localX + localZ * CHUNK_SIZE;
+      return {
+        height: chunk.heightmap[index],
+        biome: chunk.biomes[index] as BiomeId,
+      };
+    };
+    let bestFriendly: { x: number; z: number; score: number } | null = null;
+    let bestLand: { x: number; z: number; score: number } | null = null;
+    for (const key of [...keySet].sort()) {
+      const chunk = this.world.chunks.get(key);
+      if (!chunk) throw new Error(`Rust terrain generation did not retain authoritative spawn chunk ${key}`);
+      for (let localX = 0; localX < CHUNK_SIZE; localX += 2) for (let localZ = 0; localZ < CHUNK_SIZE; localZ += 2) {
+        const x = chunk.cx * CHUNK_SIZE + localX;
+        const z = chunk.cz * CHUNK_SIZE + localZ;
+        const sample = loadedColumn(x, z)!;
+        const distance = Math.hypot(x, z);
+        if (sample.height <= SEA_LEVEL + 2) continue;
+        const ground = this.world.getBlock(x, sample.height, z);
+        const head = this.world.getBlock(x, sample.height + 1, z);
+        const upperHead = this.world.getBlock(x, sample.height + 2, z);
+        if (!BLOCKS[ground ?? BlockId.Air]?.solid
+          || !this.world.isWalkThrough(head)
+          || !this.world.isWalkThrough(upperHead)) continue;
+        const neighbors = [
+          loadedColumn(x + 2, z), loadedColumn(x - 2, z), loadedColumn(x, z + 2), loadedColumn(x, z - 2),
+        ];
+        if (neighbors.some((neighbor) => !neighbor || neighbor.height <= SEA_LEVEL + 1)) continue;
+        const slope = Math.max(...neighbors.map((neighbor) => Math.abs(sample.height - neighbor!.height)));
+        if (slope > 3) continue;
+        const dangerPenalty = sample.biome === BiomeId.Volcanic ? 45 : sample.biome === BiomeId.Highlands ? 18 : sample.biome === BiomeId.Badlands ? 10 : 0;
+        const score = -distance * 0.08 - slope * 16 - Math.abs(sample.height - (SEA_LEVEL + 10)) * 0.18 - dangerPenalty;
+        if (!bestLand || score > bestLand.score) bestLand = { x, z, score };
+        if (friendly.has(sample.biome) && (!bestFriendly || score + 55 > bestFriendly.score)) {
+          bestFriendly = { x, z, score: score + 55 };
+        }
+      }
+    }
+    const selected = bestFriendly ?? bestLand;
+    return selected ? Object.freeze({ x: selected.x, z: selected.z }) : null;
+  }
+
   findSpawn() {
+    if (this.terrainGenerationMode() === "rust") {
+      throw new Error("Legacy TypeScript spawn sampling is unavailable while Rust terrain authority is required");
+    }
     const friendly = new Set([BiomeId.Meadow, BiomeId.Wildwood, BiomeId.Birchlight, BiomeId.Savanna]);
     let bestFriendly = { x: 0, z: 0, radius: Infinity, score: -Infinity };
     let bestLand = { x: 0, z: 0, score: -Infinity };
@@ -6058,6 +8519,25 @@ export class VoxelEngine {
   }
 
   previewWorld(seed: string) {
+    this.multiplayerPlayerProgressions.clear();
+    // Keep the last bounded graceful-drain proof visible on the title preview;
+    // the next real world/session reset clears it before any new acceptance.
+    this.resetMultiplayerProgressionState(0, true);
+    if (this.terrainGenerationMode() === "rust") {
+      // Title preview is presentation-only. It queues certified terrain around
+      // a fixed origin and never runs the legacy spawn/column planner.
+      this.terrainGenerationReadinessAbort?.abort();
+      this.world.reset(seed, undefined, generationOptionsFromWorldOptions(DEFAULT_WORLD_OPTIONS));
+      this.world.initializeAround(0, 0);
+      this.spawn.set(0, 48, 0);
+      this.position.copy(this.spawn);
+      this.persistent = false;
+      this.running = false;
+      this.paused = true;
+      this.titleMode = true;
+      this.emitHud(true);
+      return;
+    }
     this.persistent = false;
     this.running = false;
     this.paused = true;
@@ -6094,9 +8574,6 @@ export class VoxelEngine {
     this.persistentMachineLastStep.clear();
     this.multiplayerPlayerStates.clear();
     this.creatureTransferOffers.clear();
-    this.multiplayerPlayerProgressions.clear();
-    this.multiplayerProgressTransfers.clear();
-    this.multiplayerProgressOutgoing = [];
     this.multiplayerPlayerWallets.clear();
     this.multiplayerPeerActiveMerchants.clear();
     this.multiplayerBoatInputs.clear();
@@ -6117,6 +8594,180 @@ export class VoxelEngine {
     this.emitHud(true);
   }
 
+  private multiplayerProgressionDiagnosticsSnapshot(): MultiplayerProgressionDiagnosticsV1 {
+    const pending = this.multiplayerPendingProgressionTransfer ?? null;
+    const outgoingRequests = (this.multiplayerProgressOutgoing ?? [])
+      .filter((entry) => entry.action.status === "request");
+    let localDirty: boolean | null = null;
+    if (this.multiplayerProgressionReceived) {
+      try {
+        localDirty = this.localPlayerProgressionSignature() !== this.multiplayerProgressionSignature;
+      } catch {
+        // Partial diagnostic/test fixtures may not carry a playable local image.
+      }
+    }
+    const latest = this.multiplayerLatestProgressionReceipt ?? null;
+    let connectionCurrent: boolean | null = null;
+    if (latest) {
+      const session = this.multiplayer as (MultiplayerSession & {
+        getPeer?: (peerIdOrToken: string) => PeerInfo | null | undefined;
+      }) | null;
+      if (typeof session?.getPeer === "function") {
+        connectionCurrent = session.getPeer(latest.peerId)?.token === latest.connectionToken;
+      }
+    }
+    return Object.freeze({
+      pending: pending ? Object.freeze({
+        transferId: pending.transferId,
+        revision: pending.revision,
+        transportComplete: pending.transportComplete,
+      }) : null,
+      outgoingRequestChunks: outgoingRequests.length,
+      outgoingRequestTransfers: new Set(outgoingRequests.map((entry) => entry.action.transferId)).size,
+      confirmed: this.multiplayerProgressionReceived && this.multiplayerProgressionConfirmedState !== null,
+      confirmedRevision: this.multiplayerProgressionReceived ? this.multiplayerProgressionRevision : null,
+      localDirty,
+      latestReceipt: latest ? Object.freeze({
+        direction: latest.direction,
+        peerId: latest.peerId,
+        transferId: latest.transferId,
+        status: latest.status,
+        committedRevision: latest.committedRevision,
+        observedAt: latest.observedAt,
+        connectionCurrent,
+      }) : null,
+    });
+  }
+
+  private multiplayerPresentationDiagnosticsSnapshot(): MultiplayerPresentationDiagnosticsV1 {
+    return Object.freeze({
+      guestQueued: this.rustGuestPresentationQueueDepth ?? 0,
+      guestInFlight: this.rustGuestPresentationInFlight ?? 0,
+      hostQueuedPeers: this.rustAuthorityPresentationRequests?.size ?? 0,
+      hostPumpActive: this.rustAuthorityPresentationPump !== null && this.rustAuthorityPresentationPump !== undefined,
+      authorityOperations: this.rustAuthorityOperations?.size ?? 0,
+    });
+  }
+
+  private rustNativeInventoryDiagnosticsSnapshot() {
+    const view = this.rustLivePlayerPresentationViewR10;
+    // Production extractions always contain these fields. A few focused
+    // lifecycle/recovery harnesses deliberately install a partial historical
+    // player row, so diagnostics must omit native inventory evidence instead
+    // of turning an unrelated diagnostic read into a runtime failure.
+    if (!view
+      || typeof view.extractionRevision !== "bigint"
+      || typeof view.inventoryContainer !== "string"
+      || typeof view.inventoryContainerRevision !== "bigint"
+      || !Number.isSafeInteger(view.selectedSlot)
+      || (view.held !== null && (typeof view.held !== "object"
+        || !Number.isSafeInteger(view.held.itemCode)
+        || !Number.isSafeInteger(view.held.count)
+        || !(view.held.metadataHash instanceof Uint8Array)))) {
+      return null;
+    }
+    return Object.freeze({
+      extractionRevision: view.extractionRevision.toString(10),
+      inventoryContainer: view.inventoryContainer,
+      inventoryContainerRevision: view.inventoryContainerRevision.toString(10),
+      selectedSlot: view.selectedSlot,
+      held: view.held
+        ? Object.freeze({
+          itemCode: view.held.itemCode,
+          count: view.held.count,
+          durabilityMillionths: view.held.durabilityMillionths,
+          metadataHash: this.rustTerrainLocatorHashHex(view.held.metadataHash),
+        })
+        : null,
+    });
+  }
+
+  private rustLiveEnvironmentalSurvivalDiagnosticsSnapshotR10(): RustLivePlayerEnvironmentalSurvivalDiagnosticsR10 | null {
+    const view = this.rustLivePlayerPresentationViewR10;
+    if (!view
+      || typeof view.extractionRevision !== "bigint"
+      || typeof view.authorityTick !== "bigint"
+      || typeof view.entityId !== "bigint"
+      || typeof view.entityRevision !== "bigint"
+      || typeof view.lastDamageTick !== "bigint"
+      || !Number.isFinite(view.health)
+      || !Number.isFinite(view.maximumHealth)
+      || !Number.isFinite(view.oxygenSeconds)
+      || !Number.isFinite(view.maximumOxygenSeconds)
+      || !Number.isSafeInteger(view.contactFlags)
+      || !Number.isFinite(view.drowningAccumulator)
+      || !Number.isFinite(view.fallDistance)
+      || !view.effects
+      || view.effects.schema !== 1
+      || view.effects.producer !== "rust-bwau-v2"
+      || view.effects.playerExternalId !== view.externalEntityId
+      || view.effects.authorityTick !== view.authorityTick
+      || view.effects.omitted !== 0
+      || view.effects.contiguous !== true
+      || !view.combat
+      || typeof view.combat.domainRevision !== "bigint"
+      || typeof view.combat.rowRevision !== "bigint"
+      || typeof view.combat.entityId !== "bigint"
+      || view.combat.vitalUnits !== "millihearts-v1"
+      || view.combat.crossDomainParity !== true) {
+      return null;
+    }
+    return Object.freeze({
+      schema: 1,
+      producer: "rust-r5-r6-r7",
+      typescriptDamageAuthoringCalls: this.rustLiveTypeScriptDamageAuthoringCallsR5 ?? 0,
+      suppressedLegacyDamageCalls: this.rustLiveSuppressedLegacyDamageCallsR5 ?? 0,
+      projectedDamageEvents: this.rustLiveProjectedDamageEventsR10 ?? 0,
+      projectedDeathEvents: this.rustLiveProjectedDeathEventsR10 ?? 0,
+      extractionRevision: view.extractionRevision.toString(10),
+      authorityTick: view.authorityTick.toString(10),
+      effects: Object.freeze({
+        schema: view.effects.schema,
+        producer: view.effects.producer,
+        playerExternalId: view.effects.playerExternalId,
+        authorityTick: view.effects.authorityTick.toString(10),
+        total: view.effects.total,
+        selected: view.effects.selected,
+        omitted: view.effects.omitted,
+        firstSequence: view.effects.firstSequence?.toString(10) ?? null,
+        lastSequence: view.effects.lastSequence?.toString(10) ?? null,
+        contiguous: true as const,
+        cues: Object.freeze(view.effects.cues.map((cue) => Object.freeze({
+          sequence: cue.sequence.toString(10),
+          tick: cue.tick.toString(10),
+          entityExternalId: cue.entityExternalId,
+          kind: cue.kind,
+          amount: cue.amount,
+        }))),
+      }),
+      r6: Object.freeze({
+        entityId: view.entityId.toString(10),
+        entityRevision: view.entityRevision.toString(10),
+        health: view.health,
+        maximumHealth: view.maximumHealth,
+        oxygenSeconds: view.oxygenSeconds,
+        maximumOxygenSeconds: view.maximumOxygenSeconds,
+        inLiquid: view.inLiquid,
+        headSubmerged: view.headSubmerged,
+        contactFlags: view.contactFlags,
+        drowningAccumulator: view.drowningAccumulator,
+        fallDistance: view.fallDistance,
+        lastDamageTick: view.lastDamageTick.toString(10),
+      }),
+      r7: Object.freeze({
+        entityId: view.combat.entityId.toString(10),
+        recordId: view.combat.recordId,
+        rowRevision: view.combat.rowRevision.toString(10),
+        combatDomainRevision: view.combat.domainRevision.toString(10),
+        vitalUnits: view.combat.vitalUnits,
+        health: view.combat.health,
+        maxHealth: view.combat.maxHealth,
+        alive: view.combat.alive,
+        crossDomainParity: view.combat.crossDomainParity,
+      }),
+    });
+  }
+
   /** Exact live-Rust state exposed to browser acceptance and lifecycle tests. */
   getRustRuntimeDiagnostics(): RustLiveRuntimeDiagnosticsV1 {
     const config = this.rustRuntimeHost?.config ?? null;
@@ -6129,29 +8780,181 @@ export class VoxelEngine {
       activeLocationId: config?.locationId ?? null,
       activeSessionId: config?.sessionId ?? null,
       nativePersistenceWorldId: this.rustNativePersistenceWorldId,
+      lastCompletedSaveAndQuitNativeCheckpoint:
+        this.rustLastCompletedSaveAndQuitNativeCheckpoint ?? null,
       hydration: this.rustRuntimeHydrationState,
       manager: this.rustRuntimeManager.diagnostics(),
       playerAuthority: Object.freeze({
         state: this.rustLivePlayerAuthorityState,
         worldGeneration: this.rustLivePlayerAuthorityGeneration,
+        runtimeSessionId: this.rustLivePlayerRuntimeSessionId,
         entityId: this.rustLivePlayerEntityId,
         terrainChunkCount: this.rustLivePlayerTerrainChunkCount,
+        gameModeSetCalls: this.rustLivePlayerGameModeSetCalls,
+        lastGameModeSet: this.rustLivePlayerLastGameModeSet,
+        basicDirtProjection: this.rustBasicDirtActionProjection,
+        nativeBlockEditProjection: this.rustNativeBlockEditProjection,
+        nativeBlockEditCheckpoint: this.rustNativeBlockEditCheckpoint,
+        nativeBlockEditFinalize: this.rustNativeBlockEditPendingFinalize
+          ? Object.freeze({
+            schema: this.rustNativeBlockEditPendingFinalize.schema,
+            state: this.rustNativeBlockEditPendingFinalize.state,
+            attempts: this.rustNativeBlockEditPendingFinalize.attempts,
+            lastError: this.rustNativeBlockEditPendingFinalize.lastError,
+            protocolVersion: this.rustNativeBlockEditPendingFinalize.protocolVersion,
+            legacyFallback: this.rustNativeBlockEditPendingFinalize.legacyFallback,
+            cursorBefore: this.rustNativeBlockEditPendingFinalize.cursorBefore,
+            cursorAfter: this.rustNativeBlockEditPendingFinalize.cursorAfter,
+            receiptHash: this.rustNativeBlockEditPendingFinalize.receiptHash,
+            pendingSelectedSlot: this.rustNativeBlockEditQueuedSelectedSlotR5 ?? null,
+          })
+          : null,
+        dropPickupProjection: this.rustNativeDropPickupProjection,
+        dropPickupCheckpoint: this.rustNativeDropPickupCheckpoint,
+        dropPickupFinalize: this.rustNativeDropPickupPendingFinalize
+          ? Object.freeze({
+            schema: this.rustNativeDropPickupPendingFinalize.schema,
+            state: this.rustNativeDropPickupPendingFinalize.state,
+            attempts: this.rustNativeDropPickupPendingFinalize.attempts,
+            lastError: this.rustNativeDropPickupPendingFinalize.lastError,
+            cursorBefore: this.rustNativeDropPickupPendingFinalize.cursorBefore,
+            cursorAfter: this.rustNativeDropPickupPendingFinalize.cursorAfter,
+            receiptHash: this.rustNativeDropPickupPendingFinalize.receiptHash,
+            rustEntityId: this.rustNativeDropPickupPendingFinalize.rustEntityId,
+          })
+          : null,
+        playerDropProjection: this.rustNativePlayerDropProjection,
+        playerDropCheckpoint: this.rustNativePlayerDropCheckpoint,
+        playerDeathRespawnProjection: this.rustNativePlayerDeathRespawnProjection,
+        playerDeathRespawnCheckpoint: this.rustNativePlayerDeathRespawnCheckpoint,
+        playerDeathRespawnFinalize: this.rustNativePlayerDeathRespawnPendingFinalize
+          ? Object.freeze({
+            schema: this.rustNativePlayerDeathRespawnPendingFinalize.schema,
+            state: this.rustNativePlayerDeathRespawnPendingFinalize.state,
+            attempts: this.rustNativePlayerDeathRespawnPendingFinalize.attempts,
+            lastError: this.rustNativePlayerDeathRespawnPendingFinalize.lastError,
+            cursorBefore: this.rustNativePlayerDeathRespawnPendingFinalize.cursorBefore,
+            cursorAfter: this.rustNativePlayerDeathRespawnPendingFinalize.cursorAfter,
+            receiptHash: this.rustNativePlayerDeathRespawnPendingFinalize.receiptHash,
+            deathSequence: this.rustNativePlayerDeathRespawnPendingFinalize.deathSequence,
+            generatedDropCount: this.rustNativePlayerDeathRespawnPendingFinalize.generatedDropCount,
+          })
+          : null,
+        playerRespawnPlanPending: this.rustNativePlayerRespawnPlan !== null,
+        nativeRespawn: rustLivePlayerRespawnDiagnosticsR10(this.rustLivePlayerPresentationViewR10),
+        environmentalSurvival: this.rustLiveEnvironmentalSurvivalDiagnosticsSnapshotR10(),
+        nativeInventory: this.rustNativeInventoryDiagnosticsSnapshot(),
+        nativeDropTransforms: this.rustDroppedHotTransformFrameR10
+          ? Object.freeze({
+            extractionRevision: this.rustDroppedHotTransformFrameR10.source.extractionRevision.toString(10),
+            authorityTick: this.rustDroppedHotTransformFrameR10.source.authorityTick.toString(10),
+            inventoryDomainRevision: this.rustDroppedHotTransformFrameR10.source.inventoryDomainRevision.toString(10),
+            transforms: Object.freeze(this.rustDroppedHotTransformFrameR10.transforms.map((transform) => Object.freeze({
+              dropId: transform.dropId,
+              entityId: transform.entityId.toString(10),
+              entityRevision: transform.entityRevision.toString(10),
+              position: Object.freeze({ ...transform.position }),
+              velocity: Object.freeze({ ...transform.velocity }),
+              yawRadians: transform.yawRadians,
+              ageTicks: transform.ageTicks.toString(10),
+            }))),
+          })
+          : null,
         advanceInFlight: this.rustLiveInputAdvance !== null,
-        pendingRendererExtraction: this.rustLiveRendererExtractionQueue.length > 0,
+        pendingRendererExtraction: (this.rustLiveRendererExtractionQueue?.length ?? 0) > 0,
         lastError: this.rustLivePlayerAuthorityLastError,
         pump: this.rustLiveInputPump?.diagnostics() ?? null,
       }),
       renderer: this.getRustLiveRenderDiagnosticsR10(),
       multiplayer: Object.freeze({
-        authorityDeltaSequence: Math.max(0, ...this.rustPeerDeltaSequences.values()),
-        authorityDeltaApplied: this.rustAuthorityDeltaApplied,
-        authorityResyncs: this.rustAuthorityResyncs,
-        authorityRejections: this.rustAuthorityRejections,
+        authorityDeltaSequence: Math.max(0, ...[...(this.rustPeerDeltaSequences?.values() ?? [])]
+          .map((cursor) => cursor.sequence)),
+        authorityDeltaApplied: this.rustAuthorityDeltaApplied ?? 0,
+        authorityResyncs: this.rustAuthorityResyncs ?? 0,
+        authorityRejections: this.rustAuthorityRejections ?? 0,
         recordProducer: "coarse-legacy-projection" as const,
         pendingNativeProducer: true as const,
+        lastOutboundPose: this.multiplayerLastOutboundPose,
         lastStateHash: this.rustAuthorityLastStateHash,
         lastError: this.rustAuthorityLastError,
+        lastRejection: this.rustAuthorityLastRejection,
+        progression: this.multiplayerProgressionDiagnosticsSnapshot(),
+        lastGracefulProgressionDrain: this.multiplayerLastGracefulProgressionDrain ?? null,
+        presentation: this.multiplayerPresentationDiagnosticsSnapshot(),
+        transport: this.multiplayer?.authorityTransportDiagnostics() ?? null,
       }),
+    });
+  }
+
+  private saveAndQuitNativeCheckpointContextV1(): RustSaveAndQuitNativeCheckpointContextV1 | null {
+    const catalogWorldId = this.activeWorldId;
+    const host = this.rustRuntimeHost;
+    if (!catalogWorldId || this.rustNativePersistenceWorldId !== catalogWorldId
+      || !host || host.diagnostics().state !== "ready") return null;
+    const session = host.nativePersistenceSession?.() ?? null;
+    if (!session) return null;
+    const nativeWorldId = rustNativePersistenceWorldIdV1(host.config);
+    const persistenceBefore = snapshotRustNativePersistenceDiagnosticsV1(session.diagnostics());
+    if (host.config.catalogWorldId !== catalogWorldId
+      || session.worldId !== nativeWorldId
+      || persistenceBefore.worldId !== nativeWorldId
+      || persistenceBefore.state !== "open") {
+      throw new Error("Save & Quit could not bind its native checkpoint counters to the exact active catalog and runtime world");
+    }
+    return Object.freeze({
+      binding: Object.freeze({
+        catalogWorldId,
+        nativeWorldId,
+        universeId: host.config.universeId,
+        locationId: host.config.locationId,
+        runtimeSessionId: host.config.sessionId,
+      }),
+      host,
+      session,
+      persistenceBefore,
+    });
+  }
+
+  private retainCompletedSaveAndQuitNativeCheckpointV1(
+    context: RustSaveAndQuitNativeCheckpointContextV1,
+    checkpoint: RustNativeWorldPersistenceSaveV1,
+  ) {
+    const persistenceAfter = snapshotRustNativePersistenceDiagnosticsV1(context.session.diagnostics());
+    const before = context.persistenceBefore;
+    const binding = context.binding;
+    if (this.rustRuntimeHost !== context.host
+      || context.host.diagnostics().state !== "ready"
+      || this.activeWorldId !== binding.catalogWorldId
+      || this.rustNativePersistenceWorldId !== binding.catalogWorldId
+      || context.session.worldId !== binding.nativeWorldId
+      || checkpoint.worldId !== binding.nativeWorldId
+      || before.state !== "open"
+      || before.worldId !== binding.nativeWorldId
+      || persistenceAfter.state !== "open"
+      || persistenceAfter.worldId !== binding.nativeWorldId
+      || persistenceAfter.saves !== before.saves + 1
+      || persistenceAfter.platformOperations !== before.platformOperations + checkpoint.commits
+      || persistenceAfter.requestBytes !== before.requestBytes + checkpoint.requestBytes
+      || persistenceAfter.responseBytes !== before.responseBytes + checkpoint.responseBytes
+      || persistenceAfter.lastCheckpointId !== checkpoint.checkpointId) {
+      const message = "Save & Quit native checkpoint diagnostics did not prove one exact durable session commit";
+      this.rustLastCompletedSaveAndQuitNativeCheckpoint = null;
+      this.rustRuntimeOperationsBlocked = true;
+      this.rustAuthorityLastError = message;
+      if (this.rustLivePlayerAuthorityRequestedR5) {
+        this.rustLivePlayerAuthorityState = "blocked";
+        this.rustLivePlayerAuthorityLastError = message;
+      }
+      throw new Error(message);
+    }
+    this.rustLastCompletedSaveAndQuitNativeCheckpoint = Object.freeze({
+      schema: 1,
+      binding,
+      checkpoint: Object.freeze({ ...checkpoint }),
+      persistence: Object.freeze({ before, after: persistenceAfter }),
+      terminalEnvironmentalSurvival: snapshotRustEnvironmentalSurvivalDiagnosticsR10(
+        this.rustLiveEnvironmentalSurvivalDiagnosticsSnapshotR10(),
+      ),
     });
   }
 
@@ -6186,13 +8989,20 @@ export class VoxelEngine {
    * accepted an exact native checkpoint. Multiplayer guests own no local save.
    */
   private async hydrateRustWorldPersistence(input: Parameters<RustWorldHydrationHookV1>[0]) {
-    if (input.kind === "multiplayer-guest") return;
+    if (input.kind === "multiplayer-guest") {
+      // The runtime manager has already destroyed the prior local-world host
+      // before starting this non-catalog guest runtime. Detach that host's now
+      // closed native session from WorldStorage so later guest shutdown/quit
+      // cannot try to flush a stale local persistence owner.
+      await this.shutdownBoundNativePersistence();
+      return;
+    }
     const session = input.host.nativePersistenceSession?.() ?? null;
     if (!session) {
       throw new Error("The live Rust worker has no native browser persistence session; the protected browser world was not opened.");
     }
-    if (session.worldId !== input.worldId) {
-      throw new Error("The live Rust persistence session belongs to a different browser world.");
+    if (session.worldId !== rustNativePersistenceWorldIdV1(input.host.config)) {
+      throw new Error("The live Rust persistence session belongs to a different native runtime world.");
     }
     const bound = this.worldStorage.bindNativePersistence(input.worldId, session);
     if (!bound.ok) throw new Error(bound.error.message);
@@ -6284,6 +9094,227 @@ export class VoxelEngine {
     return entity;
   }
 
+  private async installRustLivePlayerPumpR5(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    observation: RustIntegratedPlayerBootstrapObservationV1,
+    expected: ReturnType<typeof deriveRustPlayerBootstrapCompatibilityIdentityV1>,
+  ) {
+    const entity = this.assertAuthoritativeRustPlayerStatusR5(observation, expected);
+    const worldView = observation.worldViewBinding!;
+    const lastInput = observation.continuity.lastAppliedInput;
+    const yawRadians = lastInput
+      ? lastInput.lookYaw / RUST_LIVE_INPUT_AXIS_DIVISOR_R5 * Math.PI
+      : entity.record.yaw;
+    const pitchRadians = lastInput
+      ? lastInput.lookPitch / RUST_LIVE_INPUT_AXIS_DIVISOR_R5 * (Math.PI / 2)
+      : 0;
+    if (!Number.isFinite(entity.record.yaw) || !Number.isFinite(yawRadians) || !Number.isFinite(pitchRadians)) {
+      throw new Error("Rust player status contains no exact look-intent baseline");
+    }
+    this.rustLivePlayerAttestationR10 = Object.freeze({
+      externalEntityId: expected.externalEntityId,
+      actorId: expected.actorId,
+      playerId: expected.playerId,
+      entityId: entity.entityId,
+      creativeMode: observation.runtimePlayer!.binding.creativeMode,
+      maximumOxygenSeconds: observation.runtimePlayer!.binding.maximumOxygenSeconds,
+      maximumHealth: entity.record.maximumHealth,
+      inventoryContainer: Object.freeze({ ...worldView.inventoryContainer }),
+      equipmentContainer: Object.freeze({ ...worldView.equipmentContainer }),
+      radius: observation.runtimePlayer!.binding.radius,
+      standingHeight: observation.runtimePlayer!.binding.standingHeight,
+      crouchingHeight: observation.runtimePlayer!.binding.crouchingHeight,
+      mass: observation.runtimePlayer!.binding.mass,
+    });
+    this.rustLivePlayerInitialYawRadiansR10 = entity.record.yaw;
+    this.rustLiveSelectedSlotIntentR5 = worldView.selectedSlot;
+    this.rustLiveLookIntentR5 = Object.freeze({ yawRadians, pitchRadians });
+    const service = host.runtimeService();
+    const contextContinuity = await queryRustIntegratedRuntimeContextContinuityV2(service);
+    this.assertRustLiveGenerationR5(generation, host, "context command continuity");
+    const pump = createRustLiveInputPumpR5({
+      service,
+      status: observation,
+      contextContinuity,
+      worldGeneration: generation,
+      // Generic custody subsumes Dirt. Omitting the BWQ7 cursor guarantees one
+      // native action can never be delivered through both durable streams.
+      initialNativeBlockEditCursor: this.rustNativeBlockEditProjection?.cursor ?? null,
+      initialDropPickupCursor: this.rustNativeDropPickupProjection?.cursor ?? null,
+      initialNativePlayerDropCursor: this.rustNativePlayerDropProjection?.cursor ?? null,
+      initialNativeDeathRespawnCursor: this.rustNativePlayerDeathRespawnProjection?.cursor ?? null,
+    });
+    this.rustLiveInputPump = pump;
+    this.rustLivePlayerRuntimeSessionId = host.config.sessionId;
+    return Object.freeze({ entity, pump });
+  }
+
+  private async recoverRustTerrainLocatorBeforeResidencyR5(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    observation: RustIntegratedPlayerBootstrapObservationV1,
+    expected: ReturnType<typeof deriveRustPlayerBootstrapCompatibilityIdentityV1>,
+  ) {
+    const { pump } = await this.installRustLivePlayerPumpR5(generation, host, observation, expected);
+    try {
+      // Recovery must observe the hydrated identity before terrain residency or
+      // the first fixed step advances any protected revision lane. A bounded
+      // extraction is read-only and gives the effect committer an exact native
+      // pre-debit presentation row without weakening receipt validation.
+      const requestedView = this.ensureRustLiveRenderViewR10();
+      if (!requestedView) throw new Error("Rust locator recovery could not bind its read-only player view");
+      const refreshed = await pump.refreshView(generation, requestedView);
+      this.assertRustLiveGenerationR5(generation, host, "pre-residency locator view");
+      if (refreshed.discarded || !refreshed.extraction || !refreshed.camera || refreshed.cause !== "viewport") {
+        throw new Error("Rust locator recovery did not return its exact hydrated player view");
+      }
+      this.applyRustLiveAuthorityExtractionR10(
+        generation, host, pump, refreshed.extraction, requestedView, refreshed.camera,
+      );
+      // The recovery transaction reuses the normal exact runtime-context
+      // validator, which admits only a fully attested player pump. Gameplay is
+      // still globally blocked during world hydration, so this temporary ready
+      // state exposes no input window; it only authorizes the sealed journal's
+      // receipt lookup/debit and immediate native checkpoint.
+      this.rustLivePlayerAuthorityState = "ready";
+      await this.recoverPreparedRustTerrainLocatorEffect(generation, host);
+      if (this.rustTerrainLocatorEffectJournal) {
+        throw new Error("Rust locator recovery returned without clearing its durable journal");
+      }
+    } finally {
+      // A temporary recovery pump must be fully stopped before terrain or
+      // fixed-step activation can begin. A stop failure is therefore a hard
+      // startup failure, not cleanup noise that may be ignored.
+      await this.stopRustLivePlayerAuthorityR5();
+      this.rustLivePlayerAuthorityState = "starting";
+      this.rustLivePlayerAuthorityGeneration = generation;
+    }
+  }
+
+  /**
+   * A title-screen mode edit changes the browser compatibility document while
+   * the native world is closed. On the next load, reconcile that explicit
+   * choice into the restored Rust player before terrain, input, or rendering
+   * can observe the old mode, then make the native successor durable.
+   */
+  private async reconcileRustSavedWorldPlayerGameModeR5(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    save: WorldSave,
+    observation: RustIntegratedPlayerBootstrapObservationV1,
+    expected: ReturnType<typeof deriveRustPlayerBootstrapCompatibilityIdentityV1>,
+  ) {
+    const runtimePlayer = observation.runtimePlayer;
+    if (!runtimePlayer) throw new Error("Rust saved-world mode reconciliation requires a restored native player");
+    const requestedCreativeMode = save.mode === "builder";
+    if (runtimePlayer.binding.creativeMode === requestedCreativeMode) return observation;
+    const service = host.runtimeService();
+    return host.multiplayerAuthority().runExclusiveMutation(async () => {
+      this.assertRustLiveGenerationR5(generation, host, "saved-world mode reconciliation");
+      if (!rustIntegratedRuntimeIdentityEqualsV1(service.identity(), observation.identity)) {
+        throw new Error("Rust saved-world mode reconciliation started from a stale native observation");
+      }
+      const executed = await executeRustLivePlayerGameModeSetV1(service, Object.freeze({
+        externalEntityId: expected.externalEntityId,
+        actorId: expected.actorId,
+        playerId: expected.playerId,
+        expectedCreativeMode: runtimePlayer.binding.creativeMode,
+        expectedFlags: observation.continuity.authoritativeFlags,
+        requestedCreativeMode,
+      }));
+      this.assertRustLiveGenerationR5(generation, host, "saved-world mode command");
+
+      const query = Object.freeze({
+        commandActorId: "runtime:bootstrap-status",
+        externalEntityId: expected.externalEntityId,
+        actorId: expected.actorId,
+        playerId: expected.playerId,
+      });
+      let readback = await queryRustPlayerBootstrapIdentityStatusV1(service, query);
+      this.assertRustLiveGenerationR5(generation, host, "saved-world mode readback");
+      validateRustLivePlayerGameModeSetAfterCommandV1(executed.plan, executed.validated, readback);
+      this.assertAuthoritativeRustPlayerStatusR5(readback, expected);
+
+      const catalogWorldId = this.activeWorldId;
+      if (!catalogWorldId || this.rustNativePersistenceWorldId !== catalogWorldId) {
+        throw new Error("Rust saved-world mode reconciliation has no exact native persistence binding");
+      }
+      const session = host.nativePersistenceSession?.() ?? null;
+      if (!session) throw new Error("Rust saved-world mode reconciliation has no native persistence session");
+      const persistenceBefore = session.diagnostics();
+      const identityBeforeCheckpoint = service.identity();
+      if (persistenceBefore.state !== "open" || persistenceBefore.worldId !== session.worldId) {
+        throw new Error("Rust saved-world mode reconciliation persistence session is not open");
+      }
+      const saved = await this.worldStorage.saveNativeWorld(catalogWorldId);
+      if (!saved.ok) throw new Error(saved.error.message);
+      this.assertRustLiveGenerationR5(generation, host, "saved-world mode checkpoint");
+      const persistenceAfter = session.diagnostics();
+      const identityAfterCheckpoint = service.identity();
+      const revisionKeys = Object.keys(identityBeforeCheckpoint.revision) as Array<
+        keyof RustIntegratedRuntimeIdentityV1["revision"]
+      >;
+      if (persistenceAfter.state !== "open"
+        || persistenceAfter.worldId !== persistenceBefore.worldId
+        || persistenceAfter.saves !== persistenceBefore.saves + 1
+        || persistenceAfter.platformOperations !== persistenceBefore.platformOperations + saved.value.commits
+        || persistenceAfter.lastCheckpointId !== saved.value.checkpointId
+        || saved.value.worldId !== persistenceAfter.worldId
+        || identityAfterCheckpoint.universeId !== identityBeforeCheckpoint.universeId
+        || identityAfterCheckpoint.locationId !== identityBeforeCheckpoint.locationId
+        || identityAfterCheckpoint.tick !== identityBeforeCheckpoint.tick
+        || revisionKeys.some((key) => key !== "persistence"
+          && identityAfterCheckpoint.revision[key] !== identityBeforeCheckpoint.revision[key])
+        || identityAfterCheckpoint.revision.persistence <= identityBeforeCheckpoint.revision.persistence
+        || identityAfterCheckpoint.stateHash === identityBeforeCheckpoint.stateHash) {
+        throw new Error("Rust saved-world mode reconciliation did not produce one exact native checkpoint");
+      }
+
+      readback = await queryRustPlayerBootstrapIdentityStatusV1(service, query);
+      this.assertRustLiveGenerationR5(generation, host, "post-checkpoint saved-world mode readback");
+      validateRustLivePlayerGameModeSetRestoredStateV1(
+        executed.plan,
+        executed.validated,
+        readback,
+        identityAfterCheckpoint,
+      );
+      this.assertAuthoritativeRustPlayerStatusR5(readback, expected);
+
+      const receipt = executed.validated.gameMode;
+      this.rustLivePlayerGameModeSetCalls += 1;
+      this.rustLivePlayerLastGameModeSet = Object.freeze({
+        schema: 1,
+        requestPayloadHash: receipt.requestPayloadHash,
+        receiptHash: receipt.receiptHash,
+        priorMode: receipt.priorCreativeMode ? "builder" : "survival",
+        resultingMode: receipt.resultingCreativeMode ? "builder" : "survival",
+        priorFlags: receipt.priorFlags,
+        resultingFlags: receipt.resultingFlags,
+        identityBefore: Object.freeze({
+          simulationRevision: receipt.before.revision.simulation,
+          stateHash: receipt.before.stateHash,
+        }),
+        identityAfter: Object.freeze({
+          simulationRevision: receipt.after.revision.simulation,
+          stateHash: receipt.after.stateHash,
+        }),
+        checkpoint: Object.freeze({
+          checkpointId: saved.value.checkpointId,
+          checkpointHash: saved.value.checkpointHash,
+          commits: saved.value.commits,
+          savesBefore: persistenceBefore.saves,
+          savesAfter: persistenceAfter.saves,
+          platformOperationsBefore: persistenceBefore.platformOperations,
+          platformOperationsAfter: persistenceAfter.platformOperations,
+          persistenceRevisionBefore: identityBeforeCheckpoint.revision.persistence,
+          persistenceRevisionAfter: identityAfterCheckpoint.revision.persistence,
+        }),
+      });
+      return readback;
+    });
+  }
+
   private async activateRustLivePlayerAuthorityR5(
     input: Parameters<RustLivePlayerAuthorityActivationHookV1>[0],
   ) {
@@ -6291,14 +9322,33 @@ export class VoxelEngine {
     const service = host.runtimeService();
     this.rustLivePlayerAuthorityState = "starting";
     this.rustLivePlayerAuthorityGeneration = generation;
+    this.rustLivePlayerRuntimeSessionId = null;
     this.rustLivePlayerAuthorityLastError = null;
     this.rustLivePlayerEntityId = null;
     this.rustLivePlayerTerrainChunkCount = 0;
+    this.rustLivePlayerGameModeSetCalls = 0;
+    this.rustLivePlayerLastGameModeSet = null;
+    this.rustLiveTypeScriptDamageAuthoringCallsR5 = 0;
+    this.rustLiveSuppressedLegacyDamageCallsR5 = 0;
+    this.rustLiveProjectedDamageEventsR10 = 0;
+    this.rustLiveProjectedDeathEventsR10 = 0;
     this.rustLivePlayerAttestationR10 = null;
     this.rustLivePlayerPresentationViewR10 = null;
     this.rustLivePlayerViewExtractionRevisionR10 = null;
     this.rustLiveCameraPresentationViewR10 = null;
     this.rustLiveCameraExtractionRevisionR10 = null;
+    this.rustDroppedHotTransformFrameR10 = null;
+    this.rustLivePlayerRespawnPendingR5 = null;
+    this.rustNativeBlockEditCheckpoint = null;
+    this.rustNativeBlockEditPendingFinalize = null;
+    this.rustNativeBlockEditQueuedSelectedSlotR5 = null;
+    this.rustTerrainLocatorCommitLocked = false;
+    this.rustNativeDropPickupCheckpoint = null;
+    this.clearRustNativeDropPickupFinalizeRetryTimerV1();
+    this.rustNativeDropPickupPendingFinalize = null;
+    this.rustNativePlayerDropCheckpoint = null;
+    this.rustNativePlayerDeathRespawnCheckpoint = null;
+    this.rustNativePlayerDeathRespawnPendingFinalize = null;
     this.rustLiveRenderViewR10 = null;
     this.rustLiveRenderViewRevisionR10 = 0;
     this.rustLivePlayerInitialYawRadiansR10 = null;
@@ -6314,6 +9364,13 @@ export class VoxelEngine {
       "terrain-residency-reconcile-v2",
       "entity-compatibility-bridge-v1",
       "gameplay-command-v1",
+      "creative-inventory-slot-v1",
+      "player-game-mode-set-v1",
+      "basic-dirt-action-receipt-v1",
+      "native-block-edit-receipt-v1",
+      "native-drop-pickup-receipt-v1",
+      "native-player-drop-receipt-v1",
+      "player-respawn-v1",
     ] as const;
     if (!diagnostics.authoritative || !diagnostics.contentReady || !diagnostics.liveAuthorityReady
       || required.some((capability) => !capabilities.has(capability))) {
@@ -6338,8 +9395,11 @@ export class VoxelEngine {
     });
     this.assertRustLiveGenerationR5(generation, host, "identity status");
 
+    if (this.rustTerrainLocatorEffectJournal && observation.entity === null) {
+      throw new Error("A durable locator journal cannot be recovered without its restored native player");
+    }
     if (observation.entity === null) {
-      const plan = kind === "create"
+      const plan = kind !== "load"
         ? createRustPlayerBootstrapNewWorldCompatibilityV1(profile, Object.freeze({
           schema: 1 as const,
           kind: "new-world" as const,
@@ -6385,6 +9445,53 @@ export class VoxelEngine {
     }
 
     let entity = this.assertAuthoritativeRustPlayerStatusR5(observation, expected);
+    if (kind === "load" && save) {
+      observation = await this.reconcileRustSavedWorldPlayerGameModeR5(
+        generation,
+        host,
+        save,
+        observation,
+        expected,
+      );
+      this.assertRustLiveGenerationR5(generation, host, "post-mode-reconciliation status");
+      entity = this.assertAuthoritativeRustPlayerStatusR5(observation, expected);
+    }
+    if (this.rustTerrainLocatorEffectJournal) {
+      await this.recoverRustTerrainLocatorBeforeResidencyR5(generation, host, observation, expected);
+      observation = await queryRustPlayerBootstrapIdentityStatusV1(service, {
+        commandActorId: "runtime:bootstrap-status",
+        externalEntityId: expected.externalEntityId,
+        actorId: expected.actorId,
+        playerId: expected.playerId,
+      });
+      this.assertRustLiveGenerationR5(generation, host, "post-locator recovery status");
+      entity = this.assertAuthoritativeRustPlayerStatusR5(observation, expected);
+    }
+    if (this.rustNativePlayerRespawnPlan && entity.record.health <= 0) {
+      const retainedPlan = rehydrateRustLivePlayerRespawnPlanV1(this.rustNativePlayerRespawnPlan);
+      if (!rustIntegratedRuntimeIdentityEqualsV1(service.identity(), retainedPlan.batch.expected)) {
+        throw new Error("Durable native player respawn plan no longer matches the restored dead runtime identity");
+      }
+      await host.multiplayerAuthority().runExclusiveMutation(async () => {
+        this.assertRustLiveGenerationR5(generation, host, "retained player respawn recovery");
+        await executeRustLivePlayerRespawnPlanV1(service, retainedPlan);
+        const catalogWorldId = this.activeWorldId;
+        if (!catalogWorldId || this.rustNativePersistenceWorldId !== catalogWorldId) {
+          throw new Error("Retained native player respawn recovery has no exact persistence binding");
+        }
+        const saved = await this.worldStorage.saveNativeWorld(catalogWorldId);
+        if (!saved.ok) throw new Error(saved.error.message);
+        this.assertRustLiveGenerationR5(generation, host, "retained player respawn recovery checkpoint");
+      });
+      observation = await queryRustPlayerBootstrapIdentityStatusV1(service, {
+        commandActorId: "runtime:bootstrap-status",
+        externalEntityId: expected.externalEntityId,
+        actorId: expected.actorId,
+        playerId: expected.playerId,
+      });
+      this.assertRustLiveGenerationR5(generation, host, "post-respawn-recovery status");
+      entity = this.assertAuthoritativeRustPlayerStatusR5(observation, expected);
+    }
     const centerX = Math.floor(entity.record.position.x / CHUNK_SIZE);
     const centerZ = Math.floor(entity.record.position.z / CHUNK_SIZE);
     const desiredChunks = Object.freeze(Array.from({ length: 25 }, (_, index) => Object.freeze({
@@ -6409,43 +9516,9 @@ export class VoxelEngine {
       playerId: expected.playerId,
     });
     this.assertRustLiveGenerationR5(generation, host, "post-terrain player status");
-    entity = this.assertAuthoritativeRustPlayerStatusR5(observation, expected);
-    const worldView = observation.worldViewBinding!;
-    const lastInput = observation.continuity.lastAppliedInput;
-    const yawRadians = lastInput
-      ? lastInput.lookYaw / RUST_LIVE_INPUT_AXIS_DIVISOR_R5 * Math.PI
-      : entity.record.yaw;
-    const pitchRadians = lastInput
-      ? lastInput.lookPitch / RUST_LIVE_INPUT_AXIS_DIVISOR_R5 * (Math.PI / 2)
-      : 0;
-    if (!Number.isFinite(entity.record.yaw) || !Number.isFinite(yawRadians) || !Number.isFinite(pitchRadians)) {
-      throw new Error("Rust player status contains no exact look-intent baseline");
-    }
-    this.rustLivePlayerAttestationR10 = Object.freeze({
-      externalEntityId: expected.externalEntityId,
-      actorId: expected.actorId,
-      playerId: expected.playerId,
-      entityId: entity.entityId,
-      creativeMode: observation.runtimePlayer!.binding.creativeMode,
-      maximumOxygenSeconds: observation.runtimePlayer!.binding.maximumOxygenSeconds,
-      maximumHealth: entity.record.maximumHealth,
-      radius: observation.runtimePlayer!.binding.radius,
-      standingHeight: observation.runtimePlayer!.binding.standingHeight,
-      crouchingHeight: observation.runtimePlayer!.binding.crouchingHeight,
-      mass: observation.runtimePlayer!.binding.mass,
-    });
-    this.rustLivePlayerInitialYawRadiansR10 = entity.record.yaw;
-    this.rustLiveSelectedSlotIntentR5 = worldView.selectedSlot;
-    this.rustLiveLookIntentR5 = Object.freeze({ yawRadians, pitchRadians });
-    const contextContinuity = await queryRustIntegratedRuntimeContextContinuityV2(service);
-    this.assertRustLiveGenerationR5(generation, host, "context command continuity");
-    const pump = createRustLiveInputPumpR5({
-      service,
-      status: observation,
-      contextContinuity,
-      worldGeneration: generation,
-    });
-    this.rustLiveInputPump = pump;
+    const installed = await this.installRustLivePlayerPumpR5(generation, host, observation, expected);
+    entity = installed.entity;
+    const pump = installed.pump;
     try {
       // Seed the first fixed step from exact BWS5 continuity/entity state. This
       // preserves a restored native yaw and selected slot instead of sampling
@@ -6453,29 +9526,194 @@ export class VoxelEngine {
       pump.sample(generation, this.rustLiveInputIntentR5(pump));
       const requestedView = this.ensureRustLiveRenderViewR10();
       if (!requestedView) throw new Error("Rust initial camera view could not bind to its input pump");
-      const initial = await pump.syncInitial(generation, requestedView);
-      this.assertRustLiveGenerationR5(generation, host, "initial input synchronization");
-      if (initial.discarded || !initial.step || !initial.extraction || !initial.camera || initial.cause !== "initial") {
-        throw new Error("Rust initial input synchronization did not return an authoritative player-camera extraction");
-      }
-      let acceptedView = requestedView;
-      let acceptedExtraction = initial.extraction;
-      let acceptedCamera = initial.camera;
-      while (this.currentRustLiveRenderViewR10()?.viewRevision !== acceptedView.viewRevision) {
-        const latest = this.currentRustLiveRenderViewR10();
-        if (!latest) throw new Error("Rust initial camera view disappeared during activation");
-        const refreshed = await pump.refreshView(generation, latest);
-        this.assertRustLiveGenerationR5(generation, host, "initial camera view refresh");
-        if (refreshed.discarded || !refreshed.extraction || !refreshed.camera || refreshed.cause !== "viewport") {
-          throw new Error("Rust initial camera refresh did not return the latest drawing-buffer extraction");
-        }
-        acceptedExtraction = refreshed.extraction;
-        acceptedCamera = refreshed.camera;
-        acceptedView = latest;
-      }
-      this.applyRustLiveAuthorityExtractionR10(
-        generation, host, pump, acceptedExtraction, acceptedView, acceptedCamera,
+      const synchronized = await this.runRustLivePumpNetworkExclusiveR5(
+        generation,
+        host,
+        pump,
+        "initial synchronization",
+        async () => {
+          const initial = await pump.syncInitial(generation, requestedView);
+          this.assertRustLiveGenerationR5(generation, host, "initial input synchronization");
+          if (initial.discarded || !initial.step || !initial.extraction || !initial.camera || initial.cause !== "initial") {
+            throw new Error("Rust initial input synchronization did not return an authoritative player-camera extraction");
+          }
+          let acceptedView = requestedView;
+          let acceptedExtraction = initial.extraction;
+          let acceptedCamera = initial.camera;
+          while (this.currentRustLiveRenderViewR10()?.viewRevision !== acceptedView.viewRevision) {
+            const latest = this.currentRustLiveRenderViewR10();
+            if (!latest) throw new Error("Rust initial camera view disappeared during activation");
+            const refreshed = await pump.refreshView(generation, latest);
+            this.assertRustLiveGenerationR5(generation, host, "initial camera view refresh");
+            if (refreshed.discarded || !refreshed.extraction || !refreshed.camera || refreshed.cause !== "viewport") {
+              throw new Error("Rust initial camera refresh did not return the latest drawing-buffer extraction");
+            }
+            acceptedExtraction = refreshed.extraction;
+            acceptedCamera = refreshed.camera;
+            acceptedView = latest;
+          }
+          return Object.freeze({ initial, acceptedView, acceptedExtraction, acceptedCamera });
+        },
       );
+      const { initial, acceptedView, acceptedExtraction, acceptedCamera } = synchronized;
+      const initialDurableReceiptCount = Number(Boolean(initial.nativeBlockEdit))
+        + Number(Boolean(initial.basicDirtAction))
+        + Number(Boolean(initial.dropPickup))
+        + Number(Boolean(initial.playerDrop))
+        + Number(Boolean(initial.deathRespawn));
+      if (initialDurableReceiptCount > 1) {
+        throw new Error("Rust initial synchronization exposed simultaneous durable gameplay receipts");
+      }
+      if (initial.nativeBlockEdit) {
+        await this.commitRustNativeBlockEditProjectionV1({
+          generation,
+          host,
+          pump,
+          delivery: initial.nativeBlockEdit,
+          extraction: acceptedExtraction,
+          requestedView: acceptedView,
+          camera: acceptedCamera,
+        });
+      } else if (initial.dropPickup) {
+        await this.commitRustNativeDropPickupProjectionV1({
+          generation,
+          host,
+          pump,
+          delivery: initial.dropPickup,
+          extraction: acceptedExtraction,
+          requestedView: acceptedView,
+          camera: acceptedCamera,
+        });
+      } else if (initial.basicDirtAction) {
+        await this.commitRustBasicDirtActionProjectionV1({
+          generation,
+          host,
+          pump,
+          delivery: initial.basicDirtAction,
+          extraction: acceptedExtraction,
+          requestedView: acceptedView,
+          camera: acceptedCamera,
+        });
+      } else if (initial.playerDrop) {
+        await this.commitRustNativePlayerDropProjectionV1({
+          generation,
+          host,
+          pump,
+          delivery: initial.playerDrop,
+          extraction: acceptedExtraction,
+          requestedView: acceptedView,
+          camera: acceptedCamera,
+        });
+      } else if (initial.deathRespawn) {
+        await this.commitRustNativePlayerDeathRespawnProjectionR5({
+          generation,
+          host,
+          pump,
+          delivery: initial.deathRespawn,
+          extraction: acceptedExtraction,
+          requestedView: acceptedView,
+          camera: acceptedCamera,
+        });
+      } else {
+        this.applyRustLiveAuthorityExtractionR10(
+          generation, host, pump, acceptedExtraction, acceptedView, acceptedCamera,
+        );
+      }
+      if (this.rustNativeBlockEditPendingFinalize
+        || this.rustNativeDropPickupPendingFinalize
+        || this.rustNativePlayerDeathRespawnPendingFinalize) {
+        // The projected successor is already installed and owns the commit
+        // gate. Keep this same live pump/session available for a local-save
+        // retry instead of treating its deliberately unacknowledged cursor as
+        // an activation failure and stopping the pump.
+        this.rustLivePlayerEntityId = entity.entityId;
+        this.rustLivePlayerTerrainChunkCount = reconciled.desiredChunkCount;
+        this.rustLivePlayerAuthorityState = "ready";
+        return;
+      }
+      const projectionDiagnostics = pump.diagnostics();
+      if (projectionDiagnostics.nativeBlockEditLegacySeedPending
+        || projectionDiagnostics.nativeBlockEditCursor === null) {
+        throw new Error("Rust initial block-edit receipt query did not resolve its browser projection cursor");
+      }
+      const nativeBlockEditCursorWasLegacy = this.rustNativeBlockEditProjection === null;
+      const dropPickupCursorWasLegacy = this.rustNativeDropPickupProjection === null;
+      const playerDropCursorWasLegacy = this.rustNativePlayerDropProjection === null;
+      const deathRespawnCursorWasLegacy = this.rustNativePlayerDeathRespawnProjection === null;
+      if (this.rustNativeBlockEditProjection === null) {
+        this.rustNativeBlockEditProjection = Object.freeze({
+          schema: 1,
+          cursor: projectionDiagnostics.nativeBlockEditCursor,
+          lastReceiptHash: null,
+        });
+      } else if (this.rustNativeBlockEditProjection.cursor !== projectionDiagnostics.nativeBlockEditCursor) {
+        throw new Error("Rust initial block-edit receipt cursor contradicts the tracked browser save");
+      }
+      if (projectionDiagnostics.dropPickupLegacySeedPending
+        || projectionDiagnostics.dropPickupCursor === null) {
+        throw new Error("Rust initial drop-pickup receipt query did not resolve its browser projection cursor");
+      }
+      if (this.rustNativeDropPickupProjection === null) {
+        this.rustNativeDropPickupProjection = Object.freeze({
+          schema: 1,
+          cursor: projectionDiagnostics.dropPickupCursor,
+          lastReceiptHash: null,
+        });
+      } else if (this.rustNativeDropPickupProjection.cursor !== projectionDiagnostics.dropPickupCursor) {
+        throw new Error("Rust initial drop-pickup receipt cursor contradicts the tracked browser save");
+      }
+      if (projectionDiagnostics.playerDropLegacySeedPending
+        || projectionDiagnostics.playerDropCursor === null) {
+        throw new Error("Rust initial player-drop receipt query did not resolve its browser projection cursor");
+      }
+      if (this.rustNativePlayerDropProjection === null) {
+        this.rustNativePlayerDropProjection = Object.freeze({
+          schema: 1,
+          cursor: projectionDiagnostics.playerDropCursor,
+          lastReceiptHash: null,
+        });
+      } else if (this.rustNativePlayerDropProjection.cursor !== projectionDiagnostics.playerDropCursor) {
+        throw new Error("Rust initial player-drop receipt cursor contradicts the tracked browser save");
+      }
+      if (projectionDiagnostics.deathRespawnLegacySeedPending
+        || projectionDiagnostics.deathRespawnCursor === null) {
+        throw new Error("Rust initial death-respawn parent query did not resolve its browser projection cursor");
+      }
+      if (this.rustNativePlayerDeathRespawnProjection === null) {
+        this.rustNativePlayerDeathRespawnProjection = Object.freeze({
+          schema: 1,
+          cursor: projectionDiagnostics.deathRespawnCursor,
+          lastReceiptHash: null,
+        });
+      } else if (this.rustNativePlayerDeathRespawnProjection.cursor !== projectionDiagnostics.deathRespawnCursor) {
+        throw new Error("Rust initial death-respawn cursor contradicts the tracked browser save");
+      }
+      if (nativeBlockEditCursorWasLegacy || dropPickupCursorWasLegacy || playerDropCursorWasLegacy
+        || deathRespawnCursorWasLegacy) {
+        // The native latest cursors are now exact browser custody. Persist all
+        // seeded baselines before input opens so a crash cannot skip a receipt
+        // created after this activation but before a later gameplay save.
+        const saved = this.saveRustCompatibilityDocumentLocalOnly("native receipt cursor baselines");
+        if (!saved.ok) throw new Error(`Native receipt cursor baselines could not be stored. ${saved.error.message}`);
+      }
+      if (this.rustNativePlayerRespawnPlan) {
+        const retainedPlan = rehydrateRustLivePlayerRespawnPlanV1(this.rustNativePlayerRespawnPlan);
+        // Projection is committed through helper methods above; an explicit
+        // widening prevents control-flow analysis from retaining activation's
+        // earlier null reset across those side-effecting calls.
+        const presented = this.rustLivePlayerPresentationViewR10 as RustLivePlayerViewR10 | null;
+        if (!presented || !presented.combat.alive
+          || !this.retainedRustKeepInventoryRespawnMatchesR5(
+            retainedPlan,
+            presented,
+            acceptedExtraction.identity,
+          )) {
+          throw new Error("Durable native player respawn plan was not reconciled by its restored authority state");
+        }
+        this.rustNativePlayerRespawnPlan = null;
+        const saved = this.saveRustCompatibilityDocumentLocalOnly("a recovered native keep-inventory respawn");
+        if (!saved.ok) throw new Error(`Recovered native player respawn could not be stored. ${saved.error.message}`);
+      }
       this.enqueueRustLiveRendererExtractionR10({
         generation,
         host,
@@ -6486,6 +9724,7 @@ export class VoxelEngine {
       this.rustLivePlayerEntityId = entity.entityId;
       this.rustLivePlayerTerrainChunkCount = reconciled.desiredChunkCount;
       this.rustLivePlayerAuthorityState = "ready";
+      if (this.rustLivePlayerRespawnPendingR5) queueMicrotask(() => this.scheduleRustLiveInputAdvanceR5());
     } catch (error) {
       await pump.stop().catch(() => undefined);
       if (this.rustLiveInputPump === pump) this.rustLiveInputPump = null;
@@ -6495,10 +9734,25 @@ export class VoxelEngine {
 
   private async stopRustLivePlayerAuthorityR5() {
     const pump = this.rustLiveInputPump;
+    this.clearRustNativeDropPickupFinalizeRetryTimerV1();
+    if (this.rustNativeBlockEditPendingFinalize?.pump === pump) {
+      this.rustNativeBlockEditPendingFinalize = null;
+    }
+    if (this.rustNativePlayerDeathRespawnPendingFinalize?.pump === pump) {
+      this.rustNativePlayerDeathRespawnPendingFinalize = null;
+    }
+    if (this.rustNativeDropPickupPendingFinalize?.pump === pump) {
+      this.rustNativeDropPickupPendingFinalize = null;
+    }
+    if (!this.rustNativeBlockEditPendingFinalize
+      && !this.rustNativeDropPickupPendingFinalize
+      && !this.rustNativePlayerDeathRespawnPendingFinalize) this.rustTerrainLocatorCommitLocked = false;
+    this.rustNativeBlockEditQueuedSelectedSlotR5 = null;
     this.rustLiveInputPump = null;
-    this.rustLiveRendererExtractionQueue.length = 0;
+    if (this.rustLiveRendererExtractionQueue) this.rustLiveRendererExtractionQueue.length = 0;
     this.rustLivePlayerAuthorityState = "none";
     this.rustLivePlayerAuthorityGeneration = null;
+    this.rustLivePlayerRuntimeSessionId = null;
     this.rustLivePlayerEntityId = null;
     this.rustLivePlayerTerrainChunkCount = 0;
     this.rustLivePlayerAttestationR10 = null;
@@ -6506,6 +9760,8 @@ export class VoxelEngine {
     this.rustLivePlayerViewExtractionRevisionR10 = null;
     this.rustLiveCameraPresentationViewR10 = null;
     this.rustLiveCameraExtractionRevisionR10 = null;
+    this.rustDroppedHotTransformFrameR10 = null;
+    this.rustLivePlayerRespawnPendingR5 = null;
     this.rustLiveRenderViewR10 = null;
     this.rustLiveRenderViewRevisionR10 = 0;
     this.rustLivePlayerInitialYawRadiansR10 = null;
@@ -6534,7 +9790,135 @@ export class VoxelEngine {
   }
 
   private async drainRustAuthorityOperations() {
-    while (this.rustAuthorityOperations.size) await Promise.allSettled([...this.rustAuthorityOperations]);
+    while (this.rustAuthorityOperations?.size) await Promise.allSettled([...this.rustAuthorityOperations]);
+  }
+
+  private async settleRustNativeBlockEditPendingFinalizeForLifecycleV1(stage: string) {
+    const activeAdvance = this.rustLiveInputAdvance;
+    if (activeAdvance) await activeAdvance;
+    let pending = this.rustNativeBlockEditPendingFinalize;
+    if (!pending) return;
+    if (this.rustRuntimeOperationsBlocked) {
+      throw new Error(`${stage} cannot retry a pending native block edit after authority operations were blocked`);
+    }
+    const waitMs = Math.max(0, pending.retryNotBefore - Date.now());
+    if (waitMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    pending = this.rustNativeBlockEditPendingFinalize;
+    if (!pending) return;
+    if (this.rustRuntimeOperationsBlocked) {
+      throw new Error(`${stage} cannot retry a pending native block edit after authority operations were blocked`);
+    }
+    const concurrentAdvance = this.rustLiveInputAdvance;
+    if (concurrentAdvance) {
+      await concurrentAdvance;
+      pending = this.rustNativeBlockEditPendingFinalize;
+      if (!pending) return;
+    }
+    const retry = this.startRustNativeBlockEditFinalizeRetryV1();
+    if (!retry) throw new Error(`${stage} could not start the pending native block-edit finalize retry`);
+    await retry;
+    pending = this.rustNativeBlockEditPendingFinalize;
+    if (pending) {
+      const detail = pending.lastError ? `: ${pending.lastError}` : "";
+      throw new Error(`${stage} could not make the pending native block-edit projection durable${detail}`);
+    }
+  }
+
+  private async settleRustNativePlayerDeathRespawnPendingFinalizeForLifecycleR5(stage: string) {
+    const activeAdvance = this.rustLiveInputAdvance;
+    if (activeAdvance) await activeAdvance;
+    let pending = this.rustNativePlayerDeathRespawnPendingFinalize;
+    if (!pending) return;
+    if (this.rustRuntimeOperationsBlocked) {
+      throw new Error(`${stage} cannot retry a pending native death-respawn after authority operations were blocked`);
+    }
+    const waitMs = Math.max(0, pending.retryNotBefore - Date.now());
+    if (waitMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    pending = this.rustNativePlayerDeathRespawnPendingFinalize;
+    if (!pending) return;
+    if (this.rustRuntimeOperationsBlocked) {
+      throw new Error(`${stage} cannot retry a pending native death-respawn after authority operations were blocked`);
+    }
+    const concurrentAdvance = this.rustLiveInputAdvance;
+    if (concurrentAdvance) {
+      await concurrentAdvance;
+      pending = this.rustNativePlayerDeathRespawnPendingFinalize;
+      if (!pending) return;
+    }
+    const retry = this.startRustNativePlayerDeathRespawnFinalizeRetryR5();
+    if (!retry) throw new Error(`${stage} could not start the pending native death-respawn finalize retry`);
+    await retry;
+    pending = this.rustNativePlayerDeathRespawnPendingFinalize;
+    if (pending) {
+      const detail = pending.lastError ? `: ${pending.lastError}` : "";
+      throw new Error(`${stage} could not make the pending native death-respawn projection durable${detail}`);
+    }
+  }
+
+  private async settleRustNativeDropPickupPendingFinalizeForLifecycleV1(stage: string) {
+    this.clearRustNativeDropPickupFinalizeRetryTimerV1();
+    const activeAdvance = this.rustLiveInputAdvance;
+    if (activeAdvance) await activeAdvance;
+    let pending = this.rustNativeDropPickupPendingFinalize;
+    if (!pending) return;
+    if (this.rustRuntimeOperationsBlocked) {
+      throw new Error(`${stage} cannot retry a pending native drop pickup after authority operations were blocked`);
+    }
+    const waitMs = Math.max(0, pending.retryNotBefore - Date.now());
+    if (waitMs > 0) await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+    pending = this.rustNativeDropPickupPendingFinalize;
+    if (!pending) return;
+    if (this.rustRuntimeOperationsBlocked) {
+      throw new Error(`${stage} cannot retry a pending native drop pickup after authority operations were blocked`);
+    }
+    const concurrentAdvance = this.rustLiveInputAdvance;
+    if (concurrentAdvance) {
+      await concurrentAdvance;
+      pending = this.rustNativeDropPickupPendingFinalize;
+      if (!pending) return;
+    }
+    const retry = this.startRustNativeDropPickupFinalizeRetryV1();
+    if (!retry) throw new Error(`${stage} could not start the pending native drop-pickup finalize retry`);
+    await retry;
+    pending = this.rustNativeDropPickupPendingFinalize;
+    if (pending) {
+      const detail = pending.lastError ? `: ${pending.lastError}` : "";
+      throw new Error(`${stage} could not make the pending native drop-pickup projection durable${detail}`);
+    }
+  }
+
+  private async settleRustAuthorityForLifecycleV1(stage: string) {
+    let selectedSlotAdvanceAttempted = false;
+    for (;;) {
+      // Never enter a retry while an earlier input/projection still owns the
+      // network-exclusive mutation gate. Its tracked promise must release first.
+      await this.drainRustAuthorityOperations();
+      if (this.rustNativeDropPickupPendingFinalize) {
+        await this.settleRustNativeDropPickupPendingFinalizeForLifecycleV1(stage);
+        continue;
+      }
+      if (this.rustNativePlayerDeathRespawnPendingFinalize) {
+        await this.settleRustNativePlayerDeathRespawnPendingFinalizeForLifecycleR5(stage);
+        continue;
+      }
+      if (this.rustNativeBlockEditPendingFinalize) {
+        await this.settleRustNativeBlockEditPendingFinalizeForLifecycleV1(stage);
+        continue;
+      }
+      if (!this.rustLiveSelectedSlotIntentPendingR5) return;
+      if (this.rustRuntimeOperationsBlocked || selectedSlotAdvanceAttempted) {
+        throw new Error(`${stage} could not settle the pending authoritative selected-slot intent`);
+      }
+      // Gameplay is already stopped and clearInput removed every action pulse.
+      // One no-action native step can therefore acknowledge only the held slot.
+      this.scheduleRustLiveInputAdvanceR5();
+      const selectedSlotAdvance = this.rustLiveInputAdvance;
+      if (!selectedSlotAdvance) {
+        throw new Error(`${stage} could not start the pending authoritative selected-slot acknowledgement`);
+      }
+      selectedSlotAdvanceAttempted = true;
+      await selectedSlotAdvance;
+    }
   }
 
   private async disposeRustLiveRendererR10() {
@@ -6547,7 +9931,7 @@ export class VoxelEngine {
     this.rustRenderFrameSequence = BigInt(0);
     this.rustRenderExtractionPoll = null;
     this.renderExtractionNextAt = 0;
-    this.rustLiveRendererExtractionQueue.length = 0;
+    if (this.rustLiveRendererExtractionQueue) this.rustLiveRendererExtractionQueue.length = 0;
     if (!runtime) return;
     try {
       await runtime.drain();
@@ -6566,7 +9950,7 @@ export class VoxelEngine {
     if (expected && this.rustLiveRenderRuntime !== expected) return;
     const runtime = this.rustLiveRenderRuntime;
     this.rustLiveRenderRuntime = null;
-    this.rustLiveRendererExtractionQueue.length = 0;
+    if (this.rustLiveRendererExtractionQueue) this.rustLiveRendererExtractionQueue.length = 0;
     this.renderExtraction = null;
     this.rustRenderWorldGeneration = null;
     this.rustRenderWorldEpoch = null;
@@ -6623,7 +10007,13 @@ export class VoxelEngine {
       if (pending.viewRevision !== view.viewRevision) {
         let refreshed: Awaited<ReturnType<RustLiveInputPumpR5["refreshView"]>>;
         try {
-          refreshed = await pump.refreshView(generation, view);
+          refreshed = await this.runRustLivePumpNetworkExclusiveR5(
+            generation,
+            host,
+            pump,
+            "renderer activation refresh",
+            () => pump.refreshView(generation, view),
+          );
         } catch (error) {
           this.rejectRustLiveCameraActivationR10(error, generation, host, pump);
         }
@@ -6762,21 +10152,301 @@ export class VoxelEngine {
     await this.disconnectMultiplayer(reason);
     this.rustPeerInterestCenters.clear();
     this.rustPeerDeltaSequences.clear();
+    this.rustPeerPresentationRecordRevisions.clear();
   }
 
-  private async prepareRustWorldTransition(reason: string) {
-    this.rustRuntimeOperationsBlocked = true;
+  private terrainGenerationMode() {
+    // Prototype-only lifecycle harnesses omit ChunkWorld. They are explicit
+    // tests of the integrated runtime and therefore keep the legacy test path.
+    return this.world?.terrainGenerationAuthority?.mode ?? "typescript";
+  }
+
+  /**
+   * Rust terrain queries are legal only after the exact chunk bytes are
+   * resident.  Runtime systems use this bounded lease instead of letting a
+   * strict surface/biome query synthesize the legacy TypeScript terrain.
+   */
+  private ensureTerrainResidency(x: number, z: number, radius = 0, leaseMilliseconds = 10_000) {
+    if (this.terrainGenerationMode() !== "rust") return true;
+    const minimumChunkX = Math.floor((x - radius) / CHUNK_SIZE);
+    const maximumChunkX = Math.floor((x + radius) / CHUNK_SIZE);
+    const minimumChunkZ = Math.floor((z - radius) / CHUNK_SIZE);
+    const maximumChunkZ = Math.floor((z + radius) / CHUNK_SIZE);
+    let ready = true;
+    for (let cz = minimumChunkZ; cz <= maximumChunkZ; cz += 1) {
+      for (let cx = minimumChunkX; cx <= maximumChunkX; cx += 1) {
+        if (!this.world.requestChunkForResidency(cx, cz, leaseMilliseconds)) ready = false;
+      }
+    }
+    if (!ready) return false;
+    const blockX = Math.round(x);
+    const blockZ = Math.round(z);
+    const column = this.world.installedColumn(blockX, blockZ);
+    return Boolean(column && this.world.getBlock(blockX, column.height, blockZ) !== undefined);
+  }
+
+  private replaceTerrainGenerationReadiness() {
+    this.cancelRustOriginPreflight();
+    this.cancelTerrainLocatorConsumerOperations();
+    this.terrainGenerationReadinessAbort?.abort();
+    const controller = new AbortController();
+    this.terrainGenerationReadinessAbort = controller;
+    return controller;
+  }
+
+  private cancelRustOriginPreflight() {
+    this.rustOriginPreflightGeneration += 1;
+    this.rustOriginPreflightAbort?.abort();
+    this.rustOriginPreflightAbort = null;
+  }
+
+  private assertTerrainGenerationTransition(generation: number, controller: AbortController, phase: string) {
+    if (controller.signal.aborted || generation !== this.rustRuntimeTransitionGeneration || this.disposed) {
+      const error = new Error(`Rust terrain generation ${phase} was superseded`);
+      error.name = "AbortError";
+      throw error;
+    }
+  }
+
+  private cancelTerrainLocatorConsumerOperations() {
+    this.terrainLocatorConsumerAbort?.abort();
+    this.terrainLocatorConsumerAbort = new AbortController();
+    this.pendingSettlementChart = null;
+    this.pendingDragonLairSurvey = null;
+    this.pendingFactionGuide = null;
+  }
+
+  private settlementLocatorPreview(entry: TerrainSettlementLocatorEntryV1): WorldOriginPreviewV1 | null {
+    const arrival = entry.publicArrival;
+    if (!arrival) return null;
+    return Object.freeze({
+      candidate: Object.freeze({
+        id: entry.id,
+        factionId: entry.factionId,
+        size: entry.size,
+        environment: entry.environment,
+        biome: entry.biome,
+        center: Object.freeze({ x: entry.x, ...(entry.floorY === null ? {} : { y: entry.floorY }), z: entry.z }),
+      }),
+      position: Object.freeze({ x: arrival.x, y: arrival.yMillis / 1_000, z: arrival.z }),
+      anchorKind: arrival.anchorKind,
+      distanceBlocks: Math.sqrt(Number(entry.distanceSquaredMillis)) / 1_000,
+    });
+  }
+
+  private async resolveRustSettlementOrigin(
+    seedText: string,
+    options: WorldOptions,
+    maxRegionRadius: number,
+    signal: AbortSignal,
+  ) {
+    const preference = options.origin;
+    if (preference.mode === "wilderness" || !options.structures || options.settlementDensity <= 0) return null;
+    const sizes: TerrainSettlementLocatorEntryV1["size"][] = preference.mode === "culture-settlement"
+      ? preference.minimumSize === "town" ? ["town"] : preference.minimumSize === "village" ? ["village", "town"] : ["hamlet", "village", "town"]
+      : ["hamlet", "village", "town"];
+    const traits = characterRaceTraits(this.activeCharacterProfile?.appearance.race ?? "wayfarer");
+    const result = await this.world.queryNearestSettlementsForGenerationAuthoritative(
+      seedText,
+      generationOptionsFromWorldOptions(options),
+      {
+        origin: { x: 0, z: 0 },
+        ...(preference.mode === "culture-settlement" ? { factionIds: [preference.factionId] } : {}),
+        sizes,
+        maxRegionRadius: normalizeSettlementOriginSearchRadius(maxRegionRadius),
+        limit: 1,
+        breathesWater: traits.waterBreathing,
+      },
+      signal,
+    );
+    const entry = result.entries[0] ?? null;
+    return entry?.publicArrival ? entry : null;
+  }
+
+  private async prepareRustNewWorldTerrain(
+    generation: number,
+    controller: AbortController,
+    seedText: string,
+    options: WorldOptions,
+    settlementOrigin: TerrainSettlementLocatorEntryV1 | null = null,
+  ) {
+    const maximumSpawnSearchChunkRadius = 6;
+    this.world.setRenderDistance(Math.max(this.settings.renderDistance, maximumSpawnSearchChunkRadius));
+    this.world.reset(seedText, undefined, generationOptionsFromWorldOptions(options));
+    if (settlementOrigin) {
+      const arrival = settlementOrigin.publicArrival;
+      if (!arrival) throw new Error("Authoritative Rust settlement locator returned no public arrival");
+      this.world.initializeAround(settlementOrigin.x, settlementOrigin.z);
+      await this.world.awaitGenerationRing(settlementOrigin.x, settlementOrigin.z, 1, 60_000, controller.signal);
+      this.assertTerrainGenerationTransition(generation, controller, "settlement-center readiness");
+      this.world.initializeAround(arrival.x, arrival.z);
+      await this.world.awaitGenerationRing(arrival.x, arrival.z, 1, 60_000, controller.signal);
+      this.assertTerrainGenerationTransition(generation, controller, "settlement-arrival readiness");
+      const marker = this.world.settlementLandmarkMarker(settlementOrigin.id);
+      const expectedTag = `settlement:${settlementOrigin.factionId}:${settlementOrigin.size}`;
+      const centerColumn = this.world.installedColumn(settlementOrigin.x, settlementOrigin.z);
+      const expectedMarkerY = settlementOrigin.floorY === null
+        ? centerColumn ? centerColumn.height + 2 : Number.NaN
+        : settlementOrigin.floorY + 2;
+      if (!marker || marker.id !== settlementOrigin.id || marker.tag !== expectedTag
+        || marker.mapLayer !== settlementOrigin.environment
+        || marker.position.x !== settlementOrigin.x || marker.position.y !== expectedMarkerY
+        || marker.position.z !== settlementOrigin.z) {
+        throw new Error(`Authoritative Rust settlement marker mismatch for ${settlementOrigin.id}`);
+      }
+      const position = Object.freeze({ x: arrival.x, y: arrival.yMillis / 1_000, z: arrival.z });
+      this.preparedRustNewWorld = Object.freeze({
+        seedText,
+        optionsSignature: JSON.stringify(options),
+        spawn: Object.freeze({ x: arrival.x, z: arrival.z }),
+        settlementOrigin: Object.freeze({ entry: settlementOrigin, position, markerY: marker.position.y }),
+      });
+      return;
+    }
+    this.world.initializeAround(0, 0);
+    let spawn: Readonly<{ x: number; z: number }> | null = null;
+    for (let radius = 1; radius <= maximumSpawnSearchChunkRadius; radius += 1) {
+      const ring = await this.world.awaitGenerationRing(0, 0, radius, 60_000, controller.signal);
+      this.assertTerrainGenerationTransition(generation, controller, `new-world radius-${radius} readiness`);
+      spawn = this.findSpawnInLoadedTerrain(ring.keys);
+      if (spawn) break;
+    }
+    if (!spawn) {
+      throw new Error(`Required Rust terrain installed no safe land spawn with solid ground and two-cell headroom within ${maximumSpawnSearchChunkRadius} chunk rings`);
+    }
+    this.world.initializeAround(spawn.x, spawn.z);
+    await this.world.awaitGenerationRing(spawn.x, spawn.z, 1, 60_000, controller.signal);
+    this.assertTerrainGenerationTransition(generation, controller, "new-world spawn readiness");
+    this.preparedRustNewWorld = Object.freeze({
+      seedText,
+      optionsSignature: JSON.stringify(options),
+      spawn,
+      settlementOrigin: null,
+    });
+  }
+
+  private async prepareRustLoadedWorldTerrain(
+    generation: number,
+    controller: AbortController,
+    save: WorldSave,
+    options: WorldOptions,
+  ) {
+    this.world.setRenderDistance(this.settings.renderDistance);
+    this.world.reset(
+      save.seed,
+      save.edits,
+      generationOptionsFromWorldOptions(options, save.generatorProfile ?? "world-below-v15"),
+      save.blockFacings,
+    );
+    this.world.initializeAround(save.player.x, save.player.z);
+    await this.world.awaitGenerationRing(save.player.x, save.player.z, 1, 60_000, controller.signal);
+    this.assertTerrainGenerationTransition(generation, controller, "saved-player readiness");
+    if (!save.spawn) {
+      await this.world.awaitGenerationRing(0, 0, 0, 60_000, controller.signal);
+      this.assertTerrainGenerationTransition(generation, controller, "saved-spawn readiness");
+    }
+    this.preparedRustLoadedWorld = Object.freeze({
+      seedText: save.seed,
+      optionsSignature: JSON.stringify(options),
+      playerX: save.player.x,
+      playerZ: save.player.z,
+    });
+  }
+
+  private async prepareRustWorldTransition(reason: string, preserveMultiplayerSession = false) {
+    const baseline: RustWorldTransitionPreflightBaselineV1 = Object.freeze({
+      operationsBlocked: this.rustRuntimeOperationsBlocked,
+      hydration: this.rustRuntimeHydrationState,
+      playerAuthorityState: this.rustLivePlayerAuthorityState,
+      running: this.running,
+      paused: this.paused,
+    });
     this.rustRuntimeHydrationState = "none";
     this.running = false;
     this.paused = true;
     this.clearInput();
-    await this.stopRustLivePlayerAuthorityR5();
-    if (this.persistent && this.activeWorldId) this.saveNow(false);
-    await this.worldStorage.flushPersistence();
-    await this.closeMultiplayerForRustTransition(reason);
-    await this.drainRustAuthorityOperations();
-    await this.disposeRustLiveRendererR10();
-    await this.shutdownBoundNativePersistence();
+    this.cancelTerrainLocatorConsumerOperations();
+    this.terrainGenerationReadinessAbort?.abort();
+    this.terrainGenerationReadinessAbort = null;
+    // Preserve the old generation until every prepared authority operation has
+    // either committed its two durable halves or failed closed with its journal.
+    try {
+      let transitionInputAdvanceAttempted = false;
+      for (;;) {
+        await this.drainRustAuthorityOperations();
+        if (this.rustNativeDropPickupPendingFinalize) {
+          await this.settleRustNativeDropPickupPendingFinalizeForLifecycleV1("World transition");
+          continue;
+        }
+        if (this.rustNativePlayerDeathRespawnPendingFinalize) {
+          await this.settleRustNativePlayerDeathRespawnPendingFinalizeForLifecycleR5("World transition");
+          continue;
+        }
+        if (this.rustNativeBlockEditPendingFinalize) {
+          await this.settleRustNativeBlockEditPendingFinalizeForLifecycleV1("World transition");
+          continue;
+        }
+        if (!this.rustLiveSelectedSlotIntentPendingR5) break;
+        if (baseline.operationsBlocked || transitionInputAdvanceAttempted) {
+          throw new Error("World transition could not settle the pending authoritative selected-slot intent");
+        }
+        // Running is already closed, but the old R5 pump remains admitted for
+        // one final no-action step so a compatibility-only hotbar selection can
+        // become authoritative before its terminal native checkpoint.
+        this.scheduleRustLiveInputAdvanceR5();
+        const inputAdvance = this.rustLiveInputAdvance;
+        if (!inputAdvance) {
+          throw new Error("World transition could not start the pending authoritative selected-slot acknowledgement");
+        }
+        transitionInputAdvanceAttempted = true;
+        await inputAdvance;
+      }
+      this.rustRuntimeOperationsBlocked = true;
+      if (this.persistent && this.activeWorldId) {
+        const nativeCheckpointRequired = this.requireRustNativePlayerSaveBinding("World transition");
+        if (!this.saveNow(false, preserveMultiplayerSession)) {
+          throw new Error("World transition could not commit the active browser-owned world document");
+        }
+        const nativeCheckpoint = this.rustNativeSaveOperation;
+        if (nativeCheckpointRequired && !nativeCheckpoint) {
+          throw new Error("World transition could not start the required authoritative Rust checkpoint");
+        }
+        const checkpointAttestation = nativeCheckpoint ? await nativeCheckpoint : null;
+        if (nativeCheckpointRequired && checkpointAttestation === null) {
+          throw new Error("World transition could not attest the required authoritative Rust checkpoint");
+        }
+      }
+      await this.drainRustAuthorityOperations();
+      await this.worldStorage.flushPersistence();
+    } catch (error) {
+      this.rustRuntimeHydrationState = baseline.hydration;
+      if (baseline.playerAuthorityState === "ready" && this.rustLivePlayerAuthorityState !== "ready") {
+        // A failed native checkpoint may have moved authority before it became
+        // indeterminate. Preserve quarantine and its recoverable native owner.
+        this.rustRuntimeOperationsBlocked = true;
+        this.running = false;
+        this.paused = true;
+      } else {
+        this.rustRuntimeOperationsBlocked = baseline.operationsBlocked;
+        this.running = baseline.running;
+        this.paused = this.multiplayerProgressionGameplayFrozen() || baseline.paused;
+      }
+      throw new RustWorldTransitionPreflightError(error);
+    }
+    const teardownFailures: unknown[] = [];
+    const attemptTeardown = async (operation: () => Promise<void>) => {
+      try { await operation(); }
+      catch (error) { teardownFailures.push(error); }
+    };
+    if (!preserveMultiplayerSession) {
+      await attemptTeardown(() => this.closeMultiplayerForRustTransition(reason));
+    }
+    await attemptTeardown(() => this.stopRustLivePlayerAuthorityR5());
+    await attemptTeardown(() => this.disposeRustLiveRendererR10());
+    await attemptTeardown(() => this.shutdownBoundNativePersistence());
+    if (teardownFailures.length) {
+      throw new AggregateError(teardownFailures, "Rust world transition teardown did not release every prior authority owner");
+    }
   }
 
   private async activateRustWorldRuntime(
@@ -6787,6 +10457,7 @@ export class VoxelEngine {
     save: WorldSave | null,
     generationIdentity: NonNullable<WorldMetadata["generationIdentity"]>,
   ) {
+    this.rustLastCompletedSaveAndQuitNativeCheckpoint = null;
     const config = createRustWorldRuntimeLiveConfigV1({
       worldId,
       worldSeed,
@@ -6805,37 +10476,132 @@ export class VoxelEngine {
         throw new Error("Rust world runtime lost readiness during hydration");
       }
       this.rustRuntimeHost = host;
+      this.rustGuestRuntimeManagerReleased = false;
+      this.rustNativeSaveSuppressedForMultiplayerRuntime = false;
+      this.rustPristineGuestTransitionCheckpointAdmitted = false;
       this.rustRuntimeHydrationState = kind === "create" ? "new-world" : "restored";
-      // Object.create-based lifecycle harnesses predate the production player
-      // authority gate and intentionally omit this injected member. Every real
-      // engine instance installs the strict production hook in the constructor.
-      await this.rustLivePlayerAuthorityActivation?.({ generation, kind, save, host });
-      this.assertRustLiveGenerationR5(generation, host, "player authority activation");
-      if (this.rustLivePlayerAuthorityProductionGate === true
-        && this.rustLivePlayerAuthorityState !== "ready") {
-        throw new Error("Rust player authority did not attest its complete production gate");
-      }
-      await this.trackRustAuthorityOperation(this.activateRustLiveRendererR10(generation, host));
-      if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
-        || host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") {
-        throw new Error("Rust world activation was superseded during renderer composition startup");
-      }
-      // Extraction validation remains owned by the pump even when no native
-      // composer was configured. Do not let a presentation-only backlog stall
-      // the sole fixed-step producer.
-      if (!this.rustLiveRenderRuntime) this.rustLiveRendererExtractionQueue.length = 0;
       return host;
     } catch (error) {
       this.rustRuntimeHost = null;
       this.rustRuntimeHydrationState = "blocked";
       this.rustLivePlayerAuthorityState = "blocked";
       this.rustLivePlayerAuthorityLastError = error instanceof Error ? error.message : String(error);
-      await this.stopRustLivePlayerAuthorityR5().catch(() => undefined);
-      this.rustLivePlayerAuthorityState = "blocked";
-      await this.disposeRustLiveRendererR10();
-      await this.shutdownBoundNativePersistence().catch(() => undefined);
-      await this.rustRuntimeManager.shutdown().catch(() => undefined);
       throw error;
+    }
+  }
+
+  private async finalizeRustWorldRuntime(
+    generation: number,
+    kind: "create" | "load" | "multiplayer-guest",
+    save: WorldSave | null,
+    host: RustWorldRuntimeManagedHostV1,
+  ) {
+    try {
+      this.assertRustLiveGenerationR5(generation, host, "world runtime finalization");
+      if (this.rustLivePlayerAuthorityRequestedR5) {
+        // Player terrain reconcile and fixed-step activation happen only after
+        // the certified browser ring and compatibility mirror are finalized.
+        if (!this.rustLivePlayerAuthorityActivation) {
+          throw new Error("Experimental Rust player authority has no activation implementation");
+        }
+        await this.rustLivePlayerAuthorityActivation({ generation, kind, save, host });
+        this.assertRustLiveGenerationR5(generation, host, "player authority activation");
+        if (this.rustLivePlayerAuthorityProductionGate === true
+          && this.rustLivePlayerAuthorityState !== "ready") {
+          throw new Error("Rust player authority did not attest its complete production gate");
+        }
+      }
+      if (this.rustTerrainLocatorEffectJournal) {
+        const recovery = this.rustLivePlayerAuthorityRequestedR5
+          ? "Rust locator recovery must complete before terrain residency and fixed-step activation"
+          : "This world has a pending native locator debit. Re-enable experimental Rust player authority to recover it before opening the world";
+        throw new Error(recovery);
+      }
+      if (kind === "create" && this.rustLivePlayerAuthorityRequestedR5) {
+        const pump = this.rustLiveInputPump;
+        if (!pump) throw new Error("Rust player activation completed without its authoritative input pump");
+        await this.checkpointRustLivePlayerNative(generation, pump);
+        this.assertRustLiveGenerationR5(generation, host, "post-bootstrap native checkpoint");
+      }
+      if (this.rustLivePlayerAuthorityRequestedR5) {
+        // The current R10 composer consumes the exact native player-camera
+        // extraction. Default mixed mode deliberately retains the complete
+        // TypeScript player and renderer until that presentation bridge is
+        // feature-neutral.
+        await this.trackRustAuthorityOperation(this.activateRustLiveRendererR10(generation, host));
+        if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
+          || host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") {
+          throw new Error("Rust world activation was superseded during renderer composition startup");
+        }
+        if (!this.rustLiveRenderRuntime && this.rustLiveRendererExtractionQueue) {
+          this.rustLiveRendererExtractionQueue.length = 0;
+        }
+      }
+    } catch (error) {
+      this.rustRuntimeHost = null;
+      this.rustRuntimeHydrationState = "blocked";
+      this.rustLivePlayerAuthorityState = "blocked";
+      this.rustLivePlayerAuthorityLastError = error instanceof Error ? error.message : String(error);
+      throw error;
+    }
+  }
+
+  private async cleanupFailedRustWorldRuntime(error: unknown) {
+    this.rustRuntimeOperationsBlocked = true;
+    this.rustRuntimeHost = null;
+    this.rustRuntimeHydrationState = "blocked";
+    this.rustLivePlayerAuthorityState = "blocked";
+    this.rustLivePlayerAuthorityLastError = error instanceof Error ? error.message : String(error);
+    const cleanupFailures: string[] = [];
+    const attempt = async (phase: string, operation: () => Promise<void>) => {
+      try { await operation(); }
+      catch (cleanupError) {
+        cleanupFailures.push(`${phase}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`);
+      }
+    };
+    await attempt("authority drain", () => this.drainRustAuthorityOperations());
+    await attempt("multiplayer close", () => this.closeMultiplayerForRustTransition("failed-world-transition"));
+    await attempt("post-multiplayer authority drain", () => this.drainRustAuthorityOperations());
+    await attempt("player authority stop", () => this.stopRustLivePlayerAuthorityR5());
+    this.rustLivePlayerAuthorityState = "blocked";
+    await attempt("renderer disposal", () => this.disposeRustLiveRendererR10());
+    await attempt("native persistence shutdown", () => this.shutdownBoundNativePersistence());
+    await attempt("runtime manager shutdown", () => this.rustRuntimeManager.shutdown());
+    if (cleanupFailures.length) {
+      this.rustLivePlayerAuthorityLastError = `${this.rustLivePlayerAuthorityLastError}; cleanup incomplete (${cleanupFailures.join("; ")})`;
+    }
+  }
+
+  /**
+   * Completes the browser half of a failed create rollback after every native
+   * owner has drained. The exact prior selection is restored explicitly;
+   * WorldStorage.deleteWorld's most-recent fallback is not authoritative.
+   */
+  private rollbackFailedRustWorldCreate(
+    provisionalWorldId: string,
+    baseline: RustWorldCreateRollbackBaselineV1,
+  ) {
+    try {
+      if (this.worldStorage.activeWorldId === provisionalWorldId) {
+        const restored = this.worldStorage.setActiveWorld(baseline.catalogActiveWorldId);
+        if (!restored.ok) {
+          throw new Error(`The provisional world remained recoverable because its prior catalog selection could not be restored. ${restored.error.message}`);
+        }
+      }
+      const deleted = this.worldStorage.deleteWorld(provisionalWorldId);
+      if (!deleted.ok) {
+        throw new Error(`The failed provisional world could not be removed. ${deleted.error.message}`);
+      }
+    } finally {
+      if (this.activeWorldId === provisionalWorldId) {
+        const restorableTitleShell = baseline.titleMode && !baseline.persistent;
+        this.activeWorldId = restorableTitleShell ? baseline.engineActiveWorldId : null;
+        this.persistent = false;
+        this.titleMode = true;
+      }
+      this.running = false;
+      this.paused = true;
+      this.events.onSave();
     }
   }
 
@@ -6852,18 +10618,69 @@ export class VoxelEngine {
     originSearchRadius = DEFAULT_SETTLEMENT_ORIGIN_SEARCH_RADIUS,
     agentTestWorld = false,
   ) {
-    const generation = ++this.rustRuntimeTransitionGeneration;
-    await this.prepareRustWorldTransition("world-create");
-    const created = this.createWorld(seed, mode, options, name, originSearchRadius, agentTestWorld);
-    this.running = false;
-    this.paused = true;
-    if (!created) {
-      this.rustRuntimeHydrationState = "blocked";
-      throw new Error("Browser world storage could not allocate a durable world ID");
+    if (!worldgenBuildUsesRustRuntime()) {
+      const created = this.createWorld(seed, mode, options, name, originSearchRadius, agentTestWorld);
+      if (!created) throw new Error("Browser world storage could not allocate a durable world ID");
+      return created;
     }
+    const normalizedOptions = normalizeWorldOptions(options);
+    const terrainMode = this.terrainGenerationMode();
+    const seedText = seed.trim() || this.randomSeed();
+    let settlementOrigin: TerrainSettlementLocatorEntryV1 | null = null;
+    if (terrainMode === "rust" && normalizedOptions.origin.mode !== "wilderness") {
+      this.rustOriginPreflightAbort?.abort();
+      const preflight = new AbortController();
+      const preflightGeneration = ++this.rustOriginPreflightGeneration;
+      const transitionBaseline = this.rustRuntimeTransitionGeneration;
+      const activeWorldBaseline = this.activeWorldId;
+      const profileBaseline = this.activeCharacterProfile?.id ?? null;
+      this.rustOriginPreflightAbort = preflight;
+      try {
+        settlementOrigin = await this.resolveRustSettlementOrigin(seedText, normalizedOptions, originSearchRadius, preflight.signal);
+        if (preflight.signal.aborted || this.disposed
+          || preflightGeneration !== this.rustOriginPreflightGeneration
+          || transitionBaseline !== this.rustRuntimeTransitionGeneration
+          || activeWorldBaseline !== this.activeWorldId
+          || profileBaseline !== (this.activeCharacterProfile?.id ?? null)) {
+          const error = new Error("Rust settlement-origin preflight was superseded");
+          error.name = "AbortError";
+          throw error;
+        }
+      } finally {
+        if (this.rustOriginPreflightAbort === preflight) this.rustOriginPreflightAbort = null;
+      }
+      if (!settlementOrigin) {
+        throw new Error("Authoritative Rust settlement locator found no materializable starting settlement within the requested radius");
+      }
+    }
+    let readiness: AbortController | null = null;
+    let allocationBaseline: RustWorldCreateRollbackBaselineV1 | null = null;
+    let provisionalWorldId: string | null = null;
     try {
+      await this.prepareRustWorldTransition("world-create");
+      const generation = ++this.rustRuntimeTransitionGeneration;
+      readiness = this.replaceTerrainGenerationReadiness();
+      this.assertTerrainGenerationTransition(generation, readiness, "new-world transition");
+      if (terrainMode === "rust") {
+        await this.prepareRustNewWorldTerrain(generation, readiness, seedText, normalizedOptions, settlementOrigin);
+      }
+      allocationBaseline = Object.freeze({
+        engineActiveWorldId: this.activeWorldId,
+        catalogActiveWorldId: this.worldStorage.activeWorldId,
+        persistent: this.persistent,
+        titleMode: this.titleMode,
+      });
+      const created = this.createWorld(seedText, mode, normalizedOptions, name, originSearchRadius, agentTestWorld);
+      this.running = false;
+      this.paused = true;
+      if (!created) {
+        this.rustRuntimeHydrationState = "blocked";
+        throw new Error("Browser world storage could not allocate a durable world ID");
+      }
+      provisionalWorldId = created.id;
+      this.assertTerrainGenerationTransition(generation, readiness, "new-world mirror finalization");
       if (!created.generationIdentity) throw new Error("New world catalog is missing its exact terrain generation identity");
-      await this.activateRustWorldRuntime(
+      const host = await this.activateRustWorldRuntime(
         generation,
         "create",
         created.id,
@@ -6871,15 +10688,31 @@ export class VoxelEngine {
         null,
         created.generationIdentity,
       );
+      this.assertTerrainGenerationTransition(generation, readiness, "new-world native hydration");
+      await this.finalizeRustWorldRuntime(generation, "create", null, host);
       this.rustRuntimeOperationsBlocked = false;
       this.running = true;
-      this.paused = false;
+      this.paused = this.multiplayerProgressionGameplayFrozen();
       this.titleMode = false;
       return created;
     } catch (error) {
+      if (error instanceof RustWorldTransitionPreflightError) throw error.failure;
       this.running = false;
       this.paused = true;
+      await this.cleanupFailedRustWorldRuntime(error);
+      if (provisionalWorldId && allocationBaseline) {
+        try {
+          this.rollbackFailedRustWorldCreate(provisionalWorldId, allocationBaseline);
+        } catch (rollbackError) {
+          const failure = error instanceof Error ? error.message : String(error);
+          const rollbackFailure = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+          throw new AggregateError([error, rollbackError], `${failure} Browser world rollback also failed: ${rollbackFailure}`);
+        }
+      }
       throw error;
+    } finally {
+      this.preparedRustNewWorld = null;
+      if (readiness && this.terrainGenerationReadinessAbort === readiness) this.terrainGenerationReadinessAbort = null;
     }
   }
 
@@ -6890,71 +10723,97 @@ export class VoxelEngine {
     worldId: string | null = this.worldStorage.activeWorldId,
   ) {
     if (!worldId) throw new Error("A durable world ID is required before Rust save hydration");
-    const generation = ++this.rustRuntimeTransitionGeneration;
-    await this.prepareRustWorldTransition("world-load");
-    const host = await this.activateRustWorldRuntime(
-      generation,
-      "load",
-      worldId,
-      save.seed,
-      save,
-      deriveWorldGenerationIdentityV1(save, options),
-    );
-    if (generation !== this.rustRuntimeTransitionGeneration || this.disposed) {
-      this.rustRuntimeOperationsBlocked = true;
-      throw new Error("Rust world load was superseded before the browser mirror could open");
-    }
-    try {
+    if (!worldgenBuildUsesRustRuntime()) {
       this.loadWorld(save, options, worldId);
-      this.reapplyRustLivePlayerViewR10(generation, host);
+      return true;
+    }
+    let readiness: AbortController | null = null;
+    try {
+      await this.prepareRustWorldTransition("world-load");
+      const generation = ++this.rustRuntimeTransitionGeneration;
+      readiness = this.replaceTerrainGenerationReadiness();
+      this.assertTerrainGenerationTransition(generation, readiness, "saved-world transition");
+      const normalizedOptions = normalizeWorldOptions(options);
+      const host = await this.activateRustWorldRuntime(
+        generation,
+        "load",
+        worldId,
+        save.seed,
+        save,
+        deriveWorldGenerationIdentityV1(save, normalizedOptions),
+      );
+      this.assertTerrainGenerationTransition(generation, readiness, "saved-world native activation");
+      if (this.terrainGenerationMode() === "rust") {
+        await this.prepareRustLoadedWorldTerrain(generation, readiness, save, normalizedOptions);
+      }
+      this.loadWorld(save, normalizedOptions, worldId);
+      this.running = false;
+      this.paused = true;
+      this.assertTerrainGenerationTransition(generation, readiness, "saved-world mirror finalization");
+      await this.finalizeRustWorldRuntime(generation, "load", save, host);
+      if (this.rustLivePlayerAuthorityProductionGate === true) this.reapplyRustLivePlayerViewR10(generation, host);
       this.rustRuntimeOperationsBlocked = false;
+      this.running = true;
+      this.paused = this.multiplayerProgressionGameplayFrozen();
       return true;
     } catch (error) {
-      this.rustRuntimeOperationsBlocked = true;
-      this.rustRuntimeHydrationState = "blocked";
-      await this.stopRustLivePlayerAuthorityR5().catch(() => undefined);
-      await this.drainRustAuthorityOperations();
-      await this.disposeRustLiveRendererR10();
-      await this.shutdownBoundNativePersistence().catch(() => undefined);
-      await this.rustRuntimeManager.shutdown().catch(() => undefined);
-      this.rustRuntimeHost = null;
+      if (error instanceof RustWorldTransitionPreflightError) throw error.failure;
+      await this.cleanupFailedRustWorldRuntime(error);
       throw error;
+    } finally {
+      this.preparedRustLoadedWorld = null;
+      if (readiness && this.terrainGenerationReadinessAbort === readiness) this.terrainGenerationReadinessAbort = null;
     }
   }
 
   async loadStoredWorldWithRustRuntime(id: string) {
     const metadata = this.worldStorage.listWorlds().find((world) => world.id === id);
     if (!metadata) throw new Error("That world does not exist on this device.");
-    if (!metadata.generationIdentity) {
-      throw new Error("This world's catalog lacks an exact native terrain identity. Its compatibility save remains protected until an explicit migration records one.");
-    }
-    const generation = ++this.rustRuntimeTransitionGeneration;
-    await this.prepareRustWorldTransition("world-load");
-    // Recover and hydrate before parsing or presenting the compatibility
-    // document. A legacy-only rich save therefore remains byte-for-byte
-    // protected when no lossless native migration adapter exists.
-    const host = await this.activateRustWorldRuntime(generation, "load", id, metadata.seed, null, metadata.generationIdentity);
-    if (generation !== this.rustRuntimeTransitionGeneration || this.disposed) {
-      this.rustRuntimeOperationsBlocked = true;
-      throw new Error("Rust world load was superseded before the browser mirror could open");
-    }
-    try {
+    if (!worldgenBuildUsesRustRuntime()) {
       const loaded = this.worldStorage.loadWorld(id);
       if (!loaded.ok) throw new Error(loaded.error.message);
       this.loadWorld(loaded.value.save, loaded.value.options, id);
-      this.reapplyRustLivePlayerViewR10(generation, host);
+      return loaded;
+    }
+    const migrationBootstrap = metadata.generationIdentity
+      ? null
+      : this.worldStorage.prepareNativeLegacyWorldMigration(id);
+    if (migrationBootstrap && !migrationBootstrap.ok) throw new Error(migrationBootstrap.error.message);
+    const generationIdentity = metadata.generationIdentity ?? migrationBootstrap!.value.generationIdentity;
+    let readiness: AbortController | null = null;
+    try {
+      await this.prepareRustWorldTransition("world-load");
+      const generation = ++this.rustRuntimeTransitionGeneration;
+      readiness = this.replaceTerrainGenerationReadiness();
+      this.assertTerrainGenerationTransition(generation, readiness, "stored-world transition");
+      // Recover, or migrate only an explicitly world-only source, before
+      // parsing or presenting the compatibility document. Rich saves remain
+      // byte-for-byte protected by WorldStorage's production safety gate.
+      const host = await this.activateRustWorldRuntime(generation, "load", id, metadata.seed, null, generationIdentity);
+      this.assertTerrainGenerationTransition(generation, readiness, "stored-world native activation");
+      const loaded = this.worldStorage.loadWorld(id, false);
+      if (!loaded.ok) throw new Error(loaded.error.message);
+      const normalizedOptions = normalizeWorldOptions(loaded.value.options);
+      if (this.terrainGenerationMode() === "rust") {
+        await this.prepareRustLoadedWorldTerrain(generation, readiness, loaded.value.save, normalizedOptions);
+      }
+      this.loadWorld(loaded.value.save, normalizedOptions, id);
+      this.running = false;
+      this.paused = true;
+      this.assertTerrainGenerationTransition(generation, readiness, "stored-world mirror finalization");
+      await this.finalizeRustWorldRuntime(generation, "load", loaded.value.save, host);
+      if (this.rustLivePlayerAuthorityProductionGate === true) this.reapplyRustLivePlayerViewR10(generation, host);
       this.rustRuntimeOperationsBlocked = false;
+      this.running = true;
+      this.paused = this.multiplayerProgressionGameplayFrozen();
       return loaded;
     } catch (error) {
-      this.rustRuntimeOperationsBlocked = true;
-      this.rustRuntimeHydrationState = "blocked";
-      await this.stopRustLivePlayerAuthorityR5().catch(() => undefined);
-      await this.drainRustAuthorityOperations();
-      await this.disposeRustLiveRendererR10();
-      await this.shutdownBoundNativePersistence().catch(() => undefined);
-      await this.rustRuntimeManager.shutdown().catch(() => undefined);
-      this.rustRuntimeHost = null;
+      if (error instanceof RustWorldTransitionPreflightError) throw error.failure;
+      await this.cleanupFailedRustWorldRuntime(error);
       throw error;
+    } finally {
+      this.preparedRustLoadedWorld = null;
+      if (readiness && this.terrainGenerationReadinessAbort === readiness) this.terrainGenerationReadinessAbort = null;
     }
   }
 
@@ -6984,16 +10843,25 @@ export class VoxelEngine {
     originSearchRadius = DEFAULT_SETTLEMENT_ORIGIN_SEARCH_RADIUS,
     agentTestWorld = false,
   ) {
+    const seedText = seed.trim() || this.randomSeed();
+    const normalizedOptions = normalizeWorldOptions(options);
+    const rustRequired = this.terrainGenerationMode() === "rust";
+    const prepared = this.preparedRustNewWorld;
+    if (rustRequired && (!prepared
+      || prepared.seedText !== seedText
+      || prepared.optionsSignature !== JSON.stringify(normalizedOptions))) {
+      throw new Error("Synchronous world creation is unavailable while Rust terrain authority is required; await createWorldWithRustRuntime");
+    }
     this.persistent = true;
-    this.running = true;
-    this.paused = false;
+    this.running = !rustRequired;
+    this.paused = this.multiplayerProgressionGameplayFrozen() || rustRequired;
     this.titleMode = false;
     this.mode = mode;
     this.creativeFlying = false;
     this.lastCreativeJumpTap = -Infinity;
     this.world.setRenderDistance(this.titleMode ? Math.min(this.settings.renderDistance, this.touchMode ? 4 : 6) : this.settings.renderDistance);
     this.localPlayerModel.setVariant(this.playerVariant);
-    this.worldOptions = normalizeWorldOptions(options);
+    this.worldOptions = normalizedOptions;
     this.agentTestWorld = agentTestWorld;
     this.agentWorldState = normalizeAgentWorldSave(null);
     this.agentDiagnostics = null;
@@ -7038,9 +10906,8 @@ export class VoxelEngine {
     this.multiplayerPlayerStates.clear();
     this.creatureTransferOffers.clear();
     this.multiplayerPlayerProgressions.clear();
-    this.multiplayerProgressTransfers.clear();
     this.creatureTransferOffers.clear();
-    this.multiplayerProgressOutgoing = [];
+    this.resetMultiplayerProgressionState();
     this.multiplayerPlayerWallets.clear();
     this.multiplayerPeerActiveMerchants.clear();
     this.spellKeyState = createSpellKeyState();
@@ -7097,13 +10964,33 @@ export class VoxelEngine {
     this.drowningAccumulator = 0;
     this.waterEntryMomentumSpeed = 0;
     this.waterSurfaceBreachReady = true;
+    this.waterShoreExitReady = true;
     this.waterSurfaceBreachSeconds = 0;
     this.waterSurfaceStrokeCooldownSeconds = 0;
     this.waterSurfaceBobActive = false;
-    this.world.reset(seed.trim() || this.randomSeed(), undefined, generationOptionsFromWorldOptions(this.worldOptions));
+    if (!rustRequired) this.world.reset(seedText, undefined, generationOptionsFromWorldOptions(this.worldOptions));
     const authorityId = `world:${this.world.seedText}`;
     const playerId = this.localPlayerId();
     this.mapKnowledge = createMapKnowledge(authorityId, playerId);
+    this.rustTerrainLocatorEffectJournal = null;
+    this.rustTerrainLocatorAppliedEffectIds = Object.freeze([]);
+    this.rustBasicDirtActionProjection = Object.freeze({ schema: 1, cursor: 0, lastReceiptHash: null });
+    this.rustNativeBlockEditProjection = Object.freeze({ schema: 1, cursor: 0, lastReceiptHash: null });
+    this.rustNativeBlockEditCheckpoint = null;
+    this.rustNativeBlockEditPendingFinalize = null;
+    this.rustNativeBlockEditQueuedSelectedSlotR5 = null;
+    this.rustTerrainLocatorCommitLocked = false;
+    this.rustNativeDropPickupProjection = Object.freeze({ schema: 1, cursor: 0, lastReceiptHash: null });
+    this.rustNativeDropPickupCheckpoint = null;
+    this.clearRustNativeDropPickupFinalizeRetryTimerV1();
+    this.rustNativeDropPickupPendingFinalize = null;
+    this.rustNativePlayerDropProjection = Object.freeze({ schema: 1, cursor: 0, lastReceiptHash: null });
+    this.rustNativePlayerDropCheckpoint = null;
+    this.rustNativePlayerDeathRespawnProjection = Object.freeze({ schema: 1, cursor: 0, lastReceiptHash: null });
+    this.rustNativePlayerDeathRespawnCheckpoint = null;
+    this.rustNativePlayerDeathRespawnPendingFinalize = null;
+    this.rustNativePlayerRespawnPlan = null;
+    this.rustLivePlayerRespawnPendingR5 = null;
     this.mapSurfaceSurveyedThisSession.clear();
     this.factionRelations = createFactionRelations(authorityId);
     if (this.activeCharacterProfile) {
@@ -7116,33 +11003,50 @@ export class VoxelEngine {
     this.bankAccount = createBankAccount(authorityId, playerId, this.day);
     this.stockMarket = createStockMarket(authorityId, playerId, this.world.seedText, this.day);
     const raceTraits = characterRaceTraits(this.activeCharacterProfile?.appearance.race ?? "wayfarer");
-    const settlementOrigin = this.world.resolveSettlementOrigin(
+    const settlementOrigin = rustRequired ? null : this.world.resolveSettlementOrigin(
       this.worldOptions.origin,
       raceTraits.waterBreathing,
       normalizeSettlementOriginSearchRadius(originSearchRadius),
     );
-    const spawn = settlementOrigin?.position ?? this.findSpawn();
-    this.startingSettlementId = settlementOrigin?.candidate.id ?? null;
+    const rustSettlementOrigin = rustRequired ? prepared?.settlementOrigin ?? null : null;
+    const spawn = rustSettlementOrigin?.position ?? prepared?.spawn ?? settlementOrigin?.position ?? this.findSpawn();
+    this.startingSettlementId = rustSettlementOrigin?.entry.id ?? settlementOrigin?.candidate.id ?? null;
     this.world.initializeAround(spawn.x, spawn.z);
-    const y = settlementOrigin?.position.y ?? this.world.surfaceAt(spawn.x, spawn.z) + 0.51;
+    const y = rustSettlementOrigin?.position.y ?? settlementOrigin?.position.y ?? this.world.surfaceAt(spawn.x, spawn.z) + 0.51;
     this.spawn.set(spawn.x, y, spawn.z);
     this.position.copy(this.spawn);
     this.resetDynamicWeather();
-    if (!(settlementOrigin?.candidate.environment === "underwater" && raceTraits.waterBreathing)) {
+    const settlementEnvironment = rustSettlementOrigin?.entry.environment ?? settlementOrigin?.candidate.environment ?? null;
+    if (!(settlementEnvironment === "underwater" && raceTraits.waterBreathing)) {
       for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
         for (let clearY = Math.floor(y + 0.5); clearY <= Math.floor(y + 2.5); clearY += 1) this.world.setBlock(spawn.x + dx, clearY, spawn.z + dz, BlockId.Air);
       }
     }
-    if (settlementOrigin) this.mapKnowledge = discoverSettlement(this.mapKnowledge, {
-      id: `settlement:${settlementOrigin.candidate.id}`,
-      name: `${FACTIONS[settlementOrigin.candidate.factionId].name} ${settlementOrigin.candidate.size}`,
-      position: { x: settlementOrigin.candidate.center.x, y: settlementOrigin.candidate.center.y ?? y, z: settlementOrigin.candidate.center.z },
+    const startingSettlement = rustSettlementOrigin ? {
+      id: rustSettlementOrigin.entry.id,
+      factionId: rustSettlementOrigin.entry.factionId,
+      size: rustSettlementOrigin.entry.size,
+      x: rustSettlementOrigin.entry.x,
+      y: rustSettlementOrigin.markerY,
+      z: rustSettlementOrigin.entry.z,
+    } : settlementOrigin ? {
+      id: settlementOrigin.candidate.id,
+      factionId: settlementOrigin.candidate.factionId,
+      size: settlementOrigin.candidate.size,
+      x: settlementOrigin.candidate.center.x,
+      y: settlementOrigin.candidate.center.y ?? y,
+      z: settlementOrigin.candidate.center.z,
+    } : null;
+    if (startingSettlement) this.mapKnowledge = discoverSettlement(this.mapKnowledge, {
+      id: `settlement:${startingSettlement.id}`,
+      name: `${FACTIONS[startingSettlement.factionId].name} ${startingSettlement.size}`,
+      position: { x: startingSettlement.x, y: startingSettlement.y, z: startingSettlement.z },
       playerId,
       discoveredAt: Date.now(),
       icon: "settlement",
       settlementKnowledge: "visited",
-      factionId: settlementOrigin.candidate.factionId,
-      settlementSize: settlementOrigin.candidate.size,
+      factionId: startingSettlement.factionId,
+      settlementSize: startingSettlement.size,
     });
     this.reconcileSystemQuests(true);
     if (this.questBook.active.some((quest) => quest.questId === "main-first-dawn")) this.questBook = pinQuest(this.questBook, "main-first-dawn");
@@ -7163,10 +11067,53 @@ export class VoxelEngine {
   previewWorldOrigin(seed: string, options: Partial<WorldOptions>, maxRegionRadius = 18) {
     const normalized = normalizeWorldOptions(options);
     if (normalized.origin.mode === "wilderness" || !normalized.structures || normalized.settlementDensity <= 0) return null;
-    this.originPreviewWorld ??= new ChunkWorld();
+    if (this.terrainGenerationMode() === "rust") return null;
+    this.originPreviewWorld ??= new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
     this.originPreviewWorld.reset(seed.trim() || "WILDERNESS", undefined, generationOptionsFromWorldOptions(normalized));
     const traits = characterRaceTraits(this.activeCharacterProfile?.appearance.race ?? "wayfarer");
     return this.originPreviewWorld.resolveSettlementOrigin(normalized.origin, traits.waterBreathing, maxRegionRadius);
+  }
+
+  async previewWorldOriginAuthoritative(
+    seed: string,
+    options: Partial<WorldOptions>,
+    maxRegionRadius = 18,
+    signal?: AbortSignal,
+  ): Promise<WorldOriginPreviewV1 | null> {
+    const normalized = normalizeWorldOptions(options);
+    if (normalized.origin.mode === "wilderness" || !normalized.structures || normalized.settlementDensity <= 0) return null;
+    if (this.terrainGenerationMode() !== "rust") {
+      const preview = this.previewWorldOrigin(seed, normalized, maxRegionRadius);
+      if (!preview) return null;
+      return Object.freeze({
+        candidate: Object.freeze({
+          id: preview.candidate.id,
+          factionId: preview.candidate.factionId,
+          size: preview.candidate.size,
+          environment: preview.candidate.environment ?? "surface",
+          biome: preview.candidate.biome,
+          center: preview.candidate.center,
+        }),
+        position: preview.position,
+        anchorKind: preview.anchorKind,
+        distanceBlocks: preview.distanceBlocks,
+      });
+    }
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    signal?.addEventListener("abort", abort, { once: true });
+    try {
+      if (signal?.aborted) controller.abort();
+      const entry = await this.resolveRustSettlementOrigin(
+        seed.trim() || "WILDERNESS",
+        normalized,
+        maxRegionRadius,
+        controller.signal,
+      );
+      return entry ? this.settlementLocatorPreview(entry) : null;
+    } finally {
+      signal?.removeEventListener("abort", abort);
+    }
   }
 
   /** Deterministic in-engine gallery used by browser visual regression checks. */
@@ -7227,7 +11174,7 @@ export class VoxelEngine {
     this.visualWorldTime = this.worldTime;
     this.syncOrbRackVisuals(true);
     this.emitHud(true);
-    return this.resolveChest(auditChestBlock);
+    return this.resolveChest(auditChestBlock) ?? auditChestBlock;
   }
 
   /** Deterministic exact-runtime gallery used to review the companion drone. */
@@ -7339,7 +11286,7 @@ export class VoxelEngine {
     const auditRadius = mode === "flow" ? 14 : 6;
     for (let cx = Math.floor((centerX - auditRadius) / CHUNK_SIZE); cx <= Math.floor((centerX + auditRadius) / CHUNK_SIZE); cx += 1) {
       for (let cz = Math.floor((centerZ - auditRadius) / CHUNK_SIZE); cz <= Math.floor((centerZ + auditRadius) / CHUNK_SIZE); cz += 1) {
-        this.world.generateChunk(cx, cz);
+        this.world.requestChunk(cx, cz);
       }
     }
     if (mode === "flow") {
@@ -7587,6 +11534,9 @@ export class VoxelEngine {
    * worker -> main-thread landmark handoff used during ordinary exploration.
    */
   primeGeneratedPoiAudit() {
+    if (this.terrainGenerationMode() === "rust") {
+      throw new Error("The deterministic TypeScript POI locator audit requires a typescript-rollback build and a reload");
+    }
     const startChunkX = Math.floor(this.position.x / CHUNK_SIZE);
     const startChunkZ = Math.floor(this.position.z / CHUNK_SIZE);
     for (let radius = 8; radius <= 64; radius += 1) {
@@ -7638,11 +11588,23 @@ export class VoxelEngine {
 
   /** Compatibility/audit mirror only. Normal UI and agent flows use the awaited wrapper above. */
   loadWorld(save: WorldSave, options: Partial<WorldOptions> = save.options ?? {}, worldId: string | null = this.worldStorage.activeWorldId) {
+    const normalizedOptions = normalizeWorldOptions(options);
+    const rustRequired = this.terrainGenerationMode() === "rust";
+    const prepared = this.preparedRustLoadedWorld;
+    if (rustRequired && (!prepared
+      || prepared.seedText !== save.seed
+      || prepared.optionsSignature !== JSON.stringify(normalizedOptions)
+      || prepared.playerX !== save.player.x
+      || prepared.playerZ !== save.player.z)) {
+      throw new Error("Synchronous world load is unavailable while Rust terrain authority is required; await loadWorldWithRustRuntime");
+    }
+    this.multiplayerPlayerProgressions.clear();
+    this.resetMultiplayerProgressionState();
     this.captureSystemDiagnostics = createCaptureSystemDiagnostics();
     this.recordLegacyCaptureMigration(save);
     this.persistent = true;
-    this.running = true;
-    this.paused = false;
+    this.running = !rustRequired;
+    this.paused = this.multiplayerProgressionGameplayFrozen() || rustRequired;
     this.titleMode = false;
     this.mode = save.mode === "builder" ? "builder" : "survival";
     this.creativeFlying = false;
@@ -7650,7 +11612,7 @@ export class VoxelEngine {
     this.playerVariant = save.playerVariant === "female" ? "female" : "male";
     this.world.setRenderDistance(this.settings.renderDistance);
     this.localPlayerModel.setVariant(this.playerVariant);
-    this.worldOptions = normalizeWorldOptions(options);
+    this.worldOptions = normalizedOptions;
     this.agentTestWorld = save.agentTestWorld === true;
     this.agentWorldState = normalizeAgentWorldSave(save.agentPlatform);
     this.agentDiagnostics = null;
@@ -7671,10 +11633,11 @@ export class VoxelEngine {
     this.drowningAccumulator = 0;
     this.waterEntryMomentumSpeed = 0;
     this.waterSurfaceBreachReady = true;
+    this.waterShoreExitReady = true;
     this.waterSurfaceBreachSeconds = 0;
     this.waterSurfaceStrokeCooldownSeconds = 0;
     this.waterSurfaceBobActive = false;
-    this.world.reset(save.seed, save.edits, generationOptionsFromWorldOptions(this.worldOptions, save.generatorProfile ?? "world-below-v15"), save.blockFacings);
+    if (!rustRequired) this.world.reset(save.seed, save.edits, generationOptionsFromWorldOptions(this.worldOptions, save.generatorProfile ?? "world-below-v15"), save.blockFacings);
     this.world.restoreSurfaceRoadGraph(save.surfaceRoadGraph);
     this.world.initializeAround(save.player.x, save.player.z);
     this.position.set(save.player.x, save.player.y, save.player.z);
@@ -7702,6 +11665,45 @@ export class VoxelEngine {
     this.mapKnowledge = normalizeMapKnowledge(save.mapKnowledge, authorityId, playerId);
     this.mapSurfaceSurveyedThisSession.clear();
     this.questBook = normalizeQuestBook(save.questBook);
+    this.rustTerrainLocatorEffectJournal = save.rustTerrainLocatorEffectJournal === undefined
+      || save.rustTerrainLocatorEffectJournal === null
+      ? null
+      : rehydrateRustTerrainLocatorEffectJournalV1(save.rustTerrainLocatorEffectJournal);
+    this.rustTerrainLocatorAppliedEffectIds = normalizeRustTerrainLocatorAppliedEffectIdsV1(
+      save.rustTerrainLocatorAppliedEffectIds ?? [],
+    );
+    this.rustBasicDirtActionProjection = normalizeRustBasicDirtActionProjectionCursorV1(
+      save.rustBasicDirtActionProjection,
+    );
+    this.rustNativeBlockEditProjection = normalizeRustNativeBlockEditProjectionCursorV1(
+      save.rustNativeBlockEditProjection,
+    );
+    this.rustNativeBlockEditCheckpoint = null;
+    this.rustNativeBlockEditPendingFinalize = null;
+    this.rustNativeBlockEditQueuedSelectedSlotR5 = null;
+    this.rustTerrainLocatorCommitLocked = false;
+    this.rustNativeDropPickupProjection = normalizeRustNativeDropPickupProjectionCursorV1(
+      save.rustNativeDropPickupProjection,
+    );
+    this.rustNativeDropPickupCheckpoint = null;
+    this.clearRustNativeDropPickupFinalizeRetryTimerV1();
+    this.rustNativeDropPickupPendingFinalize = null;
+    this.rustNativePlayerDropProjection = normalizeRustNativePlayerDropProjectionCursorV1(
+      save.rustNativePlayerDropProjection,
+    );
+    this.rustNativePlayerDropCheckpoint = null;
+    this.rustNativePlayerDeathRespawnProjection = normalizeRustNativePlayerDeathRespawnProjectionCursorV1(
+      save.rustNativePlayerDeathRespawnProjection,
+    );
+    this.rustNativePlayerDeathRespawnCheckpoint = null;
+    this.rustNativePlayerDeathRespawnPendingFinalize = null;
+    this.rustNativePlayerRespawnPlan = save.rustNativePlayerRespawnPlan === undefined
+      || save.rustNativePlayerRespawnPlan === null
+      ? null
+      : rustLivePlayerRespawnPlanRecordV1(
+        rehydrateRustLivePlayerRespawnPlanV1(save.rustNativePlayerRespawnPlan),
+      );
+    this.rustLivePlayerRespawnPendingR5 = null;
     this.sideQuestDefinitions = Array.isArray(save.sideQuestDefinitions) ? save.sideQuestDefinitions.slice(0, 128) : [];
     this.reconcileSystemQuests(true);
     this.blueprints = normalizeBlueprintState(save.blueprints);
@@ -7856,10 +11858,13 @@ export class VoxelEngine {
     ]) this.persistentMachineLastStep.set(key, restoredAt);
     this.persistentMachineTimer = 0;
     for (const savedBoat of save.boats ?? []) this.restoreSailboat(savedBoat);
-    for (const savedCreature of piehouseSave.creatures) this.restoreCreature(savedCreature);
-    this.sleepingCreatures = (save.sleepingCreatures ?? [])
-      .filter((saved): saved is SavedCreature => Boolean(saved && saved.kind in MOB_DEFS && Number.isFinite(saved.id)))
-      .map((saved) => ({ ...saved }));
+    // The Piehouse compatibility pass above has already moved authored legacy
+    // residents, so deferral and restore derive residency from identical data.
+    this.sleepingCreatures = this.restoreLoadedCreatureRecords(
+      piehouseSave.creatures,
+      save.sleepingCreatures ?? [],
+      rustRequired,
+    );
     const ecologyTick = this.ecologyTick();
     this.ecologySectors = new Map(Object.entries(save.ecologySectors ?? {}).flatMap(([key, sector]) => {
       if (!/^-?\d+,-?\d+$/u.test(key) || !sector || typeof sector !== "object") return [];
@@ -7878,6 +11883,23 @@ export class VoxelEngine {
       if (!ITEMS[savedDrop.item] || savedDrop.count <= 0) continue;
       const normalizedDrop = normalizeCaptureOrbInventorySlot({ item: savedDrop.item, count: savedDrop.count, ...(savedDrop.durability !== undefined ? { durability: savedDrop.durability } : {}), ...(savedDrop.metadata ? { metadata: savedDrop.metadata } : {}) });
       if (!normalizedDrop) continue;
+      if (savedDrop.rustEntityId !== undefined) {
+        const nativeOptions = rustDropSpawnOptionsFromSave(savedDrop);
+        if (!nativeOptions) continue;
+        let drop: DropEntity | undefined;
+        try {
+          drop = this.spawnDrop(
+            normalizedDrop.item,
+            normalizedDrop.count,
+            new THREE.Vector3(savedDrop.x, savedDrop.y, savedDrop.z),
+            normalizedDrop.durability,
+            normalizedDrop.metadata,
+            nativeOptions,
+          );
+        } catch { continue; }
+        if (drop) drop.age = clamp(Number(savedDrop.age) || 0, 0, 115);
+        continue;
+      }
       const drop = this.spawnDrop(normalizedDrop.item, normalizedDrop.count, new THREE.Vector3(savedDrop.x, savedDrop.y, savedDrop.z), normalizedDrop.durability, normalizedDrop.metadata);
       if (!drop) continue;
       drop.mesh.position.set(savedDrop.x, savedDrop.y, savedDrop.z);
@@ -7918,6 +11940,10 @@ export class VoxelEngine {
       this.multiplayerState.role = awaitingGuest ? "host" : this.multiplayer.role;
       this.multiplayerState.peers = this.multiplayer.getPeers();
     }
+    this.multiplayerState.guestWorldReady = isMultiplayerGuestWorldReady(
+      this.multiplayerState.role,
+      this.multiplayerReceivedSnapshot,
+    );
     this.multiplayerState.agents = authority.list();
     this.multiplayerState.chat = chat.list();
     this.multiplayerState.newestChatSequence = chat.newestSequence();
@@ -8196,7 +12222,7 @@ export class VoxelEngine {
 
   setLocalAgentTestPaused(paused: boolean) {
     if (!this.assertLocalAgentTestAdmin() || !this.agentTestWorld) return { ok: false as const, code: "test_admin_denied" };
-    this.paused = paused;
+    this.paused = this.multiplayerProgressionGameplayFrozen() || paused;
     return { ok: true as const, paused: this.paused };
   }
 
@@ -8589,32 +12615,145 @@ export class VoxelEngine {
       waterloggedBlockIds: template.waterloggedBlockIds,
       interest: (input) => this.rustAuthorityInterestSource(input),
     });
+    let transitionStarting = false;
     return async (input: Parameters<typeof factory>[0]) => {
-      const binding = await factory(input);
+      this.rustLastCompletedSaveAndQuitNativeCheckpoint = null;
+      const descriptor = parseRustMultiplayerRuntimeDescriptorV2(input.descriptor);
+      if (descriptor.generatorHash !== template.generatorHash) {
+        throw new RustMultiplayerRuntimeBootstrapErrorV1("generator-mismatch", "Host and guest generator fingerprints differ");
+      }
+      if (descriptor.terrainContentHash !== template.terrainContentHash) {
+        throw new RustMultiplayerRuntimeBootstrapErrorV1("terrain-content-mismatch", "Host and guest terrain corpus fingerprints differ");
+      }
+      if (input.signal.aborted || this.disposed) {
+        throw new RustMultiplayerRuntimeBootstrapErrorV1("cancelled", "Rust guest runtime startup was cancelled");
+      }
+      if (transitionStarting) {
+        throw new RustMultiplayerRuntimeBootstrapErrorV1("concurrent-start", "Rust guest runtime transition is already starting");
+      }
+      transitionStarting = true;
+      let generation: number | null = null;
+      let binding: Awaited<ReturnType<typeof factory>> | null = null;
       try {
-        const host = this.rustRuntimeManager.requireReady();
-        await this.rustWorldHydration({ kind: "multiplayer-guest", worldId: input.descriptor.universeId, save: null, host });
-        this.rustRuntimeHost = host;
-        this.rustRuntimeHydrationState = "guest-bootstrap";
-        this.rustRuntimeOperationsBlocked = false;
-        return binding;
-      } catch (error) {
-        await binding.shutdown().catch(() => undefined);
+        // Descriptor/content rejection happens above while the local world is
+        // still untouched. Only a valid offered runtime may cross this durable
+        // save and ownership handoff, and the in-flight guest session itself
+        // must survive it so signaling can adopt the replacement worker.
+        await this.prepareRustWorldTransition("multiplayer-guest", true);
+        generation = ++this.rustRuntimeTransitionGeneration;
+        this.rustGuestRuntimeManagerReleased = false;
         this.rustRuntimeHost = null;
+        if (input.signal.aborted || this.disposed) {
+          throw new RustMultiplayerRuntimeBootstrapErrorV1("cancelled", "Rust guest runtime startup was cancelled");
+        }
+        binding = await factory(Object.freeze({ descriptor, signal: input.signal }));
+        const host = this.rustRuntimeManager.requireReady();
+        if (generation !== this.rustRuntimeTransitionGeneration || this.disposed) {
+          throw new Error("Rust guest runtime activation was superseded before hydration");
+        }
+        await this.rustWorldHydration({ kind: "multiplayer-guest", worldId: input.descriptor.universeId, save: null, host });
+        if (generation !== this.rustRuntimeTransitionGeneration || this.disposed
+          || host.diagnostics().state !== "ready") {
+          throw new Error("Rust guest runtime lost readiness during hydration");
+        }
+        this.rustRuntimeHost = host;
+        this.rustGuestRuntimeManagerReleased = false;
+        this.rustRuntimeHydrationState = "guest-bootstrap";
+        // R5 remains blocked until the accepted host keyframe has supplied the
+        // guest spawn and player-state compatibility image used to bootstrap
+        // a new pump against this exact runtime. Default mixed mode has no
+        // player pump to rebind and may expose the attested runtime now.
+        this.rustRuntimeOperationsBlocked = this.rustLivePlayerAuthorityRequestedR5;
+        const acceptedBinding = binding;
+        let shutdownPromise: Promise<unknown> | null = null;
+        return Object.freeze({
+          ...acceptedBinding,
+          shutdown: () => shutdownPromise ??= (async () => {
+            const failures: unknown[] = [];
+            if (generation === this.rustRuntimeTransitionGeneration) {
+              this.rustRuntimeOperationsBlocked = true;
+              this.rustRuntimeTransitionGeneration += 1;
+              this.running = false;
+              this.paused = true;
+              this.clearInput();
+              try { await this.stopRustLivePlayerAuthorityR5(); }
+              catch (error) { failures.push(error); }
+              try { await this.disposeRustLiveRendererR10(); }
+              catch (error) { failures.push(error); }
+            }
+            try {
+              await acceptedBinding.shutdown();
+              this.rustGuestRuntimeManagerReleased = true;
+            }
+            catch (error) { failures.push(error); }
+            if (this.rustRuntimeHost === host) this.rustRuntimeHost = null;
+            this.rustRuntimeHydrationState = failures.length ? "blocked" : "none";
+            if (failures.length) {
+              throw new AggregateError(failures, "Rust guest runtime shutdown did not release every authority owner");
+            }
+          })(),
+        });
+      } catch (error) {
+        if (generation === null) throw error;
+        try {
+          if (binding) await binding.shutdown();
+          else await this.rustRuntimeManager.shutdown();
+          this.rustGuestRuntimeManagerReleased = true;
+        } catch { /* Preserve the transition failure; later lifecycle cleanup remains blocked. */ }
+        this.rustRuntimeHost = null;
+        this.rustRuntimeOperationsBlocked = true;
         this.rustRuntimeHydrationState = "blocked";
+        this.rustLivePlayerAuthorityState = "blocked";
+        this.rustLivePlayerAuthorityLastError = error instanceof Error ? error.message : String(error);
         throw error;
+      } finally {
+        transitionStarting = false;
       }
     };
   }
 
   private async beginMultiplayerSession(name: string, role: "host" | "guest") {
-    await this.closeHostRendezvous();
     const prior = this.multiplayer;
-    if (prior) {
+    if (prior?.role === "guest") {
+      const releaseProgressionFreeze = this.acquireMultiplayerProgressionGameplayFreeze();
+      try {
+        await this.drainGuestProgressionForGracefulDisconnect(prior);
+        if (this.multiplayer !== prior) {
+          throw new Error("The multiplayer session changed while its player progression was draining.");
+        }
+        // Detach in the same continuation as the exact clean observation. No
+        // browser task can create another local tail between these statements.
+        this.running = false;
+        this.paused = true;
+        this.multiplayer = null;
+        prior.dispose("new-session");
+      } finally {
+        releaseProgressionFreeze();
+      }
       await prior.drainAuthority().catch(() => undefined);
+      await this.closeHostRendezvous();
+    } else {
+      await this.closeHostRendezvous();
+    }
+    if (prior && prior.role !== "guest") {
+      await prior.drainAuthority().catch(() => undefined);
+      if (this.multiplayer !== prior) {
+        throw new Error("The multiplayer session changed while a replacement was starting.");
+      }
+      this.multiplayer = null;
       prior.dispose("new-session");
       await prior.drainAuthority().catch(() => undefined);
     }
+    // A native save that began while this was still a pristine single-player
+    // runtime owns the same integrated authority queue as multiplayer setup.
+    // Stop admitting new checkpoints first, then await that exact operation
+    // before any MultiplayerSession setup can negotiate/grant/replicate and
+    // permanently consume the runtime's network-pristine state.
+    this.rustPristineGuestTransitionCheckpointAdmitted = role === "guest"
+      && !this.rustNativeSaveSuppressedForMultiplayerRuntime;
+    this.rustNativeSaveSuppressedForMultiplayerRuntime = true;
+    const pendingNativeSave = this.rustNativeSaveOperation;
+    if (pendingNativeSave) await pendingNativeSave;
     this.removeAllRemotePlayers();
     this.agentAuthority = new AgentAuthority();
     (this.agentChat ??= new AgentChatRing()).clear();
@@ -8634,6 +12773,16 @@ export class VoxelEngine {
     this.multiplayerState.inviteCode = "";
     this.multiplayerState.answerCode = "";
     this.multiplayerState.error = "";
+    // Authority receipts and transport cursors are scoped to one
+    // MultiplayerSession. A replacement guest starts a fresh native receiver,
+    // while a replacement host has no live peer connections yet.
+    this.rustPeerDeltaSequences.clear();
+    this.rustAuthorityDeltaApplied = 0;
+    this.rustAuthorityResyncs = 0;
+    this.rustAuthorityRejections = 0;
+    this.rustAuthorityLastStateHash = null;
+    this.rustAuthorityLastError = null;
+    this.rustAuthorityLastRejection = null;
     const support = detectMultiplayerSupport();
     this.multiplayerState.supported = support.supported;
     this.multiplayerState.reasons = support.reasons;
@@ -8687,6 +12836,9 @@ export class VoxelEngine {
     this.multiplayerState.role = null;
     this.multiplayerState.peers = [];
     this.multiplayerPoseTimer = 0;
+    this.multiplayerPoseHeartbeatTimer = 0;
+    this.multiplayerPoseSignature = null;
+    this.multiplayerLastOutboundPose = null;
     this.multiplayerWorldTimer = 0;
     this.multiplayerSnapshotTimer = 0;
     this.multiplayerPlayerStateTimer = 0;
@@ -8696,13 +12848,8 @@ export class VoxelEngine {
     // health, hunger and progression image as stale.
     this.multiplayerPlayerStateRevision = 0;
     this.multiplayerPlayerStateSignature = "";
-    this.multiplayerProgressionRevision = 0;
-    this.multiplayerProgressionReceived = false;
-    this.multiplayerProgressionTimer = 1;
-    this.multiplayerProgressionSignature = "";
-    this.multiplayerProgressTransfers.clear();
     this.creatureTransferOffers.clear();
-    this.multiplayerProgressOutgoing = [];
+    this.resetMultiplayerProgressionState(1);
     this.multiplayerBoatInputs.clear();
     this.pendingGuestDropRequests.clear();
     this.lastNetworkMobSnapshotTick = -1;
@@ -8711,6 +12858,7 @@ export class VoxelEngine {
     this.lastNetworkDropSnapshotScope = null;
     this.pendingGuestCreatureInventoryRequests?.clear();
     this.pendingGuestPlacementRequests.clear();
+    this.deferredRemoteBlockActions.clear();
     this.pendingNetworkMobDeaths.clear();
     this.multiplayerContainerSignatures = new Map([...this.chests.entries()].map(([id, slots]) => [id, JSON.stringify(slots.map(networkItemStack))]));
     this.multiplayerContainerAwaiting.clear();
@@ -8899,92 +13047,119 @@ export class VoxelEngine {
   }
 
   async disconnectMultiplayer(reason = "local-disconnect") {
-    const closingSession = this.multiplayer;
-    const closingRole = closingSession?.role ?? null;
-    const hadSession = Boolean(closingSession);
-    const closingRendezvous = this.hostRendezvous;
-    this.hostRendezvous = null;
-    if (closingSession?.role === "guest" && this.multiplayerProgressionReceived) {
-      // A deliberate Leave must not discard journal/map work made since the
-      // five-second background checkpoint. RTCDataChannel.close drains data
-      // already queued by send(), so enqueue every bounded chunk first.
-      this.syncMultiplayerPlayerProgression();
-      this.flushPlayerProgressionTransfers(512);
-    }
-    // Dispose synchronously after the final guest transfer has been queued so
-    // no caller can race another send into the closing session. The authority
-    // drain below remains awaited before a guest-owned Rust runtime is stopped.
-    closingSession?.dispose(reason);
-    this.multiplayer = null;
-    this.removeAllRemotePlayers();
-    const support = detectMultiplayerSupport();
-    this.multiplayerState = {
-      supported: support.supported,
-      reasons: support.reasons,
-      status: "idle",
-      role: null,
-      peers: [],
-      inviteCode: "",
-      answerCode: "",
-      roomCode: "",
-      rendezvousStatus: "closed",
-      error: "",
-      agents: [],
-      chat: [],
-      newestChatSequence: 0,
-      agentTasks: [],
-      agentWaypoints: [],
-    };
-    this.agentAuthority = new AgentAuthority();
-    (this.agentChat ??= new AgentChatRing()).clear();
-    this.localChatSequence = 0;
-    (this.agentInventories ??= new Map()).clear();
-    (this.agentInventoryRevisions ??= new Map()).clear();
-    (this.agentObservationSequences ??= new Map()).clear();
-    (this.agentRuntimeTasks ??= new Map()).clear();
-    this.clearAgentWorkRuntime();
-    this.agentVoiceAssembler?.clear();
-    this.agentVoicePending = [];
-    (this.localMutedAgentVoices ??= new Set()).clear();
-    (this.localAgentVoiceGains ??= new Map()).clear();
-    this.latestAgentObservation = null;
-    this.latestAgentResult = null;
-    // Prototype-only compatibility fixtures may omit the post-Rust receipt
-    // map; real engines always construct it as the readonly field above.
-    const pendingAgentReceipts = this.pendingAgentCommandReceipts as Map<string, Readonly<{
-      resolve: (value: Readonly<{ accepted: boolean; code?: string; error?: string }>) => void;
-      timeout: number;
-    }>> | undefined;
-    for (const [commandId, pending] of pendingAgentReceipts ?? []) {
-      window.clearTimeout(pending.timeout);
-      pending.resolve({ accepted: false, code: "session-closed", error: `Command ${commandId} was cancelled because the multiplayer session closed` });
-    }
-    pendingAgentReceipts?.clear();
-    this.multiplayerReceivedSnapshot = false;
-    this.sleepVotes.clear();
-    this.multiplayerContainerAwaiting.clear();
-    this.multiplayerOptimisticContainers?.clear();
-    this.pendingGuestCreatureInventoryRequests?.clear();
-    this.pendingGuestPlacementRequests.clear();
-    this.multiplayerPeerActiveContainers.clear();
-    this.multiplayerPeerContainerSignatures.clear();
-    this.multiplayerFacilityPlayerBaseline = null;
-    this.pendingReliableRequests.clear();
-    this.multiplayerProgressTransfers.clear();
-    this.multiplayerProgressOutgoing = [];
-    this.multiplayerProgressionReceived = false;
-    this.multiplayerBoatInputs.clear();
-    if (hadSession && !this.titleMode && !this.disposed) this.events.onToast("Multiplayer session closed. The host-device world remains saved locally.");
-    if (!this.disposed) this.emitHud(true);
-    await closingRendezvous?.close().catch(() => undefined);
-    if (closingSession) {
-      await closingSession.drainAuthority?.().catch(() => undefined);
-    }
-    if (closingRole === "guest") {
-      await this.rustRuntimeManager?.shutdown().catch(() => undefined);
-      this.rustRuntimeHost = null;
-      this.rustRuntimeOperationsBlocked = true;
-      this.rustRuntimeHydrationState = "none";
+    const requestedSession = this.multiplayer;
+    const releaseProgressionFreeze = reason === "local-disconnect"
+      && requestedSession?.role === "guest"
+      ? this.acquireMultiplayerProgressionGameplayFreeze()
+      : null;
+    try {
+      if (reason === "local-disconnect") {
+        await this.drainGuestProgressionForGracefulDisconnect(requestedSession);
+        // Concurrent callers share the exact drain. Only the first continuation
+        // that still owns this session may detach and reset it.
+        if (this.multiplayer !== requestedSession) return;
+      }
+      this.multiplayerTerrainReadinessGeneration += 1;
+      this.multiplayerTerrainReadinessAbort?.abort();
+      this.multiplayerTerrainReadinessAbort = null;
+      const closingSession = this.multiplayer;
+      const closingRole = closingSession?.role ?? null;
+      const hadSession = Boolean(closingSession);
+      const closingRendezvous = this.hostRendezvous;
+      this.hostRendezvous = null;
+      if (reason !== "local-disconnect") {
+        // Protocol failure and shutdown paths cannot keep a broken session alive;
+        // make one bounded best-effort enqueue before their mandatory teardown.
+        this.bestEffortGuestProgressionFlush(closingSession);
+      }
+      if (closingRole === "guest") {
+        this.running = false;
+        this.paused = true;
+      }
+      // Detach synchronously after the strict preflight. This makes teardown
+      // single-owner even when two UI/lifecycle callers awaited the same drain.
+      this.multiplayer = null;
+      let disposeFailure: unknown = null;
+      try { closingSession?.dispose(reason); }
+      catch (error) { disposeFailure = error; }
+      this.removeAllRemotePlayers();
+      const support = detectMultiplayerSupport();
+      this.multiplayerState = {
+        supported: support.supported,
+        reasons: support.reasons,
+        status: "idle",
+        role: null,
+        guestWorldReady: false,
+        peers: [],
+        inviteCode: "",
+        answerCode: "",
+        roomCode: "",
+        rendezvousStatus: "closed",
+        error: "",
+        agents: [],
+        chat: [],
+        newestChatSequence: 0,
+        agentTasks: [],
+        agentWaypoints: [],
+      };
+      this.agentAuthority = new AgentAuthority();
+      (this.agentChat ??= new AgentChatRing()).clear();
+      this.localChatSequence = 0;
+      (this.agentInventories ??= new Map()).clear();
+      (this.agentInventoryRevisions ??= new Map()).clear();
+      (this.agentObservationSequences ??= new Map()).clear();
+      (this.agentRuntimeTasks ??= new Map()).clear();
+      this.clearAgentWorkRuntime();
+      this.agentVoiceAssembler?.clear();
+      this.agentVoicePending = [];
+      (this.localMutedAgentVoices ??= new Set()).clear();
+      (this.localAgentVoiceGains ??= new Map()).clear();
+      this.latestAgentObservation = null;
+      this.latestAgentResult = null;
+      // Prototype-only compatibility fixtures may omit the post-Rust receipt
+      // map; real engines always construct it as the readonly field above.
+      const pendingAgentReceipts = this.pendingAgentCommandReceipts as Map<string, Readonly<{
+        resolve: (value: Readonly<{ accepted: boolean; code?: string; error?: string }>) => void;
+        timeout: number;
+      }>> | undefined;
+      for (const [commandId, pending] of pendingAgentReceipts ?? []) {
+        window.clearTimeout(pending.timeout);
+        pending.resolve({ accepted: false, code: "session-closed", error: `Command ${commandId} was cancelled because the multiplayer session closed` });
+      }
+      pendingAgentReceipts?.clear();
+      this.multiplayerReceivedSnapshot = false;
+      this.sleepVotes.clear();
+      this.multiplayerContainerAwaiting.clear();
+      this.multiplayerOptimisticContainers?.clear();
+      this.pendingGuestCreatureInventoryRequests?.clear();
+      this.pendingGuestPlacementRequests.clear();
+      this.deferredRemoteBlockActions.clear();
+      this.multiplayerPeerActiveContainers.clear();
+      this.multiplayerPeerContainerSignatures.clear();
+      this.multiplayerFacilityPlayerBaseline = null;
+      this.pendingReliableRequests.clear();
+      this.resetMultiplayerProgressionState(0, true);
+      this.multiplayerBoatInputs.clear();
+      if (hadSession && !this.titleMode && !this.disposed) this.events.onToast("Multiplayer session closed. The host-device world remains saved locally.");
+      if (!this.disposed) this.emitHud(true);
+      await closingRendezvous?.close().catch(() => undefined);
+      if (closingSession) {
+        await closingSession.drainAuthority?.().catch(() => undefined);
+      }
+      if (closingRole === "guest") {
+        // The adopted guest binding owns manager shutdown. Its wrapper clears
+        // rustRuntimeHost only after stopping the exact R5 pump and renderer.
+        // Prototype/legacy sessions without that owner retain this fallback.
+        if (!this.rustGuestRuntimeManagerReleased) {
+          await this.rustRuntimeManager?.shutdown().catch(() => undefined);
+        }
+        this.rustRuntimeHost = null;
+        this.rustRuntimeOperationsBlocked = true;
+        this.rustRuntimeHydrationState = "none";
+      }
+      if (disposeFailure) throw disposeFailure;
+    } finally {
+      releaseProgressionFreeze?.();
     }
   }
 
@@ -9010,7 +13185,11 @@ export class VoxelEngine {
     for (const id of [...this.remotePlayers.keys()]) this.removeRemotePlayer(id);
   }
 
-  private upsertRemotePlayer(pose: PlayerPose, peer?: PeerInfo) {
+  private upsertRemotePlayer(
+    pose: PlayerPose,
+    peer?: PeerInfo,
+    nativePoseCustody?: RemotePlayer["nativePoseCustody"],
+  ) {
     if (pose.playerId === this.multiplayer?.identity.id) return;
     let remote = this.remotePlayers.get(pose.playerId);
     if (!remote) {
@@ -9028,11 +13207,18 @@ export class VoxelEngine {
       model.setEquipmentAppearance(this.equipmentAppearanceFromCodes(pose.equipment));
       model.group.position.set(pose.x, pose.y, pose.z);
       this.scene.add(model.group);
-      remote = { model, pose: { ...pose }, target: { ...pose }, lastUpdate: performance.now() };
+      remote = {
+        model,
+        pose: { ...pose },
+        target: { ...pose },
+        lastUpdate: performance.now(),
+        ...(nativePoseCustody ? { nativePoseCustody } : {}),
+      };
       this.remotePlayers.set(pose.playerId, remote);
     }
     remote.target = { ...pose };
     remote.lastUpdate = performance.now();
+    if (nativePoseCustody) remote.nativePoseCustody = nativePoseCustody;
     if (this.multiplayer?.role === "host") {
       const helm = pose.boatId ? this.boats.get(pose.boatId) : null;
       if (helm?.save.passengers[0] === pose.playerId) this.multiplayerBoatInputs.set(pose.playerId, {
@@ -9079,36 +13265,85 @@ export class VoxelEngine {
     }
   }
 
+  private rustLiveMultiplayerPoseSourceR5() {
+    if (!this.rustLivePlayerAuthorityEnabledR5()) return null;
+    const view = this.rustLivePlayerPresentationViewR10;
+    if (!view) throw new Error("Rust live player authority is ready without an exact multiplayer pose source");
+    const yaw = view.lookYaw === null
+      ? this.rustLivePlayerInitialYawRadiansR10
+      : view.lookYaw / RUST_LIVE_INPUT_AXIS_DIVISOR_R5 * Math.PI;
+    const pitch = view.lookPitch / RUST_LIVE_INPUT_AXIS_DIVISOR_R5 * (Math.PI / 2);
+    if (yaw === null || !Number.isFinite(yaw) || !Number.isFinite(pitch)) {
+      throw new Error("Rust live player authority has no exact multiplayer look projection");
+    }
+    return Object.freeze({ view, yaw, pitch });
+  }
+
+  private outboundPoseDiagnostics(pose: PlayerPose): RustMultiplayerOutboundPoseDiagnosticsV1 {
+    const native = this.rustLiveMultiplayerPoseSourceR5();
+    return Object.freeze({
+      producer: native ? "rust-live-player-view-r10-kinematics" as const : "typescript-compatibility" as const,
+      playerId: pose.playerId,
+      tick: pose.tick,
+      position: Object.freeze({ x: pose.x, y: pose.y, z: pose.z }),
+      velocity: Object.freeze({ x: pose.vx, y: pose.vy, z: pose.vz }),
+      yaw: pose.yaw,
+      pitch: pose.pitch,
+      grounded: pose.grounded,
+      crouching: Boolean(pose.crouching),
+      sprinting: Boolean(pose.sprinting),
+      selected: pose.selected ?? 0,
+      nativeSource: native ? Object.freeze({
+        extractionRevision: native.view.extractionRevision.toString(10),
+        authorityTick: native.view.authorityTick.toString(10),
+        entityRevision: native.view.entityRevision.toString(10),
+        lastInputSequence: native.view.lastInputSequence.toString(10),
+      }) : null,
+    });
+  }
+
   private localNetworkPose(): PlayerPose | null {
     const identity = this.multiplayer?.identity;
     if (!identity) return null;
+    const native = this.rustLiveMultiplayerPoseSourceR5();
+    const position = native?.view.position ?? this.position;
+    const velocity = native?.view.velocity ?? this.velocity;
+    const yaw = native?.yaw ?? this.yaw;
+    const pitch = native?.pitch ?? this.pitch;
+    const grounded = native?.view.grounded ?? this.grounded;
+    const crouching = native?.view.crouching ?? this.crouching;
+    const sprinting = native
+      ? (native.view.buttons & RUST_RUNTIME_INPUT_BUTTON_V1.sprint) !== 0
+      : this.sprinting;
+    const selected = native?.view.selectedSlot ?? this.selected;
+    const selectedSlot = this.inventory?.[selected] ?? null;
     const boat = this.mountedBoatId ? this.boats.get(this.mountedBoatId) : null;
     const boatSeat = boat ? boat.save.passengers.indexOf(identity.id) : -1;
     return {
       playerId: identity.id,
       tick: this.multiplayerTick,
-      x: this.position.x,
-      y: this.position.y,
-      z: this.position.z,
-      yaw: this.yaw,
-      pitch: this.pitch,
-      vx: this.velocity.x,
-      vy: this.velocity.y,
-      vz: this.velocity.z,
-      grounded: this.grounded,
-      selected: this.selected,
-      heldItem: this.selectedSlot()?.item,
-      heldItemFilled: this.selectedSlot()?.item === Item.CaptureOrb
-        && Boolean(captureOrbFromInventorySlot(this.selectedSlot())?.creature),
+      x: position.x,
+      y: position.y,
+      z: position.z,
+      yaw,
+      pitch,
+      vx: velocity.x,
+      vy: velocity.y,
+      vz: velocity.z,
+      grounded,
+      selected,
+      heldItem: selectedSlot?.item,
+      heldItemFilled: selectedSlot?.item === Item.CaptureOrb
+        && Boolean(captureOrbFromInventorySlot(selectedSlot)?.creature),
       offhandItem: this.offhand?.item,
       shieldRaised: this.offhandUseHeld,
-      crouching: this.crouching,
-      sprinting: this.sprinting,
+      crouching,
+      sprinting,
       action: this.mineHeld || this.attackCooldown > 0 ? "mine" : this.heldUse > 0 ? "use" : "none",
-      swimming: this.sprinting && this.headSubmerged && liquidKindForBlock(this.world.getBlock(
-        Math.floor(this.position.x + 0.5),
-        Math.floor(this.position.y + 0.35),
-        Math.floor(this.position.z + 0.5),
+      swimming: sprinting && this.headSubmerged && liquidKindForBlock(this.world.getBlock(
+        Math.floor(position.x + 0.5),
+        Math.floor(position.y + 0.35),
+        Math.floor(position.z + 0.5),
       )) === "water" ? 1 : 0,
       seated: this.seatedAt ? 1 : 0,
       variant: identity.sex ?? identity.variant ?? this.playerVariant,
@@ -9542,14 +13777,103 @@ export class VoxelEngine {
     if (!this.multiplayer || this.multiplayer.role !== "host") return;
     const state = this.multiplayerPlayerStates.get(playerId);
     if (!state || !this.multiplayer.getPeer(playerId)) return;
+    if (this.multiplayer.authorityMode === "rust-authoritative") {
+      void this.trackRustAuthorityOperation(this.publishRustAuthorityPresentation(playerId, true)).catch((error) => {
+        this.rustAuthorityLastError = error instanceof Error ? error.message : String(error);
+      });
+      return;
+    }
     const action: PlayerStateAction = { requestId, actorId: playerId, state, status: "accepted" };
     this.queueCriticalReliableRequest(`host-player-state:${playerId}`, () => this.multiplayer?.sendPlayerState(action, playerId) ?? 0, 10_000);
+  }
+
+  private resetMultiplayerProgressionTransport() {
+    this.multiplayerProgressTransfers.clear();
+    this.multiplayerProgressOutgoing = [];
+    this.multiplayerPendingProgressionTransfer = null;
+  }
+
+  private resetMultiplayerProgressionState(timer = 0, preserveLastGracefulDrain = false) {
+    this.resetMultiplayerProgressionTransport();
+    this.multiplayerProgressionConfirmedState = null;
+    this.rustPlayerProgressionReceipts?.clear();
+    this.multiplayerLatestProgressionReceipt = null;
+    if (!preserveLastGracefulDrain) this.multiplayerLastGracefulProgressionDrain = null;
+    this.multiplayerProgressionTransferSequence = 0;
+    this.multiplayerProgressionRevision = 0;
+    this.multiplayerProgressionReceived = false;
+    this.multiplayerProgressionTimer = timer;
+    this.multiplayerProgressionSignature = "";
+  }
+
+  private settlePendingPlayerProgressionTransfer(pending: PendingPlayerProgressionTransfer) {
+    this.multiplayerProgressOutgoing = this.multiplayerProgressOutgoing.filter((entry) => (
+      entry.action.transferId !== pending.transferId
+    ));
+    if (this.multiplayerPendingProgressionTransfer?.transferId === pending.transferId) {
+      this.multiplayerPendingProgressionTransfer = null;
+    }
+  }
+
+  private hostPlayerPoseFromNativeReceipt(
+    receipt: RustMultiplayerNativePoseReceiptV1,
+    identity: NonNullable<PeerInfo["identity"]>,
+  ): PlayerPose {
+    const native = receipt.pose;
+    let state = this.ensureHostPlayerSession(identity);
+    if (native.selected !== undefined && native.selected !== state.selected) {
+      state = { ...state, selected: native.selected };
+      this.multiplayerPlayerStates.set(identity.id, state);
+    }
+    const selected = state.inventory[state.selected];
+    const offhand = inventorySlotFromNetwork(state.offhand ?? null);
+    return {
+      playerId: native.playerId,
+      tick: native.tick,
+      x: native.x,
+      y: native.y,
+      z: native.z,
+      yaw: native.yaw,
+      pitch: native.pitch,
+      vx: native.vx,
+      vy: native.vy,
+      vz: native.vz,
+      grounded: native.grounded,
+      selected: state.selected,
+      heldItem: selected?.item,
+      heldItemFilled: selected?.item === Item.CaptureOrb && Boolean(selected.metadata),
+      offhandItem: offhand?.item,
+      shieldRaised: native.shieldRaised && offhandItemKind(offhand?.item) === "shield",
+      crouching: native.crouching,
+      sprinting: native.sprinting,
+      action: native.action,
+      variant: state.variant,
+      sex: state.sex ?? state.variant,
+      profileId: state.profileId,
+      browserId: state.browserId,
+      race: state.race,
+      colors: state.colors ? { ...state.colors } : undefined,
+      swimming: native.swimming,
+      seated: native.seated,
+      equipment: Object.fromEntries((Object.keys(state.equipment) as EquipmentSlot[])
+        .flatMap((slot) => {
+          const item = inventorySlotFromNetwork(state.equipment[slot])?.item;
+          return item === undefined ? [] : [[slot, item] as const];
+        })),
+      boatId: native.boatId,
+      boatSeat: native.boatSeat,
+      boatForward: native.boatForward,
+      boatTurn: native.boatTurn,
+      mountedCreatureId: native.mountedCreatureId,
+      mountedCreatureSeat: native.mountedCreatureSeat,
+    };
   }
 
   private queuePlayerProgressionTransfer(record: PlayerProgressionRecord, actorId: string, status: "request" | "accepted", peerId?: string) {
     const chunks = encodePlayerProgressionChunks(record.state);
     if (chunks.length > 512) throw new Error("Player progression is too large to synchronize safely.");
-    const transferId = `progress_${record.revision.toString(36)}_${Date.now().toString(36)}`;
+    this.multiplayerProgressionTransferSequence = (this.multiplayerProgressionTransferSequence ?? 0) + 1;
+    const transferId = `progress_${record.revision.toString(36)}_${Date.now().toString(36)}_${this.multiplayerProgressionTransferSequence.toString(36)}`;
     this.multiplayerProgressOutgoing = this.multiplayerProgressOutgoing.filter((entry) => (
       entry.action.actorId !== actorId || entry.action.status !== status
     ));
@@ -9557,24 +13881,319 @@ export class VoxelEngine {
       action: { transferId, actorId, revision: record.revision, chunkIndex, chunkCount: chunks.length, data, status },
       ...(peerId ? { peerId } : {}),
     }));
+    return transferId;
   }
 
   private flushPlayerProgressionTransfers(limit = 2) {
     const session = this.multiplayer;
-    if (!session || !this.multiplayerProgressOutgoing.length) return;
     let sent = 0;
+    if (!session || !this.multiplayerProgressOutgoing.length) {
+      return {
+        sent,
+        requestChunksRemaining: this.multiplayerProgressOutgoing.filter((entry) => entry.action.status === "request").length,
+      } as const;
+    }
     while (sent < limit && this.multiplayerProgressOutgoing.length) {
       const next = this.multiplayerProgressOutgoing[0];
       try {
         if (session.sendPlayerProgress(next.action, next.peerId) <= 0) break;
       } catch { break; }
       this.multiplayerProgressOutgoing.shift();
+      const pending = this.multiplayerPendingProgressionTransfer;
+      if (pending
+        && next.action.status === "request"
+        && next.action.transferId === pending.transferId
+        && next.action.chunkIndex !== undefined
+        && next.action.chunkCount !== undefined
+        && next.action.chunkIndex === next.action.chunkCount - 1) {
+        this.multiplayerPendingProgressionTransfer = { ...pending, transportComplete: true };
+      }
       sent += 1;
     }
+    return {
+      sent,
+      requestChunksRemaining: this.multiplayerProgressOutgoing.filter((entry) => entry.action.status === "request").length,
+    } as const;
+  }
+
+  private multiplayerProgressionDrainNow() {
+    return Date.now();
+  }
+
+  private multiplayerProgressionDrainWait(milliseconds: number) {
+    return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
+  }
+
+  private multiplayerProgressionDrainBudgetMs(session: MultiplayerSession, timeoutMs?: number) {
+    const authorityTimeout = Number.isFinite(session.authorityTimeoutMs)
+      ? Math.max(0, session.authorityTimeoutMs)
+      : DEFAULT_MULTIPLAYER_AUTHORITY_TIMEOUT_MS;
+    const authorityAlignedDefault = authorityTimeout + MULTIPLAYER_PRESENTATION_SCHEDULING_SLACK_MS;
+    const configured = timeoutMs ?? this.multiplayerProgressionDrainTimeoutMs ?? authorityAlignedDefault;
+    return Number.isFinite(configured) ? Math.max(0, configured) : authorityAlignedDefault;
+  }
+
+  private multiplayerProgressionGameplayFrozen() {
+    return (this.multiplayerProgressionDrainDepth ?? 0) > 0;
+  }
+
+  private acquireMultiplayerProgressionGameplayFreeze() {
+    this.multiplayerProgressionDrainDepth = (this.multiplayerProgressionDrainDepth ?? 0) + 1;
+    this.paused = true;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.multiplayerProgressionDrainDepth = Math.max(0, (this.multiplayerProgressionDrainDepth ?? 1) - 1);
+      // Acquiring a drain is an explicit pause boundary. Releasing ownership
+      // never writes paused=false: doing so could clobber a concurrent native
+      // fail-closed event or reopen a partially disposed guest session.
+      if (this.multiplayerProgressionDrainDepth > 0) this.paused = true;
+    };
+  }
+
+  private async runGuestProgressionDrain(session: MultiplayerSession, timeoutMs?: number) {
+    const deadline = this.multiplayerProgressionDrainNow()
+      + this.multiplayerProgressionDrainBudgetMs(session, timeoutMs);
+    while (this.multiplayer === session) {
+      // Multiplayer transport deliberately continues from animate() while
+      // paused. Reassert the freeze after each asynchronous receipt wait so
+      // no connection callback can reopen local gameplay during the drain.
+      this.paused = true;
+      if (session.state !== "connected") {
+        this.bestEffortGuestProgressionFlush(session);
+        throw new Error("Player progression synchronization lost its host connection before the exact transfer was confirmed.");
+      }
+      this.syncMultiplayerPlayerProgression();
+      const flush = this.flushPlayerProgressionTransfers(512);
+      const pending = this.multiplayerPendingProgressionTransfer;
+      if (!pending
+        && flush.requestChunksRemaining === 0
+        && (this.rustGuestPresentationQueueDepth ?? 0) === 0
+        && (this.rustGuestPresentationInFlight ?? 0) === 0
+        && this.localPlayerProgressionSignature() === this.multiplayerProgressionSignature) {
+        const progression = this.multiplayerProgressionDiagnosticsSnapshot();
+        const receipt = progression.latestReceipt;
+        this.multiplayerLastGracefulProgressionDrain = Object.freeze({
+          schema: 1,
+          observedAt: this.multiplayerProgressionDrainNow(),
+          exactReceiptCurrent: Boolean(receipt
+            && receipt.direction === "guest-observed"
+            && receipt.status === "accepted"
+            && receipt.committedRevision === progression.confirmedRevision
+            && receipt.connectionCurrent === true),
+          progression,
+        });
+        return;
+      }
+      const remaining = deadline - this.multiplayerProgressionDrainNow();
+      if (remaining <= 0) {
+        throw new Error("Player progression is still synchronizing; the host did not confirm the exact transfer before leaving.");
+      }
+      await this.multiplayerProgressionDrainWait(Math.min(16, remaining));
+    }
+    throw new Error("Player progression synchronization was interrupted before the multiplayer session could close.");
+  }
+
+  private drainGuestProgressionForGracefulDisconnect(
+    session: MultiplayerSession | null = this.multiplayer,
+    timeoutMs?: number,
+  ) {
+    if (!session || session.role !== "guest" || !this.multiplayerProgressionReceived) return Promise.resolve();
+    const active = this.multiplayerProgressionDrainOperation ?? null;
+    if (active) {
+      if (active.session !== session) {
+        return Promise.reject(new Error("A different multiplayer session is already draining player progression."));
+      }
+      return active.promise;
+    }
+    this.multiplayerLastGracefulProgressionDrain = null;
+    if (session.state !== "connected") {
+      this.bestEffortGuestProgressionFlush(session);
+      return Promise.reject(new Error("Player progression synchronization cannot confirm an exact transfer after the host connection closes."));
+    }
+    const releaseProgressionFreeze = this.acquireMultiplayerProgressionGameplayFreeze();
+    const promise = this.runGuestProgressionDrain(session, timeoutMs).finally(() => {
+      releaseProgressionFreeze();
+      if (this.multiplayerProgressionDrainOperation?.promise === promise) {
+        this.multiplayerProgressionDrainOperation = null;
+      }
+    });
+    this.multiplayerProgressionDrainOperation = Object.freeze({ session, promise });
+    return promise;
+  }
+
+  private bestEffortGuestProgressionFlush(session: MultiplayerSession | null = this.multiplayer) {
+    if (!session || session !== this.multiplayer || session.role !== "guest" || !this.multiplayerProgressionReceived) return;
+    try { this.syncMultiplayerPlayerProgression(); } catch { /* Forced teardown cannot retain a dead session. */ }
+    try { this.flushPlayerProgressionTransfers(512); } catch { /* One bounded transport attempt is sufficient here. */ }
+  }
+
+  private applyAuthoritativeGuestPlayerProgression(
+    record: PlayerProgressionRecord,
+    actorId: string,
+    failOnConfirmedRegression: boolean,
+    receipt: RustMultiplayerProgressionReceiptV2 | null = null,
+  ) {
+    if (record.revision < this.multiplayerProgressionRevision) {
+      if (failOnConfirmedRegression) {
+        throw new Error("Rust presentation regressed the targeted player progression revision");
+      }
+      return false;
+    }
+    const hadAuthoritativeBaseline = this.multiplayerProgressionReceived;
+    const confirmedState = this.multiplayerProgressionConfirmedState;
+    const pending = this.multiplayerPendingProgressionTransfer;
+    const authoritativeState = structuredClone(record.state);
+    if (!validatePlayerProgressionSnapshot(authoritativeState)) {
+      throw new Error("Authoritative player progression is invalid");
+    }
+    let mergedState = authoritativeState;
+    let settlesPending = false;
+    if (hadAuthoritativeBaseline && confirmedState) {
+      const localState = this.localPlayerProgressionSnapshot();
+      const exactPending = pending && receipt?.transferId === pending.transferId ? pending : null;
+      const exactReceipt = exactPending ? receipt : null;
+      if (exactPending && exactReceipt) {
+        if (!exactPending.transportComplete) {
+          throw new Error("Rust progression receipt arrived before the exact request transfer completed");
+        }
+        if (exactReceipt.status === "accepted") {
+          if (exactReceipt.committedRevision !== exactPending.revision
+            || record.revision < exactReceipt.committedRevision) {
+            throw new Error("Rust progression receipt does not match the pending committed revision");
+          }
+          mergedState = mergePlayerProgressionSnapshots(
+            exactPending.requestState,
+            localState,
+            authoritativeState,
+          );
+        } else {
+          if (record.revision < exactReceipt.committedRevision) {
+            throw new Error("Rust progression rejection exceeds its authoritative image");
+          }
+          const rebasedRequest = mergePlayerProgressionSnapshots(
+            exactPending.baseState,
+            exactPending.requestState,
+            authoritativeState,
+          );
+          mergedState = mergePlayerProgressionSnapshots(
+            exactPending.requestState,
+            localState,
+            rebasedRequest,
+          );
+        }
+        settlesPending = true;
+      } else if (!failOnConfirmedRegression
+        && pending
+        && pending.transportComplete
+        && record.revision < pending.revision) {
+        // Legacy peers reject by returning their prior full image. Rust V2
+        // never takes this path: only its exact transfer receipt can settle.
+        mergedState = mergePlayerProgressionSnapshots(
+          pending.requestState,
+          localState,
+          authoritativeState,
+        );
+        settlesPending = true;
+      } else {
+        mergedState = mergePlayerProgressionSnapshots(confirmedState, localState, authoritativeState);
+      }
+    }
+    const authoritativeSignature = this.playerProgressionSignature(authoritativeState);
+    this.applyLocalPlayerProgression(mergedState, actorId);
+    const appliedSignature = this.localPlayerProgressionSignature();
+    this.multiplayerProgressionRevision = record.revision;
+    this.multiplayerProgressionReceived = true;
+    this.multiplayerProgressionConfirmedState = authoritativeState;
+    this.multiplayerProgressionSignature = hadAuthoritativeBaseline ? authoritativeSignature : appliedSignature;
+    if (pending && settlesPending) this.settlePendingPlayerProgressionTransfer(pending);
+    if (hadAuthoritativeBaseline
+      && !this.multiplayerPendingProgressionTransfer
+      && appliedSignature !== authoritativeSignature) {
+      // A post-request tail or a dirty disjoint local edit becomes its own
+      // exact transfer before player-state publication may resume.
+      this.syncMultiplayerPlayerProgression();
+    }
+    return true;
+  }
+
+  private settleGuestPlayerProgressionAcceptance(action: PlayerProgressAction) {
+    const pending = this.multiplayerPendingProgressionTransfer;
+    if (!pending
+      || !pending.transportComplete
+      || action.transferId !== pending.transferId
+      || action.revision !== pending.revision) return;
+    this.multiplayerProgressionConfirmedState = structuredClone(pending.requestState);
+    this.multiplayerProgressionRevision = action.revision;
+    this.multiplayerProgressionReceived = true;
+    this.multiplayerProgressionSignature = pending.signature;
+    this.settlePendingPlayerProgressionTransfer(pending);
+    if (this.localPlayerProgressionSignature() !== pending.signature) {
+      this.syncMultiplayerPlayerProgression();
+    }
+  }
+
+  private recordMultiplayerProgressionReceipt(
+    direction: MultiplayerProgressionReceiptDiagnostic["direction"],
+    peer: Pick<PeerInfo, "token" | "identity">,
+    receipt: RustMultiplayerProgressionReceiptV2,
+  ) {
+    if (!peer.identity) return;
+    this.multiplayerLatestProgressionReceipt = Object.freeze({
+      direction,
+      peerId: peer.identity.id,
+      connectionToken: peer.token,
+      transferId: receipt.transferId,
+      status: receipt.status,
+      committedRevision: receipt.committedRevision,
+      observedAt: Date.now(),
+    });
+  }
+
+  private clearRustPlayerProgressionReceiptForPeer(
+    peer: Pick<PeerInfo, "token" | "identity">,
+    replacement: boolean,
+  ) {
+    if (!peer.identity) return;
+    const binding = this.rustPlayerProgressionReceipts?.get(peer.identity.id);
+    if (binding && (replacement || binding.connectionToken === peer.token)) {
+      this.rustPlayerProgressionReceipts.delete(peer.identity.id);
+    }
+    const latest = this.multiplayerLatestProgressionReceipt;
+    if (latest?.peerId === peer.identity.id
+      && (replacement || latest.connectionToken === peer.token)) {
+      this.multiplayerLatestProgressionReceipt = null;
+    }
+  }
+
+  private setRustPlayerProgressionReceipt(
+    peer: Pick<PeerInfo, "token" | "identity">,
+    action: PlayerProgressAction,
+    status: RustMultiplayerProgressionReceiptV2["status"],
+    committedRevision: number,
+  ) {
+    if (!peer.identity) return;
+    const receipt = Object.freeze({
+      transferId: action.transferId,
+      status,
+      committedRevision,
+    });
+    (this.rustPlayerProgressionReceipts ??= new Map()).set(peer.identity.id, Object.freeze({
+      connectionToken: peer.token,
+      receipt,
+    }));
+    this.recordMultiplayerProgressionReceipt("host-issued", peer, receipt);
   }
 
   private sendAuthoritativePlayerProgression(identity: NonNullable<PeerInfo["identity"]>) {
     const record = this.ensureHostPlayerProgression(identity);
+    if (this.multiplayer?.authorityMode === "rust-authoritative") {
+      void this.trackRustAuthorityOperation(this.publishRustAuthorityPresentation(identity.id, true)).catch((error) => {
+        this.rustAuthorityLastError = error instanceof Error ? error.message : String(error);
+      });
+      return;
+    }
     this.queuePlayerProgressionTransfer(record, identity.id, "accepted", identity.id);
   }
 
@@ -9586,25 +14205,31 @@ export class VoxelEngine {
       if (now - pending.receivedAt > 30_000) this.multiplayerProgressTransfers.delete(transferKey);
     }
     if (action.data === undefined || action.chunkIndex === undefined || action.chunkCount === undefined) {
-      if (session.role === "guest" && action.status === "accepted" && action.actorId === session.identity.id) {
-        this.multiplayerProgressionRevision = Math.max(this.multiplayerProgressionRevision, action.revision);
+      if (session.role === "guest"
+        && session.authorityMode === "legacy-compatibility"
+        && action.status === "accepted"
+        && action.actorId === session.identity.id) {
+        this.settleGuestPlayerProgressionAcceptance(action);
       }
       return;
     }
     const direction = action.status === "accepted" ? "accepted" : "request";
     if (session.role === "host" && (direction !== "request" || !peer.identity || action.actorId !== peer.identity.id)) return;
-    if (session.role === "guest" && (direction !== "accepted" || action.actorId !== session.identity.id)) return;
-    const key = `${direction}:${action.actorId}:${action.transferId}`;
+    if (session.role === "guest" && (session.authorityMode !== "legacy-compatibility"
+      || direction !== "accepted" || action.actorId !== session.identity.id)) return;
+    const key = `${direction}:${peer.token}:${action.actorId}:${action.transferId}`;
     let transfer = this.multiplayerProgressTransfers.get(key);
     if (!transfer || transfer.chunkCount !== action.chunkCount || transfer.revision !== action.revision) {
       const sameActor = [...this.multiplayerProgressTransfers.entries()]
-        .filter(([, pending]) => pending.actorId === action.actorId && pending.status === direction)
+        .filter(([, pending]) => pending.peerToken === peer.token
+          && pending.actorId === action.actorId && pending.status === direction)
         .sort((left, right) => left[1].receivedAt - right[1].receivedAt);
       while (sameActor.length >= 2) {
         const oldest = sameActor.shift();
         if (oldest) this.multiplayerProgressTransfers.delete(oldest[0]);
       }
       transfer = {
+        peerToken: peer.token,
         actorId: action.actorId,
         revision: action.revision,
         chunkCount: action.chunkCount,
@@ -9621,18 +14246,32 @@ export class VoxelEngine {
     let state: PlayerProgressionSnapshot;
     try { state = decodePlayerProgressionChunks(transfer.chunks as string[], action.actorId); }
     catch {
-      if (session.role === "host" && peer.identity) this.sendAuthoritativePlayerProgression(peer.identity);
+      if (session.role === "host" && peer.identity) {
+        const current = this.ensureHostPlayerProgression(peer.identity);
+        if (session.authorityMode === "rust-authoritative") {
+          this.setRustPlayerProgressionReceipt(peer, action, "rejected", current.revision);
+        }
+        this.sendAuthoritativePlayerProgression(peer.identity);
+      }
       return;
     }
     if (session.role === "host" && peer.identity) {
       const current = this.ensureHostPlayerProgression(peer.identity);
       if (action.revision !== current.revision + 1) {
+        if (session.authorityMode === "rust-authoritative") {
+          this.setRustPlayerProgressionReceipt(peer, action, "rejected", current.revision);
+        }
         this.sendAuthoritativePlayerProgression(peer.identity);
         return;
       }
       const next = { revision: action.revision, state };
       this.multiplayerPlayerProgressions.set(peer.identity.id, next);
       this.saveSoon();
+      if (session.authorityMode === "rust-authoritative") {
+        this.setRustPlayerProgressionReceipt(peer, action, "accepted", next.revision);
+        this.sendAuthoritativePlayerProgression(peer.identity);
+        return;
+      }
       const ack: PlayerProgressAction = {
         transferId: action.transferId,
         actorId: peer.identity.id,
@@ -9643,10 +14282,7 @@ export class VoxelEngine {
       return;
     }
     if (session.role === "guest") {
-      this.multiplayerProgressionRevision = action.revision;
-      this.multiplayerProgressionReceived = true;
-      this.applyLocalPlayerProgression(state, action.actorId);
-      this.multiplayerProgressionSignature = this.localPlayerProgressionSignature();
+      this.applyAuthoritativeGuestPlayerProgression({ revision: action.revision, state }, action.actorId, false);
     }
   }
 
@@ -10052,6 +14688,97 @@ export class VoxelEngine {
     return true;
   }
 
+  private remoteContainerCoordinateBlocks(containerId: string) {
+    const machine = containerId.startsWith("furnace:") || containerId.startsWith("wheat-mill:");
+    const withoutMachine = containerId.startsWith("furnace:") ? containerId.slice("furnace:".length)
+      : containerId.startsWith("wheat-mill:") ? containerId.slice("wheat-mill:".length) : containerId;
+    const raw = withoutMachine.startsWith("exhibit:") ? withoutMachine.slice("exhibit:".length) : withoutMachine;
+    const coordinateBacked = machine || withoutMachine.startsWith("exhibit:") || raw.includes(",") || raw.includes("|");
+    if (!coordinateBacked) return [];
+    const parts = raw.split("|");
+    if (parts.length < 1 || parts.length > 2 || parts.some((part) => !/^-?\d+,-?\d+,-?\d+$/u.test(part))) return null;
+    const coordinates = parts.map((part) => part.split(",").map(Number));
+    return coordinates.every(([x, y, z]) => Number.isSafeInteger(x) && Math.abs(x) <= 30_000_000
+      && Number.isSafeInteger(y) && y >= MIN_Y && y <= MAX_Y
+      && Number.isSafeInteger(z) && Math.abs(z) <= 30_000_000)
+      ? coordinates.map(([x, y, z]) => ({ x, y, z })) : null;
+  }
+
+  private purgeIncompletePlayerProgressTransfersForPeer(peer: PeerInfo, replacement = false) {
+    // Prototype-only test harnesses predating progression transfer state can
+    // omit this map; constructed engines always initialize it.
+    if (!this.multiplayerProgressTransfers) return;
+    for (const [key, pending] of this.multiplayerProgressTransfers) {
+      const belongsToClosedPeer = !replacement && pending.peerToken === peer.token;
+      const belongsToReplacedConnection = replacement && peer.identity
+        && pending.actorId === peer.identity.id && pending.peerToken !== peer.token;
+      if (belongsToClosedPeer || belongsToReplacedConnection) {
+        this.multiplayerProgressTransfers.delete(key);
+      }
+    }
+  }
+
+  private remoteContainerTerrainReady(containerId: string) {
+    const coordinates = this.remoteContainerCoordinateBlocks(containerId);
+    if (coordinates === null) return false;
+    let ready = true;
+    const radius = containerId.startsWith("exhibit:") ? 64 : 2;
+    for (const { x, z } of coordinates) if (!this.ensureTerrainResidency(x, z, radius)) ready = false;
+    return ready;
+  }
+
+  private remoteContainerInReach(containerId: string, peerId: string) {
+    const pose = this.remotePlayers.get(peerId)?.target;
+    if (!pose) return false;
+    const keeper = new THREE.Vector3(pose.x, pose.y, pose.z);
+    const coordinates = this.remoteContainerCoordinateBlocks(containerId);
+    if (coordinates === null) return false;
+    if (coordinates.some(({ x, y, z }) => new THREE.Vector3(x, y, z).distanceToSquared(keeper) <= 8 * 8)) return true;
+    if (containerId.startsWith("exhibit:") && coordinates[0]) {
+      const topology = this.exhibitTopologyAt(coordinates[0].x, coordinates[0].y, coordinates[0].z);
+      if (topology?.blocks.some((block) => new THREE.Vector3(block.x, block.y, block.z).distanceToSquared(keeper) <= 8 * 8)) return true;
+    }
+    const boat = containerId.startsWith("boat:") ? this.boats.get(containerId.slice("boat:".length)) : null;
+    if (boat) return boat.group.position.distanceToSquared(keeper) <= 8 * 8;
+    const cargoMatch = /^(dragon|leviathan):(\d+):cargo$/u.exec(containerId);
+    const cargoMob = cargoMatch ? this.mobs.find((mob) => mob.id === Number(cargoMatch[2])) : null;
+    return Boolean(cargoMob && (cargoMatch?.[1] === "dragon"
+      ? cargoMob.dragonState && dragonCargoSlots(cargoMob.dragonState) > 0
+      : cargoMob.leviathanGrowth && cargoMob.leviathanGrowth.chestModules > 0)
+      && cargoMob.group.position.distanceToSquared(keeper) <= 8 * 8);
+  }
+
+  private remoteContainerStillCanonical(containerId: string) {
+    const coordinates = this.remoteContainerCoordinateBlocks(containerId);
+    if (coordinates === null) return false;
+    if (containerId.startsWith("boat:")) return this.boats.has(containerId.slice("boat:".length));
+    const cargoMatch = /^(dragon|leviathan):(\d+):cargo$/u.exec(containerId);
+    if (cargoMatch) {
+      const mob = this.mobs.find((candidate) => candidate.id === Number(cargoMatch[2]));
+      return Boolean(mob && (cargoMatch[1] === "dragon"
+        ? mob.dragonState && dragonCargoSlots(mob.dragonState) > 0
+        : mob.leviathanGrowth && mob.leviathanGrowth.chestModules > 0));
+    }
+    if (coordinates.length === 0) return false;
+    const first = coordinates[0];
+    if (containerId.startsWith("furnace:")) return coordinates.length === 1 && this.world.getBlock(first.x, first.y, first.z) === BlockId.Furnace;
+    if (containerId.startsWith("wheat-mill:")) return coordinates.length === 1 && this.world.getBlock(first.x, first.y, first.z) === BlockId.WheatMill;
+    if (containerId.startsWith("exhibit:")) {
+      const topology = this.exhibitTopologyAt(first.x, first.y, first.z);
+      return Boolean(topology && this.exhibitStorageKey(topology) === containerId);
+    }
+    if (!coordinates.every(({ x, y, z }) => this.world.getBlock(x, y, z) === BlockId.Chest)) return false;
+    const firstKey = blockKey(first.x, first.y, first.z);
+    const facing = this.worldBlockFacing(first.x, first.y, first.z);
+    const right = blockFacingRight(facing);
+    const neighbor = [[right.x, right.z], [-right.x, -right.z]]
+      .map(([dx, dz]) => ({ x: first.x + dx, y: first.y, z: first.z + dz }))
+      .find((candidate) => this.world.getBlock(candidate.x, candidate.y, candidate.z) === BlockId.Chest
+        && this.worldBlockFacing(candidate.x, candidate.y, candidate.z) === facing);
+    const canonical = neighbor ? [firstKey, blockKey(neighbor.x, neighbor.y, neighbor.z)].sort().join("|") : firstKey;
+    return canonical === containerId;
+  }
+
   private handleRemoteContainerAction(action: ContainerAction, peer: PeerInfo) {
     if (!this.multiplayer) return;
     if (this.multiplayer.role === "host" && action.status !== "accepted" && peer.identity) {
@@ -10075,6 +14802,16 @@ export class VoxelEngine {
         return;
       }
       if (action.kind === "open") {
+        if (!this.remoteContainerInReach(action.containerId, peerId)) {
+          const response: ContainerAction = { ...action, status: "rejected", reason: "That shared workstation is unavailable or too far away." };
+          this.queueCriticalReliableRequest(`host-container-reject:${peerId}:${action.requestId}`, () => this.multiplayer?.sendContainerAction(response, peerId) ?? 0, 4_000);
+          return;
+        }
+        if (!this.remoteContainerTerrainReady(action.containerId)) {
+          const response: ContainerAction = { ...action, status: "rejected", reason: "That shared container's terrain is still loading." };
+          this.queueCriticalReliableRequest(`host-container-terrain-pending:${peerId}:${action.requestId}`, () => this.multiplayer?.sendContainerAction(response, peerId) ?? 0, 4_000);
+          return;
+        }
         const furnaceContainer = action.containerId.startsWith("furnace:");
         const millContainer = action.containerId.startsWith("wheat-mill:");
         const rawContainerId = furnaceContainer ? action.containerId.slice("furnace:".length)
@@ -10084,37 +14821,27 @@ export class VoxelEngine {
         const firstBlock = exhibitBlock ?? rawContainerId.split("|")[0];
         const coords = firstBlock.split(",").map(Number);
         const exhibitTopology = exhibitContainer && coords.length === 3 && coords.every(Number.isFinite) ? this.exhibitTopologyAt(coords[0], coords[1], coords[2]) : null;
-        const canonicalId = furnaceContainer ? `furnace:${rawContainerId}` : millContainer ? `wheat-mill:${rawContainerId}` : exhibitTopology ? this.consolidateExhibit(exhibitTopology) : coords.length === 3 && coords.every(Number.isFinite)
-          && this.world.getBlock(coords[0], coords[1], coords[2]) === BlockId.Chest
-          ? this.resolveChest(firstBlock)
-          : rawContainerId;
+        const coordinateBacked = coords.length === 3 && coords.every(Number.isFinite);
+        const coordinateBlock = coordinateBacked ? this.world.getBlock(coords[0], coords[1], coords[2]) : undefined;
+        const furnacePosition = furnaceContainer && coordinateBlock === BlockId.Furnace
+          ? new THREE.Vector3(coords[0], coords[1], coords[2])
+          : null;
+        const millPosition = millContainer && coordinateBlock === BlockId.WheatMill
+          ? new THREE.Vector3(coords[0], coords[1], coords[2])
+          : null;
+        const canonicalId = furnaceContainer ? (furnacePosition ? `furnace:${rawContainerId}` : null)
+          : millContainer ? (millPosition ? `wheat-mill:${rawContainerId}` : null)
+            : exhibitContainer ? (exhibitTopology ? this.consolidateExhibit(exhibitTopology) : null)
+              : coordinateBacked ? (coordinateBlock === BlockId.Chest ? this.resolveChest(firstBlock) : null)
+                : rawContainerId;
+        if (!canonicalId) {
+          const response: ContainerAction = { ...action, status: "rejected", reason: "That chest's terrain is still loading." };
+          this.queueCriticalReliableRequest(`host-container-terrain-pending:${peerId}:${action.requestId}`, () => this.multiplayer?.sendContainerAction(response, peerId) ?? 0, 4_000);
+          return;
+        }
         const boat = canonicalId.startsWith("boat:") ? this.boats.get(canonicalId.slice("boat:".length)) : null;
-        const cargoMatch = /^(dragon|leviathan):(\d+):cargo$/u.exec(canonicalId);
-        const cargoMob = cargoMatch ? this.mobs.find((mob) => mob.id === Number(cargoMatch[2])) : null;
-        const validCargo = Boolean(cargoMob && (cargoMatch?.[1] === "dragon"
-          ? cargoMob.dragonState && dragonCargoSlots(cargoMob.dragonState) > 0
-          : cargoMob.leviathanGrowth && cargoMob.leviathanGrowth.chestModules > 0));
         if (boat && !this.chests.has(canonicalId)) this.chests.set(canonicalId, boat.save.inventory);
-        const furnacePosition = furnaceContainer && coords.length === 3 && coords.every(Number.isFinite)
-          && this.world.getBlock(coords[0], coords[1], coords[2]) === BlockId.Furnace
-          ? new THREE.Vector3(coords[0], coords[1], coords[2])
-          : null;
-        const millPosition = millContainer && coords.length === 3 && coords.every(Number.isFinite)
-          && this.world.getBlock(coords[0], coords[1], coords[2]) === BlockId.WheatMill
-          ? new THREE.Vector3(coords[0], coords[1], coords[2])
-          : null;
-        const pose = this.remotePlayers.get(peerId)?.target;
-        const keeperPosition = pose ? new THREE.Vector3(pose.x, pose.y, pose.z) : null;
-        const inReach = Boolean(keeperPosition && ((furnacePosition && furnacePosition.distanceToSquared(keeperPosition) <= 8 * 8)
-          || (millPosition && millPosition.distanceToSquared(keeperPosition) <= 8 * 8)
-          || (boat && boat.group.position.distanceToSquared(keeperPosition) <= 8 * 8)
-          || (validCargo && cargoMob!.group.position.distanceToSquared(keeperPosition) <= 8 * 8)
-          || (exhibitTopology && exhibitTopology.blocks.some((block) => new THREE.Vector3(block.x, block.y, block.z).distanceToSquared(keeperPosition) <= 8 * 8))
-          || canonicalId.split("|").some((block) => {
-          const position = block.split(",").map(Number);
-          return position.length === 3 && position.every(Number.isFinite)
-            && new THREE.Vector3(position[0], position[1], position[2]).distanceToSquared(keeperPosition) <= 8 * 8;
-          })));
+        const inReach = this.remoteContainerInReach(canonicalId, peerId);
         // Generated and newly placed furnaces have no storage record until a
         // valid nearby keeper opens them. Only then materialize their canonical
         // empty host-owned machine state.
@@ -10145,6 +14872,23 @@ export class VoxelEngine {
         return;
       }
       const activeId = this.multiplayerPeerActiveContainers.get(peerId);
+      if (activeId !== action.containerId || !this.remoteContainerInReach(action.containerId, peerId)) {
+        const response: ContainerAction = { ...action, status: "rejected", reason: "Open this nearby shared container before changing it." };
+        this.queueCriticalReliableRequest(`host-container-reject:${peerId}:${action.requestId}`, () => this.multiplayer?.sendContainerAction(response, peerId) ?? 0, 4_000);
+        return;
+      }
+      if (!this.remoteContainerTerrainReady(action.containerId)) {
+        const response: ContainerAction = { ...action, status: "rejected", reason: "That shared container's terrain is still loading." };
+        this.queueCriticalReliableRequest(`host-container-terrain-pending:${peerId}:${action.requestId}`, () => this.multiplayer?.sendContainerAction(response, peerId) ?? 0, 4_000);
+        return;
+      }
+      if (!this.remoteContainerStillCanonical(action.containerId) || !this.remoteContainerInReach(action.containerId, peerId)) {
+        this.multiplayerPeerActiveContainers.delete(peerId);
+        for (const key of [...this.multiplayerPeerContainerSignatures.keys()]) if (key.startsWith(`${peerId}|`)) this.multiplayerPeerContainerSignatures.delete(key);
+        const response: ContainerAction = { ...action, status: "rejected", reason: "That shared container changed or moved out of reach; open it again." };
+        this.queueCriticalReliableRequest(`host-container-stale:${peerId}:${action.requestId}`, () => this.multiplayer?.sendContainerAction(response, peerId) ?? 0, 4_000);
+        return;
+      }
       const existing = activeId === action.containerId ? this.networkContainerSlots(action.containerId) ?? undefined : undefined;
       const currentRevision = this.multiplayerContainerRevisions.get(action.containerId) ?? 0;
       const currentPlayer = this.ensureHostPlayerSession(peer.identity);
@@ -10298,6 +15042,10 @@ export class VoxelEngine {
   private syncMultiplayerPlayerState() {
     const session = this.multiplayer;
     if (!session || session.role !== "guest" || !this.multiplayerReceivedSnapshot) return;
+    // Player progression travels in bounded chunks on the same ordered reliable
+    // channel. Hold state-triggered presentations until the host either accepts
+    // the pending revision or returns its prior authoritative image.
+    if (this.multiplayerPendingProgressionTransfer) return;
     this.pendingGuestPlacementRequests ??= new Map<string, number>();
     const now = Date.now();
     for (const [requestId, expiresAt] of this.pendingGuestPlacementRequests) {
@@ -10338,6 +15086,29 @@ export class VoxelEngine {
     } catch { /* The next sync interval retries after reconnect. */ }
   }
 
+  private playerProgressionSignature(value: PlayerProgressionSnapshot) {
+    const questBook = normalizeQuestBook(value.questBook);
+    const referenced = new Set([
+      ...questBook.active.map((entry) => entry.questId), ...questBook.completed,
+      ...questBook.failed.map((entry) => entry.questId), ...questBook.abandoned,
+    ]);
+    return JSON.stringify({
+      questBook,
+      sideQuestDefinitions: value.sideQuestDefinitions.filter((definition) => referenced.has(definition.id)),
+      // Full map data transfers only after its compact revision changes.
+      mapRevision: value.mapKnowledge.revision,
+      bestiary: value.bestiary,
+      plantBestiary: value.plantBestiary,
+      blueprints: value.blueprints,
+      magicState: value.magicState,
+      potionBuffs: value.potionBuffs,
+      rangedLoaded: Object.entries(value.rangedLoaded).map(([item, loaded]) => [Number(item), loaded]),
+      bankAccount: value.bankAccount,
+      stockMarket: value.stockMarket,
+      respawn: value.respawn ? [value.respawn.x, value.respawn.y, value.respawn.z] : null,
+    });
+  }
+
   private localPlayerProgressionSignature() {
     const questBook = normalizeQuestBook(this.questBook);
     const referenced = new Set([
@@ -10347,14 +15118,13 @@ export class VoxelEngine {
     return JSON.stringify({
       questBook,
       sideQuestDefinitions: this.sideQuestDefinitions.filter((definition) => referenced.has(definition.id)),
-      // Full map data transfers only after its compact revision changes.
       mapRevision: this.mapKnowledge.revision,
       bestiary: this.bestiary,
       plantBestiary: this.plantBestiary,
       blueprints: this.blueprints,
       magicState: this.magicState,
       potionBuffs: this.potionBuffs,
-      rangedLoaded: [...this.rangedLoaded.entries()],
+      rangedLoaded: [...this.rangedLoaded.entries()].sort(([left], [right]) => left - right),
       bankAccount: this.bankAccount,
       stockMarket: this.stockMarket,
       respawn: [this.spawn.x, this.spawn.y, this.spawn.z],
@@ -10364,13 +15134,26 @@ export class VoxelEngine {
   private syncMultiplayerPlayerProgression() {
     const session = this.multiplayer;
     if (!session || session.role !== "guest" || !this.multiplayerReceivedSnapshot || !this.multiplayerProgressionReceived) return;
-    if (this.multiplayerProgressOutgoing.some((entry) => entry.action.status === "request")) return;
-    const signature = this.localPlayerProgressionSignature();
+    if (this.multiplayerPendingProgressionTransfer) return;
+    const baseState = this.multiplayerProgressionConfirmedState;
+    if (!baseState) return;
+    const requestState = this.localPlayerProgressionSnapshot();
+    const signature = this.playerProgressionSignature(requestState);
     if (signature === this.multiplayerProgressionSignature) return;
     const revision = this.multiplayerProgressionRevision + 1;
-    this.queuePlayerProgressionTransfer({ revision, state: this.localPlayerProgressionSnapshot() }, session.identity.id, "request");
-    this.multiplayerProgressionRevision = revision;
-    this.multiplayerProgressionSignature = signature;
+    const transferId = this.queuePlayerProgressionTransfer(
+      { revision, state: requestState },
+      session.identity.id,
+      "request",
+    );
+    this.multiplayerPendingProgressionTransfer = {
+      revision,
+      signature,
+      transferId,
+      transportComplete: false,
+      baseState,
+      requestState,
+    };
   }
 
   private requestNetworkFacilitySnapshot(facility: { id: string; kind: SharedFacilityKind }) {
@@ -10837,13 +15620,27 @@ export class VoxelEngine {
     }
   }
 
-  private applyInitialWorldSnapshot(snapshot: WorldSnapshot, hostPeer: PeerInfo) {
+  private async applyInitialWorldSnapshot(snapshot: WorldSnapshot, hostPeer: PeerInfo) {
     const snapshotProfile = snapshot.generatorProfile ?? "world-below-v15";
     if (snapshot.generatorVersion !== GENERATOR_VERSION
       || !["legacy-v14", "world-below-v15"].includes(snapshotProfile)) {
       this.multiplayerState.error = "Host and guest use different world-generator versions.";
       return;
     }
+    // Snapshot validation is the final point at which this engine may still
+    // own a local catalog world. Detach that persistence owner before changing
+    // any world identity or awaiting asynchronous terrain work: an already
+    // queued autosave must observe `persistent === false` and cannot serialize
+    // the host seed/options into the guest's former local save.
+    this.persistent = false;
+    this.activeWorldId = null;
+    const terrainGeneration = ++this.multiplayerTerrainReadinessGeneration;
+    this.multiplayerTerrainReadinessAbort?.abort();
+    const terrainReadiness = new AbortController();
+    this.multiplayerTerrainReadinessAbort = terrainReadiness;
+    this.running = false;
+    this.paused = true;
+    this.multiplayerReceivedSnapshot = false;
     const hostPose = snapshot.players.find((pose) => pose.playerId === hostPeer.identity?.id) ?? snapshot.players[0];
     // The host world decides the game mode. A guest must never retain a local
     // builder catalog when entering somebody else's survival save.
@@ -10894,6 +15691,16 @@ export class VoxelEngine {
     const centerX = hostPose?.x ?? 0;
     const centerZ = hostPose?.z ?? 0;
     this.world.initializeAround(centerX, centerZ);
+    if (this.terrainGenerationMode() === "rust") {
+      await this.world.awaitGenerationRing(centerX, centerZ, 1, 60_000, terrainReadiness.signal);
+      if (terrainReadiness.signal.aborted
+        || terrainGeneration !== this.multiplayerTerrainReadinessGeneration
+        || this.disposed) {
+        const error = new Error("Guest Rust terrain readiness was superseded");
+        error.name = "AbortError";
+        throw error;
+      }
+    }
     const candidates = [[1.4, 0], [-1.4, 0], [0, 1.4], [0, -1.4]];
     let joined = false;
     for (const [dx, dz] of candidates) {
@@ -10911,11 +15718,6 @@ export class VoxelEngine {
     this.weather = snapshot.time.weather;
     if (snapshot.time.weatherState) this.weatherState = { ...snapshot.time.weatherState };
     else this.resetDynamicWeather({ ...this.weatherState, kind: snapshot.time.weather, intensity: snapshot.time.weather === "rain" ? 0.72 : 0 });
-    this.running = true;
-    this.paused = !this.multiplayerSimulationActive();
-    this.titleMode = false;
-    this.persistent = false;
-    this.activeWorldId = null;
     this.lastNetworkMobSnapshotTick = -1;
     this.lastNetworkMobSnapshotScope = null;
     this.lastNetworkDropSnapshotScope = null;
@@ -10930,7 +15732,21 @@ export class VoxelEngine {
       ? normalizeMultiplayerPlayerState(snapshot.playerState, guestPlayerId, this.multiplayer?.identity.variant)
       : normalizeMultiplayerPlayerState(null, guestPlayerId, this.multiplayer?.identity.variant), false, true);
     for (const pose of snapshot.players) this.upsertRemotePlayer(pose, pose.playerId === hostPeer.identity?.id ? hostPeer : undefined);
+    if (this.rustLivePlayerAuthorityRequestedR5) {
+      const generation = this.rustRuntimeTransitionGeneration;
+      const host = this.rustRuntimeHost;
+      if (!host) throw new Error("Rust guest keyframe has no active runtime host for R5 player authority");
+      // The native keyframe has already committed before its presentation is
+      // emitted. Bootstrap the guest player only now, after the matching host
+      // world, spawn, mode, inventory, and progression image are installed.
+      await this.finalizeRustWorldRuntime(generation, "multiplayer-guest", null, host);
+    }
+    this.rustRuntimeOperationsBlocked = false;
+    this.running = true;
+    this.paused = this.multiplayerProgressionGameplayFrozen() || !this.multiplayerSimulationActive();
+    this.titleMode = false;
     this.multiplayerReceivedSnapshot = true;
+    if (this.multiplayerTerrainReadinessAbort === terrainReadiness) this.multiplayerTerrainReadinessAbort = null;
     this.events.onToast(`Joined ${hostPeer.identity?.name ?? "the host"}'s world. The host device is authoritative for this session.`);
   }
 
@@ -10994,6 +15810,12 @@ export class VoxelEngine {
       if (tombstoneTick !== undefined) this.appliedMultiplayerTombstones.delete(`mob:${entry.id}`);
       if (this.pendingNetworkMobDeaths.has(entry.id)) continue;
       if (!(entry.kind in MOB_DEFS) || BUTTERFLY_ORDER.includes(entry.kind as ButterflyKind)) continue;
+      // A scoped host image can describe entities well beyond the guest's
+      // initial player ring.  Keep an existing instance (and its omission
+      // bookkeeping) untouched until the exact Rust voxels around the new
+      // pose are resident; spawning/replacing first would let prime-anchor and
+      // dragon setup read an absent column.
+      if (!this.ensureTerrainResidency(entry.x, entry.z, 4)) continue;
       let mob = this.mobs.find((candidate) => candidate.id === entry.id);
       if (mob && entry.appearanceRevision && mob.group.userData.networkAppearanceRevision !== entry.appearanceRevision) {
         this.removeMob(this.mobs.indexOf(mob));
@@ -11296,44 +16118,145 @@ export class VoxelEngine {
     this.audio.play("break", logs[0].type);
   }
 
+  private remoteBlockActionShapeValid(action: BlockAction) {
+    if (action.edits.length < 1 || action.edits.length > 2_048) return false;
+    const chunks = new Set<string>();
+    for (const edit of action.edits) {
+      if (!Number.isSafeInteger(edit.x) || !Number.isSafeInteger(edit.y) || !Number.isSafeInteger(edit.z)
+        || !Number.isSafeInteger(edit.type) || edit.y < MIN_Y || edit.y > MAX_Y || !BLOCKS[edit.type as BlockId]) return false;
+      for (let cz = Math.floor((edit.z - 2) / CHUNK_SIZE); cz <= Math.floor((edit.z + 2) / CHUNK_SIZE); cz += 1) {
+        for (let cx = Math.floor((edit.x - 2) / CHUNK_SIZE); cx <= Math.floor((edit.x + 2) / CHUNK_SIZE); cx += 1) {
+          chunks.add(`${cx},${cz}`);
+          if (chunks.size > 36) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  private remoteHostBlockActionPreflight(action: BlockAction, peer: PeerInfo) {
+    if (!peer.identity || action.actorId !== peer.identity.id || !this.remoteBlockActionShapeValid(action)) return false;
+    const remote = this.remotePlayers.get(peer.identity.id);
+    if (!remote) return false;
+    const playerPoses = [this.localNetworkPose(), ...[...this.remotePlayers.values()].map((player) => player.target)]
+      .filter((pose): pose is PlayerPose => Boolean(pose));
+    const reachSquared = action.kind === "batch" ? 32 * 32 : 8 * 8;
+    return action.edits.every((edit) => {
+      const dx = edit.x - remote.target.x;
+      const dy = edit.y - (remote.target.y + 1);
+      const dz = edit.z - remote.target.z;
+      const occupiesPlayer = edit.type !== BlockId.Air && playerPoses.some((player) => blockEditIntersectsPlayer(
+        edit,
+        player,
+        PLAYER_HEIGHT * playerVariantHeightScale(player.variant ?? "male"),
+      ));
+      return dx * dx + dy * dy + dz * dz <= reachSquared && !occupiesPlayer;
+    });
+  }
+
+  private remoteBlockActionTerrainReady(action: BlockAction) {
+    if (this.terrainGenerationMode() !== "rust") return true;
+    const chunks = new Set<string>();
+    for (const edit of action.edits) for (let cz = Math.floor((edit.z - 2) / CHUNK_SIZE); cz <= Math.floor((edit.z + 2) / CHUNK_SIZE); cz += 1) {
+      for (let cx = Math.floor((edit.x - 2) / CHUNK_SIZE); cx <= Math.floor((edit.x + 2) / CHUNK_SIZE); cx += 1) chunks.add(`${cx},${cz}`);
+    }
+    if (chunks.size > 36) return false;
+    let ready = true;
+    for (const key of chunks) {
+      const [cx, cz] = key.split(",").map(Number);
+      if (!this.world.requestChunkForResidency(cx, cz, 10_000)) ready = false;
+    }
+    if (!ready) return false;
+    return action.edits.every((edit) => this.world.getBlock(edit.x, edit.y, edit.z) !== undefined);
+  }
+
+  private deferRemoteBlockAction(key: string, action: BlockAction, peer: PeerInfo) {
+    const pending = this.deferredRemoteBlockActions ??= new Map();
+    if (!pending.has(key) && pending.size >= 256) {
+      if (this.multiplayer?.role === "host") return false;
+      const oldest = pending.keys().next().value as string | undefined;
+      if (oldest) pending.delete(oldest);
+    }
+    if (!this.multiplayer) return false;
+    pending.set(key, {
+      action,
+      peer,
+      session: this.multiplayer,
+      terrainGeneration: this.multiplayerTerrainReadinessGeneration,
+    });
+    return true;
+  }
+
+  private flushDeferredRemoteBlockActions() {
+    const session = this.multiplayer;
+    if (!session) return;
+    for (const [key, pending] of [...(this.deferredRemoteBlockActions ??= new Map())]) {
+      if (pending.session !== session || pending.terrainGeneration !== this.multiplayerTerrainReadinessGeneration) {
+        this.deferredRemoteBlockActions.delete(key);
+        continue;
+      }
+      const peerId = pending.peer.identity?.id;
+      const currentPeer = peerId ? session.getPeer(peerId) : null;
+      if (!currentPeer || currentPeer.state !== "connected") {
+        this.deferredRemoteBlockActions.delete(key);
+        continue;
+      }
+      this.deferredRemoteBlockActions.delete(key);
+      this.handleRemoteBlockAction(pending.action, currentPeer);
+    }
+  }
+
   private handleRemoteBlockAction(action: BlockAction, peer: PeerInfo) {
     if (!this.multiplayer) return;
+    const deferredKey = `${action.actorId}:${action.requestId}`;
     if (this.multiplayer.role === "host" && action.status !== "accepted") {
+      if (!this.remoteHostBlockActionPreflight(action, peer)) {
+        if (peer.identity) this.multiplayer.sendBlockAction({
+          ...action,
+          edits: [],
+          status: "rejected",
+          reason: "The host rejected an out-of-range, occupied, malformed, or spatially oversized block edit.",
+        }, peer.identity.id);
+        return;
+      }
+      if (!this.remoteBlockActionTerrainReady(action)) {
+        if (!this.deferRemoteBlockAction(deferredKey, action, peer) && peer.identity) this.multiplayer.sendBlockAction({
+          ...action,
+          edits: [],
+          status: "rejected",
+          reason: "The host terrain queue is full; retry this edit after nearby terrain loads.",
+        }, peer.identity.id);
+        return;
+      }
+      (this.deferredRemoteBlockActions ??= new Map()).delete(deferredKey);
+      // Occupancy and reach can change while a Rust chunk is loading.
+      if (!this.remoteHostBlockActionPreflight(action, peer)) return;
       const remote = peer.identity ? this.remotePlayers.get(peer.identity.id) : null;
       let playerState = peer.identity ? this.ensureHostPlayerSession(peer.identity) : null;
       if (playerState && action.selectedSlot !== undefined && action.selectedSlot !== playerState.selected) {
         // Selection is intent; the matching stack remains the host-owned pack
         // image. Carrying it on the reliable edit avoids pose-lane reordering.
         playerState = { ...playerState, selected: action.selectedSlot };
-        this.multiplayerPlayerStates.set(playerState.playerId, playerState);
       }
       const placement = playerState && this.mode === "survival"
         ? consumeMultiplayerPlacementItem(playerState, action.consumedItem, action.edits)
         : { valid: action.consumedItem === undefined || this.mode === "builder", consumed: false, state: playerState };
-      const playerPoses = [this.localNetworkPose(), ...[...this.remotePlayers.values()].map((player) => player.target)]
-        .filter((pose): pose is PlayerPose => Boolean(pose));
-      const valid = Boolean(remote) && placement.valid && action.edits.length > 0 && action.edits.length <= 2_048 && action.edits.every((edit) => {
-        const definition = BLOCKS[edit.type as BlockId];
-        const dx = edit.x - remote!.target.x;
-        const dy = edit.y - (remote!.target.y + 1);
-        const dz = edit.z - remote!.target.z;
-        const occupiesPlayer = edit.type !== BlockId.Air && playerPoses.some((player) => blockEditIntersectsPlayer(edit, player, PLAYER_HEIGHT * playerVariantHeightScale(player.variant ?? "male")));
-        const reachSquared = action.kind === "batch" ? 32 * 32 : 8 * 8;
-        return Boolean(definition) && edit.y >= MIN_Y && edit.y <= MAX_Y && dx * dx + dy * dy + dz * dz <= reachSquared && !occupiesPlayer;
-      });
+      const valid = Boolean(remote) && placement.valid && this.remoteHostBlockActionPreflight(action, peer);
       const resolved: BlockAction = valid
         ? { ...action, status: "accepted" }
         : {
           ...action,
           edits: action.edits.map((edit) => {
-            const type = this.world.getBlock(edit.x, edit.y, edit.z) ?? BlockId.Air;
+            const type = this.world.getBlock(edit.x, edit.y, edit.z);
+            if (type === undefined) return null;
             const facing = this.worldBlockFacing(edit.x, edit.y, edit.z);
             return { ...edit, type, ...(isDirectionallyPlacedBlock(type) ? { facing } : {}) };
-          }),
+          }).filter((edit): edit is BlockAction["edits"][number] => edit !== null),
           status: "rejected",
           reason: "The host rejected an out-of-range, occupied, or invalid block edit.",
         };
       if (valid) {
+        if (playerState) this.multiplayerPlayerStates.set(playerState.playerId, placement.consumed && placement.state ? placement.state : playerState);
         if (action.effect?.kind === "tree-fell") this.animateNetworkTreeFell(action, this.mode === "survival");
         const held = playerState ? inventorySlotFromNetwork(playerState.inventory[playerState.selected]) : null;
         const brokenBlocks = action.edits.flatMap((edit) => {
@@ -11378,6 +16301,17 @@ export class VoxelEngine {
       return;
     }
     if (this.multiplayer.role === "guest" && (action.status === "accepted" || action.status === "rejected")) {
+      if (action.status === "rejected" && action.edits.length === 0) {
+        this.pendingGuestPlacementRequests.delete(action.requestId);
+        if (action.reason) this.events.onToast(action.reason);
+        return;
+      }
+      if (!this.remoteBlockActionShapeValid(action)) return;
+      if (!this.remoteBlockActionTerrainReady(action)) {
+        this.deferRemoteBlockAction(deferredKey, action, peer);
+        return;
+      }
+      (this.deferredRemoteBlockActions ??= new Map()).delete(deferredKey);
       const predictedTreeFall = action.status === "accepted"
         && action.actorId === this.multiplayer.identity.id
         && action.effect?.kind === "tree-fell"
@@ -11469,10 +16403,89 @@ export class VoxelEngine {
     this.agentVoicePending = retained;
   }
 
+  private queueRustAuthorityPresentation(event: Extract<MultiplayerEvent, { type: "authority-delta" }>) {
+    const session = this.multiplayer;
+    if (!session || session.role !== "guest" || !session.sessionId || !event.peer.identity) {
+      throw new Error("Only an active Rust guest can consume an authority presentation");
+    }
+    const prior = this.rustGuestPresentationQueue ?? Promise.resolve();
+    this.rustGuestPresentationQueueDepth = (this.rustGuestPresentationQueueDepth ?? 0) + 1;
+    const operation = prior.then(async () => {
+      this.rustGuestPresentationQueueDepth = Math.max(0, (this.rustGuestPresentationQueueDepth ?? 1) - 1);
+      this.rustGuestPresentationInFlight = (this.rustGuestPresentationInFlight ?? 0) + 1;
+      try {
+        if (this.multiplayer !== session) return;
+        const presentation = decodeRustMultiplayerWorldPresentationV2({
+          delta: event.delta,
+          sessionId: session.sessionId!,
+          host: event.peer.identity!,
+          target: session.identity,
+        });
+        const snapshot = presentation.snapshot;
+        if (!this.multiplayerReceivedSnapshot) {
+          if (!event.keyframe) throw new Error("The first Rust world presentation is not a keyframe");
+          await this.applyInitialWorldSnapshot(snapshot, event.peer);
+          if (!this.multiplayerReceivedSnapshot) {
+            throw new Error(this.multiplayerState.error || "The accepted Rust keyframe was not applied");
+          }
+        } else {
+          if (snapshot.generatorVersion !== GENERATOR_VERSION || snapshot.seed !== this.world.seedText) {
+            throw new Error("Rust presentation changed world identity without a new guest session");
+          }
+          this.applyIncrementalWorldSnapshot(snapshot, event.peer);
+        }
+        const currentHost = session.getPeer(event.peer.identity!.id);
+        if (this.multiplayer !== session
+          || currentHost?.token !== event.peer.token
+          || currentHost.state !== "connected") return;
+        if (presentation.progressionReceipt) {
+          this.recordMultiplayerProgressionReceipt("guest-observed", event.peer, presentation.progressionReceipt);
+        }
+        if (presentation.playerProgression) {
+          this.applyAuthoritativeGuestPlayerProgression(
+            presentation.playerProgression,
+            session.identity.id,
+            true,
+            presentation.progressionReceipt,
+          );
+        } else if ((session.identity.peerKind ?? "human") === "human") {
+          throw new Error("Rust presentation omitted the targeted human player progression");
+        }
+        if (this.multiplayer !== session) return;
+        if (!session.confirmRustGuestPresentationApplied(event.sequence, event.stateHash)) return;
+        this.rustAuthorityDeltaApplied += 1;
+        this.rustAuthorityLastStateHash = event.stateHash;
+        this.rustAuthorityLastError = null;
+      } finally {
+        this.rustGuestPresentationInFlight = Math.max(0, (this.rustGuestPresentationInFlight ?? 1) - 1);
+      }
+    });
+    this.rustGuestPresentationQueue = operation.catch(() => undefined);
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error) => {
+      if (this.multiplayer !== session) return;
+      const message = error instanceof Error ? error.message : String(error);
+      this.rustAuthorityLastError = message;
+      this.multiplayerState.error = `Rust authority presentation failed closed: ${message}`;
+      this.running = false;
+      this.paused = true;
+      this.multiplayerReceivedSnapshot = false;
+      void this.disconnectMultiplayer("rust-presentation-invalid").then(() => {
+        this.events.onMultiplayerEnded?.("The native host presentation was invalid. Rejoin to obtain a clean keyframe.");
+      });
+    });
+  }
+
   private handleMultiplayerEvent(event: MultiplayerEvent) {
     if (event.type === "state") {
       this.multiplayerState.status = event.state;
-      if (event.state === "connected") this.paused = false;
+      if (event.state === "connected") {
+        this.paused = this.multiplayerProgressionGameplayFrozen() || !this.running;
+        if (this.multiplayer?.role === "guest") {
+          this.multiplayerPoseHeartbeatTimer = 0;
+          this.multiplayerPoseSignature = null;
+        }
+      }
       else if (!this.locked && !this.touchMode && this.running && !this.titleMode) this.paused = true;
       if (event.state === "disconnected" && this.multiplayer?.role === "guest" && this.multiplayerReceivedSnapshot) {
         this.events.onMultiplayerEnded?.("The host ended the multiplayer session.");
@@ -11482,12 +16495,17 @@ export class VoxelEngine {
       this.multiplayerState.error = event.error.message;
       this.events.onToast(`Multiplayer: ${event.error.message}`);
     } else if (event.type === "authority-delta") {
-      this.rustAuthorityDeltaApplied += 1;
-      this.rustAuthorityLastStateHash = event.stateHash;
-      this.rustAuthorityLastError = null;
+      this.queueRustAuthorityPresentation(event);
     } else if (event.type === "authority-rejection") {
       this.rustAuthorityRejections += 1;
       this.rustAuthorityLastError = `${event.code}:${event.commandId}`;
+      this.rustAuthorityLastRejection = Object.freeze({
+        messageType: event.messageType,
+        commandId: event.commandId,
+        code: event.code,
+        expected: Object.freeze({ revision: Object.freeze({ ...event.expected.revision }), stateHash: event.expected.stateHash }),
+        current: Object.freeze({ revision: Object.freeze({ ...event.current.revision }), stateHash: event.current.stateHash }),
+      });
       this.multiplayerState.error = `Rust authority rejected ${event.commandId} (${event.code}).`;
       if (this.multiplayer?.role === "host" && event.peer.identity) {
         this.multiplayer.disconnectPeer(event.peer.identity.id, `rust-authority-${event.code}`);
@@ -11509,6 +16527,15 @@ export class VoxelEngine {
     } else if (event.type === "peer") {
       this.multiplayerState.peers = this.multiplayer?.getPeers() ?? [];
       if (event.peer.state === "connected" && this.multiplayer?.role === "host" && event.peer.identity) {
+        // Delta sequence is a connection-local replay cursor. Stable character
+        // identity deliberately survives reconnect, but a fresh native guest
+        // receiver starts at sequence one under its new transport token.
+        if (event.reason === "connected") {
+          this.rustPeerDeltaSequences.set(event.peer.identity.id, Object.freeze({
+            connectionToken: event.peer.token,
+            sequence: 0,
+          }));
+        }
         if (event.peer.identity.peerKind === "agent") {
           if (event.reason !== "connected") {
             this.emitHud(true);
@@ -11566,17 +16593,48 @@ export class VoxelEngine {
           this.emitHud(true);
           return;
         }
+        if (event.reason !== "connected") {
+          this.emitHud(true);
+          return;
+        }
+        // A stable character may reconnect under a new transport token. Never
+        // let chunks from the replaced connection complete its new transfer.
+        this.purgeIncompletePlayerProgressTransfersForPeer(event.peer, true);
         if (event.reason === "connected") (this.multiplayerPeerScopeEpochs ??= new Map()).set(
           event.peer.identity.id,
           (this.multiplayerPeerScopeEpochs.get(event.peer.identity.id) ?? 0) + 1,
         );
+        const priorReceipt = this.rustPlayerProgressionReceipts?.get(event.peer.identity.id);
+        if (priorReceipt && priorReceipt.connectionToken !== event.peer.token) {
+          this.clearRustPlayerProgressionReceiptForPeer(event.peer, true);
+        }
         this.ensureHostPlayerSession(event.peer.identity);
-        this.sendHostWorldSnapshot(event.peer.identity.id);
-        this.sendAuthoritativePlayerProgression(event.peer.identity);
-        void this.trackRustAuthorityOperation(this.publishRustAuthorityKeyframe(event.peer.identity.id)).catch((error) => {
-          this.rustAuthorityLastError = error instanceof Error ? error.message : String(error);
-        });
+        if (this.multiplayer.authorityMode === "legacy-compatibility") {
+          this.sendHostWorldSnapshot(event.peer.identity.id);
+          this.sendAuthoritativePlayerProgression(event.peer.identity);
+        } else {
+          // The connected event owns the sole human bootstrap keyframe. Do not
+          // let the zeroed periodic timer immediately queue a second fenced
+          // presentation while the guest is still hydrating its terrain ring.
+          this.multiplayerSnapshotTimer = Math.max(10, this.multiplayerSnapshotTimer || 0);
+          void this.trackRustAuthorityOperation(this.publishRustAuthorityKeyframe(event.peer.identity.id)).catch((error) => {
+            this.rustAuthorityLastError = error instanceof Error ? error.message : String(error);
+          });
+        }
         this.events.onToast(`${event.peer.identity.name} joined the session.`);
+      }
+      if (["disconnected", "failed", "closed"].includes(event.peer.state)) {
+        this.purgeIncompletePlayerProgressTransfersForPeer(event.peer);
+        this.clearRustPlayerProgressionReceiptForPeer(event.peer, false);
+      }
+      if (["disconnected", "failed", "closed"].includes(event.peer.state) && event.peer.identity) {
+        // WebRTC's transient `disconnected` connectionState is surfaced as
+        // `stale` and may recover with the same token/native receiver. Only a
+        // terminal peer event retires that receiver's sequence cursor.
+        const deltaCursor = this.rustPeerDeltaSequences.get(event.peer.identity.id);
+        if (deltaCursor?.connectionToken === event.peer.token) {
+          this.rustPeerDeltaSequences.delete(event.peer.identity.id);
+        }
       }
       if (["disconnected", "failed", "closed", "stale"].includes(event.peer.state) && event.peer.identity) {
         if (event.peer.identity.peerKind === "agent") {
@@ -11600,6 +16658,20 @@ export class VoxelEngine {
         }
       }
       this.emitHud(true);
+    } else if (event.type === "native-player-pose") {
+      if (this.multiplayer?.authorityMode !== "rust-authoritative"
+        || this.multiplayer.role !== "host"
+        || !event.peer.identity
+        || event.receipt.peerId !== event.peer.identity.id
+        || event.receipt.connectionId !== event.peer.token) return;
+      const pose = this.hostPlayerPoseFromNativeReceipt(event.receipt, event.peer.identity);
+      this.upsertRemotePlayer(pose, event.peer, Object.freeze({
+        connectionGeneration: event.connectionGeneration,
+        commandSequence: event.receipt.commandSequence,
+        recordRevision: event.receipt.recordRevision,
+        receiptHash: event.receipt.receiptHash,
+        recordHash: event.receipt.recordHash,
+      }));
     } else if (event.type === "message") {
       const { envelope } = event;
       if (envelope.type === "chat") {
@@ -11666,6 +16738,10 @@ export class VoxelEngine {
           });
         }
       } else if (envelope.type === "player-pose") {
+        // Rust-authoritative sessions emit `native-player-pose` only. Keeping
+        // this raw JSON path exclusive to explicit compatibility mode prevents
+        // an accepted envelope from bypassing the native pose record.
+        if (this.multiplayer?.authorityMode !== "legacy-compatibility") return;
         let pose = envelope.payload as PlayerPose;
         if (this.multiplayer?.role === "host" && event.peer.identity) {
           let state = this.ensureHostPlayerSession(event.peer.identity);
@@ -11691,7 +16767,13 @@ export class VoxelEngine {
       } else if (envelope.type === "snapshot" && this.multiplayer?.role === "guest") {
         const snapshot = envelope.payload as WorldSnapshot;
         if (this.multiplayerReceivedSnapshot) this.applyIncrementalWorldSnapshot(snapshot, event.peer);
-        else this.applyInitialWorldSnapshot(snapshot, event.peer);
+        else void this.applyInitialWorldSnapshot(snapshot, event.peer).catch((error) => {
+          if (error instanceof Error && error.name === "AbortError") return;
+          this.running = false;
+          this.paused = true;
+          this.multiplayerReceivedSnapshot = false;
+          this.multiplayerState.error = error instanceof Error ? error.message : "Required Rust guest terrain did not become ready.";
+        });
       } else if (envelope.type === "block-action") this.handleRemoteBlockAction(envelope.payload as BlockAction, event.peer);
       else if (envelope.type === "boat-action") this.handleRemoteBoatAction(envelope.payload as BoatAction, event.peer);
       else if (envelope.type === "inventory-action") this.handleRemoteInventoryAction(envelope.payload as InventoryAction, event.peer);
@@ -11771,12 +16853,11 @@ export class VoxelEngine {
   }
 
   private rustReplicationRecord(
-    kind: "world" | "entity" | "gameplay" | "player",
+    kind: "player",
     recordId: string,
     revision: number,
-    value: unknown,
+    payload: Uint8Array,
   ) {
-    const payload = new TextEncoder().encode(JSON.stringify(value));
     return Object.freeze({
       kind,
       recordId,
@@ -11787,71 +16868,205 @@ export class VoxelEngine {
   }
 
   /**
-   * Temporary bounded producer for the real Rust keyframe transport. These
-   * records are truthful projections of host-owned state; native simulation
-   * record production remains an explicit promotion gate in diagnostics.
+   * Requests a peer-targeted, schema-checked presentation through the Rust
+   * replication index. Requests coalesce into identity-safe global batches;
+   * only Rust-selected, Rust-hashed delta bytes reach guest consumers.
    */
-  private async publishRustAuthorityKeyframe(peerId: string) {
+  private publishRustAuthorityPresentation(peerId: string, keyframe: boolean) {
     const session = this.multiplayer;
-    if (!session || session.role !== "host" || this.rustPeerDeltaInFlight.has(peerId)) return;
-    const peer = session.getPeer(peerId);
-    if (peer?.state !== "connected" || !peer.identity) return;
-    this.rustPeerDeltaInFlight.add(peerId);
+    if (!session || session.role !== "host" || session.authorityMode !== "rust-authoritative") {
+      return Promise.resolve();
+    }
+    const operation = new Promise<void>((resolve, reject) => {
+      const existing = this.rustAuthorityPresentationRequests.get(peerId);
+      if (existing) {
+        existing.keyframe ||= keyframe;
+        existing.waiters.push(Object.freeze({ resolve, reject }));
+      } else {
+        this.rustAuthorityPresentationRequests.set(peerId, {
+          keyframe,
+          waiters: [Object.freeze({ resolve, reject })],
+        });
+      }
+      this.startRustAuthorityPresentationPump();
+    });
+    return operation;
+  }
+
+  private startRustAuthorityPresentationPump() {
+    if (this.rustAuthorityPresentationPump) return;
+    const pump = (async () => {
+      while (this.rustAuthorityPresentationRequests.size > 0) {
+        const batch = [...this.rustAuthorityPresentationRequests.entries()];
+        this.rustAuthorityPresentationRequests.clear();
+        try {
+          await this.publishRustAuthorityPresentationNow(
+            batch.map(([peerId]) => peerId),
+            batch.some(([, request]) => request.keyframe),
+          );
+          for (const [, request] of batch) for (const waiter of request.waiters) waiter.resolve();
+        } catch (error) {
+          for (const [, request] of batch) for (const waiter of request.waiters) waiter.reject(error);
+        }
+      }
+    })();
+    this.rustAuthorityPresentationPump = pump;
+    void pump.finally(() => {
+      if (this.rustAuthorityPresentationPump === pump) this.rustAuthorityPresentationPump = null;
+      if (this.rustAuthorityPresentationRequests.size > 0) this.startRustAuthorityPresentationPump();
+    }).catch(() => undefined);
+  }
+
+  private async publishRustAuthorityPresentationNow(requestedPeerIds: readonly string[], keyframe: boolean) {
+    const session = this.multiplayer;
+    if (!session || session.role !== "host" || session.authorityMode !== "rust-authoritative") return;
+    if (!requestedPeerIds.some((peerId) => {
+      const peer = session.getPeer(peerId);
+      return peer?.state === "connected" && Boolean(peer.identity);
+    })) return;
+    this.rustAuthorityPresentationInFlight = (this.rustAuthorityPresentationInFlight ?? 0) + 1;
     try {
+      // Replication records share one Rust authority identity. Fence every
+      // connected guest before changing any targeted record, then advance and
+      // present every guest to the same final identity in one batch.
+      const peerIds = session.getPeers()
+        .filter((candidate) => candidate.state === "connected" && candidate.identity)
+        .map((candidate) => candidate.identity!.id);
+      const barriers = await Promise.allSettled(peerIds.map(async (candidateId) => {
+        await session.freezeRustGuestCommands(candidateId);
+        return candidateId;
+      }));
+      if (this.multiplayer !== session) return;
+      barriers.forEach((result, index) => {
+        if (result.status === "rejected") {
+          session.disconnectPeer(peerIds[index]!, "rust-authority-barrier-failed");
+        }
+      });
+      const fencedPeerIds = barriers.flatMap((result) => result.status === "fulfilled" ? [result.value] : []);
+      if (fencedPeerIds.length === 0) return;
       const host = this.rustRuntimeManager.requireReady();
       const authority = host.multiplayerAuthority();
-      const config = host.config;
-      const revision = this.multiplayerTick;
-      const localPose = this.localNetworkPose();
-      const peerState = peer.identity.peerKind === "agent" ? null : this.ensureHostPlayerSession(peer.identity);
-      const records = [
-        {
-          scope: { kind: "location" as const, universeId: config.universeId, locationId: config.locationId },
-          record: this.rustReplicationRecord("world", "coarse:world", revision, {
-            tick: revision,
-            seed: this.world.seedText,
-            mode: this.mode,
-            worldTime: this.worldTime,
-            day: this.day,
-            weather: this.weather,
-            generatorVersion: GENERATOR_VERSION,
-          }),
-        },
-        {
-          scope: { kind: "location" as const, universeId: config.universeId, locationId: config.locationId },
-          record: this.rustReplicationRecord("gameplay", "coarse:nearby", revision, {
-            mobs: peer.identity.peerKind === "agent" ? [] : this.networkMobSnapshotForPeer(peerId),
-            drops: peer.identity.peerKind === "agent" ? [] : this.networkDropSnapshotForPeer(peerId),
-            tombstones: this.activeMultiplayerTombstones(),
-          }),
-        },
-        ...(localPose ? [{
-          scope: { kind: "entity" as const, entityId: `player:${localPose.playerId}` },
-          record: this.rustReplicationRecord("player", `player:${localPose.playerId}`, revision, localPose),
-        }] : []),
-        ...(peerState ? [{
-          scope: { kind: "entity" as const, entityId: `player:${peer.identity.id}` },
-          record: this.rustReplicationRecord("player", `player:${peer.identity.id}`, revision, peerState),
-        }] : []),
-      ];
-      for (const record of records) await authority.upsertReplicationRecord(record);
-      const sequence = (this.rustPeerDeltaSequences.get(peerId) ?? 0) + 1;
+      await authority.drain();
+      if (this.multiplayer !== session) return;
+      const projections: Array<Readonly<{
+        peerId: string;
+        peerToken: string;
+        sequence: number;
+        recordRevision: number;
+        keyframe: boolean;
+        payload: Uint8Array;
+      }>> = [];
+      for (const fencedPeerId of fencedPeerIds) {
+        const peer = session.getPeer(fencedPeerId);
+        if (peer?.state !== "connected" || !peer.identity) continue;
+        const currentCursor = this.rustPeerDeltaSequences.get(fencedPeerId);
+        const sequence = (currentCursor?.connectionToken === peer.token ? currentCursor.sequence : 0) + 1;
+        const recordRevision = (this.rustPeerPresentationRecordRevisions.get(fencedPeerId) ?? 0) + 1;
+        const targetPeerKind = peer.identity.peerKind ?? "human";
+        const completeSnapshot = this.hostWorldSnapshot(fencedPeerId);
+        const snapshot: WorldSnapshot = targetPeerKind === "agent"
+          ? (() => {
+            const { playerState: _privatePlayerState, ...publicSnapshot } = completeSnapshot;
+            void _privatePlayerState;
+            return { ...publicSnapshot, mobs: [], drops: [], containers: [] };
+          })()
+          : completeSnapshot;
+        const playerProgression = targetPeerKind === "human"
+          ? this.ensureHostPlayerProgression(peer.identity)
+          : null;
+        const presentation: RustMultiplayerWorldPresentationV2 = Object.freeze({
+          schema: RUST_MULTIPLAYER_PRESENTATION_SCHEMA_V2,
+          kind: RUST_MULTIPLAYER_PRESENTATION_KIND_V2,
+          sessionId: session.sessionId!,
+          hostPeerId: session.identity.id,
+          targetPeerId: peer.identity.id,
+          targetPeerKind,
+          deltaSequence: sequence,
+          snapshot,
+          playerProgression,
+          progressionReceipt: targetPeerKind === "human"
+            ? (() => {
+              const binding = this.rustPlayerProgressionReceipts?.get(peer.identity!.id);
+              return binding?.connectionToken === peer.token ? binding.receipt : null;
+            })()
+            : null,
+        });
+        projections.push(Object.freeze({
+          peerId: fencedPeerId,
+          peerToken: peer.token,
+          sequence,
+          recordRevision,
+          keyframe: keyframe || sequence === 1,
+          payload: encodeRustMultiplayerWorldPresentationV2(presentation),
+        }));
+      }
+      if (projections.length === 0) return;
+      const from = authority.currentIdentity();
+      for (const projection of projections) {
+        await authority.upsertReplicationRecord({
+          scope: { kind: "entity", entityId: `player:${projection.peerId}` },
+          record: this.rustReplicationRecord(
+            "player",
+            rustMultiplayerPresentationRecordIdV2(projection.peerId),
+            projection.recordRevision,
+            projection.payload,
+          ),
+        });
+        this.rustPeerPresentationRecordRevisions.set(projection.peerId, projection.recordRevision);
+      }
+      await authority.drain();
+      if (this.multiplayer !== session) return;
       const to = authority.currentIdentity();
-      await session.sendRustAuthorityDelta({
-        deltaId: `delta_${peerId.replace(/[^A-Za-z0-9_.-]/gu, "_").slice(0, 96)}_${sequence}`,
-        keyframe: true,
-        sequence,
-        acknowledgedCommandSequence: 0,
-        to,
-      }, peerId);
-      this.rustPeerDeltaSequences.set(peerId, sequence);
-      this.rustAuthorityLastError = null;
+      let sendFailure: unknown = null;
+      let deliveredPresentations = 0;
+      for (const projection of projections) {
+        const currentPeer = session.getPeer(projection.peerId);
+        if (currentPeer?.state !== "connected" || currentPeer.token !== projection.peerToken) continue;
+        try {
+          await session.sendRustAuthorityDelta({
+            deltaId: `delta_${projection.peerId.replace(/[^A-Za-z0-9_.-]/gu, "_").slice(0, 96)}_${projection.recordRevision}_${projection.sequence}`,
+            keyframe: projection.keyframe,
+            sequence: projection.sequence,
+            from,
+            to,
+          }, projection.peerToken);
+          deliveredPresentations += 1;
+          const activePeer = session.getPeer(projection.peerId);
+          const activeCursor = this.rustPeerDeltaSequences.get(projection.peerId);
+          if (activePeer?.token === projection.peerToken
+            && activeCursor?.connectionToken === projection.peerToken
+            && activeCursor.sequence === projection.sequence - 1) {
+            this.rustPeerDeltaSequences.set(projection.peerId, Object.freeze({
+              connectionToken: projection.peerToken,
+              sequence: projection.sequence,
+            }));
+          }
+        } catch (error) {
+          if (error instanceof MultiplayerPeerTransportUnavailableError
+            && session.getPeer(projection.peerId)?.token !== projection.peerToken) {
+            continue;
+          }
+          if (session.getPeer(projection.peerId)?.token === projection.peerToken) {
+            session.disconnectPeer(projection.peerToken, "rust-presentation-send-failed");
+          }
+          sendFailure ??= error;
+        }
+      }
+      if (sendFailure) throw sendFailure;
+      if (deliveredPresentations > 0) this.rustAuthorityLastError = null;
     } catch (error) {
       this.rustAuthorityLastError = error instanceof Error ? error.message : String(error);
       throw error;
     } finally {
-      this.rustPeerDeltaInFlight.delete(peerId);
+      this.rustAuthorityPresentationInFlight = Math.max(0, (this.rustAuthorityPresentationInFlight ?? 1) - 1);
+      if (this.rustAuthorityPresentationInFlight === 0 && this.rustNativeSaveQueued && !this.rustNativeSaveOperation) {
+        this.scheduleRustNativeSaveCheckpoint();
+      }
     }
+  }
+
+  private publishRustAuthorityKeyframe(peerId: string) {
+    return this.publishRustAuthorityPresentation(peerId, true);
   }
 
   private refreshRustPeerInterestIfMoved(peer: PeerInfo) {
@@ -11878,7 +17093,9 @@ export class VoxelEngine {
     const session = this.multiplayer;
     if (!session || !session.role || session.state === "closed" || session.state === "error") return;
     this.multiplayerTick += 1;
+    this.flushDeferredRemoteBlockActions();
     this.multiplayerPoseTimer -= dt;
+    this.multiplayerPoseHeartbeatTimer -= dt;
     this.multiplayerWorldTimer -= dt;
     this.multiplayerSnapshotTimer -= dt;
     this.multiplayerPlayerStateTimer -= dt;
@@ -11897,18 +17114,39 @@ export class VoxelEngine {
       if (next <= 0) this.multiplayerCombatCooldowns.delete(playerId);
       else this.multiplayerCombatCooldowns.set(playerId, next);
     }
-    if (!this.agentMode && this.multiplayerPoseTimer <= 0) {
+    const guestPresentationReady = session.role !== "guest"
+      || session.authorityMode === "legacy-compatibility"
+      || (this.multiplayerReceivedSnapshot && session.isRustGuestPresentationReady());
+    if (!this.agentMode && guestPresentationReady && this.multiplayerPoseTimer <= 0) {
       this.multiplayerPoseTimer = 0.05;
       const pose = this.localNetworkPose();
       if (pose) {
-        try { session.sendPlayerPose(pose); } catch { /* Channels may still be opening. */ }
+        const rustGuest = session.role === "guest" && session.authorityMode === "rust-authoritative";
+        const signature = rustGuest
+          ? JSON.stringify(Object.entries(pose).filter(([key]) => key !== "tick"))
+          : null;
+        if (!rustGuest || signature !== this.multiplayerPoseSignature || this.multiplayerPoseHeartbeatTimer <= 0) {
+          try {
+            const sent = session.sendPlayerPose(pose);
+            if (sent > 0) {
+              this.multiplayerLastOutboundPose = this.outboundPoseDiagnostics(pose);
+              if (rustGuest) {
+                this.multiplayerPoseSignature = signature;
+                this.multiplayerPoseHeartbeatTimer = 5;
+              }
+            }
+          } catch { /* Channels may still be opening. */ }
+        }
       }
     }
     if (session.role === "host" && this.multiplayerWorldTimer <= 0) {
       this.multiplayerWorldTimer = 0.2;
       for (const peer of session.getPeers()) {
         if (peer.state !== "connected" || !peer.identity) continue;
-        this.refreshRustPeerInterestIfMoved(peer);
+        if (session.authorityMode === "rust-authoritative") {
+          this.refreshRustPeerInterestIfMoved(peer);
+          continue;
+        }
         if (peer.identity.peerKind === "agent") continue;
         try {
           session.sendMobSnapshot({
@@ -11936,13 +17174,13 @@ export class VoxelEngine {
         catch { /* A fresh semantic observation is available on the next two-hertz frame. */ }
       }
     }
-    if (!this.agentMode && session.role === "guest" && this.multiplayerPlayerStateTimer <= 0) {
-      this.multiplayerPlayerStateTimer = 0.08;
-      this.syncMultiplayerPlayerState();
-    }
     if (!this.agentMode && session.role === "guest" && this.multiplayerProgressionTimer <= 0) {
       this.multiplayerProgressionTimer = 5;
       this.syncMultiplayerPlayerProgression();
+    }
+    if (!this.agentMode && session.role === "guest" && this.multiplayerPlayerStateTimer <= 0) {
+      this.multiplayerPlayerStateTimer = 0.08;
+      this.syncMultiplayerPlayerState();
     }
     if (!this.agentMode && this.multiplayerContainerTimer <= 0) {
       this.multiplayerContainerTimer = 0.08;
@@ -11951,27 +17189,40 @@ export class VoxelEngine {
     }
     if (session.role === "host" && this.multiplayerSnapshotTimer <= 0 && session.getPeers().some((peer) => peer.state === "connected")) {
       this.multiplayerSnapshotTimer = 10;
-      this.sendHostWorldSnapshot();
-      for (const peer of session.getPeers()) if (peer.state === "connected" && peer.identity) {
-        void this.trackRustAuthorityOperation(this.publishRustAuthorityKeyframe(peer.identity.id)).catch((error) => {
-          this.rustAuthorityLastError = error instanceof Error ? error.message : String(error);
-        });
+      if (session.authorityMode === "legacy-compatibility") this.sendHostWorldSnapshot();
+      else {
+        // Human guests send no pose until their accepted Rust projection is
+        // applied. A host-side remote pose is therefore the existing bounded
+        // proof that periodic keyframes can resume without racing bootstrap.
+        const readyPeers = session.getPeers().filter((candidate) => (
+          candidate.state === "connected"
+          && candidate.identity
+          && (candidate.identity.peerKind === "agent" || this.remotePlayers.has(candidate.identity.id))
+        ));
+        for (const peer of readyPeers) {
+          void this.trackRustAuthorityOperation(this.publishRustAuthorityKeyframe(peer.identity!.id)).catch((error) => {
+            this.rustAuthorityLastError = error instanceof Error ? error.message : String(error);
+          });
+        }
       }
     }
   }
 
   activate() {
-    if (this.rustRuntimeOperationsBlocked || this.rustRuntimeHost?.diagnostics().state !== "ready") {
+    if (worldgenBuildUsesRustRuntime()
+      && (this.rustRuntimeOperationsBlocked || this.rustRuntimeHost?.diagnostics().state !== "ready")) {
       this.running = false;
       this.paused = true;
       throw new Error("Rust world runtime is not ready; gameplay remains blocked");
     }
     this.running = true;
-    this.paused = false;
+    this.paused = this.multiplayerProgressionGameplayFrozen();
     this.titleMode = false;
     this.gameplayOverlayOpen = false;
     void this.audio.unlock();
-    if (!this.touchMode && !this.agentMode) this.requestPointerLockSafely();
+    if (!this.touchMode && !this.agentMode && !this.multiplayerProgressionGameplayFrozen()) {
+      this.requestPointerLockSafely();
+    }
   }
 
   private multiplayerSimulationActive() {
@@ -13560,7 +18811,7 @@ export class VoxelEngine {
   pause(preserveSpellWheel = false) {
     const heldSpellKey = this.spellKeyState;
     const wheelOpen = this.spellWheelOpen;
-    this.paused = !this.multiplayerSimulationActive();
+    this.paused = this.multiplayerProgressionGameplayFrozen() || !this.multiplayerSimulationActive();
     this.gameplayOverlayOpen = true;
     this.clearInput();
     if (preserveSpellWheel) {
@@ -13572,24 +18823,112 @@ export class VoxelEngine {
   }
 
   async quitToTitleAsync() {
-    this.rustRuntimeOperationsBlocked = true;
-    this.rustRuntimeTransitionGeneration += 1;
+    this.rustLastCompletedSaveAndQuitNativeCheckpoint = null;
+    const progressionSession = this.multiplayer?.role === "guest" ? this.multiplayer : null;
+    const releaseProgressionFreeze = progressionSession
+      ? this.acquireMultiplayerProgressionGameplayFreeze()
+      : null;
+    try {
+      return await this.quitToTitleUnderProgressionFreeze(progressionSession);
+    } finally {
+      releaseProgressionFreeze?.();
+    }
+  }
+
+  private async quitToTitleUnderProgressionFreeze(progressionSession: MultiplayerSession | null) {
+    await this.drainGuestProgressionForGracefulDisconnect(progressionSession);
+    const previous = Object.freeze({
+      operationsBlocked: this.rustRuntimeOperationsBlocked,
+      running: this.running,
+      paused: this.paused,
+      titleMode: this.titleMode,
+    });
+    this.cancelRustOriginPreflight();
+    this.cancelTerrainLocatorConsumerOperations();
+    this.terrainGenerationReadinessAbort?.abort();
+    this.terrainGenerationReadinessAbort = null;
     this.running = false;
     this.paused = true;
     this.titleMode = true;
     this.clearInput();
     if (document.pointerLockElement) document.exitPointerLock();
-    await this.stopRustLivePlayerAuthorityR5();
-    this.closeContainer();
-    this.saveNow();
-    await this.worldStorage.flushPersistence();
-    await this.disconnectMultiplayer("quit-to-title");
-    await this.drainRustAuthorityOperations();
-    await this.disposeRustLiveRendererR10();
-    await this.shutdownBoundNativePersistence();
-    await this.rustRuntimeManager.shutdown();
+    try {
+      await this.drainRustAuthorityOperations();
+      await this.settleRustAuthorityForLifecycleV1("Save & Quit");
+      this.rustRuntimeOperationsBlocked = true;
+      this.closeContainer();
+      const nativeCheckpointRequired = this.requireRustNativePlayerSaveBinding("Save & Quit");
+      const nativeCheckpointContext = this.saveAndQuitNativeCheckpointContextV1();
+      if (!this.saveNow()) {
+        throw new Error("Save & Quit could not commit the browser-owned world document");
+      }
+      const nativeCheckpoint = this.rustNativeSaveOperation;
+      if (nativeCheckpointRequired && !nativeCheckpoint) {
+        throw new Error("Save & Quit could not start the required authoritative Rust checkpoint");
+      }
+      const checkpointAttestation = nativeCheckpoint ? await nativeCheckpoint : null;
+      if (nativeCheckpointRequired && checkpointAttestation === null) {
+        throw new Error("Save & Quit could not attest the required authoritative Rust checkpoint");
+      }
+      if (checkpointAttestation) {
+        if (!nativeCheckpointContext) {
+          this.rustRuntimeOperationsBlocked = true;
+          this.rustAuthorityLastError = "Save & Quit could not bind its completed native checkpoint to the active runtime session";
+          if (nativeCheckpointRequired) {
+            this.rustLivePlayerAuthorityState = "blocked";
+            this.rustLivePlayerAuthorityLastError = this.rustAuthorityLastError;
+          }
+          throw new Error("Save & Quit could not bind its completed native checkpoint to the active runtime session");
+        }
+        this.retainCompletedSaveAndQuitNativeCheckpointV1(nativeCheckpointContext, checkpointAttestation);
+      }
+      await this.drainRustAuthorityOperations();
+      await this.worldStorage.flushPersistence();
+      // Authority and persistence can both expose a final dirty progression
+      // tail. Its exact host receipt is the last asynchronous gate before the
+      // transport is disposed below.
+      await this.drainGuestProgressionForGracefulDisconnect(progressionSession);
+    } catch (error) {
+      this.titleMode = previous.titleMode;
+      if (this.rustLivePlayerAuthorityRequestedR5 && this.rustLivePlayerAuthorityState !== "ready") {
+        // A failed native checkpoint can quarantine the pump after its identity
+        // moved. Never undo that fail-closed state or fall back to TS gameplay.
+        this.rustRuntimeOperationsBlocked = true;
+        this.running = false;
+        this.paused = true;
+      } else {
+        this.rustRuntimeOperationsBlocked = previous.operationsBlocked;
+        this.running = previous.running;
+        this.paused = this.multiplayerProgressionGameplayFrozen() || previous.paused;
+      }
+      throw error;
+    }
+    const cleanupFailures: string[] = [];
+    const attemptCleanup = async (phase: string, operation: () => Promise<void>) => {
+      try { await operation(); }
+      catch (error) {
+        cleanupFailures.push(`${phase}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    };
+    await attemptCleanup("multiplayer disconnect", () => this.disconnectMultiplayer("quit-to-title"));
+    await attemptCleanup("authority drain", () => this.drainRustAuthorityOperations());
+    this.rustRuntimeTransitionGeneration += 1;
+    await attemptCleanup("player authority stop", () => this.stopRustLivePlayerAuthorityR5());
+    await attemptCleanup("renderer disposal", () => this.disposeRustLiveRendererR10());
+    if (worldgenBuildUsesRustRuntime()) {
+      await attemptCleanup("native persistence shutdown", () => this.shutdownBoundNativePersistence());
+      if (!this.rustGuestRuntimeManagerReleased) {
+        await attemptCleanup("runtime manager shutdown", () => this.rustRuntimeManager.shutdown());
+      }
+    }
     this.rustRuntimeHost = null;
-    this.rustRuntimeHydrationState = "none";
+    this.rustRuntimeHydrationState = cleanupFailures.length ? "blocked" : "none";
+    if (cleanupFailures.length) {
+      this.rustLivePlayerAuthorityState = "blocked";
+      const warning = `World saved, but native shutdown needs recovery (${cleanupFailures.join("; ")})`;
+      this.rustAuthorityLastError = warning;
+      this.events.onToast(warning);
+    }
     this.persistent = false;
   }
 
@@ -13964,10 +19303,14 @@ export class VoxelEngine {
     return typeof resolver === "function" ? normalizeBlockFacing(resolver.call(this.world, x, y, z)) : 0;
   }
 
-  resolveChest(block: string) {
+  resolveChest(block: string): string | null {
     const existing = this.chestStorageKey(block);
     if (existing.includes("|")) return existing;
     const [x, y, z] = block.split(",").map(Number);
+    // Structure markers can remain globally indexed after their voxels leave
+    // residency. Do not materialize (and persist) generated inventory until
+    // the chest and its possible double-chest neighbor are exact Rust bytes.
+    if (!this.ensureTerrainResidency(x, z, 2)) return null;
     const facing = this.worldBlockFacing(x, y, z);
     const right = blockFacingRight(facing);
     const neighbor = [[right.x, right.z], [-right.x, -right.z]]
@@ -14510,7 +19853,12 @@ export class VoxelEngine {
     } else if (kind === "chest" && key) {
       const exhibit = key.startsWith("exhibit:");
       const special = key.startsWith("boat:") || exhibit;
-      this.activeChestKey = special ? key : this.resolveChest(key);
+      const resolvedChest = special ? key : this.resolveChest(key);
+      if (!resolvedChest) {
+        this.events.onToast("The terrain around that chest is still loading.");
+        return;
+      }
+      this.activeChestKey = resolvedChest;
       this.activeChestTitle = key.startsWith("boat:") ? "Wayfarer Cargo Hold"
         : key.startsWith("exhibit:") ? "Living Creature Conservatory"
           : this.activeChestKey.includes("|") ? "Large Wildwood Chest" : "Wildwood Chest";
@@ -14689,6 +20037,28 @@ export class VoxelEngine {
     this.emitHud(true);
   }
 
+  /** Player-input boundary shared by keyboard, wheel, pointer, and touch hotbar controls. */
+  selectSlotFromPlayerInput(slot: number) {
+    const selected = (slot + 9) % 9;
+    if (this.rustNativeDropPickupPendingFinalize
+      || this.rustNativePlayerDeathRespawnPendingFinalize
+      || this.rustTerrainLocatorCommitLocked && !this.rustNativeBlockEditPendingFinalize) {
+      // The projected live-player successor remains immutable until its local
+      // document and exact pump parent are finalized. The commit lock also
+      // closes the checkpoint window before the pending record exists.
+      return;
+    }
+    if (this.rustNativeBlockEditPendingFinalize) {
+      // The receipt's projected player view remains the exact successor until
+      // its local document is durable and acknowledged. Physical hotbar input
+      // is therefore held outside that successor instead of being mistaken for
+      // state tampering; the latest number-key/wheel intent wins.
+      this.rustNativeBlockEditQueuedSelectedSlotR5 = selected;
+      return;
+    }
+    this.selectSlot(selected);
+  }
+
   selectSlot(slot: number) {
     const selected = (slot + 9) % 9;
     if (this.rustLivePlayerAuthorityEnabledR5()) {
@@ -14763,8 +20133,14 @@ export class VoxelEngine {
   private activeMultiplayerTombstones() {
     const oldestTick = Math.max(0, this.multiplayerTick - 600);
     this.multiplayerTombstones ??= [];
-    this.multiplayerTombstones = this.multiplayerTombstones.filter((entry) => entry.tick >= oldestTick
-      && (entry.kind !== "block" || !entry.block || this.world.getBlock(entry.block.x, entry.block.y, entry.block.z) === BlockId.Air));
+    this.multiplayerTombstones = this.multiplayerTombstones.filter((entry) => {
+      if (entry.tick < oldestTick || entry.kind !== "block" || !entry.block) return entry.tick >= oldestTick;
+      const block = this.world.getBlock(entry.block.x, entry.block.y, entry.block.z);
+      // An unloaded Rust chunk is absence of evidence, not evidence that the
+      // destroyed block came back.  Retain the tombstone until a resident
+      // voxel can positively supersede it.
+      return block === undefined || block === BlockId.Air;
+    });
     return this.multiplayerTombstones.map((entry) => ({ ...entry, ...(entry.block ? { block: { ...entry.block } } : {}) }));
   }
 
@@ -14959,11 +20335,134 @@ export class VoxelEngine {
     this.saveSoon();
   }
 
+  private rustCreativeCatalogReplacement(item: ItemCode) {
+    const definition = ITEMS[item];
+    if (!definition) throw new Error("That Creative catalog item is not installed.");
+    // The migrated bootstrap still deliberately rejects durability-bearing
+    // compatibility stacks. Do not create a selection that the next native
+    // hydration could not round-trip exactly.
+    if (definition.maxDurability !== undefined || definition.infiniteDurability === true) {
+      throw new Error("That durability-bearing Creative item is outside the current native inventory slice.");
+    }
+    const count = maxStack(item);
+    if (!Number.isSafeInteger(count) || count < 1) {
+      throw new Error("That Creative catalog item has no exact native stack size.");
+    }
+    return Object.freeze({
+      compatibility: Object.freeze({ item, count }) satisfies Readonly<InventorySlot>,
+      native: Object.freeze({
+        itemCode: item,
+        count,
+        durabilityMillionths: null,
+        metadataHash: "0".repeat(32),
+      }) satisfies RustIntegratedPlayerInventoryStackV1,
+    });
+  }
+
+  private rustCreativeCompatibilityStackMatchesNative(
+    compatibility: InventorySlot | null,
+    native: RustLivePlayerViewR10["held"],
+  ) {
+    if (compatibility === null || native === null) return compatibility === null && native === null;
+    return compatibility.item === native.itemCode
+      && compatibility.count === native.count
+      && compatibility.durability === undefined
+      && compatibility.metadata === undefined
+      && native.durabilityMillionths === null
+      && this.rustTerrainLocatorHashHex(native.metadataHash) === "0".repeat(32);
+  }
+
+  private async setRustCreativeItem(
+    replacement: ReturnType<VoxelEngine["rustCreativeCatalogReplacement"]>,
+  ) {
+    return this.withRustTerrainLocatorCommitLock(async () => {
+      const context = this.rustTerrainLocatorRuntimeContext();
+      if (!context.attestation.creativeMode || this.mode !== "builder") {
+        throw new Error("The native player has not granted Creative inventory authority.");
+      }
+      const before = context.player;
+      const selectedSlot = before.selectedSlot;
+      const compatibilityBefore = cloneSlot(this.inventory[selectedSlot] ?? null);
+      if (!this.rustCreativeCompatibilityStackMatchesNative(compatibilityBefore, before.held)) {
+        throw new Error("Creative selection found divergent browser and native selected-slot custody.");
+      }
+      const expectedStack: RustIntegratedPlayerCreativeSlotSetV1["expectedStack"] = before.held
+        ? Object.freeze({
+          itemCode: before.held.itemCode,
+          count: before.held.count,
+          durabilityMillionths: before.held.durabilityMillionths,
+          metadataHash: this.rustTerrainLocatorHashHex(before.held.metadataHash),
+        })
+        : null;
+      const result = await context.pump.setCreativeSlot(context.generation, Object.freeze({
+        inventory: context.attestation.inventoryContainer,
+        selectedSlot,
+        expectedInventoryRevision: before.inventoryContainerRevision,
+        expectedStack,
+        replacementStack: replacement.native,
+      }));
+      if (result.discarded || !result.plan || !result.validated || !result.player || !result.extraction) {
+        throw new Error("The native Creative selection was superseded before its exact readback.");
+      }
+      this.assertRustLivePlayerViewContextR10(
+        context.generation, context.host, context.pump, "Creative inventory selection",
+      );
+      const after = result.player;
+      const receipt = result.validated.creativeSlot;
+      if (!this.rustTerrainLocatorPlayerContinuityMatches(before, after)
+        || before.inventoryContainerRevision !== receipt.previousInventoryRevision
+        || after.inventoryContainerRevision !== receipt.resultingInventoryRevision
+        || after.extractionRevision <= before.extractionRevision
+        || !this.rustTerrainLocatorStackMatches(after.held, replacement.native)
+        || JSON.stringify(cloneSlot(this.inventory[selectedSlot] ?? null)) !== JSON.stringify(compatibilityBefore)) {
+        throw new Error("The native Creative selection changed state outside its exact selected-slot CAS.");
+      }
+
+      // Publish only after the BWH7 receipt and immediate native player
+      // extraction agree. Until this line the HUD/save inventory is unchanged.
+      this.projectRustLivePlayerViewR10(after);
+      this.rustLivePlayerPresentationViewR10 = after;
+      this.rustLivePlayerViewExtractionRevisionR10 = after.extractionRevision;
+      this.inventory[selectedSlot] = { ...replacement.compatibility };
+      this.audio.play("ui");
+      this.saveSoon();
+      this.emitHud(true);
+    });
+  }
+
   setCreativeItem(item: ItemCode) {
     if (this.mode !== "builder" || !ITEMS[item]) return;
-    this.inventory[this.selected] = { item, count: maxStack(item), ...(ITEMS[item].maxDurability ? { durability: ITEMS[item].maxDurability } : {}) };
-    this.audio.play("ui");
-    this.emitHud(true);
+    if (!this.rustLivePlayerAuthorityRequestedR5) {
+      this.inventory[this.selected] = {
+        item,
+        count: maxStack(item),
+        ...(ITEMS[item].maxDurability ? { durability: ITEMS[item].maxDurability } : {}),
+      };
+      this.audio.play("ui");
+      this.emitHud(true);
+      return;
+    }
+    if (!this.rustLivePlayerAuthorityEnabledR5()) {
+      this.events.onToast("Authoritative Rust Creative inventory is unavailable, so the catalog item was not selected.");
+      return;
+    }
+    if (this.rustTerrainLocatorCommitLocked) {
+      this.events.onToast("Another native inventory change is still committing.");
+      return;
+    }
+    let replacement: ReturnType<VoxelEngine["rustCreativeCatalogReplacement"]>;
+    try { replacement = this.rustCreativeCatalogReplacement(item); }
+    catch (error) {
+      this.events.onToast(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const pump = this.rustLiveInputPump!;
+    const operation = this.setRustCreativeItem(replacement);
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error) => {
+      this.quarantineRustLivePlayerAuthorityR5(error, pump);
+      this.events.onToast(error instanceof Error ? error.message : "The native Creative item could not be selected.");
+    });
   }
 
   addItem(
@@ -16857,6 +22356,7 @@ export class VoxelEngine {
   generateChestLoot(key: string): ChestState {
     const slots = Array.from({ length: 27 }, () => null as InventorySlot | null);
     const [x, y, z] = key.split(",").map(Number);
+    if (!this.ensureTerrainResidency(x, z, 2)) throw new Error(`Chest terrain is not resident at ${key}`);
     const structureMarker = this.world.structureMarkerAt(x, y, z, "chest")?.[1] as ChestMarker | undefined;
     if (structureMarker) {
       structureMarker.loot.forEach((loot, index) => {
@@ -17004,9 +22504,16 @@ export class VoxelEngine {
     for (const [key, due] of this.saplings.entries()) {
       if (due > now || processed >= 6) continue;
       const [x, y, z] = key.split(",").map(Number);
-      const current = this.world.getBlock(x, y, z);
-      if (current === undefined) { this.saplings.set(key, now + 30_000); continue; }
       processed += 1;
+      // Tree crowns and orchard/aquatic growth can cross a chunk edge.  Admit
+      // the whole bounded growth halo before consulting or mutating the due
+      // record so a cold neighbor never becomes an implicit air cell.
+      if (!this.ensureTerrainResidency(x, z, 4)) continue;
+      const current = this.world.getBlock(x, y, z);
+      if (current === undefined) {
+        this.saplings.set(key, now + 30_000);
+        continue;
+      }
       if (current === BlockId.AppleSapling || current === BlockId.FrostpearSapling) {
         const frostpear = current === BlockId.FrostpearSapling;
         const fruitItem = frostpear ? Item.Frostpear : Item.Apple;
@@ -17272,6 +22779,13 @@ export class VoxelEngine {
     let hudChange = false;
     for (let offset = 0; offset < maximum; offset += 1) {
       const entry = entries[(this.persistentMachineCursor + offset) % entries.length];
+      let residentApiaryBlock: BlockId | undefined;
+      if (entry.kind === "apiary") {
+        const [x, y, z] = entry.key.split(",").map(Number);
+        if (!this.ensureTerrainResidency(x, z, 5)) continue;
+        residentApiaryBlock = this.world.getBlock(x, y, z);
+        if (residentApiaryBlock === undefined) continue;
+      }
       const previous = this.persistentMachineLastStep.get(entry.key) ?? now;
       const elapsed = clamp((now - previous) / 1000, 0, 3600);
       this.persistentMachineLastStep.set(entry.key, now);
@@ -17279,9 +22793,9 @@ export class VoxelEngine {
         const state = this.apiaries.get(entry.key);
         if (!state || !isStockedApiary(state)) continue;
         const [x, y, z] = entry.key.split(",").map(Number);
-        const block = this.world.getBlock(x, y, z);
-        const attached = block === undefined || block === BlockId.Apiary || block === BlockId.WildBeehive;
-        const flowers = block === undefined ? (this.apiaryFlowerCache.get(entry.key) ?? []) : this.apiaryFlowersNear(entry.key);
+        const block = residentApiaryBlock!;
+        const attached = block === BlockId.Apiary || block === BlockId.WildBeehive;
+        const flowers = this.apiaryFlowersNear(entry.key);
         this.apiaryFlowerCache.set(entry.key, flowers);
         const phase = apiaryPhaseForWorldTime(this.worldTime);
         const result = stepApiary(state, {
@@ -18332,6 +23846,7 @@ export class VoxelEngine {
 
   creatureReleasePosition(metadata: CreatureMetadata, requested: THREE.Vector3) {
     const definition = MOB_DEFS[metadata.kind];
+    if (!this.ensureTerrainResidency(requested.x, requested.z, 6)) return null;
     const aquatic = definition.movement === "aquatic" || definition.aquatic || isLeviathanKind(metadata.kind);
     if (aquatic) {
       const inhabitsLiquid = (type: BlockId | undefined) => metadata.kind === "syrupfin"
@@ -18658,7 +24173,1882 @@ export class VoxelEngine {
     return { healed, recalled, companions: companions.length, message };
   }
 
+  private terrainLocatorKnownIds(kind: "settlement" | "natural-poi") {
+    return this.mapKnowledge.markers
+      .filter((marker) => marker.kind === kind)
+      .map((marker) => kind === "settlement" ? marker.id.replace(/^settlement:/u, "") : marker.id)
+      .sort();
+  }
+
+  private rustTerrainLocatorHashHex(bytes: Uint8Array) {
+    return [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+  }
+
+  private rustTerrainLocatorStackMatches(
+    view: RustLivePlayerViewR10["held"],
+    expected: RustIntegratedPlayerInventoryStackV1 | null,
+  ) {
+    if (view === null || expected === null) return view === null && expected === null;
+    return view.itemCode === expected.itemCode
+      && view.count === expected.count
+      && view.durabilityMillionths === expected.durabilityMillionths
+      && this.rustTerrainLocatorHashHex(view.metadataHash) === expected.metadataHash;
+  }
+
+  private rustTerrainLocatorPlayerContinuityMatches(
+    before: RustLivePlayerViewR10,
+    after: RustLivePlayerViewR10,
+  ) {
+    const sameCombat = before.combat.domainRevision === after.combat.domainRevision
+      && before.combat.rowRevision === after.combat.rowRevision
+      && before.combat.recordId === after.combat.recordId
+      && before.combat.ownerId === after.combat.ownerId
+      && before.combat.entityId === after.combat.entityId
+      && before.combat.vitalUnits === after.combat.vitalUnits
+      && before.combat.health === after.combat.health
+      && before.combat.maxHealth === after.combat.maxHealth
+      && before.combat.alive === after.combat.alive
+      && before.combat.crossDomainParity === after.combat.crossDomainParity;
+    const sameEffects = before.effects.schema === after.effects.schema
+      && before.effects.producer === after.effects.producer
+      && before.effects.playerExternalId === after.effects.playerExternalId
+      && before.effects.authorityTick === after.effects.authorityTick
+      && before.effects.total === after.effects.total
+      && before.effects.selected === after.effects.selected
+      && before.effects.omitted === after.effects.omitted
+      && before.effects.firstSequence === after.effects.firstSequence
+      && before.effects.lastSequence === after.effects.lastSequence
+      && before.effects.contiguous === after.effects.contiguous
+      && before.effects.cues.length === after.effects.cues.length
+      && before.effects.cues.every((cue, index) => {
+        const successor = after.effects.cues[index];
+        return successor !== undefined
+          && cue.sequence === successor.sequence
+          && cue.tick === successor.tick
+          && cue.entityExternalId === successor.entityExternalId
+          && cue.kind === successor.kind
+          && Object.is(cue.amount, successor.amount);
+      });
+    return before.authorityTick === after.authorityTick
+      && before.externalEntityId === after.externalEntityId
+      && before.actorId === after.actorId
+      && before.playerId === after.playerId
+      && before.entityId === after.entityId
+      && before.entityRevision === after.entityRevision
+      && before.inventoryContainer === after.inventoryContainer
+      && before.equipmentContainer === after.equipmentContainer
+      && before.equipmentContainerRevision === after.equipmentContainerRevision
+      && before.selectedSlot === after.selectedSlot
+      && before.backSlot === after.backSlot
+      && before.lastInputSequence === after.lastInputSequence
+      && before.buttons === after.buttons
+      && before.authoritativeFlags === after.authoritativeFlags
+      && before.lookYaw === after.lookYaw
+      && before.lookPitch === after.lookPitch
+      && before.position.x === after.position.x
+      && before.position.y === after.position.y
+      && before.position.z === after.position.z
+      && before.velocity.x === after.velocity.x
+      && before.velocity.y === after.velocity.y
+      && before.velocity.z === after.velocity.z
+      && before.radius === after.radius
+      && before.height === after.height
+      && before.mass === after.mass
+      && before.grounded === after.grounded
+      && before.crouching === after.crouching
+      && before.contactFlags === after.contactFlags
+      && before.inLiquid === after.inLiquid
+      && before.headSubmerged === after.headSubmerged
+      && before.drowningAccumulator === after.drowningAccumulator
+      && before.fallDistance === after.fallDistance
+      && before.oxygenSeconds === after.oxygenSeconds
+      && before.maximumOxygenSeconds === after.maximumOxygenSeconds
+      && before.health === after.health
+      && before.maximumHealth === after.maximumHealth
+      && before.lastDamageTick === after.lastDamageTick
+      && sameCombat
+      && sameEffects;
+  }
+
+  private rustTerrainLocatorRuntimeContext(allowBlocked = false) {
+    const generation = this.rustLivePlayerAuthorityGeneration;
+    const host = this.rustRuntimeHost;
+    const pump = this.rustLiveInputPump;
+    const attestation = this.rustLivePlayerAttestationR10;
+    const player = this.rustLivePlayerPresentationViewR10;
+    if (generation === null || !host || !pump || !attestation || !player
+      || player.extractionRevision !== this.rustLivePlayerViewExtractionRevisionR10) {
+      throw new Error("The authoritative Rust locator inventory view is unavailable");
+    }
+    if (!allowBlocked && !this.rustLivePlayerAuthorityEnabledR5()) {
+      throw new Error("The authoritative Rust player inventory is not accepting locator items");
+    }
+    if (allowBlocked && (this.rustLivePlayerAuthorityState !== "ready"
+      || generation !== this.rustRuntimeTransitionGeneration || pump.state !== "ready"
+      || host.diagnostics().state !== "ready")) {
+      throw new Error("The authoritative Rust locator recovery window is not ready");
+    }
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "locator item transaction");
+    if (player.actorId !== attestation.actorId
+      || player.inventoryContainer !== rustIntegratedContainerViewKeyV1(attestation.inventoryContainer)
+      || player.selectedSlot !== this.selected) {
+      throw new Error("The Rust locator inventory binding disagrees with the attested selected slot");
+    }
+    return Object.freeze({ generation, host, pump, attestation, player });
+  }
+
+  private rustTerrainLocatorIntent(
+    context: ReturnType<VoxelEngine["rustTerrainLocatorRuntimeContext"]>,
+    purpose: RustIntegratedPlayerLocatorItemConsumeV1["purpose"],
+    locatorResultHash: string,
+  ): RustIntegratedPlayerLocatorItemConsumeV1 {
+    const held = context.player.held;
+    const compatibility = cloneSlot(this.selectedSlot());
+    if (!held || !compatibility || compatibility.item !== held.itemCode
+      || compatibility.count !== held.count || compatibility.durability !== undefined
+      || compatibility.metadata !== undefined || held.durabilityMillionths !== null
+      || this.rustTerrainLocatorHashHex(held.metadataHash) !== "0".repeat(32)) {
+      throw new Error("Locator items must be one exact plain stack in both native and compatibility custody");
+    }
+    return Object.freeze({
+      inventory: context.attestation.inventoryContainer,
+      selectedSlot: context.player.selectedSlot,
+      expectedInventoryRevision: context.player.inventoryContainerRevision,
+      expectedStack: Object.freeze({
+        itemCode: held.itemCode,
+        count: held.count,
+        durabilityMillionths: held.durabilityMillionths,
+        metadataHash: this.rustTerrainLocatorHashHex(held.metadataHash),
+      }),
+      purpose,
+      locatorResultHash,
+    });
+  }
+
+  private saveRustCompatibilityDocumentLocalOnly(requirement: string) {
+    if (!this.persistent || !this.activeWorldId) {
+      throw new Error(`A durable browser world is required for ${requirement}`);
+    }
+    const now = Date.now();
+    const result = this.worldStorage.saveWorldLocalOnly(this.activeWorldId, {
+      save: this.serialize(),
+      playTimeDeltaMs: Math.max(0, now - this.worldSessionStartedAt),
+    });
+    if (result.ok) {
+      this.worldSessionStartedAt = now;
+      // The WorldStorage document is the committed authority. Removing the
+      // obsolete compatibility key is best-effort cleanup and must never make
+      // callers roll an already-durable locator transaction back in memory.
+      try { window.localStorage.removeItem(SAVE_KEY); }
+      catch { /* The sealed WorldStorage document remains authoritative. */ }
+    }
+    return result;
+  }
+
+  private saveRustTerrainLocatorDocumentLocalOnly() {
+    return this.saveRustCompatibilityDocumentLocalOnly("a locator item transaction");
+  }
+
+  private persistRustTerrainLocatorJournal(journal: RustTerrainLocatorEffectJournalV1) {
+    const previous = this.rustTerrainLocatorEffectJournal;
+    this.rustTerrainLocatorEffectJournal = journal;
+    let result: ReturnType<VoxelEngine["saveRustTerrainLocatorDocumentLocalOnly"]>;
+    try { result = this.saveRustTerrainLocatorDocumentLocalOnly(); }
+    catch (error) {
+      this.rustTerrainLocatorEffectJournal = previous;
+      throw error;
+    }
+    if (!result.ok) {
+      this.rustTerrainLocatorEffectJournal = previous;
+      throw new Error(`The locator recovery plan could not be stored. ${result.error.message}`);
+    }
+  }
+
+  private async checkpointRustTerrainLocatorNative(
+    context: ReturnType<VoxelEngine["rustTerrainLocatorRuntimeContext"]>,
+  ) {
+    return this.checkpointRustLivePlayerNative(context.generation, context.pump);
+  }
+
+  private async checkpointRustLivePlayerNative(
+    generation: number,
+    pump: RustLiveInputPumpR5,
+  ) {
+    const worldId = this.activeWorldId;
+    if (!worldId || this.rustNativePersistenceWorldId !== worldId) {
+      throw new Error("The live Rust player has no matching native persistence binding");
+    }
+    const checkpoint = await pump.checkpointNativePersistence(generation, async () => {
+      const result = await this.worldStorage.saveNativeWorld(worldId);
+      if (!result.ok) throw new Error(result.error.message);
+      return result.value;
+    });
+    if (checkpoint.discarded || checkpoint.value === null) {
+      throw new Error("The live Rust player's native checkpoint was superseded");
+    }
+    return checkpoint;
+  }
+
+  private async checkpointRustLivePlayerNativeWitness(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+    pump: RustLiveInputPumpR5,
+  ): Promise<RustNativeCheckpointWitnessV1> {
+    const nativeSession = host.nativePersistenceSession?.() ?? null;
+    if (!nativeSession) throw new Error("Native browser projection has no exact persistence session");
+    const persistenceBefore = nativeSession.diagnostics();
+    const nativeCheckpoint = await this.checkpointRustLivePlayerNative(generation, pump);
+    const persistenceAfter = nativeSession.diagnostics();
+    const checkpoint = nativeCheckpoint.value;
+    if (!checkpoint || !nativeCheckpoint.before || !nativeCheckpoint.after
+      || persistenceBefore.state !== "open" || persistenceAfter.state !== "open"
+      || persistenceAfter.saves !== persistenceBefore.saves + 1
+      || persistenceAfter.platformOperations !== persistenceBefore.platformOperations + checkpoint.commits
+      || persistenceAfter.lastCheckpointId !== checkpoint.checkpointId
+      || checkpoint.worldId !== persistenceAfter.worldId) {
+      throw new Error("Native browser projection did not produce one exact causally witnessed checkpoint");
+    }
+    return Object.freeze({
+      identityBefore: Object.freeze({
+        ...nativeCheckpoint.before,
+        revision: Object.freeze({ ...nativeCheckpoint.before.revision }),
+      }),
+      identityAfter: Object.freeze({
+        ...nativeCheckpoint.after,
+        revision: Object.freeze({ ...nativeCheckpoint.after.revision }),
+      }),
+      persistenceBefore: Object.freeze({ ...persistenceBefore }),
+      persistenceAfter: Object.freeze({ ...persistenceAfter }),
+      checkpoint: Object.freeze({ ...checkpoint }),
+    });
+  }
+
+  /**
+   * Makes one already-authoritative generic native block edit durable before
+   * projecting its exact R4 cell/facing, selected inventory slot, generated
+   * drops, and player-camera successor into the browser compatibility layer.
+   */
+  private async commitRustNativeBlockEditProjectionV1(input: Readonly<{
+    generation: number;
+    host: RustWorldRuntimeManagedHostV1;
+    pump: RustLiveInputPumpR5;
+    delivery: RustLiveInputPumpNativeBlockEditDeliveryV1;
+    extraction: RustIntegratedRuntimeExtractionV1;
+    requestedView: RustIntegratedRuntimeExtractionViewV1;
+    camera: RustLiveCameraViewR10;
+  }>) {
+    const { generation, host, pump, delivery, extraction, requestedView, camera: pumpCamera } = input;
+    if (this.rustTerrainLocatorCommitLocked || this.rustNativeBlockEditPendingFinalize) {
+      throw new Error("Another native browser projection is already committing");
+    }
+    if (this.rustNativeSaveSuppressedForMultiplayerRuntime
+      || this.multiplayer?.authorityMode === "rust-authoritative") {
+      throw new Error("Native block edits are disabled after multiplayer authority enters this runtime");
+    }
+    if (!this.activeWorldId || !this.persistent) {
+      throw new Error("Native block edits require one persistent active browser world");
+    }
+    const cursor = this.rustNativeBlockEditProjection;
+    const attestation = this.rustLivePlayerAttestationR10;
+    if (!cursor || !attestation || delivery.worldGeneration !== generation
+      || delivery.cursorBefore !== cursor.cursor || delivery.cursorAfter !== delivery.receipt.sequence) {
+      throw new Error("Native block-edit receipt does not continue the active browser projection cursor");
+    }
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "native block-edit projection preflight");
+
+    // Decode every adjacent authority view before crossing the native durable
+    // checkpoint. A malformed successor must leave browser state untouched.
+    const stagedPlayer = this.stageRustLivePlayerExtractionR10(generation, host, pump, extraction);
+    const stagedCamera = this.stageRustLiveCameraExtractionR10(
+      generation, host, pump, extraction, requestedView, pumpCamera,
+    );
+    const stagedDrops = this.stageRustDroppedHotTransformsR10(generation, host, pump, extraction);
+    const plan = planRustNativeBlockEditBrowserProjectionV1({
+      protocolVersion: delivery.protocolVersion,
+      legacyFallback: delivery.legacyFallback,
+      queryIdentity: delivery.queryIdentity,
+      receipt: delivery.receipt,
+      dirty: delivery.dirty,
+      cursorBefore: cursor.cursor,
+      expectedInventoryContainer: attestation.inventoryContainer,
+      selectedSlot: this.selected,
+      mode: this.mode,
+      selectedCompatibilityStack: this.inventory[this.selected] ?? null,
+    });
+    const receiptInventory = delivery.receipt.inventory;
+    const priorPlayer = this.rustLivePlayerPresentationViewR10;
+    if (priorPlayer) {
+      const priorSelectedSlotMatches = priorPlayer.selectedSlot === plan.inventory.slot
+        ? this.rustTerrainLocatorStackMatches(priorPlayer.held, receiptInventory.beforeStack)
+        : this.rustLiveSelectedSlotIntentPendingR5
+          && this.rustLiveSelectedSlotIntentR5 === plan.inventory.slot;
+      if (priorPlayer.inventoryContainerRevision !== receiptInventory.beforeRevision
+        || !priorSelectedSlotMatches) {
+        throw new Error("Native block-edit receipt contradicts the previously presented inventory state or selected-slot intent");
+      }
+    }
+    if (stagedPlayer.selectedSlot !== plan.inventory.slot
+      || stagedPlayer.inventoryContainerRevision !== receiptInventory.afterRevision
+      || !this.rustTerrainLocatorStackMatches(stagedPlayer.held, receiptInventory.afterStack)) {
+      throw new Error("Native block-edit successor contradicts its authoritative player extraction");
+    }
+
+    const currentBlock = this.world.getBlock(plan.cell.x, plan.cell.y, plan.cell.z);
+    const currentFacing = this.world.blockFacingAt(plan.cell.x, plan.cell.y, plan.cell.z);
+    const atPrior = currentBlock === plan.cell.previousBlockId && currentFacing === plan.cell.previousFacing;
+    const atReplacement = currentBlock === plan.cell.blockId && currentFacing === plan.cell.facing;
+    if (!atPrior && (!plan.cell.mutated || !atReplacement)) {
+      throw new Error("Native block-edit receipt contradicts the compatibility world cell or facing");
+    }
+
+    this.rustTerrainLocatorCommitLocked = true;
+    try {
+      await host.multiplayerAuthority().runExclusiveMutation(async () => {
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "native block-edit checkpoint");
+        if (cursor !== this.rustNativeBlockEditProjection || this.disposed
+          || this.rustNativeSaveSuppressedForMultiplayerRuntime
+          || this.selected !== plan.inventory.slot
+          || !rustNativeBlockEditCompatibilityStackMatchesV1(
+            this.inventory[plan.inventory.slot] ?? null,
+            plan.inventory.before,
+          )) {
+          throw new Error("Native block-edit projection was superseded before its durable checkpoint");
+        }
+        const nativeCheckpoint = await this.checkpointRustLivePlayerNativeWitness(generation, host, pump);
+        if (!rustIntegratedRuntimeIdentityEqualsV1(nativeCheckpoint.identityBefore, delivery.queryIdentity)) {
+          throw new Error("Native block-edit checkpoint does not continue the queried receipt identity");
+        }
+        const checkpointWitness = Object.freeze({
+          schema: 1,
+          protocolVersion: plan.protocolVersion,
+          legacyFallback: plan.legacyFallback,
+          cursorBefore: plan.cursorBefore,
+          cursorAfter: plan.cursorAfter,
+          receiptHash: plan.receiptHash,
+          queryIdentityHash: delivery.queryIdentity.stateHash,
+          dirty: plan.dirty,
+          action: plan.action,
+          cell: Object.freeze({ ...plan.cell }),
+          ...nativeCheckpoint,
+        });
+        this.rustNativeBlockEditCheckpoint = checkpointWitness;
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "native block-edit compatibility commit");
+
+        if (plan.cell.mutated) {
+          const feedback = this.world.beginPlayerEditFeedback?.(plan.action === "mine" ? "break" : "place");
+          const projected = await (async () => {
+            try {
+              const projection = {
+                batchId: `integrated-native-block-edit:${plan.receiptHash}`,
+                authorityIdentityBefore: Object.freeze({
+                  address: Object.freeze({ universeId: host.config.universeId, locationId: host.config.locationId }),
+                  revision: Object.freeze({ ...plan.world.beforeRevision }),
+                  stateHash: plan.world.beforeHash,
+                }),
+                authorityIdentityAfter: Object.freeze({
+                  address: Object.freeze({ universeId: host.config.universeId, locationId: host.config.locationId }),
+                  revision: Object.freeze({ ...plan.world.afterRevision }),
+                  stateHash: plan.world.afterHash,
+                }),
+                changes: Object.freeze([Object.freeze({
+                  x: plan.cell.x,
+                  y: plan.cell.y,
+                  z: plan.cell.z,
+                  previousBlockId: plan.cell.previousBlockId as BlockId,
+                  blockId: plan.cell.blockId as BlockId,
+                  previousFacing: plan.cell.previousFacing,
+                  facing: plan.cell.facing,
+                })]),
+                immediate: true,
+                allowAlreadyApplied: true,
+              } as const;
+              return plan.dirty === null
+                ? await this.world.applyValidatedRustWorldMutationProjectionR4V1(projection)
+                : await this.world.applyValidatedRustWorldMutationProjectionR4V2({
+                  ...projection,
+                  dirty: plan.dirty,
+                });
+            } finally {
+              if (feedback !== undefined) this.world.completePlayerEditFeedback?.(feedback);
+            }
+          })();
+          if (projected.status !== "accepted") {
+            throw new Error(`Native block-edit world projection was ${projected.status}: ${projected.detail}`);
+          }
+        } else if (this.world.getBlock(plan.cell.x, plan.cell.y, plan.cell.z) !== plan.cell.previousBlockId
+          || this.world.blockFacingAt(plan.cell.x, plan.cell.y, plan.cell.z) !== plan.cell.previousFacing) {
+          throw new Error("Native no-op block harvest lost its exact compatibility cell before commit");
+        }
+
+        this.inventory[plan.inventory.slot] = plan.inventory.after
+          ? { ...plan.inventory.after }
+          : null;
+        for (const drop of plan.drops) {
+          const projected = this.spawnDrop(
+            drop.item,
+            drop.count,
+            new THREE.Vector3(drop.position.x, drop.position.y, drop.position.z),
+            undefined,
+            undefined,
+            {
+              allowMerge: false,
+              exactPosition: true,
+              rustEntityId: drop.rustEntityId,
+              rotationY: drop.rotationY,
+              velocity: drop.velocity,
+              pickupDelay: drop.pickupDelay,
+              exactIdempotentRecovery: true,
+            },
+          );
+          if (!projected || projected.rustEntityId !== drop.rustEntityId) {
+            throw new Error("Native block-edit drop did not enter the exact compatibility projection");
+          }
+        }
+
+        const committedViews = this.commitStagedRustLiveAuthorityViewsR10(
+          generation, host, pump, stagedPlayer, stagedCamera, stagedDrops,
+        );
+        const projection = Object.freeze({
+          schema: 1,
+          cursor: plan.cursorAfter,
+          lastReceiptHash: plan.receiptHash,
+        });
+        this.rustNativeBlockEditProjection = projection;
+        this.rustNativeBlockEditPendingFinalize = Object.freeze({
+          schema: 1, state: "awaiting-local-save", attempts: 0, lastError: "",
+          protocolVersion: plan.protocolVersion, legacyFallback: plan.legacyFallback,
+          cursorBefore: plan.cursorBefore, cursorAfter: plan.cursorAfter, receiptHash: plan.receiptHash,
+          generation, host, pump, delivery, projection, checkpoint: checkpointWitness,
+          selectedSlot: plan.inventory.slot, mode: this.mode,
+          saveSuppressed: this.rustNativeSaveSuppressedForMultiplayerRuntime,
+          activeWorldId: this.activeWorldId, persistent: this.persistent, retryNotBefore: 0,
+          inventoryAfter: plan.inventory.after ? Object.freeze({ ...plan.inventory.after }) : null,
+          cell: checkpointWitness.cell,
+          nativeDrops: this.serializeRustNativeBlockEditDropsV1(),
+          playerView: committedViews.player, cameraView: committedViews.camera,
+          droppedView: committedViews.dropped,
+          extraction, viewRevision: requestedView.viewRevision,
+        });
+        await this.finalizeRustNativeBlockEditLocalSaveV1();
+      });
+    } finally {
+      if (!this.rustNativeBlockEditPendingFinalize) this.rustTerrainLocatorCommitLocked = false;
+    }
+  }
+
+  private assertRustNativeBlockEditPendingFinalizeV1(pending: RustNativeBlockEditPendingFinalizeV1) {
+    if (this.disposed || pending !== this.rustNativeBlockEditPendingFinalize
+      || pending.generation !== this.rustRuntimeTransitionGeneration
+      || pending.generation !== this.rustLivePlayerAuthorityGeneration
+      || pending.host !== this.rustRuntimeHost || pending.pump !== this.rustLiveInputPump
+      || pending.pump.state !== "ready"
+      || pending.projection !== this.rustNativeBlockEditProjection
+      || pending.checkpoint !== this.rustNativeBlockEditCheckpoint
+      || this.selected !== pending.selectedSlot || this.mode !== pending.mode
+      || pending.activeWorldId === null || !pending.persistent
+      || this.activeWorldId !== pending.activeWorldId || this.persistent !== pending.persistent
+      || this.rustNativeSaveSuppressedForMultiplayerRuntime !== pending.saveSuppressed
+      || this.multiplayer?.authorityMode === "rust-authoritative"
+      || !rustNativeBlockEditCompatibilityStackMatchesV1(this.inventory[pending.selectedSlot] ?? null, pending.inventoryAfter)
+      || this.world.getBlock(pending.cell.x, pending.cell.y, pending.cell.z) !== pending.cell.blockId
+      || this.world.blockFacingAt(pending.cell.x, pending.cell.y, pending.cell.z) !== pending.cell.facing
+      || this.rustLivePlayerPresentationViewR10 !== pending.playerView
+      || this.rustLiveCameraPresentationViewR10 !== pending.cameraView
+      || this.rustDroppedHotTransformFrameR10 !== pending.droppedView) {
+      throw new Error("Native block-edit pending finalize no longer matches its exact projected successor");
+    }
+    const diagnostic = pending.pump.diagnostics();
+    if (diagnostic.nativeBlockEditProtocolVersion !== pending.delivery.protocolVersion
+      || diagnostic.nativeBlockEditCursor !== pending.delivery.cursorBefore
+      || diagnostic.lastAcknowledgedNativeBlockEditSequence === pending.delivery.receipt.sequence
+      || diagnostic.lastAcknowledgedNativeBlockEditReceiptHash === pending.delivery.receipt.receiptHash
+      || diagnostic.pendingNativeBlockEditSequence !== pending.delivery.receipt.sequence
+      || diagnostic.pendingNativeBlockEditReceiptHash !== pending.delivery.receipt.receiptHash
+      || diagnostic.pendingNativeBlockEditIdentityHash !== pending.delivery.queryIdentity.stateHash
+      || diagnostic.pendingNativeBlockEditDirtyEvidenceHash !== (pending.delivery.dirty?.evidenceHash ?? null)
+      || diagnostic.pendingNativeBlockEditLegacyFallback !== pending.delivery.legacyFallback) {
+      throw new Error("Native block-edit pending finalize lost its exact pump delivery");
+    }
+    const currentNativeDrops = this.serializeRustNativeBlockEditDropsV1();
+    if (JSON.stringify(currentNativeDrops) !== JSON.stringify(pending.nativeDrops)) {
+      throw new Error("Native block-edit pending finalize lost its exact projected drop set or transform");
+    }
+  }
+
+  private serializeRustNativeBlockEditDropsV1() {
+    return Object.freeze(this.drops
+      .filter((drop) => drop.rustEntityId !== undefined)
+      .map((drop) => {
+        const saved = serializeWorldDropSave({
+          item: drop.item,
+          count: drop.count,
+          ...(drop.durability !== undefined ? { durability: drop.durability } : {}),
+          ...(drop.metadata ? { metadata: drop.metadata } : {}),
+          position: drop.mesh.position,
+          rotationY: drop.mesh.rotation.y,
+          velocity: drop.velocity,
+          age: drop.age,
+          pickupDelay: drop.pickupDelay,
+          rustEntityId: drop.rustEntityId,
+        });
+        return Object.freeze({
+          ...saved,
+          ...(saved.metadata ? { metadata: Object.freeze({ ...saved.metadata }) } : {}),
+        });
+      })
+      .sort((left, right) => (left.rustEntityId ?? "").localeCompare(right.rustEntityId ?? "")));
+  }
+
+  private async finalizeRustNativeBlockEditLocalSaveV1() {
+    const pending = this.rustNativeBlockEditPendingFinalize;
+    if (!pending) throw new Error("No native block-edit local save is awaiting finalize");
+    this.assertRustNativeBlockEditPendingFinalizeV1(pending);
+    let saved;
+    try { saved = this.saveRustCompatibilityDocumentLocalOnly("a native block-edit projection"); }
+    catch (error) { saved = { ok: false as const, error: error instanceof Error ? error : new Error(String(error)) }; }
+    if (!saved.ok) {
+      this.rustNativeBlockEditPendingFinalize = Object.freeze({
+        ...pending, attempts: pending.attempts + 1, lastError: saved.error.message,
+        retryNotBefore: Date.now() + 1_000,
+      });
+      return this.rustNativeBlockEditPendingFinalize;
+    }
+    if (!pending.pump.acknowledgeNativeBlockEdit(pending.generation, pending.delivery)) {
+      throw new Error("Native block-edit pump did not acknowledge its exact committed receipt");
+    }
+    const pendingSelectedSlot = this.rustNativeBlockEditQueuedSelectedSlotR5;
+    this.rustNativeBlockEditPendingFinalize = null;
+    this.rustNativeBlockEditQueuedSelectedSlotR5 = null;
+    this.rustTerrainLocatorCommitLocked = false;
+    if (pending.attempts > 0 && this.rustLiveRenderRuntime
+      && this.rustLiveRenderViewR10?.viewRevision === pending.viewRevision) {
+      this.enqueueRustLiveRendererExtractionR10({
+        generation: pending.generation, host: pending.host, pump: pending.pump,
+        viewRevision: pending.viewRevision, extraction: pending.extraction,
+      });
+    }
+    this.miningProgress = 0;
+    this.target = null;
+    if (pending.checkpoint.action === "mine") {
+      this.audio.play("break", pending.cell.previousBlockId as BlockId);
+      this.spawnParticles(pending.cell.x, pending.cell.y, pending.cell.z, pending.cell.previousBlockId as BlockId, 13);
+    } else {
+      this.heldUse = 1;
+      this.placeCooldown = Math.max(this.placeCooldown, 0.12);
+      this.audio.play("place", pending.cell.blockId as BlockId);
+    }
+    if (pendingSelectedSlot === null) this.emitHud(true);
+    else {
+      const selectionChanged = this.selected !== pendingSelectedSlot;
+      this.selectSlot(pendingSelectedSlot);
+      if (!selectionChanged) this.emitHud(true);
+    }
+    return null;
+  }
+
+  private async retryRustNativeBlockEditFinalizeV1() {
+    const pending = this.rustNativeBlockEditPendingFinalize;
+    if (!pending) throw new Error("No native block-edit local save is awaiting retry");
+    this.assertRustLivePlayerViewContextR10(pending.generation, pending.host, pending.pump, "native block-edit local-save retry");
+    return await this.runRustLivePumpNetworkExclusiveR5(
+      pending.generation, pending.host, pending.pump, "native block-edit local-save retry",
+      async () => await this.finalizeRustNativeBlockEditLocalSaveV1(),
+    );
+  }
+
+  /**
+   * Makes one already-authoritative native Dirt action durable before its
+   * compatibility projection becomes observable. The browser cursor is saved
+   * with the cell, selected slot, and native drop; pump acknowledgement is the
+   * final step so every earlier crash deterministically replays the receipt.
+   */
+  private async commitRustBasicDirtActionProjectionV1(input: Readonly<{
+    generation: number;
+    host: RustWorldRuntimeManagedHostV1;
+    pump: RustLiveInputPumpR5;
+    delivery: RustLiveInputPumpBasicDirtActionDeliveryV1;
+    extraction: RustIntegratedRuntimeExtractionV1;
+    requestedView: RustIntegratedRuntimeExtractionViewV1;
+    camera: RustLiveCameraViewR10;
+  }>) {
+    const { generation, host, pump, delivery, extraction, requestedView, camera: pumpCamera } = input;
+    if (this.rustTerrainLocatorCommitLocked) {
+      throw new Error("Another native browser projection is already committing");
+    }
+    if (this.rustNativeSaveSuppressedForMultiplayerRuntime
+      || this.multiplayer?.authorityMode === "rust-authoritative") {
+      throw new Error("Native Dirt actions are disabled after multiplayer authority enters this runtime");
+    }
+    const cursor = this.rustBasicDirtActionProjection;
+    const attestation = this.rustLivePlayerAttestationR10;
+    if (!cursor || !attestation || delivery.worldGeneration !== generation
+      || delivery.cursorBefore !== cursor.cursor || delivery.cursorAfter !== delivery.receipt.sequence) {
+      throw new Error("Native Dirt receipt does not continue the active browser projection cursor");
+    }
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "basic Dirt projection preflight");
+
+    // Decode both player and camera rows before the durable checkpoint. A bad
+    // extraction must leave both native persistence and the browser untouched.
+    const stagedPlayer = this.stageRustLivePlayerExtractionR10(generation, host, pump, extraction);
+    const stagedCamera = this.stageRustLiveCameraExtractionR10(
+      generation, host, pump, extraction, requestedView, pumpCamera,
+    );
+    const stagedDrops = this.stageRustDroppedHotTransformsR10(generation, host, pump, extraction);
+    const plan = planRustBasicDirtBrowserProjectionV1({
+      receipt: delivery.receipt,
+      cursorBefore: cursor.cursor,
+      expectedInventoryContainer: attestation.inventoryContainer,
+      selectedSlot: this.selected,
+      mode: this.mode,
+      selectedCompatibilityStack: this.inventory[this.selected] ?? null,
+    });
+    const receiptInventory = delivery.receipt.inventory;
+    const priorPlayer = this.rustLivePlayerPresentationViewR10;
+    if (priorPlayer) {
+      const priorSelectedSlotMatches = priorPlayer.selectedSlot === plan.inventory.slot
+        ? this.rustTerrainLocatorStackMatches(priorPlayer.held, receiptInventory.beforeStack)
+        : this.rustLiveSelectedSlotIntentPendingR5
+          && this.rustLiveSelectedSlotIntentR5 === plan.inventory.slot;
+      if (priorPlayer.inventoryContainerRevision !== receiptInventory.beforeRevision
+        || !priorSelectedSlotMatches) {
+        throw new Error("Native Dirt receipt contradicts the previously presented inventory state or selected-slot intent");
+      }
+    }
+    if (stagedPlayer.selectedSlot !== plan.inventory.slot
+      || stagedPlayer.inventoryContainerRevision !== receiptInventory.afterRevision
+      || !this.rustTerrainLocatorStackMatches(stagedPlayer.held, receiptInventory.afterStack)) {
+      throw new Error("Native Dirt receipt successor contradicts its authoritative player extraction");
+    }
+
+    const currentBlock = this.world.getBlock(plan.cell.x, plan.cell.y, plan.cell.z);
+    if (currentBlock !== plan.cell.expectedBlockId) {
+      if (currentBlock !== plan.cell.replacementBlockId) {
+        throw new Error("Native Dirt receipt contradicts the compatibility world cell");
+      }
+      const sx = splitCoordinate(plan.cell.x);
+      const sz = splitCoordinate(plan.cell.z);
+      const index = blockIndex(sx.local, plan.cell.y, sz.local);
+      const recorded = this.world.serializeEdits()[chunkKey(sx.chunk, sz.chunk)]
+        ?.some(([savedIndex, block]) => savedIndex === index && block === plan.cell.replacementBlockId);
+      if (!recorded) {
+        throw new Error("Native Dirt recovery found a replacement cell without its recorded browser edit");
+      }
+    }
+
+    this.rustTerrainLocatorCommitLocked = true;
+    try {
+      await host.multiplayerAuthority().runExclusiveMutation(async () => {
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "basic Dirt native checkpoint");
+        if (cursor !== this.rustBasicDirtActionProjection || this.disposed
+          || this.rustNativeSaveSuppressedForMultiplayerRuntime) {
+          throw new Error("Native Dirt projection was superseded before its durable checkpoint");
+        }
+        await this.checkpointRustLivePlayerNative(generation, pump);
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "basic Dirt compatibility commit");
+
+        const playerEditFeedback = this.world.beginPlayerEditFeedback?.(plan.action === "mine" ? "break" : "place");
+        this.world.applyValidatedRustCellProjectionV1({
+          x: plan.cell.x,
+          y: plan.cell.y,
+          z: plan.cell.z,
+          expectedBlockId: plan.cell.expectedBlockId as BlockId,
+          replacementBlockId: plan.cell.replacementBlockId as BlockId,
+          immediate: true,
+          allowAlreadyApplied: true,
+        });
+        if (playerEditFeedback !== undefined) this.world.completePlayerEditFeedback?.(playerEditFeedback);
+
+        this.inventory[plan.inventory.slot] = plan.inventory.after
+          ? { ...plan.inventory.after }
+          : null;
+        for (const drop of plan.drops) {
+          const projected = this.spawnDrop(
+            drop.item,
+            drop.count,
+            new THREE.Vector3(drop.position.x, drop.position.y, drop.position.z),
+            undefined,
+            undefined,
+            {
+              allowMerge: false,
+              exactPosition: true,
+              rustEntityId: drop.rustEntityId,
+              rotationY: drop.rotationY,
+              velocity: drop.velocity,
+              pickupDelay: drop.pickupDelay,
+              exactIdempotentRecovery: true,
+            },
+          );
+          if (!projected || projected.rustEntityId !== drop.rustEntityId) {
+            throw new Error("Native Dirt drop did not enter the exact compatibility projection");
+          }
+        }
+
+        this.commitStagedRustLiveAuthorityViewsR10(
+          generation, host, pump, stagedPlayer, stagedCamera, stagedDrops,
+        );
+        this.rustBasicDirtActionProjection = Object.freeze({
+          schema: 1,
+          cursor: plan.cursorAfter,
+          lastReceiptHash: plan.receiptHash,
+        });
+        const saved = this.saveRustCompatibilityDocumentLocalOnly("a native Dirt action projection");
+        if (!saved.ok) throw new Error(`Native Dirt browser projection could not be stored. ${saved.error.message}`);
+        pump.acknowledgeBasicDirtAction(generation, delivery);
+
+        this.miningProgress = 0;
+        this.target = null;
+        if (plan.action === "mine") {
+          this.audio.play("break", plan.cell.expectedBlockId as BlockId);
+          this.spawnParticles(plan.cell.x, plan.cell.y, plan.cell.z, plan.cell.expectedBlockId as BlockId, 13);
+        } else {
+          this.heldUse = 1;
+          this.placeCooldown = Math.max(this.placeCooldown, 0.12);
+          this.audio.play("place", plan.cell.replacementBlockId as BlockId);
+        }
+        this.emitHud(true);
+      });
+    } finally {
+      this.rustTerrainLocatorCommitLocked = false;
+    }
+  }
+
+  /**
+   * Commits one already-authoritative native player drop into the compatibility
+   * inventory and Three.js presentation. Rust persistence is checkpointed
+   * first; the browser stack, exact native drop, player/camera/hot-transform
+   * frame, projection cursor, and local document then commit before pump ack.
+   */
+  private async commitRustNativePlayerDropProjectionV1(input: Readonly<{
+    generation: number;
+    host: RustWorldRuntimeManagedHostV1;
+    pump: RustLiveInputPumpR5;
+    delivery: RustLiveInputPumpPlayerDropDeliveryV1;
+    extraction: RustIntegratedRuntimeExtractionV1;
+    requestedView: RustIntegratedRuntimeExtractionViewV1;
+    camera: RustLiveCameraViewR10;
+  }>) {
+    const { generation, host, pump, delivery, extraction, requestedView, camera: pumpCamera } = input;
+    if (this.rustTerrainLocatorCommitLocked) {
+      throw new Error("Another native browser projection is already committing");
+    }
+    if (this.mode !== "survival" || this.rustNativeSaveSuppressedForMultiplayerRuntime
+      || this.multiplayer) {
+      throw new Error("Native player drops are restricted to single-runtime Survival authority");
+    }
+    const cursor = this.rustNativePlayerDropProjection;
+    const attestation = this.rustLivePlayerAttestationR10;
+    if (!cursor || !attestation || delivery.worldGeneration !== generation
+      || delivery.cursorBefore !== cursor.cursor || delivery.cursorAfter !== delivery.receipt.sequence) {
+      throw new Error("Native player-drop receipt does not continue the active browser projection cursor");
+    }
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "native player-drop projection preflight");
+
+    const stagedPlayer = this.stageRustLivePlayerExtractionR10(generation, host, pump, extraction);
+    const stagedCamera = this.stageRustLiveCameraExtractionR10(
+      generation, host, pump, extraction, requestedView, pumpCamera,
+    );
+    const stagedDrops = this.stageRustDroppedHotTransformsR10(generation, host, pump, extraction);
+    const plan = planRustNativePlayerDropBrowserProjectionV1({
+      receipt: delivery.receipt,
+      cursorBefore: cursor.cursor,
+      expectedUniverseId: host.config.universeId,
+      expectedLocationId: host.config.locationId,
+      expectedPlayerId: attestation.playerId,
+      expectedPlayerEntityId: attestation.entityId,
+      expectedInventoryContainer: attestation.inventoryContainer,
+      selectedSlot: this.selected,
+      mode: this.mode,
+      selectedCompatibilityStack: this.inventory[this.selected] ?? null,
+    });
+    const receiptInventory = delivery.receipt.inventory;
+    const containerViewKey = rustIntegratedContainerViewKeyV1(attestation.inventoryContainer);
+    const priorPlayer = this.rustLivePlayerPresentationViewR10;
+    if (priorPlayer) {
+      const priorSelectedSlotMatches = priorPlayer.selectedSlot === plan.inventory.slot
+        ? this.rustTerrainLocatorStackMatches(priorPlayer.held, receiptInventory.beforeStack)
+        : this.rustLiveSelectedSlotIntentPendingR5
+          && this.rustLiveSelectedSlotIntentR5 === plan.inventory.slot;
+      if (priorPlayer.inventoryContainer !== containerViewKey
+        || priorPlayer.inventoryContainerRevision !== plan.inventory.beforeRevision
+        || !priorSelectedSlotMatches) {
+        throw new Error("Native player-drop receipt contradicts the previously presented selected inventory state");
+      }
+    }
+    if (stagedPlayer.inventoryContainer !== containerViewKey
+      || stagedPlayer.selectedSlot !== plan.inventory.slot
+      || stagedPlayer.inventoryContainerRevision !== plan.inventory.afterRevision
+      || stagedPlayer.authorityTick < BigInt(delivery.receipt.completionTick)
+      || !this.rustTerrainLocatorStackMatches(stagedPlayer.held, receiptInventory.afterStack)) {
+      throw new Error("Native player-drop successor contradicts its authoritative player extraction");
+    }
+
+    const hotMatches = stagedDrops.transforms
+      .filter((transform) => transform.entityId.toString(10) === plan.drop.rustEntityId);
+    const hot = hotMatches[0];
+    if (hotMatches.length !== 1 || !hot || hot.dropId !== plan.drop.dropId) {
+      throw new Error("Native player-drop receipt has no unique same-envelope Rust hot identity");
+    }
+    // BWS9 retains the immutable creation event, while this BWX0/BWR6 frame is
+    // extracted after the fixed step has advanced drop physics. Position,
+    // velocity, yaw, age, and their revisions are therefore allowed to move
+    // forward. The current transform remains Rust-authoritative and is applied
+    // atomically below; only its stable receipt/custody ancestry is compared.
+    const receiptDrop = delivery.receipt.drop;
+    if (!rustIntegratedRuntimeIdentityEqualsV1(stagedDrops.source.identity, delivery.queryIdentity)
+      || stagedDrops.source.authorityTick < BigInt(delivery.receipt.completionTick)
+      || hot.rowRevision < receiptDrop.spatialRevision) {
+      throw new Error("Native player-drop hot transform does not descend from its exact queried creation receipt");
+    }
+    if (hot.custodyContainer !== rustIntegratedContainerViewKeyV1(receiptDrop.custodyContainer)
+      || hot.custodySlot !== receiptDrop.custodySlot
+      || hot.boundContainerRevision !== receiptDrop.custodyRevision
+      || hot.itemCode !== receiptDrop.stack.itemCode
+      || hot.count !== receiptDrop.stack.count
+      || hot.durabilityMillionths !== receiptDrop.stack.durabilityMillionths
+      || this.rustTerrainLocatorHashHex(hot.metadataHash) !== receiptDrop.stack.metadataHash
+      || hot.createdTick !== receiptDrop.createdTick
+      || hot.expiresTick !== receiptDrop.expiresTick
+      || hot.pickupLockActorId !== receiptDrop.pickupLockActorId) {
+      throw new Error("Native player-drop hot transform contradicts its immutable receipt custody");
+    }
+    if (this.drops.some((drop) => drop.rustEntityId === plan.drop.rustEntityId)) {
+      throw new Error("Native player-drop identity already exists in the compatibility projection");
+    }
+
+    this.rustTerrainLocatorCommitLocked = true;
+    try {
+      await host.multiplayerAuthority().runExclusiveMutation(async () => {
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "native player-drop checkpoint");
+        if (cursor !== this.rustNativePlayerDropProjection || this.disposed
+          || this.mode !== "survival" || this.rustNativeSaveSuppressedForMultiplayerRuntime
+          || this.multiplayer || this.selected !== plan.inventory.slot
+          || !rustBasicDirtCompatibilityStackMatchesV1(
+            this.inventory[plan.inventory.slot] ?? null,
+            plan.inventory.before,
+          )
+          || this.drops.some((drop) => drop.rustEntityId === plan.drop.rustEntityId)) {
+          throw new Error("Native player-drop projection was superseded before its durable checkpoint");
+        }
+        const nativeCheckpoint = await this.checkpointRustLivePlayerNativeWitness(generation, host, pump);
+        this.rustNativePlayerDropCheckpoint = Object.freeze({
+          schema: 1,
+          cursorBefore: plan.cursorBefore,
+          cursorAfter: plan.cursorAfter,
+          receiptHash: plan.receiptHash,
+          queryIdentityHash: delivery.queryIdentity.stateHash,
+          ...nativeCheckpoint,
+        });
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "native player-drop compatibility commit");
+
+        this.inventory[plan.inventory.slot] = plan.inventory.after
+          ? { ...plan.inventory.after }
+          : null;
+        const projected = this.spawnDrop(
+          plan.drop.item,
+          plan.drop.count,
+          new THREE.Vector3(plan.drop.position.x, plan.drop.position.y, plan.drop.position.z),
+          undefined,
+          undefined,
+          {
+            allowMerge: false,
+            exactPosition: true,
+            rustEntityId: plan.drop.rustEntityId,
+            rotationY: plan.drop.rotationY,
+            velocity: plan.drop.velocity,
+            pickupDelay: plan.drop.pickupDelay,
+            exactIdempotentRecovery: true,
+          },
+        );
+        if (!projected || projected.rustEntityId !== plan.drop.rustEntityId) {
+          throw new Error("Native player drop did not enter the exact compatibility projection");
+        }
+
+        this.commitStagedRustLiveAuthorityViewsR10(
+          generation, host, pump, stagedPlayer, stagedCamera, stagedDrops,
+        );
+        this.rustNativePlayerDropProjection = Object.freeze({
+          schema: 1,
+          cursor: plan.cursorAfter,
+          lastReceiptHash: plan.receiptHash,
+        });
+        const saved = this.saveRustCompatibilityDocumentLocalOnly("a native player-drop projection");
+        if (!saved.ok) {
+          throw new Error(`Native player-drop browser projection could not be stored. ${saved.error.message}`);
+        }
+        if (!pump.acknowledgePlayerDrop(generation, delivery)) {
+          throw new Error("Native player-drop pump did not acknowledge its exact committed receipt");
+        }
+        this.emitHud(true);
+      });
+    } finally {
+      this.rustTerrainLocatorCommitLocked = false;
+    }
+  }
+
+  /**
+   * Commits the compatibility half of one already-authoritative native pickup.
+   * Native inventory custody and entity removal are checkpointed first; the
+   * browser inventory, presentation drop, cursor, and world document then move
+   * together before the pump relinquishes replay custody.
+   */
+  private async commitRustNativeDropPickupProjectionV1(input: Readonly<{
+    generation: number;
+    host: RustWorldRuntimeManagedHostV1;
+    pump: RustLiveInputPumpR5;
+    delivery: RustLiveInputPumpDropPickupDeliveryV1;
+    extraction: RustIntegratedRuntimeExtractionV1;
+    requestedView: RustIntegratedRuntimeExtractionViewV1;
+    camera: RustLiveCameraViewR10;
+  }>) {
+    const { generation, host, pump, delivery, extraction, requestedView, camera: pumpCamera } = input;
+    if (this.rustTerrainLocatorCommitLocked || this.rustNativeDropPickupPendingFinalize) {
+      throw new Error("Another native browser projection is already committing");
+    }
+    if (this.rustNativeSaveSuppressedForMultiplayerRuntime
+      || this.multiplayer?.authorityMode === "rust-authoritative") {
+      throw new Error("Native drop pickup is disabled after multiplayer authority enters this runtime");
+    }
+    const cursor = this.rustNativeDropPickupProjection;
+    const attestation = this.rustLivePlayerAttestationR10;
+    if (!cursor || !attestation || delivery.worldGeneration !== generation
+      || delivery.cursorBefore !== cursor.cursor || delivery.cursorAfter !== delivery.receipt.sequence) {
+      throw new Error("Native drop-pickup receipt does not continue the active browser projection cursor");
+    }
+    this.assertRustLivePlayerViewContextR10(generation, host, pump, "native drop-pickup projection preflight");
+
+    const stagedPlayer = this.stageRustLivePlayerExtractionR10(generation, host, pump, extraction);
+    const stagedCamera = this.stageRustLiveCameraExtractionR10(
+      generation, host, pump, extraction, requestedView, pumpCamera,
+    );
+    const stagedDrops = this.stageRustDroppedHotTransformsR10(generation, host, pump, extraction);
+    const plan = planRustNativeDropPickupBrowserProjectionV1({
+      receipt: delivery.receipt,
+      cursorBefore: cursor.cursor,
+      expectedUniverseId: host.config.universeId,
+      expectedLocationId: host.config.locationId,
+      expectedPlayerId: attestation.playerId,
+      expectedPlayerEntityId: attestation.entityId,
+      expectedInventoryContainer: attestation.inventoryContainer,
+      compatibilityInventory: this.inventory,
+      compatibilityDrops: this.drops,
+      retainedDeathRespawn: stagedPlayer.latestDeathRespawn ?? null,
+    });
+    const containerViewKey = rustIntegratedContainerViewKeyV1(attestation.inventoryContainer);
+    const priorPlayer = this.rustLivePlayerPresentationViewR10;
+    if (priorPlayer && (priorPlayer.inventoryContainer !== containerViewKey
+      || priorPlayer.inventoryContainerRevision !== plan.inventoryBeforeRevision)) {
+      throw new Error("Native drop-pickup receipt contradicts the previously presented inventory revision");
+    }
+    if (stagedPlayer.inventoryContainer !== containerViewKey
+      || stagedPlayer.inventoryContainerRevision !== plan.inventoryAfterRevision
+      || stagedPlayer.authorityTick < BigInt(delivery.receipt.completionTick)) {
+      throw new Error("Native drop-pickup successor contradicts its authoritative player extraction");
+    }
+    const selectedAffected = delivery.receipt.player.affectedSlots
+      .find((affected) => affected.slot === stagedPlayer.selectedSlot);
+    if (selectedAffected
+      && !this.rustTerrainLocatorStackMatches(stagedPlayer.held, selectedAffected.afterStack)) {
+      throw new Error("Native drop-pickup successor does not expose its selected-slot inventory result");
+    }
+    const priorSelectedAffected = priorPlayer
+      ? delivery.receipt.player.affectedSlots.find((affected) => affected.slot === priorPlayer.selectedSlot)
+      : undefined;
+    if (priorPlayer && priorSelectedAffected
+      && !this.rustTerrainLocatorStackMatches(priorPlayer.held, priorSelectedAffected.beforeStack)) {
+      throw new Error("Native drop-pickup receipt contradicts its selected-slot inventory predecessor");
+    }
+
+    const compatibilityInventoryBeforeJson = JSON.stringify(this.inventory.map((slot) => cloneSlot(slot)));
+    const selectedSlotBefore = this.selected;
+    const selectedSlotIntentBefore = this.rustLiveSelectedSlotIntentR5;
+    const selectedSlotIntentPendingBefore = this.rustLiveSelectedSlotIntentPendingR5;
+
+    this.rustTerrainLocatorCommitLocked = true;
+    try {
+      await host.multiplayerAuthority().runExclusiveMutation(async () => {
+        const rendererPoll = this.rustRenderExtractionPoll;
+        if (rendererPoll) await rendererPoll.catch(() => undefined);
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "native drop-pickup checkpoint");
+        if (this.rustRenderExtractionPoll || cursor !== this.rustNativeDropPickupProjection || this.disposed
+          || this.rustNativeSaveSuppressedForMultiplayerRuntime) {
+          throw new Error("Native drop-pickup projection was superseded before its durable checkpoint");
+        }
+        const nativeCheckpoint = await this.checkpointRustLivePlayerNativeWitness(generation, host, pump);
+        if (!rustIntegratedRuntimeIdentityEqualsV1(nativeCheckpoint.identityBefore, delivery.queryIdentity)) {
+          throw new Error("Native drop-pickup checkpoint does not continue the queried drop-pickup identity");
+        }
+        if (JSON.stringify(this.inventory.map((slot) => cloneSlot(slot))) !== compatibilityInventoryBeforeJson
+          || this.selected !== selectedSlotBefore
+          || this.rustLiveSelectedSlotIntentR5 !== selectedSlotIntentBefore
+          || this.rustLiveSelectedSlotIntentPendingR5 !== selectedSlotIntentPendingBefore
+          || this.rustLivePlayerPresentationViewR10 !== priorPlayer) {
+          throw new Error("Native drop-pickup compatibility predecessor changed during its checkpoint");
+        }
+        const checkpointWitness = Object.freeze({
+          schema: 1,
+          cursorBefore: plan.cursorBefore,
+          cursorAfter: plan.cursorAfter,
+          receiptHash: plan.receiptHash,
+          queryIdentityHash: delivery.queryIdentity.stateHash,
+          rustEntityId: plan.rustEntityId,
+          ...nativeCheckpoint,
+        });
+        this.rustNativeDropPickupCheckpoint = checkpointWitness;
+        this.assertRustLivePlayerViewContextR10(generation, host, pump, "native drop-pickup compatibility commit");
+
+        const dropIndexes = this.drops
+          .map((drop, index) => drop.rustEntityId === plan.rustEntityId ? index : -1)
+          .filter((index) => index >= 0);
+        if (dropIndexes.length !== 1) {
+          throw new Error("Native drop-pickup source disappeared or duplicated before browser projection");
+        }
+        const dropIndex = dropIndexes[0]!;
+        const drop = this.drops[dropIndex]!;
+        if (drop.item !== plan.sourceStack.item || drop.count !== plan.sourceStack.count
+          || drop.durability !== undefined || drop.metadata !== undefined) {
+          throw new Error("Native drop-pickup source changed before browser projection");
+        }
+
+        for (const affected of plan.affectedSlots) {
+          this.inventory[affected.slot] = affected.after ? { ...affected.after } : null;
+        }
+        // Rust already removed the authoritative entity and custody record. No
+        // legacy tombstone may be emitted for this presentation-only mirror.
+        this.removeDrop(dropIndex);
+        const committedViews = this.commitStagedRustLiveAuthorityViewsR10(
+          generation, host, pump, stagedPlayer, stagedCamera, stagedDrops,
+        );
+        const projection = Object.freeze({
+          schema: 1,
+          cursor: plan.cursorAfter,
+          lastReceiptHash: plan.receiptHash,
+        });
+        this.rustNativeDropPickupProjection = projection;
+        const inventoryAfter = Object.freeze(this.inventory.map((slot) => {
+          const cloned = cloneSlot(slot);
+          return cloned ? Object.freeze(cloned) : null;
+        }));
+        this.rustLiveRendererExtractionQueue.length = 0;
+        this.rustNativeDropPickupPendingFinalize = Object.freeze({
+          schema: 1,
+          state: "awaiting-local-save",
+          attempts: 0,
+          lastError: "",
+          cursorBefore: plan.cursorBefore,
+          cursorAfter: plan.cursorAfter,
+          receiptHash: plan.receiptHash,
+          rustEntityId: plan.rustEntityId,
+          generation,
+          host,
+          pump,
+          delivery,
+          plan,
+          projection,
+          checkpoint: checkpointWitness,
+          activeWorldId: this.activeWorldId,
+          nativePersistenceWorldId: this.rustNativePersistenceWorldId,
+          persistent: this.persistent,
+          saveSuppressed: this.rustNativeSaveSuppressedForMultiplayerRuntime,
+          mode: this.mode,
+          selectedSlot: this.selected,
+          universeId: host.config.universeId,
+          locationId: host.config.locationId,
+          sessionId: host.config.sessionId,
+          retryNotBefore: 0,
+          inventoryAfter,
+          inventoryAfterJson: JSON.stringify(inventoryAfter),
+          nativeDrops: this.serializeRustNativeBlockEditDropsV1(),
+          playerView: committedViews.player,
+          cameraView: committedViews.camera,
+          droppedView: committedViews.dropped,
+          extraction,
+          viewRevision: requestedView.viewRevision,
+        });
+        await this.finalizeRustNativeDropPickupLocalSaveV1();
+      });
+    } finally {
+      if (!this.rustNativeDropPickupPendingFinalize) this.rustTerrainLocatorCommitLocked = false;
+    }
+  }
+
+  private assertRustNativeDropPickupPendingFinalizeV1(
+    pending: RustNativeDropPickupPendingFinalizeV1,
+  ) {
+    const config = pending.host.config;
+    if (this.disposed || pending !== this.rustNativeDropPickupPendingFinalize
+      || !this.rustTerrainLocatorCommitLocked
+      || pending.generation !== this.rustRuntimeTransitionGeneration
+      || pending.generation !== this.rustLivePlayerAuthorityGeneration
+      || pending.host !== this.rustRuntimeHost || pending.pump !== this.rustLiveInputPump
+      || pending.pump.state !== "ready" || pending.host.diagnostics().state !== "ready"
+      || pending.projection !== this.rustNativeDropPickupProjection
+      || pending.checkpoint !== this.rustNativeDropPickupCheckpoint
+      || pending.plan.cursorBefore !== pending.cursorBefore
+      || pending.plan.cursorAfter !== pending.cursorAfter
+      || pending.plan.receiptHash !== pending.receiptHash
+      || pending.plan.rustEntityId !== pending.rustEntityId
+      || pending.delivery.cursorBefore !== pending.cursorBefore
+      || pending.delivery.cursorAfter !== pending.cursorAfter
+      || pending.delivery.receipt.sequence !== pending.cursorAfter
+      || pending.delivery.receipt.receiptHash !== pending.receiptHash
+      || pending.activeWorldId !== this.activeWorldId
+      || pending.nativePersistenceWorldId !== this.rustNativePersistenceWorldId
+      || pending.persistent !== this.persistent
+      || pending.saveSuppressed !== this.rustNativeSaveSuppressedForMultiplayerRuntime
+      || this.rustNativeSaveSuppressedForMultiplayerRuntime
+      || this.multiplayer?.authorityMode === "rust-authoritative"
+      || pending.mode !== this.mode || pending.selectedSlot !== this.selected
+      || config.universeId !== pending.universeId || config.locationId !== pending.locationId
+      || config.sessionId !== pending.sessionId
+      || this.rustLivePlayerPresentationViewR10 !== pending.playerView
+      || this.rustLiveCameraPresentationViewR10 !== pending.cameraView
+      || this.rustDroppedHotTransformFrameR10 !== pending.droppedView
+      || this.rustRenderExtractionPoll !== null
+      || this.rustLiveRendererExtractionQueue.length !== 0
+      || JSON.stringify(this.inventory) !== pending.inventoryAfterJson
+      || this.drops.some((drop) => drop.rustEntityId === pending.rustEntityId)) {
+      throw new Error("Native drop-pickup pending finalize no longer matches its exact projected successor");
+    }
+    const diagnostic = pending.pump.diagnostics();
+    if (!diagnostic.dropPickupQueryConfigured || diagnostic.dropPickupLegacySeedPending
+      || diagnostic.dropPickupCursor !== pending.cursorBefore
+      || diagnostic.lastAcknowledgedDropPickupSequence === pending.cursorAfter
+      || diagnostic.lastAcknowledgedDropPickupReceiptHash === pending.receiptHash
+      || diagnostic.pendingDropPickupSequence !== pending.cursorAfter
+      || diagnostic.pendingDropPickupReceiptHash !== pending.receiptHash
+      || diagnostic.pendingDropPickupIdentityHash !== pending.delivery.queryIdentity.stateHash) {
+      throw new Error("Native drop-pickup pending finalize lost its exact pump delivery");
+    }
+    const currentNativeDrops = this.serializeRustNativeBlockEditDropsV1();
+    if (JSON.stringify(currentNativeDrops) !== JSON.stringify(pending.nativeDrops)) {
+      throw new Error("Native drop-pickup pending finalize lost its exact projected drop set or transform");
+    }
+    const persistenceSession = pending.host.nativePersistenceSession?.();
+    if (!persistenceSession) {
+      throw new Error("Native drop-pickup pending finalize lost its checkpoint persistence session");
+    }
+    const persistence = persistenceSession.diagnostics();
+    if (JSON.stringify(persistence) !== JSON.stringify(pending.checkpoint.persistenceAfter)) {
+      throw new Error("Native drop-pickup pending finalize lost its exact checkpoint persistence state");
+    }
+  }
+
+  private async finalizeRustNativeDropPickupLocalSaveV1() {
+    const pending = this.rustNativeDropPickupPendingFinalize;
+    if (!pending) throw new Error("No native drop-pickup local save is awaiting finalize");
+    this.assertRustNativeDropPickupPendingFinalizeV1(pending);
+    let saved;
+    try { saved = this.saveRustCompatibilityDocumentLocalOnly("a native drop-pickup projection"); }
+    catch (error) { saved = { ok: false as const, error: error instanceof Error ? error : new Error(String(error)) }; }
+    if (!saved.ok) {
+      this.rustNativeDropPickupPendingFinalize = Object.freeze({
+        ...pending,
+        attempts: pending.attempts + 1,
+        lastError: saved.error.message,
+        retryNotBefore: Date.now() + 1_000,
+      });
+      this.armRustNativeDropPickupFinalizeRetryTimerV1();
+      return this.rustNativeDropPickupPendingFinalize;
+    }
+    if (!pending.pump.acknowledgeDropPickup(pending.generation, pending.delivery)) {
+      throw new Error("Native drop-pickup pump did not acknowledge its exact committed receipt");
+    }
+    this.clearRustNativeDropPickupFinalizeRetryTimerV1();
+    this.rustNativeDropPickupPendingFinalize = null;
+    this.rustTerrainLocatorCommitLocked = false;
+    if (pending.attempts > 0 && this.rustLiveRenderRuntime
+      && this.rustLiveRenderViewR10?.viewRevision === pending.viewRevision) {
+      this.enqueueRustLiveRendererExtractionR10({
+        generation: pending.generation,
+        host: pending.host,
+        pump: pending.pump,
+        viewRevision: pending.viewRevision,
+        extraction: pending.extraction,
+      });
+    }
+    this.audio.play("pickup");
+    this.emitHud(true);
+    return null;
+  }
+
+  private async retryRustNativeDropPickupFinalizeV1() {
+    const pending = this.rustNativeDropPickupPendingFinalize;
+    if (!pending) throw new Error("No native drop-pickup local save is awaiting retry");
+    this.clearRustNativeDropPickupFinalizeRetryTimerV1();
+    this.assertRustNativeDropPickupPendingFinalizeV1(pending);
+    this.assertRustLivePlayerViewContextR10(
+      pending.generation,
+      pending.host,
+      pending.pump,
+      "native drop-pickup local-save retry",
+    );
+    return await this.runRustLivePumpNetworkExclusiveR5(
+      pending.generation,
+      pending.host,
+      pending.pump,
+      "native drop-pickup local-save retry",
+      async () => await this.finalizeRustNativeDropPickupLocalSaveV1(),
+    );
+  }
+
+  private assertRustTerrainLocatorJournalContext(
+    journal: RustTerrainLocatorEffectJournalV1,
+    context: ReturnType<VoxelEngine["rustTerrainLocatorRuntimeContext"]>,
+  ) {
+    const terrain = this.world.terrainLocatorAuthorityIdentity();
+    if (journal.world.saveId !== this.activeWorldId
+      || journal.world.terrainNamespace !== terrain.namespace
+      || journal.world.runtimeUniverseId !== context.host.config.universeId
+      || journal.world.runtimeLocationId !== context.host.config.locationId
+      || journal.actorId !== context.attestation.actorId
+      || journal.actorId !== this.localPlayerId()
+      || journal.selectedSlot !== context.player.selectedSlot
+      || journal.position.x !== context.player.position.x
+      || journal.position.y !== context.player.position.y
+      || journal.position.z !== context.player.position.z) {
+      throw new Error("The durable locator plan belongs to a different world, player, slot, or position");
+    }
+  }
+
+  private commitRustTerrainLocatorPlayerResult(
+    context: ReturnType<VoxelEngine["rustTerrainLocatorRuntimeContext"]>,
+    result: RustLiveInputPumpLocatorItemConsumeResultV1,
+  ) {
+    if (result.discarded || !result.validated || !result.player || !result.extraction) {
+      throw new Error("The Rust locator item debit did not return its complete receipt and readback");
+    }
+    this.assertRustLivePlayerViewContextR10(
+      context.generation, context.host, context.pump, "locator item receipt commit",
+    );
+    const before = this.rustLivePlayerPresentationViewR10;
+    const after = result.player;
+    const locator = result.validated.locator;
+    if (!before || !this.rustTerrainLocatorPlayerContinuityMatches(before, after)
+      || after.inventoryContainerRevision !== locator.resultingInventoryRevision
+      || !this.rustTerrainLocatorStackMatches(after.held, result.validated.remainingStack)) {
+      throw new Error("The locator receipt changed player state outside its exact inventory debit");
+    }
+    const alreadyProjected = before.inventoryContainerRevision === locator.resultingInventoryRevision
+      && this.rustTerrainLocatorStackMatches(before.held, result.validated.remainingStack);
+    if (alreadyProjected) {
+      if (after.extractionRevision < before.extractionRevision) {
+        throw new Error("The recovered locator readback regressed its extraction revision");
+      }
+      if (after.extractionRevision === before.extractionRevision) return "idempotent" as const;
+    } else if (before.inventoryContainerRevision !== locator.previousInventoryRevision
+      || after.extractionRevision <= before.extractionRevision) {
+      throw new Error("The locator debit did not advance exactly one inventory revision at the same authority tick");
+    }
+    this.projectRustLivePlayerViewR10(after);
+    this.assertRustLivePlayerViewContextR10(
+      context.generation, context.host, context.pump, "locator item player projection",
+    );
+    this.rustLivePlayerPresentationViewR10 = after;
+    this.rustLivePlayerViewExtractionRevisionR10 = after.extractionRevision;
+    return alreadyProjected ? "idempotent-refresh" as const : "advanced" as const;
+  }
+
+  private rustTerrainLocatorRemainingCompatibilitySlot(
+    journal: RustTerrainLocatorEffectJournalV1,
+    result: RustLiveInputPumpLocatorItemConsumeResultV1,
+  ): InventorySlot | null {
+    const remaining = result.validated?.remainingStack ?? null;
+    if (remaining === null) {
+      if (journal.compatibilityStack.count !== 1) {
+        throw new Error("The native locator receipt cleared a compatibility stack with more than one unit");
+      }
+      return null;
+    }
+    if (remaining.itemCode !== journal.compatibilityStack.item
+      || remaining.count !== journal.compatibilityStack.count - 1
+      || remaining.durabilityMillionths !== null || remaining.metadataHash !== "0".repeat(32)) {
+      throw new Error("The native locator receipt cannot be represented losslessly in the compatibility inventory");
+    }
+    return { item: remaining.itemCode as ItemCode, count: remaining.count };
+  }
+
+  private rustTerrainLocatorEffectReachedStorage(
+    worldId: string,
+    effectId: string,
+    selectedSlot: number,
+    remaining: InventorySlot | null,
+  ) {
+    const loaded = this.worldStorage.loadWorld(worldId, false);
+    if (!loaded.ok || loaded.value.save.rustTerrainLocatorEffectJournal) return false;
+    try {
+      if (!rustTerrainLocatorEffectWasAppliedV1(
+        loaded.value.save.rustTerrainLocatorAppliedEffectIds ?? [], effectId,
+      )) return false;
+    } catch { return false; }
+    const stored = cloneSlot(loaded.value.save.inventory[selectedSlot] ?? null);
+    return JSON.stringify(stored) === JSON.stringify(remaining);
+  }
+
+  private rustTerrainLocatorEffectTransition(
+    effect: RustTerrainLocatorEffectV1,
+    actorId: string,
+    positionY: number,
+  ) {
+    let mapKnowledge = this.mapKnowledge;
+    let questBook = this.questBook;
+    let skillResult = addSkillXp(this.skillState, "exploration", 0);
+    let successMessage: string;
+    if (effect.kind === "chart") {
+      const byId = new Map(effect.result.entries.map((entry) => [entry.id, entry]));
+      for (const id of effect.applyEntryIds) {
+        const destination = byId.get(id);
+        if (!destination) throw new Error("The settlement chart lost one of its sealed destinations");
+        mapKnowledge = discoverSettlement(mapKnowledge, {
+          id: `settlement:${destination.id}`,
+          name: `${FACTIONS[destination.factionId].name} ${destination.size}`,
+          position: { x: destination.x, y: positionY, z: destination.z },
+          playerId: actorId,
+          discoveredAt: effect.discoveredAt,
+          icon: "settlement",
+          settlementKnowledge: "charted",
+          factionId: destination.factionId,
+          settlementSize: destination.size,
+        });
+      }
+      skillResult = addSkillXp(this.skillState, "exploration", 12 + effect.applyEntryIds.length * 3);
+      successMessage = `The folio charts ${effect.applyEntryIds.length} connected ${effect.applyEntryIds.length === 1 ? "community" : "communities"}. Their terrain remains unexplored.`;
+    } else {
+      const entry = effect.result.entry;
+      const markerName = entry.dragonType === "sea"
+        ? `Sea Dragon Nest · Stage ${entry.stage}+ chart`
+        : `${entry.dragonType[0].toUpperCase()}${entry.dragonType.slice(1)} Dragon Lair · Stage ${entry.stage}+ survey`;
+      mapKnowledge = discoverNaturalPoi(mapKnowledge, {
+        id: entry.id,
+        name: markerName,
+        position: { x: entry.x, y: entry.y, z: entry.z },
+        playerId: actorId,
+        discoveredAt: effect.discoveredAt,
+        icon: "dragon-lair",
+      });
+      questBook = applyQuestEvent(this.questBook, this.allQuestDefinitions(), {
+        type: "custom",
+        eventId: `${entry.dragonType}-dragon-lair-recorded`,
+        at: effect.discoveredAt,
+      });
+      skillResult = addSkillXp(this.skillState, "exploration", 24 + entry.stage * 4);
+      const distanceBlocks = Math.round(Math.sqrt(Number(entry.distanceSquaredMillis)) / 1_000);
+      successMessage = `${markerName} marked · ${distanceBlocks.toLocaleString()} blocks away.`;
+    }
+    return Object.freeze({ mapKnowledge, questBook, skillResult, successMessage });
+  }
+
+  private commitRustTerrainLocatorEffect(
+    journal: RustTerrainLocatorEffectJournalV1,
+    result: RustLiveInputPumpLocatorItemConsumeResultV1,
+  ) {
+    const effectId = rustTerrainLocatorEffectIdV1(journal);
+    const remaining = this.rustTerrainLocatorRemainingCompatibilitySlot(journal, result);
+    const alreadyApplied = rustTerrainLocatorEffectWasAppliedV1(
+      this.rustTerrainLocatorAppliedEffectIds, effectId,
+    );
+    const before = Object.freeze({
+      inventory: this.inventory,
+      mapKnowledge: this.mapKnowledge,
+      skillState: this.skillState,
+      questBook: this.questBook,
+      placeCooldown: this.placeCooldown,
+      heldUse: this.heldUse,
+      journal: this.rustTerrainLocatorEffectJournal,
+      ledger: this.rustTerrainLocatorAppliedEffectIds,
+      worldSessionStartedAt: this.worldSessionStartedAt,
+    });
+    const nextInventory = [...this.inventory];
+    nextInventory[journal.selectedSlot] = remaining;
+    let nextMap = this.mapKnowledge;
+    let nextQuest = this.questBook;
+    let successMessage = "The recovered locator record is already committed.";
+    let skillResult = addSkillXp(this.skillState, "exploration", 0);
+    if (!alreadyApplied) {
+      const transition = this.rustTerrainLocatorEffectTransition(
+        journal.effect, journal.actorId, journal.position.y,
+      );
+      nextMap = transition.mapKnowledge;
+      nextQuest = transition.questBook;
+      skillResult = transition.skillResult;
+      successMessage = transition.successMessage;
+    }
+    this.inventory = nextInventory;
+    this.mapKnowledge = nextMap;
+    this.skillState = skillResult.state;
+    this.questBook = nextQuest;
+    this.placeCooldown = 0.45;
+    this.heldUse = 1;
+    this.rustTerrainLocatorAppliedEffectIds = alreadyApplied
+      ? this.rustTerrainLocatorAppliedEffectIds
+      : appendRustTerrainLocatorAppliedEffectIdV1(this.rustTerrainLocatorAppliedEffectIds, effectId);
+    this.rustTerrainLocatorEffectJournal = null;
+    const worldId = journal.world.saveId;
+    let saved: ReturnType<VoxelEngine["saveRustTerrainLocatorDocumentLocalOnly"]>;
+    try { saved = this.saveRustTerrainLocatorDocumentLocalOnly(); }
+    catch (error) {
+      this.inventory = before.inventory;
+      this.mapKnowledge = before.mapKnowledge;
+      this.skillState = before.skillState;
+      this.questBook = before.questBook;
+      this.placeCooldown = before.placeCooldown;
+      this.heldUse = before.heldUse;
+      this.rustTerrainLocatorEffectJournal = before.journal;
+      this.rustTerrainLocatorAppliedEffectIds = before.ledger;
+      this.worldSessionStartedAt = before.worldSessionStartedAt;
+      throw error;
+    }
+    if (!saved.ok && !this.rustTerrainLocatorEffectReachedStorage(
+      worldId, effectId, journal.selectedSlot, remaining,
+    )) {
+      this.inventory = before.inventory;
+      this.mapKnowledge = before.mapKnowledge;
+      this.skillState = before.skillState;
+      this.questBook = before.questBook;
+      this.placeCooldown = before.placeCooldown;
+      this.heldUse = before.heldUse;
+      this.rustTerrainLocatorEffectJournal = before.journal;
+      this.rustTerrainLocatorAppliedEffectIds = before.ledger;
+      this.worldSessionStartedAt = before.worldSessionStartedAt;
+      throw new Error(`The locator effect could not be committed locally. ${saved.error.message}`);
+    }
+    return Object.freeze({
+      applied: !alreadyApplied,
+      successMessage,
+      gainedLevels: skillResult.gainedLevels,
+      explorationLevel: this.skillState.skills.exploration.level,
+    });
+  }
+
+  private commitRustTerrainLocatorCompatibilityEffect(
+    effect: RustTerrainLocatorEffectV1,
+    snapshot: ReturnType<VoxelEngine["terrainLocatorConsumerSnapshot"]>,
+  ) {
+    if (this.rustLivePlayerAuthorityRequestedR5) {
+      throw new Error("Experimental Rust player authority cannot fall back to compatibility inventory custody");
+    }
+    if (!this.terrainLocatorConsumerSnapshotCurrent(snapshot, true)) {
+      throw new Error("The locator item changed before its compatibility effect committed");
+    }
+    const selected = snapshot.slot;
+    if (!selected || selected.count < 1 || selected.durability !== undefined || selected.metadata !== undefined) {
+      throw new Error("The selected locator item is not one plain compatibility stack");
+    }
+    const before = Object.freeze({
+      inventory: this.inventory,
+      mapKnowledge: this.mapKnowledge,
+      skillState: this.skillState,
+      questBook: this.questBook,
+      placeCooldown: this.placeCooldown,
+      heldUse: this.heldUse,
+      worldSessionStartedAt: this.worldSessionStartedAt,
+    });
+    const transition = this.rustTerrainLocatorEffectTransition(effect, snapshot.actorId, snapshot.position.y);
+    const nextInventory = [...this.inventory];
+    nextInventory[snapshot.selected] = selected.count === 1
+      ? null
+      : { ...selected, count: selected.count - 1 };
+    this.inventory = nextInventory;
+    this.mapKnowledge = transition.mapKnowledge;
+    this.skillState = transition.skillResult.state;
+    this.questBook = transition.questBook;
+    this.placeCooldown = 0.45;
+    this.heldUse = 1;
+    try {
+      if (this.persistent) {
+        if (!this.activeWorldId) throw new Error("The locator item has no browser world to commit");
+        const now = Date.now();
+        const saveBoundToIntegratedRuntime = this.rustNativePersistenceWorldId === this.activeWorldId;
+        const saveInput = {
+          save: this.serialize(),
+          playTimeDeltaMs: Math.max(0, now - this.worldSessionStartedAt),
+        };
+        const saved = saveBoundToIntegratedRuntime
+          ? this.worldStorage.saveWorldLocalOnly(this.activeWorldId, saveInput)
+          : this.worldStorage.saveWorld(this.activeWorldId, saveInput);
+        if (!saved.ok) throw new Error(`The locator effect could not be committed locally. ${saved.error.message}`);
+        this.worldSessionStartedAt = now;
+        try { window.localStorage.removeItem(SAVE_KEY); }
+        catch { /* The committed WorldStorage document remains authoritative. */ }
+      }
+    } catch (error) {
+      this.inventory = before.inventory;
+      this.mapKnowledge = before.mapKnowledge;
+      this.skillState = before.skillState;
+      this.questBook = before.questBook;
+      this.placeCooldown = before.placeCooldown;
+      this.heldUse = before.heldUse;
+      this.worldSessionStartedAt = before.worldSessionStartedAt;
+      throw error;
+    }
+    return Object.freeze({
+      applied: true,
+      successMessage: transition.successMessage,
+      gainedLevels: transition.skillResult.gainedLevels,
+      explorationLevel: this.skillState.skills.exploration.level,
+    });
+  }
+
+  private announceRustTerrainLocatorEffect(result: ReturnType<VoxelEngine["commitRustTerrainLocatorEffect"]>) {
+    if (!result.applied) return;
+    this.audio.play("craft");
+    if (result.gainedLevels > 0) {
+      this.events.onToast(`Exploration increased to ${result.explorationLevel}.`);
+    }
+    this.events.onToast(result.successMessage);
+    this.emitHud(true);
+  }
+
+  private async withRustTerrainLocatorCommitLock<T>(operation: () => Promise<T>) {
+    if (this.rustLivePlayerRespawnTransactionR5) {
+      throw new Error("A native player respawn transaction is already committing");
+    }
+    if (this.rustTerrainLocatorCommitLocked) {
+      throw new Error("Another authoritative locator item is already committing");
+    }
+    this.rustTerrainLocatorCommitLocked = true;
+    try {
+      const host = this.rustRuntimeHost;
+      if (!host || host.diagnostics().state !== "ready") {
+        throw new Error("The locator commit lost its sole integrated Rust runtime");
+      }
+      // Multiplayer, agent, replication, and handshake mutations use the
+      // same integrated runtime as the player pump. Reserve their shared
+      // authority queue for the complete debit + native-checkpoint interval;
+      // pump-tail adjacency alone cannot stop a network revision landing
+      // between BWX7 and its durable checkpoint.
+      return await host.multiplayerAuthority().runExclusiveMutation(async () => {
+        if (host !== this.rustRuntimeHost || host.diagnostics().state !== "ready") {
+          throw new Error("The locator commit's integrated Rust runtime was superseded");
+        }
+        const pending = [this.rustLiveInputAdvance, this.rustLiveViewRefresh]
+          .filter((value): value is Promise<void> => value !== null);
+        if (pending.length) await Promise.all(pending);
+        const pump = this.rustLiveInputPump;
+        if (!pump) throw new Error("The locator commit lost its live input pump");
+        const generation = this.rustLivePlayerAuthorityGeneration;
+        if (generation === null) throw new Error("The locator commit lost its live player generation");
+        await pump.drain();
+        // A valid network-only successor may have landed immediately before
+        // this queue was reserved. Adopt it while the multiplayer mutation
+        // lane is still exclusive, otherwise the following inventory command
+        // would misclassify ordinary replication as out-of-band identity
+        // drift and fail the live player pump closed.
+        await pump.adoptExternalNetworkSuccessor(generation);
+        if (host !== this.rustRuntimeHost || pump !== this.rustLiveInputPump
+          || host.diagnostics().state !== "ready" || pump.state !== "ready") {
+          throw new Error("The locator commit was superseded during network adoption");
+        }
+        return await operation();
+      });
+    } finally {
+      this.rustTerrainLocatorCommitLocked = false;
+    }
+  }
+
+  private async runRustTerrainLocatorNewDebit(input: Readonly<{
+    effect: RustTerrainLocatorEffectV1;
+    actorId: string;
+    position: Readonly<{ x: number; y: number; z: number }>;
+    selectedSlot: number;
+    compatibilityStack: Readonly<{ item: ItemCode; count: number }>;
+    purpose: RustIntegratedPlayerLocatorItemConsumeV1["purpose"];
+    locatorResultHash: string;
+    allowBlocked: boolean;
+    stillCurrent?: () => boolean;
+  }>) {
+    return this.withRustTerrainLocatorCommitLock(async () => {
+      let context = this.rustTerrainLocatorRuntimeContext(input.allowBlocked);
+      if (input.stillCurrent && !input.stillCurrent()) {
+        throw new Error("The locator item changed before its durable checkpoint");
+      }
+      // The first native checkpoint makes the plan's exact pre-debit identity
+      // recoverable. The journal is deliberately authored only after this
+      // checkpoint, because the checkpoint itself advances persistence identity.
+      await this.checkpointRustTerrainLocatorNative(context);
+      context = this.rustTerrainLocatorRuntimeContext(input.allowBlocked);
+      if (input.stillCurrent && !input.stillCurrent()) {
+        throw new Error("The locator item changed while its pre-debit checkpoint committed");
+      }
+      const intent = this.rustTerrainLocatorIntent(context, input.purpose, input.locatorResultHash);
+      if (context.player.selectedSlot !== input.selectedSlot
+        || intent.expectedStack.itemCode !== input.compatibilityStack.item
+        || intent.expectedStack.count !== input.compatibilityStack.count) {
+        throw new Error("The native locator stack no longer matches its compatibility document");
+      }
+      const consume = context.pump.consumeLocatorItem(context.generation, intent, {
+        beforeDispatch: async (plan) => {
+          const current = this.rustTerrainLocatorRuntimeContext(input.allowBlocked);
+          if (current.host !== context.host || current.pump !== context.pump
+            || current.generation !== context.generation
+            || input.stillCurrent && !input.stillCurrent()) {
+            throw new Error("The locator item was superseded before its recovery journal committed");
+          }
+          const journal = createRustTerrainLocatorEffectJournalV1({
+            world: {
+              saveId: this.activeWorldId!,
+              terrainNamespace: this.world.terrainLocatorAuthorityIdentity().namespace,
+              runtimeUniverseId: context.host.config.universeId,
+              runtimeLocationId: context.host.config.locationId,
+            },
+            actorId: input.actorId,
+            position: input.position,
+            selectedSlot: input.selectedSlot,
+            compatibilityStack: input.compatibilityStack,
+            plan,
+            effect: input.effect,
+          });
+          this.assertRustTerrainLocatorJournalContext(journal, current);
+          this.persistRustTerrainLocatorJournal(journal);
+        },
+      });
+      // Enqueue immediately behind BWV7 before awaiting either promise. No
+      // input, camera, or view operation can enter this pump-tail interval.
+      const postDebitCheckpoint = this.checkpointRustTerrainLocatorNative(context);
+      let result: RustLiveInputPumpLocatorItemConsumeResultV1;
+      try {
+        result = await consume;
+        await postDebitCheckpoint;
+      } catch (error) {
+        await postDebitCheckpoint.catch(() => undefined);
+        throw error;
+      }
+      this.commitRustTerrainLocatorPlayerResult(context, result);
+      const journal = this.rustTerrainLocatorEffectJournal;
+      if (!journal) throw new Error("The native locator debit returned without its durable browser journal");
+      this.assertRustTerrainLocatorJournalContext(journal, this.rustTerrainLocatorRuntimeContext(input.allowBlocked));
+      return this.commitRustTerrainLocatorEffect(journal, result);
+    });
+  }
+
+  private async recoverPreparedRustTerrainLocatorEffect(
+    generation: number,
+    host: RustWorldRuntimeManagedHostV1,
+  ) {
+    const saved = this.rustTerrainLocatorEffectJournal;
+    if (!saved) return;
+    await this.withRustTerrainLocatorCommitLock(async () => {
+      let context = this.rustTerrainLocatorRuntimeContext(true);
+      if (context.generation !== generation || context.host !== host) {
+        throw new Error("The locator journal recovery opened against a different Rust runtime generation");
+      }
+      const journal = rehydrateRustTerrainLocatorEffectJournalV1(saved);
+      this.assertRustTerrainLocatorJournalContext(journal, context);
+      const plan = rehydrateRustLiveLocatorItemConsumePlanV1(journal.plan);
+      const nativePreDebit = context.player.inventoryContainerRevision === plan.request.expectedInventoryRevision
+        && this.rustTerrainLocatorStackMatches(context.player.held, plan.request.expectedStack);
+      const nativePostDebit = context.player.inventoryContainerRevision === plan.request.expectedInventoryRevision + BigInt(1)
+        && this.rustTerrainLocatorStackMatches(context.player.held, plan.expectedRemainingStack);
+      if (!nativePreDebit && !nativePostDebit) {
+        throw new Error("The hydrated locator inventory is neither the sealed pre-debit nor post-debit state");
+      }
+      if (nativePreDebit) {
+        // Hydration may legitimately rebase persistence and state hash. Seal a
+        // new exact checkpoint and plan instead of weakening ordinary command
+        // identity validation or guessing whether the old command ran.
+        await this.checkpointRustTerrainLocatorNative(context);
+        context = this.rustTerrainLocatorRuntimeContext(true);
+        const intent = this.rustTerrainLocatorIntent(
+          context, plan.request.purpose, plan.request.locatorResultHash,
+        );
+        const consume = context.pump.consumeLocatorItem(context.generation, intent, {
+          beforeDispatch: async (replanned) => {
+            const replacement = createRustTerrainLocatorEffectJournalV1({
+              world: journal.world,
+              actorId: journal.actorId,
+              position: journal.position,
+              selectedSlot: journal.selectedSlot,
+              compatibilityStack: journal.compatibilityStack,
+              plan: replanned,
+              effect: journal.effect,
+            });
+            this.assertRustTerrainLocatorJournalContext(
+              replacement, this.rustTerrainLocatorRuntimeContext(true),
+            );
+            this.persistRustTerrainLocatorJournal(replacement);
+          },
+        });
+        const postDebitCheckpoint = this.checkpointRustTerrainLocatorNative(context);
+        let result: RustLiveInputPumpLocatorItemConsumeResultV1;
+        try {
+          result = await consume;
+          await postDebitCheckpoint;
+        } catch (error) {
+          await postDebitCheckpoint.catch(() => undefined);
+          throw error;
+        }
+        this.commitRustTerrainLocatorPlayerResult(context, result);
+        const replacement = this.rustTerrainLocatorEffectJournal;
+        if (!replacement) throw new Error("The replanned locator debit lost its replacement journal");
+        this.commitRustTerrainLocatorEffect(replacement, result);
+        return;
+      }
+      const result = await context.pump.recoverLocatorItem(context.generation, plan);
+      this.commitRustTerrainLocatorPlayerResult(context, result);
+      this.commitRustTerrainLocatorEffect(journal, result);
+    });
+  }
+
+  private terrainLocatorConsumerSnapshot(slotRequired: boolean) {
+    const identity = this.world.terrainLocatorAuthorityIdentity();
+    return Object.freeze({
+      generation: this.rustRuntimeTransitionGeneration,
+      namespace: identity.namespace,
+      lifecycleRevision: identity.lifecycleRevision,
+      actorId: this.localPlayerId(),
+      position: Object.freeze({ x: this.position.x, y: this.position.y, z: this.position.z }),
+      selected: this.selected,
+      slot: slotRequired ? cloneSlot(this.selectedSlot()) : null,
+      signal: this.terrainLocatorConsumerAbort.signal,
+    });
+  }
+
+  private terrainLocatorConsumerSnapshotCurrent(
+    snapshot: ReturnType<VoxelEngine["terrainLocatorConsumerSnapshot"]>,
+    slotRequired: boolean,
+  ) {
+    const identity = this.world.terrainLocatorAuthorityIdentity();
+    return !snapshot.signal.aborted
+      && snapshot.generation === this.rustRuntimeTransitionGeneration
+      && snapshot.namespace === identity.namespace
+      && snapshot.lifecycleRevision === identity.lifecycleRevision
+      && snapshot.actorId === this.localPlayerId()
+      && snapshot.position.x === this.position.x
+      && snapshot.position.y === this.position.y
+      && snapshot.position.z === this.position.z
+      && (!slotRequired || (snapshot.selected === this.selected
+        && JSON.stringify(snapshot.slot) === JSON.stringify(cloneSlot(this.selectedSlot()))));
+  }
+
+  private beginRustSettlementChartUse(custody: "native" | "typescript") {
+    if (this.pendingSettlementChart) return true;
+    const snapshot = this.terrainLocatorConsumerSnapshot(true);
+    const exclusions = this.terrainLocatorKnownIds("settlement");
+    const promise = (async () => {
+      const result = await this.world.queryNearestSettlementsAuthoritative({
+        origin: { x: snapshot.position.x, z: snapshot.position.z },
+        excludeIds: exclusions,
+        maxRegionRadius: 48,
+        limit: 4,
+        breathesWater: characterRaceTraits(this.activeCharacterProfile?.appearance.race ?? "wayfarer").waterBreathing,
+      }, snapshot.signal);
+      if (!this.terrainLocatorConsumerSnapshotCurrent(snapshot, true)) return;
+      const knownAtCommit = new Set(this.terrainLocatorKnownIds("settlement"));
+      const routes = result.entries.filter((entry) => !knownAtCommit.has(entry.id));
+      if (!routes.length) {
+        this.events.onToast("Every community in this folio's regional reach is already on your map, so it remains unused.");
+        return;
+      }
+      const discoveredAt = Date.now();
+      const slot = snapshot.slot;
+      if (!slot || slot.durability !== undefined || slot.metadata !== undefined) {
+        throw new Error("The selected settlement folio is not a plain authoritative stack");
+      }
+      const effect = createRustTerrainSettlementChartEffectV1(
+        result, routes.map((entry) => entry.id), discoveredAt,
+      );
+      const committed = custody === "native"
+        ? await this.runRustTerrainLocatorNewDebit({
+          effect,
+          actorId: snapshot.actorId,
+          position: snapshot.position,
+          selectedSlot: snapshot.selected,
+          compatibilityStack: { item: slot.item, count: slot.count },
+          purpose: "chart",
+          locatorResultHash: result.resultHash,
+          allowBlocked: false,
+          stillCurrent: () => this.terrainLocatorConsumerSnapshotCurrent(snapshot, true),
+        })
+        : this.commitRustTerrainLocatorCompatibilityEffect(effect, snapshot);
+      this.announceRustTerrainLocatorEffect(committed);
+    })().catch((error) => {
+      if (custody === "native" && this.rustTerrainLocatorEffectJournal && this.rustLiveInputPump) {
+        this.quarantineRustLivePlayerAuthorityR5(error, this.rustLiveInputPump);
+      }
+      if (!snapshot.signal.aborted && this.terrainLocatorConsumerSnapshotCurrent(snapshot, true)) {
+        this.events.onToast(error instanceof Error ? error.message : "The authoritative settlement folio could not be read.");
+      }
+    }).finally(() => {
+      if (this.pendingSettlementChart === promise) this.pendingSettlementChart = null;
+    });
+    this.pendingSettlementChart = promise;
+    this.trackRustAuthorityOperation(promise);
+    return true;
+  }
+
+  private beginRustDragonLairSurveyUse(custody: "native" | "typescript") {
+    if (this.pendingDragonLairSurvey) return true;
+    const slot = this.selectedSlot();
+    const definition = slot ? ITEMS[slot.item] : null;
+    const survey = definition?.lairSurvey;
+    if (!survey) return false;
+    const snapshot = this.terrainLocatorConsumerSnapshot(true);
+    const exclusions = this.terrainLocatorKnownIds("natural-poi");
+    const surveyIdentity = Object.freeze({ dragonType: survey.dragonType, minimumStage: survey.minimumStage });
+    const promise = (async () => {
+      const result = await this.world.queryNearestDragonLairAuthoritative({
+        origin: { x: snapshot.position.x, z: snapshot.position.z },
+        dragonType: surveyIdentity.dragonType,
+        minimumStage: surveyIdentity.minimumStage,
+        excludeIds: exclusions,
+        maxRegionRadius: 24,
+      }, snapshot.signal);
+      const entry = result.entry;
+      if (!entry || !this.terrainLocatorConsumerSnapshotCurrent(snapshot, true)) return;
+      const currentDefinition = ITEMS[this.selectedSlot()?.item ?? -1]?.lairSurvey;
+      if (!currentDefinition || currentDefinition.dragonType !== surveyIdentity.dragonType
+        || currentDefinition.minimumStage !== surveyIdentity.minimumStage
+        || this.terrainLocatorKnownIds("natural-poi").includes(entry.id)) return;
+      const discoveredAt = Date.now();
+      const selectedSlot = snapshot.slot;
+      if (!selectedSlot || selectedSlot.durability !== undefined || selectedSlot.metadata !== undefined) {
+        throw new Error("The selected lair charter is not a plain authoritative stack");
+      }
+      const effect = createRustTerrainDragonLairEffectV1(result, discoveredAt);
+      const committed = custody === "native"
+        ? await this.runRustTerrainLocatorNewDebit({
+          effect,
+          actorId: snapshot.actorId,
+          position: snapshot.position,
+          selectedSlot: snapshot.selected,
+          compatibilityStack: { item: selectedSlot.item, count: selectedSlot.count },
+          purpose: "lair",
+          locatorResultHash: result.resultHash,
+          allowBlocked: false,
+          stillCurrent: () => this.terrainLocatorConsumerSnapshotCurrent(snapshot, true),
+        })
+        : this.commitRustTerrainLocatorCompatibilityEffect(effect, snapshot);
+      this.announceRustTerrainLocatorEffect(committed);
+    })().catch((error) => {
+      if (custody === "native" && this.rustTerrainLocatorEffectJournal && this.rustLiveInputPump) {
+        this.quarantineRustLivePlayerAuthorityR5(error, this.rustLiveInputPump);
+      }
+      if (!snapshot.signal.aborted && this.terrainLocatorConsumerSnapshotCurrent(snapshot, true)) {
+        this.events.onToast(error instanceof Error ? error.message : "The authoritative lair charter could not be read.");
+      }
+    }).finally(() => {
+      if (this.pendingDragonLairSurvey === promise) this.pendingDragonLairSurvey = null;
+    });
+    this.pendingDragonLairSurvey = promise;
+    this.trackRustAuthorityOperation(promise);
+    return true;
+  }
+
+  private interceptRustTerrainLocatorSelectedUse() {
+    if (this.terrainGenerationMode() !== "rust") return false;
+    const definition = ITEMS[this.selectedSlot()?.item ?? -1];
+    if (definition?.useKind !== "settlement-chart" && definition?.useKind !== "lair-survey") return false;
+    if (this.rustLivePlayerAuthorityRequestedR5 && !this.rustLivePlayerAuthorityEnabledR5()) {
+      this.events.onToast("Authoritative Rust player custody is unavailable, so the locator item was not used.");
+      return true;
+    }
+    const custody = this.rustLivePlayerAuthorityRequestedR5 ? "native" : "typescript";
+    return definition.useKind === "settlement-chart"
+      ? this.beginRustSettlementChartUse(custody)
+      : this.beginRustDragonLairSurveyUse(custody);
+  }
+
   useSelected() {
+    if (this.interceptRustTerrainLocatorSelectedUse()) return true;
     if (this.rustLivePlayerAuthorityEnabledR5()) {
       this.rustSecondaryUseHeld = true;
       return true;
@@ -21454,6 +28844,10 @@ export class VoxelEngine {
     if (this.rustLivePlayerAuthorityEnabledR5()) return;
     if (!this.target || this.target.type === BlockId.Bedrock || Boolean(BLOCKS[this.target.type]?.liquid)) return;
     const { x, y, z, type } = this.target;
+    if (type === BlockId.Chest && !this.ensureTerrainResidency(x, z, 2)) {
+      this.events.onToast("The terrain around that chest is still loading.");
+      return;
+    }
     const veinHeart = type === BlockId.LivingVein ? this.nearbyVeinmetalHeart(x, y, z) : null;
     const ownsBreakLoot = this.multiplayer?.role !== "guest";
     const exhibitTopology = type === BlockId.ButterflyExhibit ? this.exhibitTopologyAt(x, y, z) : null;
@@ -21801,16 +29195,17 @@ export class VoxelEngine {
     this.targetEggDrop = entityVisible && !this.targetBoat && eggHit && eggHit.distance <= (mobHit?.distance ?? Infinity) ? eggHit.drop : null;
     this.targetRemotePlayerId = entityVisible && !this.targetBoat && !this.targetEggDrop && playerHit && playerHit.distance <= (mobHit?.distance ?? Infinity) ? playerHit.playerId : null;
     this.targetMob = entityVisible && !this.targetBoat && !this.targetEggDrop && !this.targetRemotePlayerId && mobHit ? mobHit.mob : null;
-    if (this.targetMob && !this.bestiary[this.targetMob.kind].seen) {
+    const progressionDiscoveryAllowed = !this.multiplayerProgressionGameplayFrozen();
+    if (progressionDiscoveryAllowed && this.targetMob && !this.bestiary[this.targetMob.kind].seen) {
       observeBestiaryEntry(this.bestiary[this.targetMob.kind], Date.now());
       this.dispatchGuildEvent("observeCreature", 1, `observe:${this.targetMob.specimenId ?? this.targetMob.id}`, { creatureKind: this.targetMob.kind });
       this.saveSoon();
     }
-    if (this.targetMob) {
+    if (progressionDiscoveryAllowed && this.targetMob) {
       if (this.observeCreatureRarity(this.targetMob)) triggerCreatureInspectionShimmer(this.targetMob.visual, this.targetMob.age);
     }
     this.target = this.targetMob || this.targetRemotePlayerId || this.targetBoat || this.targetEggDrop ? null : blockHit;
-    if (this.target) {
+    if (progressionDiscoveryAllowed && this.target) {
       const discoveredPlants = discoverPlantBlock(this.plantBestiary, this.target.type);
       if (discoveredPlants !== this.plantBestiary) {
         this.plantBestiary = discoveredPlants;
@@ -21994,22 +29389,28 @@ export class VoxelEngine {
     const onRopeLadder = feetBlock === BlockId.RopeLadder || headBlock === BlockId.RopeLadder;
     const headLiquid = liquidKindForBlock(headBlock);
     this.headSubmerged = headLiquid !== undefined && headLiquid !== "lava";
+    let liquidSurfaceY: number | undefined;
     let liquidSurfaceClearance: number | undefined;
     if (liquidKind !== undefined && this.keys.has("Space")) {
-      let topLiquidY = feetCellY;
-      // The breathing controller only needs the nearby surface. A bounded
-      // four-cell probe keeps deep-water movement allocation-free and cheap.
-      for (let step = 0; step < 4; step += 1) {
-        const aboveKind = liquidKindForBlock(this.world.getBlock(liquidSampleX, topLiquidY + 1, liquidSampleZ));
-        if (aboveKind !== liquidKind) break;
-        topLiquidY += 1;
+      // A bounded scan is useful only if it actually reaches loaded open
+      // clearance. A capped liquid stack, ceiling, or chunk boundary is an
+      // unknown surface and cannot authorize a shore mantle.
+      liquidSurfaceY = loadedLiquidSurfaceY(
+        feetCellY,
+        SHORE_SURFACE_SCAN_CELLS,
+        (y) => this.world.getBlock(liquidSampleX, y, liquidSampleZ),
+      );
+      if (liquidSurfaceY !== undefined) {
+        liquidSurfaceClearance = this.position.y + this.cameraEyeHeight - liquidSurfaceY;
       }
-      liquidSurfaceClearance = this.position.y + this.cameraEyeHeight - (topLiquidY + 0.5);
     }
     const enteredSwimmableLiquid = inSwimmableLiquid && !this.wasInWater;
     if (enteredSwimmableLiquid) this.audio.play("splash");
     this.wasInWater = inSwimmableLiquid;
-    if (!this.keys.has("Space")) this.waterSurfaceBreachReady = true;
+    if (!this.keys.has("Space")) {
+      this.waterSurfaceBreachReady = true;
+      this.waterShoreExitReady = true;
+    }
     if (!inSwimmableLiquid) {
       this.waterEntryMomentumSpeed = 0;
       this.waterSurfaceBreachSeconds = 0;
@@ -22070,12 +29471,39 @@ export class VoxelEngine {
       this.fallVelocity = 0;
       this.fallDistance = 0;
       this.fallCuePlayed = false;
-      const bankX = Math.round(this.position.x - Math.sin(this.yaw) * 0.62);
-      const bankZ = Math.round(this.position.z - Math.cos(this.yaw) * 0.62);
-      const bankY = Math.floor(this.position.y + 0.6);
-      const bankType = this.world.getBlock(bankX, bankY, bankZ);
-      const bankHead = this.world.getBlock(bankX, bankY + 1, bankZ);
-      const horizontalCollision = Boolean(BLOCKS[bankType ?? BlockId.Air]?.solid) && !BLOCKS[bankHead ?? BlockId.Bedrock]?.solid;
+      const shoreProbeDistance = PLAYER_RADIUS + SHORE_PROBE_CLEARANCE;
+      const shoreDirectionX = -Math.sin(this.yaw);
+      const shoreDirectionZ = -Math.cos(this.yaw);
+      const shoreForwardX = this.position.x + shoreDirectionX * shoreProbeDistance;
+      const shoreForwardZ = this.position.z + shoreDirectionZ * shoreProbeDistance;
+      const shoreBodyHeight = this.currentPlayerHeight();
+      const projectedShoreBody = projectBodyOntoForwardMotion(
+        this.position.x,
+        this.position.z,
+        this.velocity.x,
+        this.velocity.z,
+        this.yaw,
+        dt,
+      );
+      const projectedShoreCollision = loadedBodyCollisionAt({
+        x: projectedShoreBody.x,
+        y: this.position.y,
+        z: projectedShoreBody.z,
+        radius: PLAYER_RADIUS,
+        height: shoreBodyHeight,
+        getBlock: (x, y, z) => this.world.getBlock(x, y, z),
+      });
+      const shoreLedgeHeight = projectedShoreCollision === "solid"
+        ? loadedLowBankShoreLedgeHeight({
+          surfaceY: liquidSurfaceY,
+          forwardX: shoreForwardX,
+          forwardZ: shoreForwardZ,
+          radius: PLAYER_RADIUS,
+          height: shoreBodyHeight,
+          getBlock: (x, y, z) => this.world.getBlock(x, y, z),
+        })
+        : undefined;
+      const horizontalCollision = projectedShoreCollision === "solid" && shoreLedgeHeight !== undefined;
       const tidebreathActive = inWater && (this.potionBuffs.tidebreath ?? 0) > this.worldSimulationSeconds();
       const hasBreatherCharm = this.countItem(Item.BreatherCharm) > 0;
       const activeMount = this.mountedCreatureId === null ? null : this.mobs.find((mob) => mob.id === this.mountedCreatureId) ?? null;
@@ -22088,6 +29516,7 @@ export class VoxelEngine {
           drowningAccumulator: this.drowningAccumulator,
           entryMomentumSpeed: this.waterEntryMomentumSpeed,
           surfaceBreachReady: this.waterSurfaceBreachReady,
+          shoreExitReady: this.waterShoreExitReady,
           surfaceBreachSeconds: this.waterSurfaceBreachSeconds,
           surfaceStrokeCooldownSeconds: this.waterSurfaceStrokeCooldownSeconds,
           surfaceBobActive: this.waterSurfaceBobActive,
@@ -22102,8 +29531,10 @@ export class VoxelEngine {
           submersion: this.headSubmerged ? 1 : 0.68,
           headSubmerged: this.headSubmerged,
           horizontalCollision,
-          shoreLedgeHeight: horizontalCollision ? 1 : undefined,
-          surfaceGap: this.headSubmerged ? 0.25 : 0.72,
+          shoreLedgeHeight,
+          surfaceGap: liquidSurfaceY === undefined
+            ? undefined
+            : Math.max(0, liquidSurfaceY - (this.position.y + this.cameraEyeHeight)),
           surfaceClearance: liquidSurfaceClearance,
           enteredFromAir: enteredSwimmableLiquid,
         },
@@ -22117,6 +29548,7 @@ export class VoxelEngine {
       this.velocity.y = swim.state.velocityY;
       this.waterEntryMomentumSpeed = swim.state.entryMomentumSpeed ?? 0;
       this.waterSurfaceBreachReady = swim.state.surfaceBreachReady ?? true;
+      this.waterShoreExitReady = swim.state.shoreExitReady ?? true;
       this.waterSurfaceBreachSeconds = swim.state.surfaceBreachSeconds ?? 0;
       this.waterSurfaceStrokeCooldownSeconds = swim.state.surfaceStrokeCooldownSeconds ?? 0;
       this.waterSurfaceBobActive = swim.state.surfaceBobActive ?? false;
@@ -22496,7 +29928,10 @@ export class VoxelEngine {
   }
 
   damagePlayer(amount: number, source: string, bypassArmor = false, feedback: "direct" | "ambient" = "direct") {
-    if (this.rustLivePlayerAuthorityEnabledR5()) return;
+    if (this.rustLivePlayerAuthorityEnabledR5()) {
+      this.rustLiveSuppressedLegacyDamageCallsR5 += 1;
+      return;
+    }
     if (this.mode !== "survival" || this.playerInvulnerability > 0 || this.spawnProtection > 0) return;
     this.mobs ??= [];
     const sourceName = source.toLocaleLowerCase();
@@ -22564,6 +29999,9 @@ export class VoxelEngine {
       friendlyFire: "off", pvpEnabled: false,
     });
     const finalAmount = event.resolvedAmount;
+    if (this.rustLivePlayerAuthorityGeneration !== null) {
+      this.rustLiveTypeScriptDamageAuthoringCallsR5 += 1;
+    }
     this.health = applyAscendantHealthFloor(this.skillState ?? createSkillState(), this.health - finalAmount, 10);
     this.damageRevision += 1;
     this.gainSkillExperience("survival", Math.min(8, 1 + finalAmount * 1.5));
@@ -22761,6 +30199,10 @@ export class VoxelEngine {
       return false;
     }
     if (mob.hiredByPlayerId === this.localPlayerId()) return true;
+    if (!this.ensureTerrainResidency(mob.group.position.x, mob.group.position.z, 4)) {
+      this.events.onToast("The required Rust terrain around this recruit is still arriving; no guild custody changed.");
+      return false;
+    }
     mob.hiredByPlayerId = this.localPlayerId();
     mob.followCommand = "follow";
     mob.followDistance = "dynamic";
@@ -22811,6 +30253,10 @@ export class VoxelEngine {
     const guildId = guildIdRaw as GuildId;
     const state = guildHallStateForBook(this.guildBook, guildId);
     if (state === markerState) return;
+    // Retained landmark metadata outlives voxel residency.  Defer the entire
+    // upgrade, including its version tag, until every edited column is backed
+    // by installed Rust bytes.
+    if (!this.ensureTerrainResidency(marker.position.x, marker.position.z, 3)) return;
     const palette = guildHallBlockPalette(guildId, state);
     const { x, y, z } = marker.position;
     const placeIfOpen = (px: number, py: number, pz: number, block: BlockId) => {
@@ -22880,6 +30326,10 @@ export class VoxelEngine {
         const distance = 14 + (quest.number % 3) * 4;
         const x = Math.round(hall.position.x + Math.cos(angle) * distance);
         const z = Math.round(hall.position.z + Math.sin(angle) * distance);
+        // Hall markers may remain globally indexed after their voxel chunks
+        // leave memory.  Do not author a quest marker until the exact Rust
+        // terrain under both the site and encounter offset is resident.
+        if (!this.ensureTerrainResidency(x + 2, z, 2)) continue;
         const y = this.world.surfaceAt(x, z) + 1;
         this.world.structureMarkers.set(markerKey, {
           type: "landmark",
@@ -23107,11 +30557,14 @@ export class VoxelEngine {
 
   private clearTemporaryMagicState() {
     this.clearTemporaryMagicVisuals();
-    for (const block of this.temporarySpellBlocks.values()) {
-      if (this.world.getBlock(block.x, block.y, block.z) === BlockId.LivingRoot) this.world.setBlock(block.x, block.y, block.z, block.original, false, true);
+    for (const [key, block] of this.temporarySpellBlocks) {
+      if (!this.ensureTerrainResidency(block.x, block.z)) continue;
+      const current = this.world.getBlock(block.x, block.y, block.z);
+      if (current === undefined) continue;
+      if (current === BlockId.LivingRoot && !this.world.setBlock(block.x, block.y, block.z, block.original, false, true)) continue;
+      this.temporarySpellBlocks.delete(key);
     }
     this.activeSpellFields = [];
-    this.temporarySpellBlocks.clear();
     this.stormstepDashSeconds = 0;
     this.stormstepAirUsed = false;
   }
@@ -23187,6 +30640,10 @@ export class VoxelEngine {
       this.events.onToast("The thread refuses distant custody, cages, and legendary arenas.");
       return false;
     }
+    if (!this.ensureTerrainResidency(companion.group.position.x, companion.group.position.z, 3)) {
+      this.events.onToast("The required Rust terrain around this companion is still arriving; the rescue thread waits.");
+      return false;
+    }
     const inCombat = ["chase", "windup"].includes(companion.state) || companion.awarenessTimer > 1
       || this.mobs.some((mob) => mob.hostile && mob.health > 0 && mob.group.position.distanceToSquared(companion.group.position) <= 10 * 10);
     if (inCombat) { this.events.onToast("The thread cannot recall a companion while combat still has hold of it."); return false; }
@@ -23260,7 +30717,10 @@ export class VoxelEngine {
     const startX = Math.round(this.position.x);
     const startY = Math.round(this.position.y - 0.51);
     const startZ = Math.round(this.position.z);
-    const startBlock = this.world.getBlock(startX, startY, startZ) ?? BlockId.Air;
+    const residencyRadius = Math.ceil(Math.max(Math.abs(target.x - startX), Math.abs(target.z - startZ)) / 2) + 2;
+    if (!this.ensureTerrainResidency((startX + target.x) / 2, (startZ + target.z) / 2, residencyRadius)) return 0;
+    const startBlock = this.world.getBlock(startX, startY, startZ);
+    if (startBlock === undefined) return 0;
     if (!BLOCKS[startBlock]?.solid || blockContainsWater(startBlock)) return 0;
     const dx = target.x - startX;
     const dy = target.y - startY;
@@ -23275,7 +30735,8 @@ export class VoxelEngine {
     const addCandidate = (x: number, y: number, z: number) => {
       const key = `${x},${y},${z}`;
       if (this.temporarySpellBlocks.has(key) || candidates.has(key)) return false;
-      const current = this.world.getBlock(x, y, z) ?? BlockId.Air;
+      const current = this.world.getBlock(x, y, z);
+      if (current === undefined) return false;
       if (current !== BlockId.Air) return false;
       candidates.set(key, { x, y, z, original: current });
       return true;
@@ -23294,7 +30755,8 @@ export class VoxelEngine {
       if (!addCandidate(x, y, z)) return 0;
       let dangerousDrop = true;
       for (let drop = 1; drop <= 3; drop += 1) {
-        const below = this.world.getBlock(x, y - drop, z) ?? BlockId.Air;
+        const below = this.world.getBlock(x, y - drop, z);
+        if (below === undefined) return 0;
         if (BLOCKS[below]?.solid || blockContainsWater(below)) { dangerousDrop = false; break; }
       }
       if (!dangerousDrop) continue;
@@ -23439,7 +30901,10 @@ export class VoxelEngine {
     }
     for (const [key, block] of [...this.temporarySpellBlocks]) {
       if (block.expiresAt > now) continue;
-      if (this.world.getBlock(block.x, block.y, block.z) === BlockId.LivingRoot) this.world.setBlock(block.x, block.y, block.z, block.original, false, true);
+      if (!this.ensureTerrainResidency(block.x, block.z)) continue;
+      const current = this.world.getBlock(block.x, block.y, block.z);
+      if (current === undefined) continue;
+      if (current === BlockId.LivingRoot && !this.world.setBlock(block.x, block.y, block.z, block.original, false, true)) continue;
       this.temporarySpellBlocks.delete(key);
     }
     const remaining: typeof this.activeSpellFields = [];
@@ -25131,6 +32596,10 @@ export class VoxelEngine {
   setNearestFactionTownWaypoint() {
     const factionId = this.activeSentient?.factionId;
     if (!factionId || factionId === "player") return null;
+    if (this.terrainGenerationMode() === "rust") {
+      this.events.onToast("This guide cannot author a route through unloaded required-Rust terrain. Only certified installed settlement markers are available.");
+      return null;
+    }
     const indexed = this.world.queryNearestSettlement({
       origin: { x: this.position.x, z: this.position.z },
       factionIds: [factionId],
@@ -25162,6 +32631,66 @@ export class VoxelEngine {
     this.saveSoon();
     this.emitHud(true);
     return id;
+  }
+
+  setNearestFactionTownWaypointAuthoritative(): Promise<string | null> {
+    if (this.terrainGenerationMode() !== "rust") return Promise.resolve(this.setNearestFactionTownWaypoint());
+    if (this.pendingFactionGuide) return this.pendingFactionGuide;
+    const sentient = this.activeSentient;
+    const factionId = sentient?.factionId;
+    if (!sentient || !factionId || factionId === "player") return Promise.resolve(null);
+    const snapshot = this.terrainLocatorConsumerSnapshot(false);
+    const sentientIdentity = Object.freeze({ id: sentient.id, factionId, name: sentient.name });
+    const exclusions = this.terrainLocatorKnownIds("settlement");
+    const promise = (async () => {
+      const result = await this.world.queryNearestSettlementsAuthoritative({
+        origin: { x: snapshot.position.x, z: snapshot.position.z },
+        factionIds: [factionId],
+        sizes: ["town", "village"],
+        maxRegionRadius: 48,
+        limit: 1,
+        breathesWater: characterRaceTraits(this.activeCharacterProfile?.appearance.race ?? "wayfarer").waterBreathing,
+      }, snapshot.signal);
+      const destination = result.entries[0] ?? null;
+      const active = this.activeSentient;
+      if (!destination || !this.terrainLocatorConsumerSnapshotCurrent(snapshot, false)
+        || !active || active.id !== sentientIdentity.id || active.factionId !== sentientIdentity.factionId
+        || JSON.stringify(exclusions) !== JSON.stringify(this.terrainLocatorKnownIds("settlement"))) return null;
+      const id = `settlement:${destination.id}`;
+      const nextMap = discoverSettlement(this.mapKnowledge, {
+        id,
+        name: `${FACTIONS[factionId].name} ${destination.size}`,
+        position: { x: destination.x, y: destination.floorY ?? snapshot.position.y, z: destination.z },
+        playerId: snapshot.actorId,
+        discoveredAt: Date.now(),
+        icon: "settlement",
+        settlementKnowledge: "charted",
+        factionId,
+        settlementSize: destination.size,
+      });
+      if (!this.terrainLocatorConsumerSnapshotCurrent(snapshot, false)
+        || this.activeSentient?.id !== sentientIdentity.id || this.activeSentient?.factionId !== factionId) return null;
+      this.mapKnowledge = nextMap;
+      const dx = destination.x - snapshot.position.x;
+      const dz = destination.z - snapshot.position.z;
+      const cardinal = Math.abs(dx) > Math.abs(dz) ? (dx >= 0 ? "east" : "west") : (dz >= 0 ? "south" : "north");
+      const rawDistance = Math.sqrt(Number(destination.distanceSquaredMillis)) / 1_000;
+      const distance = Math.max(100, Math.round(rawDistance / 100) * 100);
+      this.events.onToast(`${sentientIdentity.name || "The guide"} charts the nearest ${FACTIONS[factionId].name} ${destination.size}, about ${distance} blocks ${cardinal}.`);
+      this.saveSoon();
+      this.emitHud(true);
+      return id;
+    })().catch((error) => {
+      if (!snapshot.signal.aborted && this.terrainLocatorConsumerSnapshotCurrent(snapshot, false)
+        && this.activeSentient?.id === sentientIdentity.id) {
+        this.events.onToast(error instanceof Error ? error.message : "The authoritative faction guide could not be read.");
+      }
+      return null;
+    }).finally(() => {
+      if (this.pendingFactionGuide === promise) this.pendingFactionGuide = null;
+    });
+    this.pendingFactionGuide = promise;
+    return promise;
   }
 
   shareCartographyMaps() {
@@ -25495,8 +33024,10 @@ export class VoxelEngine {
 
   private updateFastTravelChannel() {
     const channel = this.fastTravelChannel;
-    if (!channel || channel.status !== "channeling") return;
-    const next = advanceFastTravelChannel(channel, this.position, this.worldSimulationSeconds(), this.damageRevision);
+    if (!channel || channel.status === "cancelled") return;
+    const next = channel.status === "completed"
+      ? channel
+      : advanceFastTravelChannel(channel, this.position, this.worldSimulationSeconds(), this.damageRevision);
     if (next === channel) return;
     if (next.status === "cancelled") {
       this.fastTravelChannel = null;
@@ -25506,6 +33037,13 @@ export class VoxelEngine {
     }
     if (next.status !== "completed") {
       this.fastTravelChannel = next;
+      return;
+    }
+    const destinationChunkX = Math.floor(next.destination.x / CHUNK_SIZE);
+    const destinationChunkZ = Math.floor(next.destination.z / CHUNK_SIZE);
+    if (!this.world.requestChunkForResidency(destinationChunkX, destinationChunkZ, 15_000)) {
+      this.fastTravelChannel = next;
+      if (channel.status !== "completed") this.events.onToast("The required Rust terrain at the destination is still arriving; no journey has been spent.");
       return;
     }
     const committed = commitFastTravel(this.mapKnowledge, next);
@@ -25602,13 +33140,16 @@ export class VoxelEngine {
       .sort((left, right) => left[1].position.x - right[1].position.x || left[0].localeCompare(right[0]));
     for (const [anchorId, marker] of candidates) {
       if (this.roadEvents.has(anchorId)) continue;
+      const x = Math.round(marker.position.x + 3);
+      const z = Math.round(marker.position.z + 3);
+      // Road markers are globally retained.  Never consume the one-shot event
+      // or run walkability against a pending neighbor chunk.
+      if (!this.ensureTerrainResidency(x, z, 3)) continue;
       const nearbyThreats = this.mobs.filter((mob) => mob.hostile && mob.health > 0
         && mob.group.position.distanceToSquared(new THREE.Vector3(marker.position.x, marker.position.y, marker.position.z)) <= 34 * 34).length;
       const event = planRoadEvent(this.world.seedText, anchorId, this.day, 2 + nearbyThreats * 2);
       this.roadEvents.set(anchorId, event);
       if (event.kind === "quiet") return false;
-      const x = Math.round(marker.position.x + 3);
-      const z = Math.round(marker.position.z + 3);
       const spawn = (kind: MobKind, name: string, hostile = false, factionId: FactionId | null = null, profession: string | null = null) => {
         const y = this.world.findWalkableY(x, z, marker.position.y) + MOB_DEFS[kind].footOffset;
         const mob = this.spawnMob(kind, new THREE.Vector3(x, y, z), {
@@ -25689,9 +33230,17 @@ export class VoxelEngine {
       });
       if (population.applied) {
         const priorIds = new Set(settlement.residents.map((resident) => resident.id));
-        settlement = population.state;
-        for (const resident of settlement.residents) {
-          if (priorIds.has(resident.id)) continue;
+        const arrivingResidents = population.state.residents.filter((resident) => !priorIds.has(resident.id));
+        // A retained settlement plan is not voxel residency.  Keep the
+        // population transition pending so the resident can be materialized
+        // atomically once its authoritative terrain arrives.
+        const terrainReady = arrivingResidents.every((resident) => this.ensureTerrainResidency(
+          Math.round(resident.position.x),
+          Math.round(resident.position.z),
+          2,
+        ));
+        if (terrainReady) settlement = population.state;
+        for (const resident of terrainReady ? arrivingResidents : []) {
           const kind: MobKind = resident.profession in MOB_DEFS
             ? resident.profession as MobKind
             : settlement.ownerFactionId === "goblins" ? "goblin-worker"
@@ -26229,6 +33778,11 @@ export class VoxelEngine {
     const desiredZ = -Math.cos(this.yaw) * (forward / length) - Math.sin(this.yaw) * (right / length);
     const moving = forward !== 0 || right !== 0;
     if (moving) mob.desiredAngle = Math.atan2(desiredZ, desiredX);
+    const mountProbeRadius = Math.ceil(Math.max(2, profile.landSpeed * dt + mob.definition.radius + 2));
+    if (!this.ensureTerrainResidency(mob.group.position.x, mob.group.position.z, mountProbeRadius)) {
+      this.velocity.set(0, 0, 0);
+      return;
+    }
     const mountedInWater = blockContainsWater(this.world.getBlock(Math.floor(mob.group.position.x + 0.5), Math.floor(mob.group.position.y + 0.5), Math.floor(mob.group.position.z + 0.5)));
     const mountedSprint = this.keys.has("ControlLeft") || this.keys.has("ControlRight") || this.sprintLatched;
     const ascentHeld = this.keys.has("Space");
@@ -26341,6 +33895,11 @@ export class VoxelEngine {
     const desiredZ = -Math.cos(this.yaw) * (forward / length) - Math.sin(this.yaw) * (right / length);
     const moving = forward !== 0 || right !== 0;
     if (moving) mob.desiredAngle = Math.atan2(desiredZ, desiredX);
+    const dragonProbeRadius = Math.ceil(Math.max(3, (6.2 + state.stage * 1.22) * dt * 1.32 + mob.definition.radius + 2));
+    if (!this.ensureTerrainResidency(mob.group.position.x, mob.group.position.z, dragonProbeRadius)) {
+      this.velocity.set(0, 0, 0);
+      return;
+    }
     const sprint = this.keys.has("ControlLeft") || this.keys.has("ControlRight") || this.sprintLatched;
     const currentCell = this.world.getBlock(Math.floor(mob.group.position.x + 0.5), Math.floor(mob.group.position.y + 0.5), Math.floor(mob.group.position.z + 0.5));
     const seaInWater = state.type === "sea" && blockContainsWater(currentCell);
@@ -26411,6 +33970,10 @@ export class VoxelEngine {
     const rustLivePlayerAuthority = this.rustLivePlayerAuthorityEnabledR5();
     const playerId = this.localPlayerId();
     for (const boat of this.boats.values()) {
+      // Bow/stern water probes extend beyond the hull center.  Keep the
+      // complete movement halo resident before changing kinematics, input
+      // queues, presentation, or a seated player's mirror.
+      if (!this.ensureTerrainResidency(boat.save.x, boat.save.z, 3)) continue;
       const localSeat = boat.save.passengers.indexOf(playerId);
       const driverId = boat.save.passengers[0];
       const localDriver = !rustLivePlayerAuthority && localSeat === 0 && this.multiplayer?.role !== "guest";
@@ -27602,6 +35165,7 @@ export class VoxelEngine {
   private updateSentientPassage(mob: MobEntity) {
     const passage = mob.openedPassage;
     if (!passage || mob.age < passage.closeAfter) return;
+    if (!this.ensureTerrainResidency(passage.x, passage.z)) return;
     const type = this.world.getBlock(passage.x, passage.y, passage.z);
     const stillOpen = passage.kind === "door"
       ? type !== undefined && this.isDoor(type) && this.doorIsOpen(type)
@@ -28146,9 +35710,42 @@ export class VoxelEngine {
     };
   }
 
+  private restoreLoadedCreatureRecords(
+    activeCreatures: readonly SavedCreature[],
+    sleepingCreatures: readonly SavedCreature[],
+    rustRequired: boolean,
+  ) {
+    const deferredCreatures: SavedCreature[] = [];
+    for (const savedCreature of activeCreatures) {
+      if (!isRestorableSavedCreature(savedCreature)) continue;
+      const { chunkX, chunkZ } = creatureRestoreTerrainCell(savedCreature);
+      const key = `${chunkX},${chunkZ}`;
+      if (rustRequired && !this.world.chunks.has(key)) {
+        deferredCreatures.push({ ...savedCreature });
+        continue;
+      }
+      const restored = this.restoreCreature(savedCreature);
+      // A Piehouse or other authored restore can require a wider terrain halo
+      // than its canonical sample cell. Preserve that record for the bounded
+      // wake scheduler instead of losing it while Rust installs the halo.
+      if (rustRequired && !restored) deferredCreatures.push({ ...savedCreature });
+    }
+    const sleepingById = new Map<number, SavedCreature>();
+    for (const saved of [...sleepingCreatures, ...deferredCreatures]) {
+      if (saved && isRestorableSavedCreature(saved) && Number.isFinite(saved.id)) sleepingById.set(saved.id, { ...saved });
+    }
+    return [...sleepingById.values()].map((saved) => ({ ...saved }));
+  }
+
   restoreCreature(saved: SavedCreature) {
-    if (!(saved.kind in MOB_DEFS) || BUTTERFLY_ORDER.includes(saved.kind as ButterflyKind)) return null;
+    if (!isRestorableSavedCreature(saved)) return null;
     const migrated = migrateLanternPiehouseCreature(saved);
+    const { cellX, cellZ, chunkX, chunkZ } = creatureRestoreTerrainCell(migrated);
+    const creatureChunk = this.world.requestChunk(
+      chunkX,
+      chunkZ,
+    );
+    if (!creatureChunk) return null;
     const piehouseOrigin = lanternPiehouseKeeperOrigin(migrated);
     const definition = MOB_DEFS[migrated.kind];
     const position = new THREE.Vector3(migrated.x, migrated.y, migrated.z);
@@ -28156,22 +35753,26 @@ export class VoxelEngine {
       // The resident may be far outside the player's current streaming ring.
       // Generate only Merry's anchor chunk so authored flooring and any saved
       // player edit are both available to the exact indoor grounding check.
-      this.world.generateChunk(Math.floor(migrated.x / CHUNK_SIZE), Math.floor(migrated.z / CHUNK_SIZE));
-      const markerY = this.world.sampleColumn(piehouseOrigin.x, piehouseOrigin.z).height + 1;
+      if (!this.ensureTerrainResidency(piehouseOrigin.x, piehouseOrigin.z, 2)
+        || !this.ensureTerrainResidency(migrated.x, migrated.z, 2)) return null;
+      const column = this.world.installedColumn(piehouseOrigin.x, piehouseOrigin.z);
+      if (!column) {
+        this.world.requestChunk(Math.floor(piehouseOrigin.x / CHUNK_SIZE), Math.floor(piehouseOrigin.z / CHUNK_SIZE));
+        return null;
+      }
+      const markerY = column.height + 1;
       position.y = structureMobSpawnY(this.world, migrated.kind, migrated.x, migrated.z, markerY, ["authored-interior-spawn"]);
     } else if (definition.movement !== "flying" && definition.movement !== "aquatic" && !isLeviathanKind(migrated.kind) && migrated.kind !== "glowmoth") {
-      const x = Math.round(migrated.x);
-      const z = Math.round(migrated.z);
       const clearance = Math.max(1, Math.ceil(definition.height));
       const localGround = chooseLocalWalkableGround(Math.floor(migrated.y), (candidateY) => {
-        const type = this.world.getBlock(x, candidateY, z);
+        const type = this.world.getBlock(cellX, candidateY, cellZ);
         if (type === undefined || !BLOCKS[type]?.solid) return false;
         for (let offset = 1; offset <= clearance; offset += 1) {
-          if (!this.world.isWalkThrough(this.world.getBlock(x, candidateY + offset, z))) return false;
+          if (!this.world.isWalkThrough(this.world.getBlock(cellX, candidateY + offset, cellZ))) return false;
         }
         return true;
       }, 1, 2);
-      const ground = localGround ?? this.world.findWalkableY(x, z, migrated.y);
+      const ground = localGround ?? this.world.findWalkableY(cellX, cellZ, migrated.y);
       position.y = ground + definition.footOffset;
     }
     const legacyNatural = migrated.naturalSpawned ?? Boolean(
@@ -28182,7 +35783,7 @@ export class VoxelEngine {
       && !migrated.dragonState?.tamed && !migrated.name,
     );
     const restoredUnderground = legacyNatural && typeof this.world?.surfaceAt === "function"
-      ? position.y < this.world.surfaceAt(Math.round(position.x), Math.round(position.z)) - 2
+      ? position.y < this.world.surfaceAt(cellX, cellZ) - 2
       : false;
     return this.spawnMob(migrated.kind, position, {
       id: migrated.id,
@@ -28280,9 +35881,12 @@ export class VoxelEngine {
       const saved = this.sleepingCreatures[index];
       const nearby = interests.some((focus) => (saved.x - focus.x) ** 2 + (saved.z - focus.z) ** 2 <= wakeRadiusSquared);
       if (!nearby) continue;
-      this.world.generateChunk(Math.floor(saved.x / CHUNK_SIZE), Math.floor(saved.z / CHUNK_SIZE));
+      const migrated = migrateLanternPiehouseCreature(saved);
+      const { chunkX, chunkZ } = creatureRestoreTerrainCell(migrated);
+      if (!this.world.requestChunk(chunkX, chunkZ)) continue;
+      if (!this.restoreCreature({ ...saved, outOfRangeSeconds: 0 })) continue;
       this.sleepingCreatures.splice(index, 1);
-      if (this.restoreCreature({ ...saved, outOfRangeSeconds: 0 })) restored += 1;
+      restored += 1;
     }
     if (restored > 0) this.saveSoon();
   }
@@ -28359,14 +35963,21 @@ export class VoxelEngine {
       // The production ChunkWorld always supports explicit activation, while
       // small deterministic world adapters used by tools and tests may expose
       // only an already-authored marker query.
-      if (typeof this.world.generateChunk === "function") {
-        this.world.generateChunk(Math.floor(focus.x / CHUNK_SIZE), Math.floor(focus.z / CHUNK_SIZE));
-      }
+      if (typeof this.world.requestChunk === "function"
+        && !this.world.requestChunkForResidency(Math.floor(focus.x / CHUNK_SIZE), Math.floor(focus.z / CHUNK_SIZE))) continue;
       for (const [key, marker] of this.world.structureMarkersNear(focus.x, focus.y, focus.z, 48)) nearbyMarkers.set(key, marker);
     }
     for (const [markerKey, raw] of nearbyMarkers) {
       if (raw.type !== "spawn" || this.activatedStructureMarkers.has(markerKey)) continue;
       const marker = raw as SpawnMarker;
+      // Marker metadata is retained independently of chunks and each authored
+      // spawn can fan out to marker.radius.  Gate the full neighborhood before
+      // legendary state, merchant state, or activation bookkeeping mutates.
+      if (!this.ensureTerrainResidency(
+        marker.position.x,
+        marker.position.z,
+        Math.max(2, Math.ceil(marker.radius) + 2),
+      )) continue;
       const tagValue = (prefix: string) => marker.tags?.find((tag) => tag.startsWith(prefix))?.slice(prefix.length) ?? null;
       const settlementId = tagValue("settlement:");
       const residentId = tagValue("resident:");
@@ -28562,6 +36173,7 @@ export class VoxelEngine {
       const distance = index === 0 ? 0 : radius * (0.35 + (index % 3) * 0.22);
       const x = center.x + Math.cos(angle) * distance;
       const z = center.z + Math.sin(angle) * distance;
+      if (!this.ensureTerrainResidency(x, z, 1)) continue;
       let y = center.y;
       if (aquatic) {
         const liquid = this.world.getBlock(Math.floor(x + 0.5), Math.floor(y + 0.5), Math.floor(z + 0.5));
@@ -28635,7 +36247,6 @@ export class VoxelEngine {
     const visited = new Set<string>();
     const phase = (this.naturalSpawnInterestCursor % 24) * 0.271;
     const radii = [12, 20, 28, 36, 48, 56] as const;
-    const aquaticSurfaceBiomes = new Set([BiomeId.DeepOcean, BiomeId.Ocean, BiomeId.River, BiomeId.LumenTrench]);
     for (let probe = 0; probe < 36 && candidates.length < 12; probe += 1) {
       const radius = radii[probe % radii.length];
       const angle = phase + probe * 2.399963229728653;
@@ -28644,14 +36255,17 @@ export class VoxelEngine {
       const key = `${x},${z}`;
       if (visited.has(key)) continue;
       visited.add(key);
-      const columnSample = this.world.sampleColumn(x, z);
+      const columnSample = this.world.installedColumn(x, z);
+      if (!columnSample) {
+        this.world.requestChunkForResidency(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+        continue;
+      }
       const probeY = underground ? Math.round(focus.y) : Math.round(columnSample.waterline);
       const loaded = this.world.getBlock(x, probeY, z) !== undefined;
-      const likelyNaturalWater = underground
-        ? this.world.undergroundBiomeAt(x, focus.y, z) === UndergroundBiomeId.GlasswaterDeeps
-        : aquaticSurfaceBiomes.has(columnSample.biome) && columnSample.height < columnSample.waterline;
-      if (!loaded && !likelyNaturalWater) continue;
-      if (!loaded) this.world.generateChunk(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+      if (!loaded) {
+        this.world.requestChunkForResidency(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+        continue;
+      }
       const minimumY = underground
         ? focus.y - 32
         : Math.min(columnSample.height + 1, focus.y - 8);
@@ -28702,12 +36316,19 @@ export class VoxelEngine {
     const interests = this.simulationInterestPoints();
     const focus = requestedFocus ?? selectSimulationInterest(interests, this.naturalSpawnInterestCursor++);
     if (!focus) return;
+    const focusChunk = this.world.requestChunkForResidency(
+      Math.floor(focus.x / CHUNK_SIZE),
+      Math.floor(focus.z / CHUNK_SIZE),
+    );
+    if (!focusChunk) { this.noteEcologyRejection("terrain-pending"); return; }
+    const focusColumn = this.world.installedColumn(Math.round(focus.x), Math.round(focus.z));
+    if (!focusColumn) { this.noteEcologyRejection("terrain-pending"); return; }
     const underground = focus.id === this.localPlayerId()
       ? this.skyVisibility < 0.18
-      : focus.y < this.world.surfaceAt(Math.round(focus.x), Math.round(focus.z)) - 2;
+      : focus.y < focusColumn.height - 2;
     if (intent === "hostile" && this.worldOptions.difficulty === "peaceful") return;
     if (this.worldOptions.mobDensity <= 0) return;
-    const focusBiome = this.world.biomeAt(Math.round(focus.x), Math.round(focus.z));
+    const focusBiome = focusColumn.biome;
     const waterBiome = [BiomeId.DeepOcean, BiomeId.Ocean, BiomeId.River, BiomeId.LumenTrench].includes(focusBiome);
     const aquaticCandidates = intent === "passive" || (!underground && waterBiome)
       ? this.naturalAquaticSpawnCandidates(focus, underground)
@@ -28750,7 +36371,10 @@ export class VoxelEngine {
       const radius = 24 + Math.random() * 32;
       let x = aquaticCandidate?.x ?? Math.round(focus.x + Math.cos(angle) * radius);
       let z = aquaticCandidate?.z ?? Math.round(focus.z + Math.sin(angle) * radius);
-      this.world.generateChunk(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+      if (!this.world.requestChunkForResidency(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE))) {
+        this.noteEcologyRejection("terrain-pending");
+        continue;
+      }
       const biome = this.world.biomeAt(x, z);
       let y = underground ? focus.y : this.world.surfaceAt(x, z);
       let kind: MobKind | null = null;
@@ -28938,7 +36562,11 @@ export class VoxelEngine {
     if (!mob.definition.sentient && mob.renderTier && mob.renderTier !== "hero") return;
     if (mob.dragonState) {
       const attack = mob.dragonAttackAnimation;
-      const surface = this.world.surfaceAt(Math.round(mob.group.position.x), Math.round(mob.group.position.z));
+      const column = this.world.installedColumn(Math.round(mob.group.position.x), Math.round(mob.group.position.z));
+      // Animation is presentation only. Unknown terrain keeps the last pose;
+      // it must not synthesize the TypeScript terrain or throw on a cold guest.
+      if (!column) return;
+      const surface = column.height;
       const airborne = mob.group.position.y > surface + mob.definition.footOffset + 0.8;
       const mode = attack?.kind ?? (mob.hurtTimer > 0 ? "hurt" : airborne ? "fly" : moved > 0.01 ? "walk" : "idle");
       const attackProgress = attack ? 1 - attack.remaining / Math.max(0.01, attack.duration) : 0;
@@ -30821,6 +38449,8 @@ export class VoxelEngine {
       const cadence = Math.max(8, creatureEcologyContract(representative.kind).workCadenceSeconds);
       const due = group.workers.filter((worker) => this.worldSimulationSeconds() - worker.state.lastCycleAt >= cadence);
       if (!due.length) continue;
+      const workOrigin = representative.creatureWork.home ?? representative.group.position;
+      if (!this.ensureTerrainResidency(workOrigin.x, workOrigin.z, 8)) continue;
       const environment = this.creatureWorkObservation(representative);
       let groupGardenPower = 0;
       let groupRetrievalPower = 0;
@@ -31023,7 +38653,6 @@ export class VoxelEngine {
         following: Boolean(followerSlot || mob.id === this.mountedCreatureId || this.leadAnchors.has(mob.id)),
       });
       mob.outOfRangeSeconds = rangeAction.outOfRangeSeconds;
-      if (mob.definition.sentient) this.updateSentientPassage(mob);
       if (rangeAction.action === "despawn") {
         this.removeMob(index);
         continue;
@@ -31039,6 +38668,14 @@ export class VoxelEngine {
         mob.sentientSimulationAccumulator = 0;
         continue;
       }
+      // Active entities may be driven by remote-player/agent interest outside
+      // the camera ring.  Lease a movement/probe halo before any AI branch is
+      // allowed to consume strict surface or biome data.
+      if (!this.ensureTerrainResidency(mob.group.position.x, mob.group.position.z, 10)) {
+        mob.group.visible = false;
+        continue;
+      }
+      if (mob.definition.sentient) this.updateSentientPassage(mob);
 
       let mobDt = dt;
       if (mob.definition.sentient) {
@@ -32096,8 +39733,45 @@ export class VoxelEngine {
     if (!ITEMS[item] || count <= 0) return;
     const resolvedDurability = durability ?? ITEMS[item]?.maxDurability;
     const stackLimit = inventorySlotStackLimit({ item, count: 1, ...(resolvedDurability !== undefined ? { durability: resolvedDurability } : {}), ...(metadata ? { metadata } : {}) });
+    const resolvedMetadata = metadata ? cloneSlot({ item, count: 1, metadata })?.metadata : undefined;
+    const nativeIdentity = options.rustEntityId;
+    if (options.exactIdempotentRecovery !== undefined && typeof options.exactIdempotentRecovery !== "boolean") {
+      throw new TypeError("Drop exact-idempotent recovery flag must be boolean");
+    }
+    if (nativeIdentity === undefined && (options.rotationY !== undefined || options.exactIdempotentRecovery !== undefined)) {
+      throw new Error("Exact native drop options require a Rust entity identity");
+    }
+    if (nativeIdentity !== undefined) {
+      if (!validRustDropEntityId(nativeIdentity)) throw new RangeError("Rust drop entity id must be a canonical positive u64 decimal string");
+      if (options.allowMerge !== false || options.exactPosition !== true
+        || !finiteVector3(position) || !options.velocity || !finiteVector3(options.velocity)
+        || !Number.isFinite(options.rotationY)
+        || !Number.isFinite(options.pickupDelay) || (options.pickupDelay ?? -1) < 0
+        || !Number.isSafeInteger(count) || count > stackLimit) {
+        throw new Error("Rust drop spawn requires one exact, finite, non-merging stack presentation");
+      }
+      const duplicate = this.drops.find((drop) => drop.rustEntityId === nativeIdentity);
+      if (duplicate) {
+        const exact = duplicate.item === item
+          && duplicate.count === count
+          && duplicate.durability === resolvedDurability
+          && JSON.stringify(duplicate.metadata ?? null) === JSON.stringify(resolvedMetadata ?? null)
+          && duplicate.mesh.position.x === position.x
+          && duplicate.mesh.position.y === position.y
+          && duplicate.mesh.position.z === position.z
+          && duplicate.mesh.rotation.y === options.rotationY
+          && duplicate.velocity.x === options.velocity.x
+          && duplicate.velocity.y === options.velocity.y
+          && duplicate.velocity.z === options.velocity.z
+          && duplicate.pickupDelay === options.pickupDelay
+          && duplicate.age === 0;
+        if (options.exactIdempotentRecovery === true && exact) return duplicate;
+        throw new Error("Rust drop entity id is already projected with different or unverified state");
+      }
+    }
     let firstDrop: DropEntity | undefined;
-    const nearby = options.allowMerge !== false && stackLimit > 1 ? this.drops.find((drop) => drop.item === item && drop.durability === resolvedDurability
+    const nearby = nativeIdentity === undefined && options.allowMerge !== false && stackLimit > 1 ? this.drops.find((drop) => drop.rustEntityId === undefined
+      && drop.item === item && drop.durability === resolvedDurability
       && JSON.stringify(drop.metadata ?? null) === JSON.stringify(metadata ?? null)
       && drop.mesh.position.distanceToSquared(position) < 2.25 && drop.count < stackLimit) : undefined;
     if (nearby) {
@@ -32108,7 +39782,7 @@ export class VoxelEngine {
     }
     while (count > 0) {
       if (this.drops.length >= 120) {
-        const removableIndex = this.drops.findIndex((drop) => !dragonEggDropIsProtected(
+        const removableIndex = this.drops.findIndex((drop) => drop.rustEntityId === undefined && !dragonEggDropIsProtected(
           drop.metadata,
           drop.age,
           this.worldOptions.dayLengthMinutes,
@@ -32133,14 +39807,17 @@ export class VoxelEngine {
       mesh.scale.multiplyScalar(0.52);
       mesh.position.copy(position);
       if (!options.exactPosition) mesh.position.add(new THREE.Vector3((Math.random() - 0.5) * 0.45, 0.25, (Math.random() - 0.5) * 0.45));
+      if (nativeIdentity !== undefined) mesh.rotation.y = options.rotationY!;
       this.dropGroup.add(mesh);
       const velocity = options.velocity
         ? new THREE.Vector3(options.velocity.x, options.velocity.y, options.velocity.z)
         : new THREE.Vector3((Math.random() - 0.5) * 1.4, 2 + Math.random(), (Math.random() - 0.5) * 1.4);
       const drop: DropEntity = {
-        id: options.id ?? this.nextDropId++, item, count: amount,
+        id: options.id ?? this.nextDropId++,
+        ...(nativeIdentity !== undefined ? { rustEntityId: nativeIdentity } : {}),
+        item, count: amount,
         ...(resolvedDurability !== undefined ? { durability: resolvedDurability } : {}),
-        ...(metadata ? { metadata: cloneSlot({ item, count: 1, metadata })?.metadata } : {}),
+        ...(resolvedMetadata ? { metadata: resolvedMetadata } : {}),
         mesh,
         velocity,
         ...(options.networkReplica ? {
@@ -32163,6 +39840,18 @@ export class VoxelEngine {
     const dropInterestPoints = this.simulationInterestPoints();
     for (let index = this.drops.length - 1; index >= 0; index -= 1) {
       const drop = this.drops[index];
+      // A native drop's root transform, velocity, age, pickup clock, custody,
+      // and lifetime all belong to the integrated Rust runtime. Authoritative
+      // extraction commits update this compatibility mirror atomically; the
+      // legacy frame loop must never integrate the same entity a second time.
+      if (drop.rustEntityId !== undefined) continue;
+      const candidateX = drop.mesh.position.x + drop.velocity.x * dt;
+      const candidateZ = drop.mesh.position.z + drop.velocity.z * dt;
+      // Physics, pickup/expiry clocks, and both egg incubators are one
+      // transaction.  A cold current/candidate halo defers the whole entity,
+      // including metadata time, until its environment is authoritative.
+      if (!this.ensureTerrainResidency(drop.mesh.position.x, drop.mesh.position.z, 2)
+        || !this.ensureTerrainResidency(candidateX, candidateZ, 2)) continue;
       drop.age += dt;
       drop.pickupDelay -= dt;
       drop.velocity.y -= 12 * dt;
@@ -32350,6 +40039,14 @@ export class VoxelEngine {
 
   dropSelectedItem() {
     if (this.rustLivePlayerAuthorityEnabledR5()) {
+      if (this.mode !== "survival" || this.rustNativeSaveSuppressedForMultiplayerRuntime
+        || this.multiplayer) return;
+      const slot = this.selectedSlot();
+      if (!slot) return;
+      if (slot.item === Item.LooseCard) {
+        this.events.onToast("Loose Card custody tokens can move through inventories and containers, but cannot become world drops. Use the card to return it to the case.");
+        return;
+      }
       this.rustDropPulse = true;
       return;
     }
@@ -32618,7 +40315,8 @@ export class VoxelEngine {
       this.skyVisibilityTarget = this.world.skyVisibilityAt(this.camera.position.x, this.camera.position.y, this.camera.position.z);
       this.subterraneanBlendTarget = this.world.subterraneanBlendAt(this.camera.position.x, this.camera.position.y, this.camera.position.z);
       const directSkyExposure = this.world.directSkyExposureAt(this.camera.position.x, this.camera.position.y, this.camera.position.z);
-      const depthBelowSurface = this.world.surfaceAt(Math.floor(this.camera.position.x), Math.floor(this.camera.position.z)) - this.camera.position.y;
+      const cameraColumn = this.world.installedColumn(Math.floor(this.camera.position.x), Math.floor(this.camera.position.z));
+      const depthBelowSurface = cameraColumn ? cameraColumn.height - this.camera.position.y : 0;
       const sunDirection = this.celestialDirection.lengthSq() > 0.01 ? this.celestialDirection : new THREE.Vector3(0.45, 0.8, -0.24).normalize();
       const moonDirection = this.moonDirection.lengthSq() > 0.01 ? this.moonDirection : sunDirection.clone().multiplyScalar(-1);
       this.cameraEnvironmentTarget = deriveCameraEnvironmentTarget({
@@ -32720,7 +40418,8 @@ export class VoxelEngine {
   }
 
   resetDynamicWeather(saved?: WeatherState) {
-    const biome = weatherBiomeFromId(this.world.biomeAt(Math.round(this.position.x), Math.round(this.position.z)));
+    const installedBiome = this.world.installedColumn(Math.round(this.position.x), Math.round(this.position.z))?.biome;
+    const biome = installedBiome === undefined ? this.weatherBiome : weatherBiomeFromId(installedBiome);
     this.weatherBiome = biome;
     this.weatherBiomeCandidate = biome;
     this.weatherBiomeHold = 0;
@@ -32744,7 +40443,9 @@ export class VoxelEngine {
       this.weather = "clear";
       return;
     }
-    const currentBiome = weatherBiomeFromId(this.world.biomeAt(Math.round(this.position.x), Math.round(this.position.z)));
+    const installedBiome = this.world.installedColumn(Math.round(this.position.x), Math.round(this.position.z))?.biome;
+    if (installedBiome === undefined) return;
+    const currentBiome = weatherBiomeFromId(installedBiome);
     if (currentBiome === this.weatherBiome) {
       this.weatherBiomeCandidate = currentBiome;
       this.weatherBiomeHold = 0;
@@ -32767,7 +40468,9 @@ export class VoxelEngine {
     const blockX = Math.round(x);
     const blockZ = Math.round(z);
     const seaSurface = blockContainsWater(this.world.getBlock(blockX, SEA_LEVEL, blockZ));
-    const ground = (seaSurface ? SEA_LEVEL : this.world.surfaceAt(blockX, blockZ)) + 0.55;
+    const column = this.world.installedColumn(blockX, blockZ);
+    if (!seaSurface && !column) return;
+    const ground = (seaSurface ? SEA_LEVEL : column!.height) + 0.55;
     const top = Math.max(ground + 30, this.camera.position.y + 22);
     const segments = 16;
     const segmentHeight = (top - ground) / segments;
@@ -32940,11 +40643,13 @@ export class VoxelEngine {
       ? rainAmbienceLevel(weatherFx.precipitation, openRainFraction)
       : 0;
     this.audio.setDepth(this.position.y, rainSampleLevel);
-    const biome = this.world.biomeAt(Math.round(this.position.x), Math.round(this.position.z));
+    const installedAudioColumn = this.world.installedColumn(Math.round(this.position.x), Math.round(this.position.z));
+    const biome = installedAudioColumn?.biome;
     // A roof suppresses sky visibility, but a normal house should retain its
     // biome/day score. Reserve cave music for players actually below terrain.
-    const caveMusic = this.cavePresentationActive
-      && this.position.y < this.world.surfaceAt(Math.round(this.position.x), Math.round(this.position.z)) - 4;
+    const caveMusic = Boolean(installedAudioColumn)
+      && this.cavePresentationActive
+      && this.position.y < installedAudioColumn!.height - 4;
     if (caveMusic && this.running && !this.paused && !this.titleMode) {
       if (!Number.isFinite(this.undergroundAmbienceTimer)) this.undergroundAmbienceTimer = 3;
       this.undergroundAmbienceTimer -= dt;
@@ -32976,9 +40681,10 @@ export class VoxelEngine {
       ocean: atSea ? underwater ? 1 : 0.78 : 0,
       swimming: underwater && horizontalSpeed > 0.35 ? clamp(horizontalSpeed / 4, 0.22, 1) : 0,
     });
-    const forestBiome = [BiomeId.Wildwood, BiomeId.Birchlight, BiomeId.Bloomwood, BiomeId.RainveilJungle, BiomeId.SakurabloomGrove].includes(biome);
+    const forestBiome = biome !== undefined
+      && [BiomeId.Wildwood, BiomeId.Birchlight, BiomeId.Bloomwood, BiomeId.RainveilJungle, BiomeId.SakurabloomGrove].includes(biome);
     const skyChallenge = biome === BiomeId.Highlands && this.position.y > 57 && daylight > 0.35;
-    const alternateScore = (this.day + biome) % 2 === 0;
+    const alternateScore = (this.day + (biome ?? 0)) % 2 === 0;
     const explorationScore = this.day % 3 === 0
       ? "hoppin"
       : alternateScore ? "wildwoodA" : "wildwoodB";
@@ -33026,12 +40732,14 @@ export class VoxelEngine {
       for (let dz = -2; dz <= 2; dz += 1) for (let dx = -2; dx <= 2; dx += 1) {
         const x = this.camera.position.x + dx * 5.5;
         const z = this.camera.position.z + dz * 5.5;
+        const column = this.world.installedColumn(Math.round(x), Math.round(z));
+        if (!column) continue;
         columns.push(planRainColumn({
           x,
           z,
           spawnY: this.camera.position.y + 22,
           floorY: MIN_Y,
-          obstructionY: this.world.surfaceAt(Math.round(x), Math.round(z)),
+          obstructionY: column.height,
           viewerY: this.camera.position.y,
         }));
       }
@@ -33111,7 +40819,13 @@ export class VoxelEngine {
     }
     for (let index = this.leafParticles.length - 1; index >= 0; index -= 1) {
       const particle = this.leafParticles[index];
-      const ground = this.world.surfaceAt(Math.round(particle.state.position.x), Math.round(particle.state.position.z)) + 0.5;
+      const column = this.world.installedColumn(Math.round(particle.state.position.x), Math.round(particle.state.position.z));
+      if (!column) {
+        this.scene.remove(particle.object);
+        this.leafParticles.splice(index, 1);
+        continue;
+      }
+      const ground = column.height + 0.5;
       const next = stepLeafParticle(particle.state, dt, ground);
       if (!next) {
         this.scene.remove(particle.object);
@@ -33641,7 +41355,7 @@ export class VoxelEngine {
       chunkWorkMilliseconds = performance.now() - chunkWorkStartedAt;
       if (this.running && !this.paused) this.updateBoats(dt);
       if (this.running && !this.paused && (this.locked || this.touchMode)) {
-        if (rustLivePlayerAuthority) {
+        if (rustLivePlayerAuthority && !this.rustLiveAutomationPulseR5) {
           this.scheduleRustLiveInputAdvanceR5();
         } else {
           this.accumulator = Math.min(this.accumulator + dt, PHYSICS_STEP * 4);
@@ -33694,6 +41408,7 @@ export class VoxelEngine {
           const beforeX = mob.group.position.x;
           const beforeZ = mob.group.position.z;
           if (mob.networkTarget) {
+            if (!this.ensureTerrainResidency(mob.networkTarget.x, mob.networkTarget.z, 4)) continue;
             mob.networkSnapshotAge = Math.min(0.3, (mob.networkSnapshotAge ?? 0) + dt);
             const predictedTarget = mob.networkVelocity
               ? mob.networkTarget.clone().addScaledVector(mob.networkVelocity, Math.min(0.22, mob.networkSnapshotAge))
@@ -33876,10 +41591,15 @@ export class VoxelEngine {
       const ratio = 48 / horizontal;
       const x = pose.x + (goal.x - pose.x) * ratio;
       const z = pose.z + (goal.z - pose.z) * ratio;
-      const surface = this.world.surfaceAt(Math.round(x), Math.round(z));
+      const column = this.world.installedColumn(Math.round(x), Math.round(z));
+      if (!column || this.world.getBlock(Math.round(x), column.height, Math.round(z)) === undefined) {
+        this.world.requestChunkForResidency(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+        return null;
+      }
+      const surface = column.height;
       return { x, y: pose.y > SEA_LEVEL - 8 ? surface + 0.51 : pose.y + (goal.y - pose.y) * ratio, z };
     })() : goal;
-    return findAgentVoxelPath(this.agentNavigationQuery(), pose, localGoal);
+    return localGoal ? findAgentVoxelPath(this.agentNavigationQuery(), pose, localGoal) : null;
   }
 
   private cancelAgentRuntime(agentId: string, code = "cancelled", message = "The active drone command was cancelled.") {
@@ -34565,7 +42285,12 @@ export class VoxelEngine {
     const x = Math.floor(selfPose.x);
     const y = Math.floor(selfPose.y);
     const z = Math.floor(selfPose.z);
-    const surfaceDepth = this.world.surfaceAt(x, z) - selfPose.y;
+    let observationColumn = this.world.installedColumn(x, z);
+    if (!observationColumn || this.world.getBlock(x, observationColumn.height, z) === undefined) {
+      this.world.requestChunkForResidency(Math.floor(x / CHUNK_SIZE), Math.floor(z / CHUNK_SIZE));
+      observationColumn = undefined;
+    }
+    const surfaceDepth = observationColumn ? observationColumn.height - selfPose.y : 0;
     const depth = selfPose.y > 28 ? "Surface" : selfPose.y > 0 ? "Stoneways" : selfPose.y > -28 ? "Deepstone Caves" : selfPose.y > -52 ? "Crystal Deeps" : "Worldheart";
     const currentBlock = this.world.getBlock(x, y, z);
     const currentLiquid = liquidKindForBlock(currentBlock);
@@ -34605,7 +42330,7 @@ export class VoxelEngine {
         velocity: { x: selfPose.vx, y: selfPose.vy, z: selfPose.vz },
         yaw: selfPose.yaw,
         pitch: selfPose.pitch,
-        biome: BIOME_NAMES[this.world.biomeAt(x, z)] ?? "Unmapped",
+        biome: observationColumn ? BIOME_NAMES[observationColumn.biome] ?? "Unmapped" : "Unmapped",
         depth: `${depth} (${Math.max(0, Math.round(surfaceDepth))} blocks below local surface)`,
         liquid: currentLiquid ?? null,
         light: this.world.gameplayLightAt(x, y + 1, z, this.daylightAmount()),
@@ -34674,6 +42399,7 @@ export class VoxelEngine {
   }
 
   renderGameToText() {
+    const nativeEnvironmental = this.rustLiveEnvironmentalSurvivalDiagnosticsSnapshotR10();
     const nearbyMobs = this.mobs
       .map((mob) => ({
         id: mob.id,
@@ -34708,27 +42434,78 @@ export class VoxelEngine {
         velocity: [Number(this.velocity.x.toFixed(2)), Number(this.velocity.y.toFixed(2)), Number(this.velocity.z.toFixed(2))],
         yaw: Number(this.yaw.toFixed(3)), pitch: Number(this.pitch.toFixed(3)),
         health: this.health, hunger: this.hunger, oxygen: Number(this.oxygenSeconds.toFixed(2)),
+        alive: nativeEnvironmental?.r7.alive ?? this.health > 0,
         variant: this.playerVariant, camera: this.cameraMode, mode: this.mode, sprinting: this.sprinting, crouching: this.crouching, flying: this.mode === "builder" && this.creativeFlying, submerged: this.headSubmerged,
+        inLiquid: nativeEnvironmental?.r6.inLiquid ?? this.headSubmerged,
+        nativeEnvironmental,
         input: { jumpHeld: this.keys.has("Space"), forwardHeld: this.keys.has("KeyW") },
         surfaceBreach: {
           ready: this.waterSurfaceBreachReady,
+          shoreExitReady: this.waterShoreExitReady,
           remainingSeconds: Number(this.waterSurfaceBreachSeconds.toFixed(3)),
           strokeCooldownSeconds: Number(this.waterSurfaceStrokeCooldownSeconds.toFixed(3)),
           bobActive: this.waterSurfaceBobActive,
         },
         mountedBoatId: this.mountedBoatId, mountedCreatureId: this.mountedCreatureId,
       },
+      inventory: {
+        selectedSlot: this.selected,
+        held: cloneSlot(this.inventory[this.selected] ?? null),
+      },
+      multiplayer: {
+        role: this.multiplayer?.role ?? null,
+        status: this.multiplayer?.state ?? this.multiplayerState.status,
+        error: this.multiplayerState.error || null,
+        progression: this.multiplayerProgressionDiagnosticsSnapshot(),
+        presentation: this.multiplayerPresentationDiagnosticsSnapshot(),
+        remotePlayers: [...this.remotePlayers.entries()]
+          .sort(([left], [right]) => left.localeCompare(right))
+          .slice(0, 16)
+          .map(([id, remote]) => ({
+            id,
+            name: remote.model.playerName,
+            position: [
+              Number(remote.target.x.toFixed(2)),
+              Number(remote.target.y.toFixed(2)),
+              Number(remote.target.z.toFixed(2)),
+            ],
+            tick: remote.target.tick,
+            ageMilliseconds: Math.max(0, Math.round(performance.now() - remote.lastUpdate)),
+            nativePoseCustody: remote.nativePoseCustody ? { ...remote.nativePoseCustody } : null,
+          })),
+      },
       world: {
         seed: this.world.seedText,
         day: this.day,
         time: Number(this.worldTime.toFixed(4)),
-        biome: BIOME_NAMES[this.world.biomeAt(Math.round(this.position.x), Math.round(this.position.z))],
+        biome: (() => {
+          const biome = this.world.installedColumn(Math.round(this.position.x), Math.round(this.position.z))?.biome;
+          return biome === undefined ? "Unmapped" : BIOME_NAMES[biome];
+        })(),
         weather: this.weatherState.kind,
         startingSettlementId: this.startingSettlementId,
       },
       target: this.target ? { type: "block", name: BLOCKS[this.target.type].name, position: [this.target.x, this.target.y, this.target.z] }
         : this.targetMob ? { type: "mob", id: this.targetMob.id, name: this.targetMob.name }
           : this.targetBoat ? { type: "boat", id: this.targetBoat.save.id } : null,
+      drops: this.drops.slice(0, 32).map((drop) => ({
+        item: drop.item,
+        count: drop.count,
+        position: [
+          Number(drop.mesh.position.x.toFixed(3)),
+          Number(drop.mesh.position.y.toFixed(3)),
+          Number(drop.mesh.position.z.toFixed(3)),
+        ],
+        velocity: [
+          Number(drop.velocity.x.toFixed(3)),
+          Number(drop.velocity.y.toFixed(3)),
+          Number(drop.velocity.z.toFixed(3)),
+        ],
+        rotationY: Number(drop.mesh.rotation.y.toFixed(6)),
+        age: Number(drop.age.toFixed(3)),
+        rustEntityId: drop.rustEntityId ?? null,
+        pickupDelay: Number(drop.pickupDelay.toFixed(3)),
+      })),
       nearbyMobs,
       boats: [...this.boats.values()].map((boat) => ({ id: boat.save.id, position: [boat.save.x, boat.save.y, boat.save.z], passengers: boat.save.passengers.length, storageSlots: boat.save.inventory.filter(Boolean).length })),
       exhibits: [...this.chests.entries()].filter(([key]) => key.startsWith("exhibit:")).map(([key, slots]) => ({ key, capacity: slots.length, residents: slots.filter(Boolean).length })),
@@ -34788,7 +42565,7 @@ export class VoxelEngine {
     }
     if (!rustLivePlayerAuthority) this.updateGameplayCamera(Math.min(duration, 0.1));
     this.updateTarget();
-    if (rustLivePlayerAuthority) this.scheduleRustLiveInputAdvanceR5();
+    if (rustLivePlayerAuthority && !this.rustLiveAutomationPulseR5) this.scheduleRustLiveInputAdvanceR5();
     this.renderer.render(this.scene, this.camera);
     this.publishRendererExtractionR11(performance.now());
     this.lastPresentedFrameTime = performance.now();
@@ -34806,7 +42583,7 @@ export class VoxelEngine {
     const minutes = totalMinutes % 60;
     const suffix = hours >= 12 ? "PM" : "AM";
     const displayHour = hours % 12 || 12;
-    const biome = this.world.biomeAt(Math.round(this.position.x), Math.round(this.position.z));
+    const biome = this.world.installedColumn(Math.round(this.position.x), Math.round(this.position.z))?.biome;
     const selectedSlot = this.selectedSlot();
     const selectedDefinition = selectedSlot ? ITEMS[selectedSlot.item] : null;
     const rangedWeapon = selectedSlot && selectedDefinition?.useKind === "ranged-weapon" && selectedDefinition.ammoItem
@@ -34886,7 +42663,7 @@ export class VoxelEngine {
       breakProgress: clamp(this.miningProgress, 0, 1),
       day: this.day,
       clock: `${displayHour}:${String(minutes).padStart(2, "0")} ${suffix}`,
-      biome: BIOME_NAMES[biome] ?? "The Unmapped Wild",
+      biome: biome === undefined ? "The Unmapped Wild" : BIOME_NAMES[biome] ?? "The Unmapped Wild",
       depth: this.depthName(),
       coordinates: [Math.round(this.position.x), Math.round(this.position.y), Math.round(this.position.z)],
       mapHeading: this.yaw,
@@ -34896,6 +42673,10 @@ export class VoxelEngine {
         position: { x: remote.target.x, y: remote.target.y, z: remote.target.z },
         headingRadians: remote.target.yaw,
         color: remote.target.variant === "female" ? "#d86e9a" : ["#5d8fc6", "#a874d0", "#5eaa81", "#d18b4c"][index % 4],
+        ...(remote.nativePoseCustody ? {
+          authorityReceiptHash: remote.nativePoseCustody.receiptHash,
+          authorityRecordHash: remote.nativePoseCustody.recordHash,
+        } : {}),
       })),
       debug: this.debug,
       lighting,
@@ -35272,6 +43053,14 @@ export class VoxelEngine {
       sugarworks: Object.fromEntries(this.sugarworks.entries()),
       mapKnowledge: this.mapKnowledge,
       questBook: this.questBook,
+      rustTerrainLocatorEffectJournal: this.rustTerrainLocatorEffectJournal,
+      rustTerrainLocatorAppliedEffectIds: [...this.rustTerrainLocatorAppliedEffectIds],
+      rustBasicDirtActionProjection: this.rustBasicDirtActionProjection,
+      rustNativeBlockEditProjection: this.rustNativeBlockEditProjection,
+      rustNativeDropPickupProjection: this.rustNativeDropPickupProjection,
+      rustNativePlayerDropProjection: this.rustNativePlayerDropProjection,
+      rustNativePlayerDeathRespawnProjection: this.rustNativePlayerDeathRespawnProjection,
+      rustNativePlayerRespawnPlan: this.rustNativePlayerRespawnPlan,
       sideQuestDefinitions: this.sideQuestDefinitions,
       blueprints: this.blueprints,
       plantBestiary: this.plantBestiary,
@@ -35302,21 +43091,18 @@ export class VoxelEngine {
       stockMarket: this.stockMarket,
       potionBuffs: { ...this.potionBuffs },
       rangedLoaded: Object.fromEntries(this.rangedLoaded.entries()),
-      drops: this.drops.map((drop) => {
-        const slot = normalizeCaptureOrbInventorySlot({
-          item: drop.item,
-          count: drop.count,
-          ...(drop.durability !== undefined ? { durability: drop.durability } : {}),
-          ...(drop.metadata ? { metadata: drop.metadata } : {}),
-        })!;
-        return {
-          item: slot.item,
-          count: slot.count,
-          ...(slot.durability !== undefined ? { durability: slot.durability } : {}),
-          ...(slot.metadata ? { metadata: slot.metadata } : {}),
-          x: drop.mesh.position.x, y: drop.mesh.position.y, z: drop.mesh.position.z, age: drop.age,
-        };
-      }),
+      drops: this.drops.map((drop) => serializeWorldDropSave({
+        item: drop.item,
+        count: drop.count,
+        ...(drop.durability !== undefined ? { durability: drop.durability } : {}),
+        ...(drop.metadata ? { metadata: drop.metadata } : {}),
+        position: drop.mesh.position,
+        rotationY: drop.mesh.rotation.y,
+        velocity: drop.velocity,
+        age: drop.age,
+        pickupDelay: drop.pickupDelay,
+        ...(drop.rustEntityId !== undefined ? { rustEntityId: drop.rustEntityId } : {}),
+      })),
       options: { ...this.worldOptions, enabledFactions: [...this.worldOptions.enabledFactions] },
       playerVariant: this.playerVariant,
       liquidLevels: [...this.liquidCells.entries()].map(([key, cell]) => [key, { ...cell }]),
@@ -35341,8 +43127,106 @@ export class VoxelEngine {
     };
   }
 
-  saveNow(notify = true) {
-    if (!this.persistent) return;
+  private scheduleRustNativeSaveCheckpoint(allowPristineGuestTransition = false) {
+    const pristineGuestTransition = allowPristineGuestTransition
+      && this.rustPristineGuestTransitionCheckpointAdmitted
+      && this.multiplayer?.authorityMode === "rust-authoritative"
+      && this.multiplayer.role === null
+      && this.multiplayer.getPeers().length === 0;
+    if (!pristineGuestTransition && (this.rustNativeSaveSuppressedForMultiplayerRuntime
+      || this.multiplayer?.authorityMode === "rust-authoritative")) {
+      this.rustNativeSaveQueued = false;
+      return;
+    }
+    if (this.rustTerrainLocatorEffectJournal || this.rustTerrainLocatorCommitLocked
+      || !this.activeWorldId || this.rustNativePersistenceWorldId !== this.activeWorldId
+      || !this.rustRuntimeHost || this.rustRuntimeHost.diagnostics().state !== "ready") return;
+    if (this.rustLiveSelectedSlotIntentPendingR5) {
+      // Compatibility presents a selected-slot intent immediately, while Rust
+      // remains the inventory authority until the next accepted extraction.
+      // Never checkpoint that deliberate, transient mismatch.
+      this.rustNativeSaveQueued = true;
+      return;
+    }
+    if (this.rustAuthorityPresentationInFlight > 0) {
+      this.rustNativeSaveQueued = true;
+      return;
+    }
+    if (this.rustNativeSaveOperation) {
+      this.rustNativeSaveQueued = true;
+      return;
+    }
+    const host = this.rustRuntimeHost;
+    const worldId = this.activeWorldId;
+    const pump = this.rustLivePlayerAuthorityState === "ready" ? this.rustLiveInputPump : null;
+    if (pristineGuestTransition) this.rustPristineGuestTransitionCheckpointAdmitted = false;
+    const operation = (async () => {
+      let checkpointAttestation: RustNativeWorldPersistenceSaveV1 | null = null;
+      do {
+        if (this.rustLiveSelectedSlotIntentPendingR5) {
+          this.rustNativeSaveQueued = true;
+          return checkpointAttestation;
+        }
+        if (this.rustAuthorityPresentationInFlight > 0) {
+          this.rustNativeSaveQueued = true;
+          return checkpointAttestation;
+        }
+        this.rustNativeSaveQueued = false;
+        await host.multiplayerAuthority().runExclusiveMutation(async () => {
+          if (host !== this.rustRuntimeHost || host.diagnostics().state !== "ready"
+            || worldId !== this.activeWorldId || worldId !== this.rustNativePersistenceWorldId
+            || this.rustTerrainLocatorEffectJournal) return;
+          if (this.rustLiveSelectedSlotIntentPendingR5) {
+            this.rustNativeSaveQueued = true;
+            return;
+          }
+          if (pump && pump === this.rustLiveInputPump && this.rustLivePlayerAuthorityState === "ready") {
+            const context = this.rustTerrainLocatorRuntimeContext(true);
+            if (context.host !== host || context.pump !== pump) return;
+            const checkpoint = await this.checkpointRustTerrainLocatorNative(context);
+            checkpointAttestation = checkpoint.value;
+            return;
+          }
+          const result = await this.worldStorage.saveNativeWorld(worldId);
+          if (!result.ok) throw new Error(result.error.message);
+          checkpointAttestation = result.value;
+        });
+      } while (this.rustNativeSaveQueued && !this.rustTerrainLocatorEffectJournal);
+      return checkpointAttestation;
+    })();
+    this.rustNativeSaveOperation = operation;
+    this.trackRustAuthorityOperation(operation);
+    void operation.catch((error) => {
+      if (pump && pump === this.rustLiveInputPump) this.quarantineRustLivePlayerAuthorityR5(error, pump);
+      else {
+        this.rustAuthorityLastError = error instanceof Error ? error.message : String(error);
+        this.events.onToast(`Rust save: ${this.rustAuthorityLastError}`);
+      }
+    }).finally(() => {
+      if (this.rustNativeSaveOperation === operation) this.rustNativeSaveOperation = null;
+      if (this.rustNativeSaveQueued && this.rustAuthorityPresentationInFlight === 0
+        && !this.rustLiveSelectedSlotIntentPendingR5) {
+        queueMicrotask(() => this.scheduleRustNativeSaveCheckpoint());
+      }
+    });
+  }
+
+  private requireRustNativePlayerSaveBinding(operation: string) {
+    if (!this.rustLivePlayerAuthorityRequestedR5 || !this.persistent) return false;
+    if (!this.activeWorldId || this.rustNativePersistenceWorldId !== this.activeWorldId
+      || this.rustLivePlayerAuthorityState !== "ready" || !this.rustLiveInputPump) {
+      throw new Error(`${operation} requires the authoritative Rust player, input pump, and native persistence binding to attest the active catalog world`);
+    }
+    return true;
+  }
+
+  saveNow(notify = true, allowPristineGuestTransitionCheckpoint = false): boolean {
+    if (!this.persistent) return true;
+    try { this.requireRustNativePlayerSaveBinding("World save"); }
+    catch (error) {
+      this.events.onToast(error instanceof Error ? error.message : String(error));
+      return false;
+    }
     window.clearTimeout(this.saveTimer);
     if (this.autoSaveIdleHandle) {
       const idleWindow = window as Window & { cancelIdleCallback?: (handle: number) => void };
@@ -35356,53 +43240,103 @@ export class VoxelEngine {
     try {
       const now = Date.now();
       const playTimeDeltaMs = Math.max(0, now - this.worldSessionStartedAt);
+      const nativeRuntimeCustody = Boolean(this.activeWorldId && this.rustNativePersistenceWorldId === this.activeWorldId);
+      const localOnly = Boolean(this.rustTerrainLocatorEffectJournal) || nativeRuntimeCustody;
       const result = this.activeWorldId
-        ? this.worldStorage.saveWorld(this.activeWorldId, { save, playTimeDeltaMs })
+        ? localOnly
+          ? this.worldStorage.saveWorldLocalOnly(this.activeWorldId, { save, playTimeDeltaMs })
+          : this.worldStorage.saveWorld(this.activeWorldId, { save, playTimeDeltaMs })
         : this.worldStorage.createWorld({ name: this.world.seedText || "New World", save, options: this.worldOptions });
       if (result.ok) {
         this.activeWorldId = result.value.id;
         this.worldSessionStartedAt = now;
-        window.localStorage.removeItem(SAVE_KEY);
+        try { window.localStorage.removeItem(SAVE_KEY); }
+        catch { /* The committed WorldStorage document remains authoritative. */ }
+        if (nativeRuntimeCustody && !this.rustTerrainLocatorEffectJournal) {
+          this.scheduleRustNativeSaveCheckpoint(allowPristineGuestTransitionCheckpoint);
+        }
         if (notify) this.events.onSave();
-        return;
+        return true;
       }
-      // A legacy single-save fallback keeps the current session recoverable if
-      // a browser cannot commit the catalog transaction.
+      if (this.rustTerrainLocatorEffectJournal) {
+        this.events.onToast(result.error.message);
+        return false;
+      }
+      // Keep a compatibility backup for manual recovery, but never report it as
+      // an authoritative catalog save: migrated catalogs do not re-import it.
       window.localStorage.setItem(SAVE_KEY, JSON.stringify(save));
-      if (notify) this.events.onSave();
       this.events.onToast(result.error.message);
+      return false;
     } catch {
       this.events.onToast("This world grew beyond the browser's save allowance. The current session is safe, but storage is full.");
+      return false;
     }
   }
 
   async shutdown() {
     if (this.rustRuntimeShutdown) return this.rustRuntimeShutdown;
     this.rustRuntimeShutdown = (async () => {
-      this.rustRuntimeOperationsBlocked = true;
-      this.rustRuntimeTransitionGeneration += 1;
+      this.cancelRustOriginPreflight();
+      this.cancelTerrainLocatorConsumerOperations();
+      this.terrainGenerationReadinessAbort?.abort();
+      this.terrainGenerationReadinessAbort = null;
       this.running = false;
       this.paused = true;
       this.clearInput();
       cancelAnimationFrame(this.animationFrame);
       this.unbindEvents();
       let failure: unknown = null;
-      try { await this.stopRustLivePlayerAuthorityR5(); }
+      try { await this.settleRustAuthorityForLifecycleV1("Engine shutdown"); }
       catch (error) { failure = error; }
-      try { this.saveNow(false); }
+      this.rustRuntimeOperationsBlocked = true;
+      try { await this.drainRustAuthorityOperations(); }
       catch (error) { failure = error; }
+      try {
+        if (this.rustNativeBlockEditPendingFinalize) {
+          throw new Error("Engine shutdown retained a pending native block-edit receipt for restart recovery");
+        }
+        if (this.rustNativePlayerDeathRespawnPendingFinalize) {
+          throw new Error("Engine shutdown retained a pending native death-respawn parent for restart recovery");
+        }
+        if (this.rustNativeDropPickupPendingFinalize) {
+          throw new Error("Engine shutdown retained a pending native drop-pickup receipt for restart recovery");
+        }
+        const nativeCheckpointRequired = this.requireRustNativePlayerSaveBinding("Engine shutdown");
+        if (!this.saveNow(false)) {
+          failure ??= new Error("Engine shutdown could not commit the active browser-owned world document");
+        } else {
+          const nativeCheckpoint = this.rustNativeSaveOperation;
+          if (nativeCheckpointRequired && !nativeCheckpoint) {
+            failure ??= new Error("Engine shutdown could not start the required authoritative Rust checkpoint");
+          } else if (nativeCheckpoint) {
+            const checkpointAttestation = await nativeCheckpoint;
+            if (nativeCheckpointRequired && checkpointAttestation === null) {
+              failure ??= new Error("Engine shutdown could not attest the required authoritative Rust checkpoint");
+            }
+          }
+        }
+      } catch (error) { failure ??= error; }
+      try { await this.drainRustAuthorityOperations(); }
+      catch (error) { failure ??= error; }
       try { await this.worldStorage.flushPersistence(); }
       catch (error) { failure ??= error; }
       try { await this.disconnectMultiplayer("engine-shutdown"); }
       catch (error) { failure ??= error; }
       try { await this.drainRustAuthorityOperations(); }
       catch (error) { failure ??= error; }
+      this.rustRuntimeTransitionGeneration += 1;
+      try { await this.stopRustLivePlayerAuthorityR5(); }
+      catch (error) { failure ??= error; }
       try { await this.disposeRustLiveRendererR10(); }
       catch (error) { failure ??= error; }
-      try { await this.shutdownBoundNativePersistence(); }
-      catch (error) { failure ??= error; }
-      try { await this.rustRuntimeManager.shutdown(); }
-      catch (error) { failure ??= error; }
+      if (worldgenBuildUsesRustRuntime()) {
+        try { await this.shutdownBoundNativePersistence(); }
+        catch (error) { failure ??= error; }
+        if (!this.rustGuestRuntimeManagerReleased) {
+          try { await this.rustRuntimeManager.shutdown(); }
+          catch (error) { failure ??= error; }
+        }
+      }
       this.rustRuntimeHost = null;
       this.rustRuntimeHydrationState = "none";
       this.disposeBrowserResources();
@@ -35421,6 +43355,7 @@ export class VoxelEngine {
   private disposeBrowserResources() {
     if (this.disposed) return;
     this.disposed = true;
+    this.clearRustNativeDropPickupFinalizeRetryTimerV1();
     this.unlockFullscreenEscape();
     this.worldStorage.dispose();
     this.creatureArticulatedBatcher.dispose();

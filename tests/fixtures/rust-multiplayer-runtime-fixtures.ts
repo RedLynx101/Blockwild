@@ -57,6 +57,8 @@ export class FixtureRustAuthority implements RustMultiplayerAuthorityV1 {
   negotiateError: Error | null = null;
   negotiateGate: Promise<void> | null = null;
   readonly events: string[] = [];
+  readonly nextSequences = new Map<string, number>();
+  readonly connections = new Map<string, string>();
 
   constructor(universeId = RUNTIME_DESCRIPTOR.universeId, locationId = RUNTIME_DESCRIPTOR.locationId) {
     this.identity = createNetworkAuthorityIdentityV1(
@@ -73,7 +75,13 @@ export class FixtureRustAuthority implements RustMultiplayerAuthorityV1 {
     if (this.negotiateError) throw this.negotiateError;
     return { capabilities: ["interact"] as const, maxCommandBytes: 1_024 };
   }
-  async installPeer() { this.events.push("install-peer"); }
+  async installPeer(peer: Parameters<RustMultiplayerAuthorityV1["installPeer"]>[0]) {
+    this.events.push("install-peer");
+    const nextSequence = Math.max(peer.nextSequence, this.nextSequences.get(peer.peerId) ?? 0);
+    this.nextSequences.set(peer.peerId, nextSequence);
+    this.connections.set(peer.peerId, peer.connectionId);
+    return { status: "installed" as const, nextSequence };
+  }
   async authorizeInbound(): Promise<RustMultiplayerAuthorityDecisionV1> {
     return { accepted: true, commandId: "fixture", idempotencyKey: "fixture", code: "accepted", receiptHash: "c".repeat(32) };
   }
@@ -84,7 +92,13 @@ export class FixtureRustAuthority implements RustMultiplayerAuthorityV1 {
   async acceptDelta() { return { code: "applied", sequence: 0, stateHash: this.identity.stateHash }; }
   async reconnectCheckpoint() { return null; }
   async releaseCommand() {}
-  async releasePeer() { this.events.push("release-peer"); }
+  async releasePeer(peer: Parameters<RustMultiplayerAuthorityV1["releasePeer"]>[0]) {
+    if (this.connections.get(peer.peerId) !== peer.connectionId) return "superseded" as const;
+    this.events.push("release-peer");
+    this.connections.delete(peer.peerId);
+    return "released" as const;
+  }
+  runExclusiveMutation<T>(operation: () => Promise<T>) { return operation(); }
   async drain() { this.events.push("drain"); }
 }
 

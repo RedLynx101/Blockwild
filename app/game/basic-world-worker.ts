@@ -10,7 +10,9 @@ type WorkerRequest = Readonly<{
 
 self.onmessage = (event: MessageEvent<WorkerRequest>) => {
   const { id, seedText, generationOptions, request } = event.data;
-  const world = new ChunkWorld();
+  // Explicit opt-in compatibility oracle. These silhouettes are presentation
+  // only and never attest or participate in production worldgen authority.
+  const world = new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
   world.reset(seedText, undefined, generationOptions);
   const geometry = buildBasicWorldGeometry(request, (x, z) => world.sampleColumn(x, z));
   world.dispose();

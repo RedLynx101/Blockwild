@@ -1,11 +1,15 @@
 //! Deterministic shadow engine used by R0/R1 worker and replay laboratories.
 
 mod runtime;
+mod runtime_domain_schema_generated;
 mod runtime_domain_wire;
+mod runtime_player_final_bind_wire;
 mod world_view_runtime;
 
 pub use runtime::*;
+pub use runtime_domain_schema_generated::*;
 pub use runtime_domain_wire::*;
+pub use runtime_player_final_bind_wire::*;
 pub use world_view_runtime::*;
 
 use std::collections::BTreeMap;

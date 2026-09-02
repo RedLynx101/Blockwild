@@ -15,6 +15,7 @@ import {
 import {
   RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1,
   RUST_PERSISTENCE_PLATFORM_MAX_PAGE_RECORDS_V1,
+  RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1,
   rustPersistencePlatformPayloadHashV1,
   rustPersistenceZeroHashV1,
   type RustPersistencePlatformCodeV1,
@@ -410,7 +411,9 @@ function encodePagedRecoveryPage(checkpointId: string, startRecord: number, entr
   }
   writer.u8(nextRecord === null ? 0 : 1); if (nextRecord !== null) writer.u32(nextRecord);
   const result = writer.finish();
-  if (result.byteLength > RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1) throw new Error("encoded recovery page exceeds 4 MiB");
+  if (result.byteLength > RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1) {
+    throw new Error("encoded recovery page exceeds the 64 MiB record plus 64 KiB overhead budget");
+  }
   return result;
 }
 
@@ -532,9 +535,9 @@ function deleteMatching(store: IDBObjectStore, predicate: (value: unknown, key: 
   });
 }
 
-async function abortTransaction(transaction: IDBTransaction) {
+async function abortTransaction(transaction: IDBTransaction, done: Promise<void>) {
   try { transaction.abort(); } catch { /* transaction already settled */ }
-  try { await transactionDone(transaction); } catch { /* expected abort */ }
+  try { await done; } catch { /* expected abort */ }
 }
 
 async function readMigrationState(transaction: IDBTransaction, worldId: string): Promise<MigrationStateSnapshotV1> {
@@ -604,13 +607,13 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
       const journalStore = idb.objectStore(STORE_JOURNAL);
       const tombstone = await requestValue(idb.objectStore(STORE_TOMBSTONES).get(tombstoneKey(transaction.worldId))) as StoredTombstone | undefined;
       if (tombstone) {
-        await abortTransaction(idb);
+        await abortTransaction(idb, done);
         return reject(transaction, "record-conflict", "World has a Rust delete tombstone and cannot be resurrected by a stale save.");
       }
       const sequenceRecord = await requestValue(metaStore.get(sequenceKey(transaction.worldId))) as StoredMeta | undefined;
       const currentSequence = typeof sequenceRecord?.value === "number" ? sequenceRecord.value : 0;
       if (currentSequence !== transaction.expectedJournalSequence || transaction.nextJournalSequence !== currentSequence + 1) {
-        await abortTransaction(idb);
+        await abortTransaction(idb, done);
         return reject(transaction, "stale-sequence", `Expected durable journal sequence ${currentSequence}.`);
       }
       for (const mutation of transaction.mutations) {
@@ -618,18 +621,18 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
         const current = await requestValue(recordStore.get(key)) as StoredRecord | undefined;
         const currentRevision = current?.revision ?? null;
         if (currentRevision !== mutation.expectedRecordRevision) {
-          await abortTransaction(idb);
+          await abortTransaction(idb, done);
           return reject(transaction, "record-conflict", `Record ${key} changed before the transaction committed.`);
         }
         if (current) {
           if (!persistencePayloadMatchesV1(current.payload, current.payloadHash)) {
-            await abortTransaction(idb);
+            await abortTransaction(idb, done);
             return reject(transaction, "corrupt", `Record ${key} failed its durable payload hash.`);
           }
           const versionKey = recordVersionKey(current.address, current.revision);
           const historical = await requestValue(versionStore.get(versionKey)) as StoredRecord | undefined;
           if (historical && !sameStoredRecord(current, historical)) {
-            await abortTransaction(idb);
+            await abortTransaction(idb, done);
             return reject(transaction, "corrupt", `Immutable record version ${versionKey} disagrees with the current durable record.`);
           }
           // V2 databases have only the mutable current record. Materialize
@@ -764,7 +767,7 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
       const next = start + candidate.length < checkpoint.records.length ? start + candidate.length : null;
       try { encodePagedRecoveryPage(checkpoint.checkpointId, start, candidate, next); }
       catch {
-        if (entries.length === 0) return platformResponse(request, "corrupt", { message: "A recovery record exceeds the requested 4 MiB page budget." });
+        if (entries.length === 0) return platformResponse(request, "corrupt", { message: "A recovery record exceeds the requested 64 MiB record plus 64 KiB overhead budget." });
         break;
       }
       entries.push(Object.freeze({ descriptor, payload }));
@@ -796,7 +799,7 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
       const latest = await requestValue(meta.get(latestCheckpointKey(request.worldId))) as StoredMeta | undefined;
       const head = await requestValue(checkpoints.get(checkpointKey(request.worldId, request.objectId))) as StoredCheckpoint | undefined;
       if (!head || latest?.value !== request.objectId || head.checkpoint.checkpointHash !== request.expectedHeadHash) {
-        await abortTransaction(idb); return platformResponse(request, "conflict", { message: "Compaction head changed before the browser transaction began." });
+        await abortTransaction(idb, done); return platformResponse(request, "conflict", { message: "Compaction head changed before the browser transaction began." });
       }
       const keep = new Set<string>();
       const keepRecordVersions = new Set<string>();
@@ -840,7 +843,7 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
         ? await requestValue(idb.objectStore(STORE_CHECKPOINTS).get(checkpointKey(request.worldId, latest.value))) as StoredCheckpoint | undefined
         : undefined;
       if (request.expectedHeadHash !== null && latestCheckpoint?.checkpoint.checkpointHash !== request.expectedHeadHash) {
-        await abortTransaction(idb); return platformResponse(request, "conflict", { message: "Delete expected head does not match durable storage." });
+        await abortTransaction(idb, done); return platformResponse(request, "conflict", { message: "Delete expected head does not match durable storage." });
       }
       const previous = await requestValue(meta.get(storageRevisionKey(request.worldId))) as StoredMeta | undefined;
       const storageRevision = (typeof previous?.value === "number" ? previous.value : 0) + 1;
@@ -871,7 +874,7 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
       const existing = await requestValue(chunks.get(key)) as StoredPlatformChunk | undefined;
       if (existing) {
         const identical = existing.totalBytes === request.totalBytes && existing.payloadHash === request.payloadHash && existing.payload.byteLength === request.payload.byteLength && existing.payload.every((value, index) => value === request.payload[index]);
-        await abortTransaction(idb);
+        await abortTransaction(idb, done);
         if (!identical) return platformResponse(request, "conflict", { message: "Chunk offset already contains different bytes." });
         const storageRevision = await this.storageRevision(request.worldId);
         return platformResponse(request, "accepted", { storageRevision, durableHash: platformReceiptHash(request, storageRevision), nextCursor: request.cursor + request.payload.byteLength, message: "Identical durable chunk already exists." });
@@ -880,7 +883,7 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
       const assembly = all.filter((entry) => entry.operation === operation && entry.worldId === request.worldId && entry.objectId === request.objectId);
       for (const entry of assembly) {
         if (entry.totalBytes !== request.totalBytes || request.cursor < entry.offset + entry.payload.byteLength && entry.offset < request.cursor + request.payload.byteLength) {
-          await abortTransaction(idb); return platformResponse(request, "conflict", { message: "Chunk overlaps or disagrees with its staged assembly." });
+          await abortTransaction(idb, done); return platformResponse(request, "conflict", { message: "Chunk overlaps or disagrees with its staged assembly." });
         }
       }
       chunks.put(Object.freeze({ key, operation, worldId: request.worldId, objectId: request.objectId, offset: request.cursor, totalBytes: request.totalBytes, payload: Uint8Array.from(request.payload), payloadHash: request.payloadHash }) satisfies StoredPlatformChunk);
@@ -928,12 +931,12 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
       const all = await requestValue(chunks.getAll()) as StoredPlatformChunk[];
       const assembly = all.filter((entry) => entry.operation === "import-chunk" && entry.worldId === request.worldId && entry.objectId === request.objectId).sort((left, right) => left.offset - right.offset);
       let cursor = 0; const parts: Uint8Array[] = [];
-      for (const entry of assembly) { if (entry.offset !== cursor || entry.totalBytes !== request.totalBytes || entry.payloadHash !== rustPersistencePlatformPayloadHashV1(entry.payload)) { await abortTransaction(idb); return platformResponse(request, "corrupt", { message: "Staged import chunks are incomplete or corrupt." }); } parts.push(entry.payload); cursor += entry.payload.byteLength; }
-      if (cursor !== request.totalBytes) { await abortTransaction(idb); return platformResponse(request, "conflict", { message: "Staged import is not complete." }); }
+      for (const entry of assembly) { if (entry.offset !== cursor || entry.totalBytes !== request.totalBytes || entry.payloadHash !== rustPersistencePlatformPayloadHashV1(entry.payload)) { await abortTransaction(idb, done); return platformResponse(request, "corrupt", { message: "Staged import chunks are incomplete or corrupt." }); } parts.push(entry.payload); cursor += entry.payload.byteLength; }
+      if (cursor !== request.totalBytes) { await abortTransaction(idb, done); return platformResponse(request, "conflict", { message: "Staged import is not complete." }); }
       const archive = new Uint8Array(cursor); let writeOffset = 0; for (const part of parts) { archive.set(part, writeOffset); writeOffset += part.byteLength; }
       const archiveBytesHash = rustPersistencePlatformPayloadHashV1(archive);
       try { validatePortableArchive(archive, request.expectedHeadHash!); }
-      catch (error) { await abortTransaction(idb); return platformResponse(request, "corrupt", { message: error instanceof Error ? error.message : "Portable archive validation failed." }); }
+      catch (error) { await abortTransaction(idb, done); return platformResponse(request, "corrupt", { message: error instanceof Error ? error.message : "Portable archive validation failed." }); }
       const previous = await requestValue(meta.get(storageRevisionKey(request.worldId))) as StoredMeta | undefined;
       const storageRevision = (typeof previous?.value === "number" ? previous.value : 0) + 1;
       meta.put(Object.freeze({ key: storageRevisionKey(request.worldId), value: storageRevision }) satisfies StoredMeta);

@@ -1,0 +1,70 @@
+{
+  "format": "blockwild-world",
+  "version": 1,
+  "exportedAt": 16000,
+  "ownershipNotice": "Synthetic historical-format regression fixture, not an archived user save.",
+  "world": {
+    "version": 1,
+    "metadata": {
+      "id": "r3-synthetic-g16",
+      "ownership": "host-device",
+      "name": "R3 Synthetic Generator 16",
+      "seed": "WILDERNESS",
+      "mode": "builder",
+      "createdAt": 16000,
+      "updatedAt": 16000,
+      "lastPlayedAt": 16000,
+      "playTimeMs": 0,
+      "lastSavedGameVersion": "1.0.0",
+      "generationIdentity": null
+    },
+    "options": {
+      "difficulty": "peaceful",
+      "dayLengthMinutes": 20,
+      "mobDensity": 0,
+      "butterflyDensity": 0,
+      "caveFrequency": 1,
+      "biomeScale": 1.35,
+      "resourceAbundance": 1,
+      "structures": true,
+      "weather": false,
+      "keepInventory": true,
+      "friendlyFire": false,
+      "sleepRule": "percentage",
+      "sleepPercentage": 50,
+      "enabledFactions": ["hobbits", "dwarves"],
+      "origin": { "mode": "wilderness" }
+    },
+    "save": {
+      "version": 2,
+      "generatorVersion": 16,
+      "generatorProfile": "world-below-v15",
+      "lastSavedGameVersion": "1.0.0",
+      "seed": "WILDERNESS",
+      "mode": "builder",
+      "edits": {
+        "-8,-1": [
+          [26743,3],[26744,3],[26745,3],[26759,3],[26760,3],[26761,3],[26775,3],[26776,3],[26777,3],
+          [26999,0],[27000,0],[27001,0],[27015,0],[27016,0],[27017,0],[27031,0],[27032,0],[27033,0],
+          [27240,13],[27255,0],[27256,0],[27257,0],[27271,0],[27272,0],[27273,0],[27287,0],[27288,0],[27289,0],
+          [27511,0],[27512,0],[27513,0],[27527,0],[27528,0],[27529,0],[27543,0],[27544,0],[27545,0]
+        ],
+        "-9,-1": [[26767,3],[27023,0]]
+      },
+      "player": { "x": -120, "y": 40.51, "z": -8, "yaw": 0, "pitch": 0 },
+      "spawn": { "x": -120, "y": 40.51, "z": -8 },
+      "inventory": [],
+      "selected": 0,
+      "health": 10,
+      "hunger": 10,
+      "xp": 0,
+      "level": 0,
+      "time": 0.32,
+      "day": 1,
+      "weather": "clear",
+      "furnaces": {},
+      "chests": {},
+      "savedAt": 16000
+    }
+  }
+}

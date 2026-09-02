@@ -13,14 +13,20 @@ import {
   RustIntegratedPlayerInventoryReaderV1,
   RustIntegratedPlayerInventoryWriterV1,
 } from "./rust-integrated-runtime-player-inventory";
+import {
+  RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1,
+  rustIntegratedRuntimeDomainWireFamilyV1,
+} from "./rust-integrated-runtime-domain-schema.generated";
 
-export const RUST_CONTEXT_COMMAND_CONTINUITY_TYPE_V2 =
-  "blockwild.simulation.context-command-continuity.r5.v2";
-export const RUST_CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2 =
-  "blockwild.simulation.context-command-continuity-receipt.r5.v2";
+const QUERY_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("context-command-continuity-v2");
+const RECEIPT_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("context-command-continuity-receipt-v2");
 
-const QUERY_MAGIC = Uint8Array.of(0x42, 0x57, 0x53, 0x36); // BWS6
-const RECEIPT_MAGIC = Uint8Array.of(0x42, 0x57, 0x4f, 0x36); // BWO6
+export const RUST_CONTEXT_COMMAND_CONTINUITY_TYPE_V2 = QUERY_SCHEMA.typeId;
+export const RUST_CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2 = RECEIPT_SCHEMA.typeId;
+
+const wireEncoder = new TextEncoder();
+const QUERY_MAGIC = wireEncoder.encode(QUERY_SCHEMA.magic);
+const RECEIPT_MAGIC = wireEncoder.encode(RECEIPT_SCHEMA.magic);
 const HEADER_BYTES = 28;
 const MAX_SAFE_U64 = Number.MAX_SAFE_INTEGER;
 
@@ -55,25 +61,26 @@ function bytesHash(value: Uint8Array) {
   return [...value].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
-function wrap(magic: Uint8Array, body: Uint8Array) {
+function wrap(magic: Uint8Array, schema: number, body: Uint8Array) {
   const output = new Uint8Array(HEADER_BYTES + body.byteLength);
   const view = new DataView(output.buffer);
   output.set(magic);
-  view.setUint16(4, 1, true);
-  view.setUint16(6, 2, true);
+  view.setUint16(4, RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1, true);
+  view.setUint16(6, schema, true);
   view.setUint32(8, body.byteLength, true);
   output.set(hashBytes(rustIntegratedRuntimeWireChecksumV1(body)), 12);
   output.set(body, HEADER_BYTES);
   return output;
 }
 
-function unwrap(packet: Uint8Array, magic: Uint8Array) {
+function unwrap(packet: Uint8Array, magic: Uint8Array, schema: number) {
   if (!(packet instanceof Uint8Array) || packet.byteLength < HEADER_BYTES
     || !magic.every((byte, index) => packet[index] === byte)) {
     fail("context-continuity-header", "context continuity packet header is malformed");
   }
   const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
-  if (view.getUint16(4, true) !== 1 || view.getUint16(6, true) !== 2
+  if (view.getUint16(4, true) !== RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1
+    || view.getUint16(6, true) !== schema
     || view.getUint32(8, true) !== packet.byteLength - HEADER_BYTES) {
     fail("context-continuity-header", "context continuity packet version or length is invalid");
   }
@@ -141,11 +148,11 @@ export function encodeRustIntegratedRuntimeContextContinuityQueryV2(
 ) {
   const writer = new RustIntegratedPlayerInventoryWriterV1();
   writeIdentity(writer, expected);
-  return wrap(QUERY_MAGIC, writer.finish());
+  return wrap(QUERY_MAGIC, QUERY_SCHEMA.innerSchema, writer.finish());
 }
 
 export function decodeRustIntegratedRuntimeContextContinuityQueryV2(packet: Uint8Array) {
-  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, QUERY_MAGIC));
+  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, QUERY_MAGIC, QUERY_SCHEMA.innerSchema));
   const expected = readIdentity(reader);
   reader.finish();
   return Object.freeze({ expected });
@@ -161,14 +168,16 @@ export function encodeRustIntegratedRuntimeContextContinuityReceiptV2(
   writer.option(value.lastSequence, (sequence) => writer.u64(BigInt(sequence)));
   writer.option(value.nextSequence, (sequence) => writer.u64(BigInt(sequence)));
   writer.u8(value.queuedCommandsEmpty ? 1 : 0);
-  return wrap(RECEIPT_MAGIC, writer.finish());
+  return wrap(RECEIPT_MAGIC, RECEIPT_SCHEMA.innerSchema, writer.finish());
 }
 
 export function decodeRustIntegratedRuntimeContextContinuityReceiptV2(
   packet: Uint8Array,
   expectedRequestPayloadHash?: string,
 ) {
-  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, RECEIPT_MAGIC));
+  const reader = new RustIntegratedPlayerInventoryReaderV1(
+    unwrap(packet, RECEIPT_MAGIC, RECEIPT_SCHEMA.innerSchema),
+  );
   const requestPayloadHash = bytesHash(reader.take(16));
   const identity = readIdentity(reader);
   const lastSequence = reader.option(() => safeNumber(reader.u64(), "last context sequence"));
@@ -197,7 +206,7 @@ export async function queryRustIntegratedRuntimeContextContinuityV2(
   const operation = createRustIntegratedRuntimeDomainOperationV1({
     domain: "simulation",
     typeId: RUST_CONTEXT_COMMAND_CONTINUITY_TYPE_V2,
-    schema: 2,
+    schema: QUERY_SCHEMA.operationSchema,
     payload,
   });
   const id = `context-continuity:${expected.stateHash}`;
@@ -212,7 +221,8 @@ export async function queryRustIntegratedRuntimeContextContinuityV2(
   if (receipt.status === "rejected") fail(receipt.code, receipt.message);
   const response = receipt.domainReceipts[0];
   if (receipt.domainReceipts.length !== 1 || !response || response.domain !== "simulation"
-    || response.typeId !== RUST_CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2 || response.schema !== 2
+    || response.typeId !== RUST_CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2
+    || response.schema !== RECEIPT_SCHEMA.operationSchema
     || !rustIntegratedRuntimeIdentityEqualsV1(receipt.before, expected)
     || !rustIntegratedRuntimeIdentityEqualsV1(receipt.after, expected)
     || !rustIntegratedRuntimeIdentityEqualsV1(service.identity(), expected)) {

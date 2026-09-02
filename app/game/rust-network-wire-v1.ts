@@ -81,6 +81,8 @@ const COMMAND_KIND_TAG: Readonly<Record<NetworkCommandKindV1, number>> = Object.
   chat: 3,
   interest: 4,
   reconnect: 5,
+  pose: 6,
+  "presentation-state": 7,
 });
 const DELTA_KIND_TAG: Readonly<Record<NetworkDeltaRecordKindV1, number>> = Object.freeze({
   world: 0,

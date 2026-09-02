@@ -478,8 +478,10 @@ export function surveyNearestUndiscoveredDragonLair(input: Readonly<{
   isSeaDragonNestBiome?: (x: number, z: number) => boolean;
 }>): DragonLairSurvey | null {
   const known = input.discoveredLairIds instanceof Set ? input.discoveredLairIds : new Set(input.discoveredLairIds ?? []);
-  const originRegionX = Math.floor(input.origin.x / DRAGON_LAIR_REGION_BLOCKS);
-  const originRegionZ = Math.floor(input.origin.z / DRAGON_LAIR_REGION_BLOCKS);
+  const originXMillis = Math.round(input.origin.x * 1_000);
+  const originZMillis = Math.round(input.origin.z * 1_000);
+  const originRegionX = Math.floor(originXMillis / (DRAGON_LAIR_REGION_BLOCKS * 1_000));
+  const originRegionZ = Math.floor(originZMillis / (DRAGON_LAIR_REGION_BLOCKS * 1_000));
   const maxRadius = clamp(Math.floor(input.maxRegionRadius ?? 24), 1, 64);
 
   // Sea dragons nest on a separate, wider abyssal grid. Atlantian charts use
@@ -487,10 +489,10 @@ export function surveyNearestUndiscoveredDragonLair(input: Readonly<{
   // resolves to a real nest rather than a generic underground dragon cavern.
   if (input.dragonType === "sea") {
     const seaRegionBlocks = 48 * 16;
-    const seaOriginRegionX = Math.floor(input.origin.x / seaRegionBlocks);
-    const seaOriginRegionZ = Math.floor(input.origin.z / seaRegionBlocks);
+    const seaOriginRegionX = Math.floor(originXMillis / (seaRegionBlocks * 1_000));
+    const seaOriginRegionZ = Math.floor(originZMillis / (seaRegionBlocks * 1_000));
     let nearest: SeaDragonNestPlan | null = null;
-    let nearestDistance = Number.POSITIVE_INFINITY;
+    let nearestDistanceSquared: bigint | null = null;
     for (let radius = 0; radius <= maxRadius; radius += 1) {
       for (let dx = -radius; dx <= radius; dx += 1) for (let dz = -radius; dz <= radius; dz += 1) {
         if (radius > 0 && Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
@@ -510,12 +512,16 @@ export function surveyNearestUndiscoveredDragonLair(input: Readonly<{
           oceanFloorY: sampledFloor, biome: "lumen-trench",
         });
         if (!nest || nest.guardianStage < input.minimumStage || known.has(nest.id)) continue;
-        const distance = Math.hypot(nest.center.x - input.origin.x, nest.center.z - input.origin.z);
-        if (distance < nearestDistance || (distance === nearestDistance && nest.id < (nearest?.id ?? "~"))) {
+        const dxMillis = BigInt(nest.center.x) * BigInt(1_000) - BigInt(originXMillis);
+        const dzMillis = BigInt(nest.center.z) * BigInt(1_000) - BigInt(originZMillis);
+        const distanceSquared = dxMillis * dxMillis + dzMillis * dzMillis;
+        if (nearestDistanceSquared === null || distanceSquared < nearestDistanceSquared
+          || (distanceSquared === nearestDistanceSquared && nest.id < (nearest?.id ?? "~"))) {
           nearest = nest;
-          nearestDistance = distance;
+          nearestDistanceSquared = distanceSquared;
         }
       }
+      const nearestDistance = nearestDistanceSquared === null ? Number.POSITIVE_INFINITY : Math.sqrt(Number(nearestDistanceSquared)) / 1_000;
       if (nearest && radius * seaRegionBlocks > nearestDistance + seaRegionBlocks * 1.5) break;
     }
     // TypeScript does not narrow loop-assigned nullable locals reliably after
@@ -528,26 +534,30 @@ export function surveyNearestUndiscoveredDragonLair(input: Readonly<{
       minimumStage: input.minimumStage,
       actualStage: resolvedNest.guardianStage,
       position: resolvedNest.center,
-      distanceBlocks: Math.round(nearestDistance),
+      distanceBlocks: Math.round(Math.sqrt(Number(nearestDistanceSquared!)) / 1_000),
       markerName: `Sea Dragon Nest · Stage ${resolvedNest.guardianStage}+ chart`,
     };
   }
 
   let best: DragonLairCandidate | null = null;
-  let bestDistance = Number.POSITIVE_INFINITY;
+  let bestDistanceSquared: bigint | null = null;
   for (let radius = 0; radius <= maxRadius; radius += 1) {
     for (let dx = -radius; dx <= radius; dx += 1) for (let dz = -radius; dz <= radius; dz += 1) {
       if (radius > 0 && Math.max(Math.abs(dx), Math.abs(dz)) !== radius) continue;
       const candidate = dragonLairCandidateForRegion({ seed: input.seed, regionX: originRegionX + dx, regionZ: originRegionZ + dz, surfaceYAt: input.surfaceYAt });
       if (!candidate || candidate.type !== input.dragonType || candidate.stage < input.minimumStage || known.has(candidate.id)) continue;
-      const distance = Math.hypot(candidate.origin.x - input.origin.x, candidate.origin.z - input.origin.z);
-      if (distance < bestDistance || (distance === bestDistance && candidate.id < (best?.id ?? "~"))) {
+      const dxMillis = BigInt(candidate.origin.x) * BigInt(1_000) - BigInt(originXMillis);
+      const dzMillis = BigInt(candidate.origin.z) * BigInt(1_000) - BigInt(originZMillis);
+      const distanceSquared = dxMillis * dxMillis + dzMillis * dzMillis;
+      if (bestDistanceSquared === null || distanceSquared < bestDistanceSquared
+        || (distanceSquared === bestDistanceSquared && candidate.id < (best?.id ?? "~"))) {
         best = candidate;
-        bestDistance = distance;
+        bestDistanceSquared = distanceSquared;
       }
     }
     // Once the next complete region ring begins farther away than the current
     // best, no later region can win; survey work remains bounded in real play.
+    const bestDistance = bestDistanceSquared === null ? Number.POSITIVE_INFINITY : Math.sqrt(Number(bestDistanceSquared)) / 1_000;
     if (best && radius * DRAGON_LAIR_REGION_BLOCKS > bestDistance + DRAGON_LAIR_REGION_BLOCKS * 1.5) break;
   }
   const resolvedBest = best as DragonLairCandidate | null;
@@ -558,7 +568,7 @@ export function surveyNearestUndiscoveredDragonLair(input: Readonly<{
     minimumStage: input.minimumStage,
     actualStage: resolvedBest.stage,
     position: resolvedBest.origin,
-    distanceBlocks: Math.round(bestDistance),
+    distanceBlocks: Math.round(Math.sqrt(Number(bestDistanceSquared!)) / 1_000),
     markerName: `${resolvedBest.type[0].toUpperCase()}${resolvedBest.type.slice(1)} Dragon Lair · Stage ${resolvedBest.stage}+ survey`,
   };
 }

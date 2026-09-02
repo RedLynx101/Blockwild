@@ -131,7 +131,7 @@ test("host reassembles and persists a reconnecting guest's quest progression by 
     multiplayerPlayerProgressions: new Map(), multiplayerProgressTransfers: new Map(),
     multiplayerProgressOutgoing: [], saveSoon: () => undefined,
   });
-  const peer = { identity: { id: playerId, name: "Guest", color: "#8855cc", browserId: "browser-guest" } };
+  const peer = { token: "peer-rejoin-001", identity: { id: playerId, name: "Guest", color: "#8855cc", browserId: "browser-guest" } };
   chunks.forEach((data, chunkIndex) => {
     (engine as unknown as { handleRemotePlayerProgress(action: unknown, peer: unknown): void }).handleRemotePlayerProgress({
       transferId: "quest-rejoin-transfer", actorId: playerId, revision: 1,
@@ -149,13 +149,14 @@ test("host reassembles and persists a reconnecting guest's quest progression by 
 test("incomplete progression transfers expire and stay capped per character", () => {
   const playerId = sessionState().playerId;
   const now = Date.now();
+  const peerToken = "peer-cap-001";
   const pending = (id: string, receivedAt: number) => ({
-    actorId: playerId, revision: 1, chunkCount: 2, chunks: ["e30=", null], receivedAt, status: "request" as const,
+    peerToken, actorId: playerId, revision: 1, chunkCount: 2, chunks: ["e30=", null], receivedAt, status: "request" as const,
   });
   const transfers = new Map([
-    [`request:${playerId}:expired`, pending("expired", now - 31_000)],
-    [`request:${playerId}:one`, pending("one", now - 20)],
-    [`request:${playerId}:two`, pending("two", now - 10)],
+    [`request:${peerToken}:${playerId}:expired`, pending("expired", now - 31_000)],
+    [`request:${peerToken}:${playerId}:one`, pending("one", now - 20)],
+    [`request:${peerToken}:${playerId}:two`, pending("two", now - 10)],
   ]);
   const engine = Object.create(VoxelEngine.prototype) as VoxelEngine & Record<string, unknown>;
   Object.assign(engine, {
@@ -163,12 +164,160 @@ test("incomplete progression transfers expire and stay capped per character", ()
     multiplayerPlayerProgressions: new Map(), multiplayerProgressTransfers: transfers,
     multiplayerProgressOutgoing: [],
   });
-  const peer = { identity: { id: playerId, name: "Guest", color: "#8855cc" } };
+  const peer = { token: peerToken, identity: { id: playerId, name: "Guest", color: "#8855cc" } };
   (engine as unknown as { handleRemotePlayerProgress(action: unknown, peer: unknown): void }).handleRemotePlayerProgress({
     transferId: "three", actorId: playerId, revision: 1, chunkIndex: 0, chunkCount: 2, data: "e30=", status: "request",
   }, peer);
   assert.equal([...transfers.keys()].some((key) => key.endsWith(":expired")), false);
   assert.equal([...transfers.values()].filter((transfer) => transfer.actorId === playerId).length, 2);
+});
+
+test("progression chunks cannot cross a stable actor's replaced peer token", () => {
+  const playerId = sessionState().playerId;
+  const state = normalizeMultiplayerPlayerProgression(null, playerId, "host-world");
+  const chunks = encodePlayerProgressionChunks({
+    ...state,
+    mapKnowledge: { ...state.mapKnowledge, revision: 1 },
+  }, 1_024);
+  assert.ok(chunks.length > 1);
+  const stored = new Map([[playerId, { revision: 0, state }]]);
+  const transfers = new Map();
+  const engine = Object.create(VoxelEngine.prototype) as VoxelEngine & Record<string, unknown>;
+  Object.assign(engine, {
+    multiplayer: { role: "host", authorityMode: "legacy-compatibility", sendPlayerProgress: () => 1 },
+    multiplayerPlayerProgressions: stored,
+    multiplayerProgressTransfers: transfers,
+    multiplayerProgressOutgoing: [],
+    saveSoon: () => undefined,
+  });
+  const oldPeer = { token: "peer-token-old-001", identity: { id: playerId, name: "Guest", color: "#8855cc" } };
+  const newPeer = { token: "peer-token-new-002", identity: oldPeer.identity };
+  const receive = (data: string, chunkIndex: number, peer: typeof oldPeer) => {
+    (engine as unknown as { handleRemotePlayerProgress(action: unknown, peer: unknown): void }).handleRemotePlayerProgress({
+      transferId: "stable-transfer-001",
+      actorId: playerId,
+      revision: 1,
+      chunkIndex,
+      chunkCount: chunks.length,
+      data,
+      status: "request",
+    }, peer);
+  };
+  const purge = (peer: typeof oldPeer, replacement = false) => {
+    (engine as unknown as { purgeIncompletePlayerProgressTransfersForPeer(peer: unknown, replacement?: boolean): void })
+      .purgeIncompletePlayerProgressTransfersForPeer(peer, replacement);
+  };
+
+  receive(chunks[0]!, 0, oldPeer);
+  assert.equal(transfers.size, 1);
+  purge(oldPeer);
+  assert.equal(transfers.size, 0, "disconnect purges the old token's partial transfer");
+
+  receive(chunks[0]!, 0, oldPeer);
+  purge(newPeer, true);
+  assert.equal(transfers.size, 0, "replacement purges partial transfers for the stable actor");
+
+  chunks.slice(1).forEach((data, index) => receive(data, index + 1, newPeer));
+  assert.equal(stored.get(playerId)?.revision, 0, "new-token chunks cannot complete with an old-token prefix");
+  receive(chunks[0]!, 0, newPeer);
+  assert.equal(stored.get(playerId)?.revision, 1);
+  assert.equal(stored.get(playerId)?.state.mapKnowledge.revision, 1);
+});
+
+test("peer events retain same-token stale progression state but clear terminal and replacement receipts", () => {
+  const playerId = sessionState().playerId;
+  const oldToken = "peer-event-old-token-001";
+  const newToken = "peer-event-new-token-002";
+  const transfers = new Map<string, {
+    peerToken: string;
+    actorId: string;
+    revision: number;
+    chunkCount: number;
+    chunks: Array<string | null>;
+    receivedAt: number;
+    status: "request";
+  }>();
+  const putPartial = () => transfers.set(`request:${oldToken}:${playerId}:stable-transfer-001`, {
+    peerToken: oldToken,
+    actorId: playerId,
+    revision: 1,
+    chunkCount: 2,
+    chunks: ["partial", null],
+    receivedAt: Date.now(),
+    status: "request",
+  });
+  const identity = { id: playerId, name: "Guest", color: "#8855cc", peerKind: "human" as const };
+  const receipt = Object.freeze({
+    transferId: "stable-transfer-receipt-001",
+    status: "accepted" as const,
+    committedRevision: 1,
+  });
+  const receipts = new Map<string, Readonly<{ connectionToken: string; receipt: typeof receipt }>>([
+    [playerId, Object.freeze({ connectionToken: oldToken, receipt })],
+  ]);
+  const peer = (token: string, state: "connected" | "stale" | "closed") => ({
+    token,
+    identity,
+    state,
+    connectedAt: 1,
+    lastSeenAt: 1,
+    latencyMs: 0,
+    reliableOpen: state === "connected",
+    movementOpen: state === "connected",
+    voiceOpen: state === "connected",
+  });
+  const engine = Object.create(VoxelEngine.prototype) as VoxelEngine & Record<string, unknown>;
+  Object.assign(engine, {
+    multiplayer: { role: "host", authorityMode: "legacy-compatibility", getPeers: () => [] },
+    multiplayerState: { peers: [] },
+    multiplayerProgressTransfers: transfers,
+    multiplayerPeerScopeEpochs: new Map(),
+    rustPlayerProgressionReceipts: receipts,
+    rustPeerDeltaSequences: new Map(),
+    rustPeerPresentationRecordRevisions: new Map(),
+    remotePlayers: new Map(),
+    multiplayerBoatInputs: new Map(),
+    boats: new Map(),
+    sleepVotes: new Set(),
+    multiplayerPeerActiveContainers: new Map(),
+    multiplayerPeerActiveFacilities: new Map(),
+    multiplayerPeerActiveMerchants: new Map(),
+    hostRendezvous: null,
+    ensureHostPlayerSession: () => undefined,
+    sendHostWorldSnapshot: () => undefined,
+    sendAuthoritativePlayerProgression: () => undefined,
+    removeRemotePlayer: () => undefined,
+    evaluateSleepVotes: () => undefined,
+    emitHud: () => undefined,
+    events: { onToast: () => undefined },
+  });
+  const handle = (eventPeer: ReturnType<typeof peer>, reason: string) => {
+    (engine as unknown as { handleMultiplayerEvent(event: unknown): void }).handleMultiplayerEvent({
+      type: "peer",
+      peer: eventPeer,
+      reason,
+    });
+  };
+
+  putPartial();
+  handle(peer(oldToken, "stale"), "ice-disconnected");
+  assert.equal(transfers.size, 1, "recoverable stale state preserves same-token reassembly");
+  assert.equal(receipts.get(playerId)?.receipt, receipt, "recoverable stale state preserves its exact same-token receipt");
+
+  handle(peer(oldToken, "closed"), "connection-closed");
+  assert.equal(transfers.size, 0, "terminal closure purges that token's partial transfer");
+  assert.equal(receipts.has(playerId), false, "terminal closure clears that token's receipt");
+
+  putPartial();
+  receipts.set(playerId, Object.freeze({ connectionToken: oldToken, receipt }));
+  handle(peer(newToken, "connected"), "connected");
+  assert.equal(transfers.size, 0, "a connected replacement token purges the stable actor's old transfer");
+  assert.equal(receipts.has(playerId), false, "a connected replacement token clears the old receipt");
+
+  receipts.set(playerId, Object.freeze({ connectionToken: newToken, receipt }));
+  handle(peer(oldToken, "closed"), "late-old-token-close");
+  assert.equal(receipts.get(playerId)?.connectionToken, newToken,
+    "a late terminal event from the replaced token cannot clear the new connection's receipt");
 });
 
 test("a forced initial title-join image restores vitals before separate progression arrives", () => {
@@ -234,19 +383,25 @@ test("host teardown releases guest-broken chest and furnace contents exactly onc
   assert.deepEqual(drops, [{ item: Item.Apple, count: 2 }, { item: Item.Stick, count: 5 }]);
 });
 
-test("graceful guest disconnect flushes dirty progression before closing transport", () => {
+test("graceful guest disconnect awaits the progression receipt drain before closing transport", async () => {
   const calls: string[] = [];
+  let releaseReceipt!: () => void;
+  const receipt = new Promise<void>((resolve) => { releaseReceipt = resolve; });
   const engine = Object.create(VoxelEngine.prototype) as VoxelEngine;
   Object.assign(engine, {
     multiplayer: { role: "guest", dispose: () => calls.push("dispose") },
     hostRendezvous: null,
     multiplayerProgressionReceived: true,
-    syncMultiplayerPlayerProgression: () => calls.push("sync"),
-    flushPlayerProgressionTransfers: (limit: number) => calls.push(`flush:${limit}`),
+    drainGuestProgressionForGracefulDisconnect: async () => {
+      calls.push("drain");
+      await receipt;
+      calls.push("receipt");
+    },
     removeAllRemotePlayers: () => undefined,
     sleepVotes: new Map(),
     multiplayerContainerAwaiting: new Set(),
     pendingGuestPlacementRequests: new Map(),
+    deferredRemoteBlockActions: new Map(),
     multiplayerPeerActiveContainers: new Map(),
     multiplayerPeerContainerSignatures: new Map(),
     multiplayerFacilityPlayerBaseline: null,
@@ -259,8 +414,12 @@ test("graceful guest disconnect flushes dirty progression before closing transpo
     emitHud: () => undefined,
     events: { onToast: () => undefined },
   });
-  engine.disconnectMultiplayer();
-  assert.deepEqual(calls, ["sync", "flush:512", "dispose"]);
+  const disconnect = engine.disconnectMultiplayer();
+  await Promise.resolve();
+  assert.deepEqual(calls, ["drain"], "artificial receipt latency must keep the transport alive");
+  releaseReceipt();
+  await disconnect;
+  assert.deepEqual(calls, ["drain", "receipt", "dispose"]);
 });
 
 test("boat lifecycle requests are bounded host-authoritative intents", () => {
@@ -1174,6 +1333,7 @@ test("send-zero leaves player and container signatures dirty for retry", () => {
       sendContainerAction: () => 0,
     },
     multiplayerReceivedSnapshot: true,
+    multiplayerProgressOutgoing: [],
     multiplayerPlayerStateRevision: current.revision,
     multiplayerPlayerStateSignature: "stale-player-image",
     multiplayerContainerSignatures: new Map([[containerId, "stale-container-image"]]),
@@ -1210,6 +1370,10 @@ test("host rejects a chest transaction when either player or container revision 
       getPeer: () => ({ identity: { id: current.playerId } }),
     },
     chests: new Map([[containerId, Array.from({ length: 27 }, () => null)]]),
+    remotePlayers: new Map([[current.playerId, { target: { x: 4, y: 8, z: -2 } }]]),
+    world: {
+      getBlock: (x: number, y: number, z: number) => x === 4 && y === 8 && z === -2 ? BlockId.Chest : BlockId.Air,
+    },
     multiplayerContainerRevisions: new Map([[containerId, 2]]),
     multiplayerContainerSignatures: new Map(),
     multiplayerPeerActiveContainers: new Map([[current.playerId, containerId]]),

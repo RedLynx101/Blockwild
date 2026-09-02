@@ -5,12 +5,19 @@
 //! the browser validates and executes the requested IndexedDB operation.
 
 use crate::{
-    PERSISTENCE_BROWSER_HEADER_BYTES_V1, PERSISTENCE_BROWSER_MAX_WIRE_BYTES_V1, PERSISTENCE_BROWSER_PROTOCOL_V1,
-    PersistenceError, validate_label,
+    MAX_RECORD_BYTES_V1, PERSISTENCE_BROWSER_HEADER_BYTES_V1, PERSISTENCE_BROWSER_MAX_WIRE_BYTES_V1,
+    PERSISTENCE_BROWSER_PROTOCOL_V1, PersistenceError, validate_label,
 };
 use blockwild_types::{CanonicalHash, CanonicalHasher};
 
 pub const PERSISTENCE_PLATFORM_CHUNK_BYTES_V1: usize = 4 * 1024 * 1024;
+/// One recovery page must be able to carry every valid record plus its exact
+/// checkpoint descriptor and page framing without widening ordinary import or
+/// export chunks. The resulting BWPA remains below the 128 MiB dispatcher
+/// packet ceiling.
+pub const PERSISTENCE_PLATFORM_RECOVERY_PAGE_OVERHEAD_BYTES_V1: usize = 64 * 1024;
+pub const PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1: usize =
+    MAX_RECORD_BYTES_V1 + PERSISTENCE_PLATFORM_RECOVERY_PAGE_OVERHEAD_BYTES_V1;
 pub const PERSISTENCE_PLATFORM_MAX_PAGE_RECORDS_V1: u32 = 4_096;
 
 const REQUEST_MAGIC: [u8; 4] = *b"BWPR";
@@ -143,7 +150,7 @@ impl PersistencePlatformRequestV1 {
         max_records: u32,
         max_bytes: u32,
     ) -> Result<Self, PersistenceError> {
-        if max_bytes == 0 || max_bytes as usize > PERSISTENCE_PLATFORM_CHUNK_BYTES_V1 {
+        if max_bytes == 0 || max_bytes as usize > PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1 {
             return Err(PersistenceError::new(
                 "platform-page",
                 "recovery page byte limit is outside its V1 bounds",
@@ -374,7 +381,8 @@ pub struct PersistencePlatformResponseV1 {
     pub storage_revision: u64,
     pub durable_hash: CanonicalHash,
     pub next_cursor: Option<u64>,
-    /// Operation-specific bytes. They remain bounded to one 4 MiB page.
+    /// Operation-specific bytes. Ordinary pages remain bounded to 4 MiB;
+    /// recovery alone admits one maximum record plus bounded framing.
     pub payload: Vec<u8>,
     pub message: String,
 }
@@ -387,12 +395,7 @@ impl PersistencePlatformResponseV1 {
                 "BWPA does not match its BWPR request identity",
             ));
         }
-        if self.payload.len() > PERSISTENCE_PLATFORM_CHUNK_BYTES_V1 {
-            return Err(PersistenceError::new(
-                "platform-size",
-                "BWPA operation payload exceeds 4 MiB",
-            ));
-        }
+        validate_platform_response_payload_v1(self.operation, &self.payload)?;
         if self.code == PersistencePlatformResultCodeV1::Accepted
             && is_durable_mutation(request.operation)
             && self.durable_hash == CanonicalHash::default()
@@ -460,6 +463,7 @@ pub fn decode_persistence_platform_request_v1(bytes: &[u8]) -> Result<Persistenc
 pub fn encode_persistence_platform_response_v1(
     response: &PersistencePlatformResponseV1,
 ) -> Result<Vec<u8>, PersistenceError> {
+    validate_platform_response_payload_v1(response.operation, &response.payload)?;
     let mut writer = Writer::default();
     writer.u16(response.operation as u16);
     writer.u8(response.code as u8);
@@ -485,18 +489,43 @@ pub fn decode_persistence_platform_response_v1(
         ));
     }
     let mut reader = Reader::new(payload);
+    let operation = PersistencePlatformOperationV1::from_tag(reader.u16()?)?;
     let value = PersistencePlatformResponseV1 {
         request_id,
-        operation: PersistencePlatformOperationV1::from_tag(reader.u16()?)?,
+        operation,
         code: PersistencePlatformResultCodeV1::from_tag(reader.u8()?)?,
         storage_revision: reader.u64()?,
         durable_hash: reader.hash()?,
         next_cursor: if reader.flag()? { Some(reader.u64()?) } else { None },
-        payload: reader.bytes(PERSISTENCE_PLATFORM_CHUNK_BYTES_V1)?,
+        payload: reader.bytes(platform_response_payload_limit_v1(operation))?,
         message: reader.string()?,
     };
     reader.finish()?;
+    validate_platform_response_payload_v1(value.operation, &value.payload)?;
     Ok(value)
+}
+
+const fn platform_response_payload_limit_v1(operation: PersistencePlatformOperationV1) -> usize {
+    if matches!(operation, PersistencePlatformOperationV1::ReadRecoveryPage) {
+        PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1
+    } else {
+        PERSISTENCE_PLATFORM_CHUNK_BYTES_V1
+    }
+}
+
+fn validate_platform_response_payload_v1(
+    operation: PersistencePlatformOperationV1,
+    payload: &[u8],
+) -> Result<(), PersistenceError> {
+    if payload.len() <= platform_response_payload_limit_v1(operation) {
+        return Ok(());
+    }
+    let message = if operation == PersistencePlatformOperationV1::ReadRecoveryPage {
+        "recovery page payload exceeds the 64 MiB record plus 64 KiB overhead budget"
+    } else {
+        "BWPA operation payload exceeds 4 MiB"
+    };
+    Err(PersistenceError::new("platform-size", message))
 }
 
 fn is_durable_mutation(operation: PersistencePlatformOperationV1) -> bool {

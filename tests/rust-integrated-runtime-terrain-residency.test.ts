@@ -44,6 +44,7 @@ test("terrain residency identity excludes origin and rejects non-normalized opti
     chunks: [{ chunkX: 0, chunkZ: 0 }],
   });
   assert.doesNotThrow(() => request(DEFAULT_OPTIONS));
+  assert.doesNotThrow(() => request(DEFAULT_OPTIONS.replace("\"settlementDensity\":1", "\"settlementDensity\":2")));
   assert.equal(DEFAULT_OPTIONS.includes("origin"), false);
   assert.throws(
     () => request(DEFAULT_OPTIONS.replace("\"structures\":true", "\"structures\":true,\"origin\":{\"mode\":\"wilderness\"}")),
@@ -53,6 +54,12 @@ test("terrain residency identity excludes origin and rejects non-normalized opti
     () => request(DEFAULT_OPTIONS.replace("\"caveFrequency\":1", "\"caveFrequency\":1.001")),
     /unsupported or non-normalized/u,
   );
+  for (const settlementDensity of [2.01, 3]) {
+    assert.throws(
+      () => request(DEFAULT_OPTIONS.replace("\"settlementDensity\":1", `\"settlementDensity\":${settlementDensity}`)),
+      /unsupported or non-normalized/u,
+    );
+  }
 });
 
 test("terrain residency receipt decodes Rust golden and fails closed on corruption", () => {

@@ -47,3 +47,16 @@ Telemetry reports a deliberate `feature-gated` zero-work state. Re-enablement st
 The compatibility artifact contains the small authoritative engine ABI and deterministic kernels. The `renderer-lab` variant adds Rust `wgpu`, the canonical render fixture, and the async browser smoke path. Both are content-addressed and built from the same lockfile/protocol, but the renderer module loads only for diagnostics or an explicit `wgpu` selector until renderer promotion.
 
 This is not a renderer deferral: native and browser `wgpu` implementation, fixture parity, telemetry, and reviewed evidence remain R0-R2 gates. It simply prevents every compatibility browser from downloading the much larger renderer payload while Three.js is still the public default.
+
+## D-005 — Terrain rollback is an explicit build, never a runtime switch
+
+**Status:** implemented as a pre-promotion safety boundary
+**Plan impact:** enforces the approved reload-only rollback policy without promoting the terrain ledger row
+
+Terrain authority is selected once at compilation. The private `BLOCKWILD_WORLDGEN_BUILD_PROFILE` accepts exactly `rust-primary` (the default) or `typescript-rollback`; Next and Vite publish only that validated literal. URLs and public runtime environment variables cannot change terrain authority. A rollback therefore requires building and loading the rollback artifact, and returning to Rust requires another build and reload.
+
+The rollback build creates no Rust terrain-generation workers and consequently cannot request a Rust terrain manifest. It displays a persistent rollback label, includes the profile in diagnostic build identity, and keeps explicit constructor and Node-test seams for deterministic tests. The profile is deployment metadata, not world data: generator-v18 saves, generation identities, exports, and imports remain byte/schema compatible across both builds.
+
+[`RUST_ENGINE_ROLLBACK_WINDOWS.json`](./RUST_ENGINE_ROLLBACK_WINDOWS.json) is the machine-readable retirement gate. TypeScript terrain support remains available for at least two independently verified stable Rust-primary releases. Each schema-v2 `verifiedStableReleases` record has exactly five fields: a unique `releaseId`, an exact 40-character lowercase `commitSha`, `buildProfile: "rust-primary"`, one portable repository-relative or HTTPS `evidence` reference, and a canonical UTC `measuredAt` timestamp. Records are ordered by strictly increasing `measuredAt` and must also use distinct commits, so aliases or repeated measurements of one build cannot satisfy the window.
+
+`retireAfter` is either `null` or the exact `releaseId` of a recorded qualifying release. A non-null anchor is valid only at the minimum-th or a later chronologically ordered record; retirement happens after that anchored release. No qualifying release has been recorded yet, so `verifiedStableReleases` remains empty and `retireAfter` remains `null`. The migration audit fails closed on malformed evidence, repeated identities or commits, non-Rust-primary profiles, missing measurement fields, early retirement, and unknown or premature retirement anchors.

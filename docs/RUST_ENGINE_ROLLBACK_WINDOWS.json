@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 2,
+  "domain": "terrain-generation",
+  "primaryBuildProfile": "rust-primary",
+  "rollbackBuildProfile": "typescript-rollback",
+  "requiresReload": true,
+  "saveCompatibility": {
+    "generatorVersion": 18,
+    "profilePersisted": false
+  },
+  "supportWindow": {
+    "minimumStableReleases": 2,
+    "verifiedStableReleases": [],
+    "retireAfter": null
+  }
+}

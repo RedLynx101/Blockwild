@@ -402,7 +402,8 @@ export function buildWorldOverhaulAudit(seeds: readonly string[] = AUDIT_SEEDS) 
     generatedAt: new Date().toISOString(),
     profile: "world-below-v15",
     seeds: seeds.map((seed) => {
-      const world = new ChunkWorld();
+      // Historical world-overhaul oracle, not a production authority verifier.
+      const world = new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
       world.reset(seed, undefined, { profile: "world-below-v15" });
       return {
         seed,

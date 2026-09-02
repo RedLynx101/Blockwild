@@ -80,6 +80,364 @@ fn wire_rejects_truncation_trailing_data_versions_and_malicious_sizes() {
 }
 
 #[test]
+fn native_player_pose_payload_and_projection_round_trip_and_reject_tampering() {
+    let pose = native_player_pose(42);
+    assert_eq!(pose.pose_hash.to_hex(), "4f75838a9217204c90910000d1e2b543");
+    let bytes = encode_network_player_pose_v1(&pose).unwrap();
+    assert_eq!(decode_network_player_pose_v1(&bytes).unwrap(), pose);
+    assert!(bytes.len() <= NETWORK_PLAYER_POSE_MAX_WIRE_BYTES_V1);
+
+    let mut tampered_pose = bytes;
+    *tampered_pose.last_mut().unwrap() ^= 0x80;
+    assert_eq!(
+        decode_network_player_pose_v1(&tampered_pose).unwrap_err().code,
+        NetworkErrorCode::HashMismatch,
+    );
+
+    let projection = NetworkPlayerPoseProjectionV1::new(NetworkPlayerPoseProjectionSourceV1 {
+        session_id: "session-r9".into(),
+        peer_id: "peer-1".into(),
+        connection_id: "conn-human-1".into(),
+        player_id: "peer-1".into(),
+        command_id: "pose:42".into(),
+        command_sequence: 7,
+        command_hash: CanonicalHash([0x11; 16]),
+        receipt_hash: CanonicalHash([0x22; 16]),
+        presented_delta_sequence: 9,
+        presented_identity_hash: CanonicalHash([0x33; 16]),
+        record_revision: 3,
+        previous_record_hash: CanonicalHash([0x44; 16]),
+        pose: pose.clone(),
+    })
+    .unwrap();
+    let bytes = encode_network_player_pose_projection_v1(&projection).unwrap();
+    assert_eq!(projection.record_hash.to_hex(), "51987a01efaa8790b089bb6f605af956");
+    assert_eq!(projection.projection_hash.to_hex(), "8d3d9d01fbda1c00e077e7654e4135d2");
+    assert_eq!(decode_network_player_pose_projection_v1(&bytes).unwrap(), projection);
+    assert!(bytes.len() <= NETWORK_PLAYER_POSE_PROJECTION_MAX_WIRE_BYTES_V1);
+
+    let mut tampered_projection = bytes;
+    *tampered_projection.last_mut().unwrap() ^= 0x01;
+    assert_eq!(
+        decode_network_player_pose_projection_v1(&tampered_projection)
+            .unwrap_err()
+            .code,
+        NetworkErrorCode::HashMismatch,
+    );
+
+    for (record_revision, previous_record_hash) in [(1, CanonicalHash([0x44; 16])), (2, CanonicalHash::default())] {
+        assert_eq!(
+            NetworkPlayerPoseProjectionV1::new(NetworkPlayerPoseProjectionSourceV1 {
+                session_id: "session-r9".into(),
+                peer_id: "peer-1".into(),
+                connection_id: "conn-human-1".into(),
+                player_id: "peer-1".into(),
+                command_id: "pose:ancestry".into(),
+                command_sequence: 8,
+                command_hash: CanonicalHash([0x11; 16]),
+                receipt_hash: CanonicalHash([0x22; 16]),
+                presented_delta_sequence: 9,
+                presented_identity_hash: CanonicalHash([0x33; 16]),
+                record_revision,
+                previous_record_hash,
+                pose: pose.clone(),
+            })
+            .unwrap_err()
+            .code,
+            NetworkErrorCode::HashMismatch,
+        );
+    }
+}
+
+#[test]
+fn native_player_pose_rejects_each_bounded_integer_family() {
+    let mut source = native_player_pose_source(1);
+    source.x_milliblocks = NETWORK_PLAYER_POSE_MAX_HORIZONTAL_MILLIBLOCKS_V1 + 1;
+    assert_eq!(
+        NetworkPlayerPoseV1::new(source).unwrap_err().code,
+        NetworkErrorCode::InvalidInteger,
+    );
+
+    let mut source = native_player_pose_source(1);
+    source.pitch_milliradians = NETWORK_PLAYER_POSE_MAX_PITCH_MILLIRADIANS_V1 + 1;
+    assert_eq!(
+        NetworkPlayerPoseV1::new(source).unwrap_err().code,
+        NetworkErrorCode::InvalidInteger,
+    );
+
+    let mut source = native_player_pose_source(1);
+    source.velocity_y_milliblocks_per_second = NETWORK_PLAYER_POSE_MAX_VELOCITY_MILLIBLOCKS_PER_SECOND_V1 + 1;
+    assert_eq!(
+        NetworkPlayerPoseV1::new(source).unwrap_err().code,
+        NetworkErrorCode::InvalidInteger,
+    );
+
+    let mut source = native_player_pose_source(1);
+    source.selected_slot = Some(9);
+    assert_eq!(
+        NetworkPlayerPoseV1::new(source).unwrap_err().code,
+        NetworkErrorCode::InvalidInteger,
+    );
+
+    let mut source = native_player_pose_source(1);
+    source.swimming_per_mille = Some(1_001);
+    assert_eq!(
+        NetworkPlayerPoseV1::new(source).unwrap_err().code,
+        NetworkErrorCode::InvalidInteger,
+    );
+
+    let mut source = native_player_pose_source(1);
+    source.boat_turn_per_mille = Some(-1_001);
+    assert_eq!(
+        NetworkPlayerPoseV1::new(source).unwrap_err().code,
+        NetworkErrorCode::InvalidInteger,
+    );
+
+    let mut source = native_player_pose_source(1);
+    source.mounted_creature_id = Some(NETWORK_MAX_SAFE_INTEGER_V1 + 1);
+    assert_eq!(
+        NetworkPlayerPoseV1::new(source).unwrap_err().code,
+        NetworkErrorCode::InvalidInteger,
+    );
+
+    let mut source = native_player_pose_source(1);
+    source.boat_id = None;
+    assert_eq!(
+        NetworkPlayerPoseV1::new(source).unwrap_err().code,
+        NetworkErrorCode::InvalidLabel,
+    );
+
+    let mut source = native_player_pose_source(1);
+    source.mounted_creature_id = None;
+    assert_eq!(
+        NetworkPlayerPoseV1::new(source).unwrap_err().code,
+        NetworkErrorCode::InvalidLabel,
+    );
+}
+
+#[test]
+fn native_guest_pose_projection_is_accepted_idempotent_and_monotonic() {
+    let (fixture, mut runtime) = native_player_pose_runtime();
+    let first_pose = native_player_pose(42);
+    let first_command = native_player_pose_command(&fixture, "pose:42", "pose-idem:42", "conn-human-1", 0, &first_pose);
+    let first_request = prepare_network_guest_pose_request_v1(501, &fixture.delta.to, 1_000, &first_command).unwrap();
+    let (first_receipt, first_projection) = native_player_pose_response(&mut runtime, &first_request);
+    assert!(first_receipt.accepted());
+    let first_projection = first_projection.expect("accepted native pose projection");
+    assert_eq!(first_projection.record_revision, 1);
+    assert_eq!(first_projection.previous_record_hash, CanonicalHash::default());
+    assert_eq!(first_projection.pose, first_pose);
+    assert_eq!(first_projection.command_hash, first_command.command_hash);
+    assert_eq!(first_projection.receipt_hash, first_receipt.receipt_hash);
+    assert_eq!(runtime.player_pose_record_count(), 1);
+    assert_eq!(runtime.player_pose_projection_cache_count(), 1);
+
+    let fingerprint = runtime.authority_fingerprint();
+    let mut tampered_receipt = first_receipt.clone();
+    tampered_receipt.receipt_hash = CanonicalHash::default();
+    assert_eq!(
+        encode_network_browser_response_v1(&NetworkBrowserResponseV1::GuestPose {
+            request_id: 501,
+            receipt: tampered_receipt,
+            projection: Some(Box::new(first_projection.clone())),
+            authority_fingerprint: fingerprint,
+        })
+        .unwrap_err()
+        .code,
+        NetworkErrorCode::HashMismatch,
+    );
+    let (duplicate_receipt, duplicate_projection) = native_player_pose_response(&mut runtime, &first_request);
+    assert_eq!(duplicate_receipt, first_receipt);
+    assert_eq!(duplicate_projection.as_ref(), Some(&first_projection));
+    assert_eq!(runtime.authority_fingerprint(), fingerprint);
+    assert_eq!(runtime.latest_player_pose_projection("peer-1"), Some(&first_projection));
+
+    let second_pose = native_player_pose(43);
+    let second_command =
+        native_player_pose_command(&fixture, "pose:43", "pose-idem:43", "conn-human-1", 1, &second_pose);
+    let second_request = prepare_network_guest_pose_request_v1(502, &fixture.delta.to, 1_001, &second_command).unwrap();
+    let (_, second_projection) = native_player_pose_response(&mut runtime, &second_request);
+    let second_projection = second_projection.expect("second native pose projection");
+    assert_eq!(second_projection.record_revision, 2);
+    assert_eq!(second_projection.previous_record_hash, first_projection.record_hash);
+    assert_eq!(
+        runtime.active_player_pose_projection("peer-1"),
+        Some(&second_projection)
+    );
+
+    let (_, replayed_first) = native_player_pose_response(&mut runtime, &first_request);
+    assert_eq!(replayed_first, Some(first_projection));
+    assert_eq!(
+        runtime.active_player_pose_projection("peer-1"),
+        Some(&second_projection),
+        "replaying an old exact receipt must not regress the active native record",
+    );
+}
+
+#[test]
+fn native_guest_pose_reconnect_preserves_history_and_fences_the_old_connection() {
+    let (fixture, mut runtime) = native_player_pose_runtime();
+    let first_pose = native_player_pose(50);
+    let old_command = native_player_pose_command(&fixture, "pose:old", "pose-idem:old", "conn-human-1", 0, &first_pose);
+    let old_request = prepare_network_guest_pose_request_v1(601, &fixture.delta.to, 1_000, &old_command).unwrap();
+    let (_, first_projection) = native_player_pose_response(&mut runtime, &old_request);
+    let first_projection = first_projection.unwrap();
+
+    runtime.release_peer("peer-1");
+    assert!(runtime.active_player_pose_projection("peer-1").is_none());
+    assert_eq!(runtime.latest_player_pose_projection("peer-1"), Some(&first_projection));
+    let mut replacement = native_player_pose_grant(&fixture);
+    replacement.connection_id = "conn-human-2".into();
+    replacement.next_sequence = 1;
+    runtime.upsert_peer_grant(replacement).unwrap();
+    let before_old_replay = runtime.authority_fingerprint();
+    let (old_receipt, old_projection) = native_player_pose_response(&mut runtime, &old_request);
+    assert_eq!(old_receipt.code, Some(NetworkReceiptCodeV1::ConnectionMismatch));
+    assert!(old_projection.is_none());
+    assert_eq!(runtime.authority_fingerprint(), before_old_replay);
+    assert_eq!(runtime.latest_player_pose_projection("peer-1"), Some(&first_projection));
+
+    assert!(runtime.record_delta_presentation(&fixture.delta).unwrap());
+    let next_pose = native_player_pose(51);
+    let next_command = native_player_pose_command(&fixture, "pose:new", "pose-idem:new", "conn-human-2", 1, &next_pose);
+    let next_request = prepare_network_guest_pose_request_v1(602, &fixture.delta.to, 1_001, &next_command).unwrap();
+    let (_, next_projection) = native_player_pose_response(&mut runtime, &next_request);
+    let next_projection = next_projection.unwrap();
+    assert_eq!(next_projection.record_revision, 2);
+    assert_eq!(next_projection.previous_record_hash, first_projection.record_hash);
+    assert_eq!(next_projection.connection_id, "conn-human-2");
+    assert_eq!(runtime.active_player_pose_projection("peer-1"), Some(&next_projection));
+}
+
+#[test]
+fn native_guest_pose_preflight_failure_is_atomic() {
+    let (fixture, mut runtime) = native_player_pose_runtime();
+    let pose = native_player_pose(60);
+    let valid = native_player_pose_command(&fixture, "pose:valid", "pose-idem:valid", "conn-human-1", 0, &pose);
+    let valid_request = prepare_network_guest_pose_request_v1(701, &fixture.delta.to, 1_000, &valid).unwrap();
+    let baseline = runtime.authority_fingerprint();
+
+    let mut wrong_actor_source = source_from_command(&valid);
+    wrong_actor_source.command_id = "pose:wrong-actor".into();
+    wrong_actor_source.idempotency_key = "pose-idem:wrong-actor".into();
+    wrong_actor_source.actor_id = "forged-player".into();
+    let wrong_actor = NetworkCommandV1::new(wrong_actor_source).unwrap();
+    assert_eq!(
+        prepare_network_guest_pose_request_v1(702, &fixture.delta.to, 1_000, &wrong_actor)
+            .unwrap_err()
+            .code,
+        NetworkErrorCode::InvalidLabel,
+    );
+    let wrong_actor_batch =
+        prepare_network_command_batch_request_v1(702, &fixture.delta.to, 1_000, &[wrong_actor]).unwrap();
+    assert_eq!(
+        runtime.process(&wrong_actor_batch).unwrap_err().code,
+        NetworkErrorCode::InvalidLabel,
+    );
+    assert_eq!(runtime.authority_fingerprint(), baseline);
+    assert_eq!(runtime.player_pose_record_count(), 0);
+
+    let mut malformed_source = source_from_command(&valid);
+    malformed_source.command_id = "pose:malformed".into();
+    malformed_source.idempotency_key = "pose-idem:malformed".into();
+    malformed_source.payload = b"not-a-native-pose".to_vec();
+    let malformed_command = NetworkCommandV1::new(malformed_source).unwrap();
+    let malformed_batch =
+        prepare_network_command_batch_request_v1(703, &fixture.delta.to, 1_000, &[malformed_command]).unwrap();
+    assert_eq!(
+        runtime.process(&malformed_batch).unwrap_err().code,
+        NetworkErrorCode::WireMagic,
+    );
+    assert_eq!(runtime.authority_fingerprint(), baseline);
+    assert_eq!(runtime.player_pose_record_count(), 0);
+
+    let mut malformed = valid_request.clone();
+    *malformed.last_mut().unwrap() ^= 0x80;
+    assert_eq!(
+        runtime.process(&malformed).unwrap_err().code,
+        NetworkErrorCode::HashMismatch
+    );
+    assert_eq!(runtime.authority_fingerprint(), baseline);
+    assert_eq!(runtime.player_pose_record_count(), 0);
+
+    let (receipt, projection) = native_player_pose_response(&mut runtime, &valid_request);
+    assert!(receipt.accepted(), "failed preflight must not consume sequence zero");
+    assert_eq!(projection.unwrap().record_revision, 1);
+}
+
+#[test]
+fn mixed_generic_batch_cannot_bypass_native_guest_pose_custody() {
+    let (fixture, mut runtime) = native_player_pose_runtime();
+    let pose = native_player_pose(70);
+    let pose_command = native_player_pose_command(
+        &fixture,
+        "pose:dedicated-only",
+        "pose-idem:dedicated-only",
+        "conn-human-1",
+        0,
+        &pose,
+    );
+    let ordinary = NetworkCommandV1::new(NetworkCommandSourceV1 {
+        session_id: "session-r9".into(),
+        command_id: "ordinary:first".into(),
+        idempotency_key: "ordinary-idem:first".into(),
+        peer_id: "peer-1".into(),
+        connection_id: "conn-human-1".into(),
+        actor_id: "peer-1".into(),
+        peer_kind: NetworkPeerKindV1::Human,
+        kind: NetworkCommandKindV1::Gameplay,
+        required_capability: NetworkCapabilityV1::Interact,
+        sequence: 0,
+        expected: fixture.delta.to.clone(),
+        expires_at: 10_000,
+        lease_keys: Vec::new(),
+        payload: vec![1, 2, 3],
+    })
+    .unwrap();
+    let batch =
+        prepare_network_command_batch_request_v1(750, &fixture.delta.to, 1_000, &[ordinary, pose_command.clone()])
+            .unwrap();
+    let baseline = runtime.authority_fingerprint();
+    assert_eq!(runtime.process(&batch).unwrap_err().code, NetworkErrorCode::InvalidEnum);
+    assert_eq!(runtime.authority_fingerprint(), baseline);
+    assert_eq!(runtime.player_pose_record_count(), 0);
+
+    let dedicated = prepare_network_guest_pose_request_v1(751, &fixture.delta.to, 1_000, &pose_command).unwrap();
+    let (receipt, projection) = native_player_pose_response(&mut runtime, &dedicated);
+    assert!(
+        receipt.accepted(),
+        "the mixed batch must not consume command sequence zero"
+    );
+    assert_eq!(projection.unwrap().record_revision, 1);
+}
+
+#[test]
+fn native_guest_pose_projection_cache_is_strictly_bounded() {
+    let (fixture, mut runtime) = native_player_pose_runtime();
+    for sequence in 0..(NETWORK_BROWSER_MAX_PLAYER_POSE_PROJECTIONS_V1 + 8) {
+        let pose = native_player_pose(sequence as u64);
+        let command = native_player_pose_command(
+            &fixture,
+            &format!("pose:{sequence}"),
+            &format!("pose-idem:{sequence}"),
+            "conn-human-1",
+            sequence as u64,
+            &pose,
+        );
+        let request =
+            prepare_network_guest_pose_request_v1(800 + sequence as u64, &fixture.delta.to, 1_000, &command).unwrap();
+        let (receipt, projection) = native_player_pose_response(&mut runtime, &request);
+        assert!(receipt.accepted());
+        assert_eq!(projection.unwrap().record_revision, sequence as u64 + 1);
+    }
+    assert_eq!(
+        runtime.player_pose_projection_cache_count(),
+        NETWORK_BROWSER_MAX_PLAYER_POSE_PROJECTIONS_V1,
+    );
+    assert_eq!(runtime.player_pose_record_count(), 1);
+}
+
+#[test]
 fn malformed_and_tampered_packets_never_mutate_authority() {
     let fixture = canonical_network_fixture_v1().unwrap();
     let mut authority = NetworkAuthorityV1::new("session-r9".into()).unwrap();
@@ -169,6 +527,284 @@ fn authority_enforces_revision_sequence_capability_and_idempotency() {
     .unwrap();
     let receipt = authority.authorize(&denied, &fixture.starting_identity, 1_004).unwrap();
     assert_eq!(receipt.code, Some(NetworkReceiptCodeV1::CapabilityDenied));
+}
+
+#[test]
+fn pose_authority_tracks_the_latest_connection_bound_presentation() {
+    let fixture = canonical_network_fixture_v1().unwrap();
+    let mut authority = NetworkAuthorityV1::new("session-r9".into()).unwrap();
+    authority.upsert_grant(fixture.human_grant.clone()).unwrap();
+    let presented_a = fixture.starting_identity.clone();
+    let live_b = NetworkAuthorityIdentityV1::new(
+        presented_a.address.clone(),
+        NetworkAuthorityRevisionV1 {
+            world: presented_a.revision.world + 1,
+            ..presented_a.revision
+        },
+    )
+    .unwrap();
+
+    let missing_cursor = pose_command_from(
+        &fixture.human_command,
+        "pose-missing",
+        "idem-pose-missing",
+        0,
+        presented_a.clone(),
+    );
+    assert_eq!(
+        authority.authorize(&missing_cursor, &live_b, 1_000).unwrap().code,
+        Some(NetworkReceiptCodeV1::StaleRevision),
+    );
+
+    let before_presentation = authority.authority_fingerprint();
+    assert!(authority.record_peer_presentation("peer-1", 1, &presented_a).unwrap());
+    let after_presentation = authority.authority_fingerprint();
+    assert_ne!(after_presentation, before_presentation);
+    assert!(!authority.record_peer_presentation("peer-1", 1, &presented_a).unwrap());
+    assert_eq!(authority.authority_fingerprint(), after_presentation);
+
+    let pose_from_a = pose_command_from(
+        &fixture.human_command,
+        "pose-from-a",
+        "idem-pose-from-a",
+        0,
+        presented_a.clone(),
+    );
+    assert_eq!(
+        decode_network_command_v1(&encode_network_command_v1(&pose_from_a).unwrap()).unwrap(),
+        pose_from_a,
+        "the explicit pose kind must survive the native wire boundary",
+    );
+    assert!(
+        authority.authorize(&pose_from_a, &live_b, 1_001).unwrap().accepted(),
+        "pose admission follows the exact state presented to this connection",
+    );
+
+    let non_pose_from_a = command_from(
+        &fixture.human_command,
+        "gameplay-from-a",
+        "idem-gameplay-from-a",
+        1,
+        presented_a.clone(),
+        Vec::new(),
+    );
+    assert_eq!(
+        authority.authorize(&non_pose_from_a, &live_b, 1_002).unwrap().code,
+        Some(NetworkReceiptCodeV1::StaleRevision),
+        "non-pose commands retain strict live-authority equality",
+    );
+
+    assert!(authority.record_peer_presentation("peer-1", 2, &live_b).unwrap());
+    assert_eq!(
+        authority
+            .record_peer_presentation("peer-1", 3, &presented_a)
+            .unwrap_err()
+            .code,
+        NetworkErrorCode::HashMismatch,
+        "a newer delta sequence cannot rewind a domain revision",
+    );
+    let other_address = NetworkAuthorityIdentityV1::new(
+        WorldAddressV1 {
+            universe_id: live_b.address.universe_id.clone(),
+            location_id: "other-location".into(),
+        },
+        live_b.revision,
+    )
+    .unwrap();
+    assert_eq!(
+        authority
+            .record_peer_presentation("peer-1", 3, &other_address)
+            .unwrap_err()
+            .code,
+        NetworkErrorCode::HashMismatch,
+        "a presentation cursor cannot silently switch authority addresses",
+    );
+    let stale_pose = pose_command_from(
+        &fixture.human_command,
+        "pose-stale-a",
+        "idem-pose-stale-a",
+        1,
+        presented_a.clone(),
+    );
+    assert_eq!(
+        authority.authorize(&stale_pose, &live_b, 1_003).unwrap().code,
+        Some(NetworkReceiptCodeV1::StaleRevision),
+    );
+
+    let advanced_epoch = NetworkAuthorityIdentityV1::new(
+        live_b.address.clone(),
+        NetworkAuthorityRevisionV1 {
+            epoch: live_b.revision.epoch + 1,
+            ..live_b.revision
+        },
+    )
+    .unwrap();
+    let epoch_stale = pose_command_from(
+        &fixture.human_command,
+        "pose-old-epoch",
+        "idem-pose-old-epoch",
+        1,
+        live_b.clone(),
+    );
+    assert_eq!(
+        authority.authorize(&epoch_stale, &advanced_epoch, 1_004).unwrap().code,
+        Some(NetworkReceiptCodeV1::StaleRevision),
+        "a presentation cursor cannot cross an authority epoch",
+    );
+    let presentation_ahead = pose_command_from(
+        &fixture.human_command,
+        "pose-presentation-ahead",
+        "idem-pose-presentation-ahead",
+        1,
+        live_b.clone(),
+    );
+    assert_eq!(
+        authority
+            .authorize(&presentation_ahead, &presented_a, 1_004)
+            .unwrap()
+            .code,
+        Some(NetworkReceiptCodeV1::StaleRevision),
+        "a presented domain revision cannot be ahead of live authority",
+    );
+
+    let pose_from_b = pose_command_from(
+        &fixture.human_command,
+        "pose-from-b",
+        "idem-pose-from-b",
+        1,
+        live_b.clone(),
+    );
+    assert!(authority.authorize(&pose_from_b, &live_b, 1_005).unwrap().accepted());
+
+    let mut replacement = fixture.human_grant.clone();
+    replacement.connection_id = "conn-human-2".into();
+    replacement.next_sequence = 2;
+    authority.upsert_grant(replacement.clone()).unwrap();
+    let old_connection = pose_command_from(
+        &fixture.human_command,
+        "pose-old-connection",
+        "idem-pose-old-connection",
+        2,
+        live_b.clone(),
+    );
+    assert_eq!(
+        authority.authorize(&old_connection, &live_b, 1_006).unwrap().code,
+        Some(NetworkReceiptCodeV1::ConnectionMismatch),
+    );
+    let new_connection_without_cursor = NetworkCommandV1::new(NetworkCommandSourceV1 {
+        connection_id: replacement.connection_id.clone(),
+        command_id: "pose-new-connection-missing".into(),
+        idempotency_key: "idem-pose-new-connection-missing".into(),
+        ..source_from_command(&old_connection)
+    })
+    .unwrap();
+    assert_eq!(
+        authority
+            .authorize(&new_connection_without_cursor, &live_b, 1_007)
+            .unwrap()
+            .code,
+        Some(NetworkReceiptCodeV1::StaleRevision),
+        "replacing a connection clears its prior presentation cursor",
+    );
+    assert!(authority.record_peer_presentation("peer-1", 3, &live_b).unwrap());
+    let accepted_replacement = NetworkCommandV1::new(NetworkCommandSourceV1 {
+        command_id: "pose-new-connection".into(),
+        idempotency_key: "idem-pose-new-connection".into(),
+        ..source_from_command(&new_connection_without_cursor)
+    })
+    .unwrap();
+    assert!(
+        authority
+            .authorize(&accepted_replacement, &live_b, 1_008)
+            .unwrap()
+            .accepted(),
+    );
+    authority.release_peer("peer-1");
+    replacement.next_sequence = 3;
+    authority.upsert_grant(replacement).unwrap();
+    let released_cursor = NetworkCommandV1::new(NetworkCommandSourceV1 {
+        command_id: "pose-after-release".into(),
+        idempotency_key: "idem-pose-after-release".into(),
+        sequence: 3,
+        ..source_from_command(&accepted_replacement)
+    })
+    .unwrap();
+    assert_eq!(
+        authority.authorize(&released_cursor, &live_b, 1_009).unwrap().code,
+        Some(NetworkReceiptCodeV1::StaleRevision),
+        "releasing a peer clears its connection-bound presentation cursor",
+    );
+}
+
+#[test]
+fn presentation_state_authority_tracks_the_latest_reachable_connection_presentation() {
+    let fixture = canonical_network_fixture_v1().unwrap();
+    let mut authority = NetworkAuthorityV1::new("session-r9".into()).unwrap();
+    authority.upsert_grant(fixture.human_grant.clone()).unwrap();
+    let presented_a = fixture.starting_identity.clone();
+    let live_b = NetworkAuthorityIdentityV1::new(
+        presented_a.address.clone(),
+        NetworkAuthorityRevisionV1 {
+            entities: presented_a.revision.entities + 1,
+            ..presented_a.revision
+        },
+    )
+    .unwrap();
+
+    let missing_cursor = presentation_state_command_from(
+        &fixture.human_command,
+        "player-state-missing",
+        "idem-player-state-missing",
+        0,
+        presented_a.clone(),
+    );
+    let missing_receipt = authority.authorize(&missing_cursor, &live_b, 1_000).unwrap();
+    assert_eq!(missing_receipt.code, Some(NetworkReceiptCodeV1::StaleRevision));
+    assert_eq!(
+        missing_receipt.message,
+        "Player-state command does not match the latest connection-bound authority presentation.",
+    );
+
+    assert!(authority.record_peer_presentation("peer-1", 1, &presented_a).unwrap());
+    let from_a = presentation_state_command_from(
+        &fixture.human_command,
+        "player-state-from-a",
+        "idem-player-state-from-a",
+        0,
+        presented_a.clone(),
+    );
+    assert_eq!(NetworkCommandKindV1::PresentationState as u8, 7);
+    assert_eq!(
+        decode_network_command_v1(&encode_network_command_v1(&from_a).unwrap()).unwrap(),
+        from_a,
+        "the additive presentation-state kind must survive the native wire boundary",
+    );
+    assert!(
+        authority.authorize(&from_a, &live_b, 1_001).unwrap().accepted(),
+        "player-state admission follows the latest state presented to this connection",
+    );
+
+    assert!(authority.record_peer_presentation("peer-1", 2, &live_b).unwrap());
+    let stale_a = presentation_state_command_from(
+        &fixture.human_command,
+        "player-state-stale-a",
+        "idem-player-state-stale-a",
+        1,
+        presented_a,
+    );
+    assert_eq!(
+        authority.authorize(&stale_a, &live_b, 1_002).unwrap().code,
+        Some(NetworkReceiptCodeV1::StaleRevision),
+        "player-state must name the exact latest connection-bound presentation",
+    );
+    let from_b = presentation_state_command_from(
+        &fixture.human_command,
+        "player-state-from-b",
+        "idem-player-state-from-b",
+        1,
+        live_b.clone(),
+    );
+    assert!(authority.authorize(&from_b, &live_b, 1_003).unwrap().accepted());
 }
 
 #[test]
@@ -603,6 +1239,95 @@ fn canonical_fixture_and_native_hook_are_stable() {
     assert_eq!(first.digest, second.digest);
 }
 
+fn native_player_pose_source(tick: u64) -> NetworkPlayerPoseSourceV1 {
+    NetworkPlayerPoseSourceV1 {
+        player_id: "peer-1".into(),
+        tick,
+        x_milliblocks: 12_345,
+        y_milliblocks: 64_500,
+        z_milliblocks: -9_876,
+        yaw_milliradians: 1_571,
+        pitch_milliradians: -314,
+        velocity_x_milliblocks_per_second: 4_350,
+        velocity_y_milliblocks_per_second: -125,
+        velocity_z_milliblocks_per_second: 750,
+        grounded: true,
+        selected_slot: Some(3),
+        shield_raised: true,
+        crouching: false,
+        sprinting: true,
+        action: NetworkPlayerPoseActionV1::Mine,
+        swimming_per_mille: Some(250),
+        seated_per_mille: Some(1_000),
+        boat_id: Some("boat:cedar-1".into()),
+        boat_seat: Some(0),
+        boat_forward_per_mille: Some(875),
+        boat_turn_per_mille: Some(-250),
+        mounted_creature_id: Some(42),
+        mounted_creature_seat: Some(1),
+    }
+}
+
+fn native_player_pose(tick: u64) -> NetworkPlayerPoseV1 {
+    let mut source = native_player_pose_source(tick);
+    source.x_milliblocks += i32::try_from(tick % 10_000).unwrap();
+    NetworkPlayerPoseV1::new(source).unwrap()
+}
+
+fn native_player_pose_grant(fixture: &NetworkCanonicalFixtureV1) -> NetworkPeerGrantV1 {
+    NetworkPeerGrantV1 {
+        actor_id: "peer-1".into(),
+        ..fixture.human_grant.clone()
+    }
+}
+
+fn native_player_pose_runtime() -> (NetworkCanonicalFixtureV1, NetworkBrowserAuthorityRuntimeV1) {
+    let fixture = canonical_network_fixture_v1().unwrap();
+    let mut runtime = NetworkBrowserAuthorityRuntimeV1::new("session-r9".into()).unwrap();
+    runtime.upsert_peer_grant(native_player_pose_grant(&fixture)).unwrap();
+    assert!(runtime.record_delta_presentation(&fixture.delta).unwrap());
+    (fixture, runtime)
+}
+
+fn native_player_pose_command(
+    fixture: &NetworkCanonicalFixtureV1,
+    command_id: &str,
+    idempotency_key: &str,
+    connection_id: &str,
+    sequence: u64,
+    pose: &NetworkPlayerPoseV1,
+) -> NetworkCommandV1 {
+    NetworkCommandV1::new(NetworkCommandSourceV1 {
+        session_id: "session-r9".into(),
+        command_id: command_id.into(),
+        idempotency_key: idempotency_key.into(),
+        peer_id: "peer-1".into(),
+        connection_id: connection_id.into(),
+        actor_id: "peer-1".into(),
+        peer_kind: NetworkPeerKindV1::Human,
+        kind: NetworkCommandKindV1::Pose,
+        required_capability: NetworkCapabilityV1::Interact,
+        sequence,
+        expected: fixture.delta.to.clone(),
+        expires_at: 10_000,
+        lease_keys: Vec::new(),
+        payload: encode_network_player_pose_v1(pose).unwrap(),
+    })
+    .unwrap()
+}
+
+fn native_player_pose_response(
+    runtime: &mut NetworkBrowserAuthorityRuntimeV1,
+    request: &[u8],
+) -> (NetworkCommandReceiptV1, Option<NetworkPlayerPoseProjectionV1>) {
+    match decode_network_browser_response_v1(&runtime.process(request).unwrap()).unwrap() {
+        NetworkBrowserResponseV1::GuestPose {
+            receipt, projection, ..
+        } => (receipt, projection.map(|projection| *projection)),
+        response => panic!("unexpected native guest pose response: {response:?}"),
+    }
+}
+
 fn command_from(
     base: &NetworkCommandV1,
     command_id: &str,
@@ -628,4 +1353,61 @@ fn command_from(
         payload: base.payload.clone(),
     })
     .unwrap()
+}
+
+fn pose_command_from(
+    base: &NetworkCommandV1,
+    command_id: &str,
+    idempotency_key: &str,
+    sequence: u64,
+    expected: NetworkAuthorityIdentityV1,
+) -> NetworkCommandV1 {
+    NetworkCommandV1::new(NetworkCommandSourceV1 {
+        kind: NetworkCommandKindV1::Pose,
+        command_id: command_id.into(),
+        idempotency_key: idempotency_key.into(),
+        sequence,
+        expected,
+        lease_keys: Vec::new(),
+        ..source_from_command(base)
+    })
+    .unwrap()
+}
+
+fn presentation_state_command_from(
+    base: &NetworkCommandV1,
+    command_id: &str,
+    idempotency_key: &str,
+    sequence: u64,
+    expected: NetworkAuthorityIdentityV1,
+) -> NetworkCommandV1 {
+    NetworkCommandV1::new(NetworkCommandSourceV1 {
+        kind: NetworkCommandKindV1::PresentationState,
+        command_id: command_id.into(),
+        idempotency_key: idempotency_key.into(),
+        sequence,
+        expected,
+        lease_keys: Vec::new(),
+        ..source_from_command(base)
+    })
+    .unwrap()
+}
+
+fn source_from_command(base: &NetworkCommandV1) -> NetworkCommandSourceV1 {
+    NetworkCommandSourceV1 {
+        session_id: base.session_id.clone(),
+        command_id: base.command_id.clone(),
+        idempotency_key: base.idempotency_key.clone(),
+        peer_id: base.peer_id.clone(),
+        connection_id: base.connection_id.clone(),
+        actor_id: base.actor_id.clone(),
+        peer_kind: base.peer_kind,
+        kind: base.kind,
+        required_capability: base.required_capability,
+        sequence: base.sequence,
+        expected: base.expected.clone(),
+        expires_at: base.expires_at,
+        lease_keys: base.lease_keys.clone(),
+        payload: base.payload.clone(),
+    }
 }

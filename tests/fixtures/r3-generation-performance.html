@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>R3 generation and streaming comparison</title>
+    <link rel="icon" href="data:," />
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #e7ece5; color: #173d36; font: 15px system-ui, sans-serif; }
+      main { width: min(1080px, 100%); margin: 14px auto; }
+      canvas { display: block; width: 100%; height: auto; border: 1px solid #ced8cf; border-radius: 8px; }
+      footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 2px; }
+      button { border: 0; border-radius: 5px; padding: 10px 18px; background: #22634c; color: white; font: 600 15px system-ui; cursor: pointer; }
+      button:disabled { opacity: .55; cursor: default; }
+      p { margin: 0; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <canvas id="evidence" width="1080" height="620" aria-label="Generation and streaming evidence progress"></canvas>
+      <footer><button id="run" type="button">Run comparison lane</button><p>Explicit start · F fullscreen · diagnostic subsystem measurements</p></footer>
+    </main>
+    <script type="module" src="./r3-generation-performance.ts"></script>
+  </body>
+</html>

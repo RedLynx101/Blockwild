@@ -101,6 +101,7 @@ pub fn canonical_fixture() -> CanonicalSimulationFixture {
             swim_surface_breach_seconds: 0.0,
             swim_stroke_cooldown_seconds: 0.0,
             swim_surface_bob_active: false,
+            swim_shore_exit_ready: true,
         },
         controls: PhysicsControlsV1 {
             flags: 0,

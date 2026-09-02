@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { Item } from "../app/game/data.ts";
+import { planRustDroppedHotTransformsR10 } from "../app/game/rust-authoritative-extraction-r10.ts";
 import { TypeScriptCanonicalHasher } from "../app/game/rust-kernel-shadow.ts";
 import { requireBlockwildProductionContent } from "../app/game/rust-integrated-runtime-content.ts";
 import type { RustIntegratedRuntimeExtractionV1 } from "../app/game/rust-integrated-runtime-contract.ts";
@@ -21,12 +22,18 @@ import {
   createProductionHeldEquipmentModelsR10,
   RUST_HELD_PRESENTATION_SLOT_R10,
   RustPresentationEntityExtractionR10,
+  type RustPresentationBindingIdentityR10,
+  type RustPresentationEntityExtractionResultR10,
 } from "../app/game/rust-render-presentation-extraction-r10.ts";
 import {
   attestRenderPresentationCatalogV1,
+  createRenderPresentationCoverageInventoryR10,
   createRenderPresentationRegistryV1,
+  RENDER_PRESENTATION_CATALOG_ID_V1,
+  RENDER_PRESENTATION_CATALOG_REVISION_V1,
   type AttestedRenderPresentationCatalogV1,
 } from "../app/game/rust-render-presentation-profile.ts";
+import { RustRenderSceneComposerR10 } from "../app/game/rust-render-scene-composer-r10.ts";
 import { encodeRustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-codec-r6.ts";
 import type { RustEntityExtractionR6V3 } from "../app/game/rust-entity-authority-contract-r6.ts";
 import { createProductionRenderModelAttestationsR10 } from "../app/game/rust-live-render-runtime-r10.ts";
@@ -106,7 +113,7 @@ function domainBundle(
 ) {
   const writer = new Writer().raw(new TextEncoder().encode("BWX0")).u16(1)
     .u64(extractionRevision).u64(authorityTick)
-    .raw(Uint8Array.from({ length: 16 }, () => 7)).raw(hex(CONTENT_HASH)).u8(1).u16(8);
+    .raw(hex("1".repeat(32))).raw(hex(CONTENT_HASH)).u8(1).u16(8);
   for (let domain = 1; domain <= 8; domain += 1) {
     const rows = rowsByDomain.get(domain) ?? [];
     const payload = new Writer();
@@ -154,17 +161,43 @@ function dropRow(input: Readonly<{
   profileId?: string;
   modelId?: string;
   blockerId?: string;
+  dropId?: string;
+  entityId?: bigint;
+  positionMilli?: Readonly<{ x: bigint; y: bigint; z: bigint }>;
+  velocityMilliPerSecond?: Readonly<{ x: bigint; y: bigint; z: bigint }>;
+  yawMicroturns?: number;
+  createdTick?: bigint;
 }>) {
-  const dropId = "drop:presentation-test";
+  const dropId = input.dropId ?? "drop:presentation-test";
+  const position = input.positionMilli ?? Object.freeze({ x: BigInt(2_000), y: BigInt(4_000), z: BigInt(0) });
+  const velocity = input.velocityMilliPerSecond ?? Object.freeze({ x: BigInt(0), y: BigInt(0), z: BigInt(0) });
   const fields: Array<readonly [string, Uint8Array]> = [
+    ["boundContainerRevision", u64Field(1)],
+    ["createdTick", u64Field(input.createdTick ?? BigInt(10))],
+    ["custodyContainer", stringField("container-key-v1/010203")],
+    ["custodySlot", u64Field(0)],
     ["dropId", stringField(dropId)],
-    ["entityId", u64Field(DROP_ENTITY_ID)],
+    ["entityId", u64Field(input.entityId ?? DROP_ENTITY_ID)],
     ["entityRevision", u64Field(input.entityRevision)],
+    ["expiresTick.present", boolField(false)],
+    ["pickupLockActorId.present", boolField(false)],
+    ["position.xMilli", i64Field(position.x)],
+    ["position.yMilli", i64Field(position.y)],
+    ["position.zMilli", i64Field(position.z)],
     ["stack.itemCode", u64Field(input.itemCode)],
+    ["stack.count", u64Field(1)],
+    ["stack.durability.present", boolField(false)],
+    ["stack.metadataHash", hashField(new Uint8Array(16))],
     ["presentation.role", stringField("dropped-item")],
     ["presentation.contentDomain", stringField("item")],
     ["presentation.contentId", stringField(String(input.itemCode))],
     ["presentation.status", stringField(input.status)],
+    ["rotation.pitchMicroturns", u64Field(0)],
+    ["rotation.rollMicroturns", u64Field(0)],
+    ["rotation.yawMicroturns", u64Field(input.yawMicroturns ?? 0)],
+    ["velocity.xMilliPerSecond", i64Field(velocity.x)],
+    ["velocity.yMilliPerSecond", i64Field(velocity.y)],
+    ["velocity.zMilliPerSecond", i64Field(velocity.z)],
   ];
   if (input.profileId !== undefined) fields.push(["presentation.profileId", stringField(input.profileId)]);
   if (input.modelId !== undefined) fields.push(["presentation.modelId", stringField(input.modelId)]);
@@ -390,13 +423,38 @@ function dropEnvelope(input: Readonly<{
   modelRevision: number;
   modelHash: Uint8Array;
   blockers?: readonly string[];
+  revision?: number;
+  authorityTick?: number;
+  dropId?: string;
+  entityId?: bigint;
+  positionMilli?: Readonly<{ x: bigint; y: bigint; z: bigint }>;
+  velocityMilliPerSecond?: Readonly<{ x: bigint; y: bigint; z: bigint }>;
+  yawMicroturns?: number;
+  createdTick?: bigint;
 }>) {
-  const revision = 1;
+  const revision = input.revision ?? 1;
+  const authorityTick = input.authorityTick ?? 10;
   const entityRevision = input.entityRevision ?? BigInt(revision);
-  const entities = entityExtraction(revision, 10, [], [
-    dropRecord(Number(input.recordEntityRevision ?? entityRevision), input.modelKey, input.modelRevision, input.modelHash),
+  const record = Object.freeze({
+    ...dropRecord(Number(input.recordEntityRevision ?? entityRevision), input.modelKey, input.modelRevision, input.modelHash),
+    ...(input.dropId === undefined ? {} : { externalEntityId: input.dropId, specimenId: input.dropId }),
+    ...(input.entityId === undefined ? {} : { entityId: input.entityId }),
+    ...(input.positionMilli === undefined ? {} : { position: Object.freeze({
+      x: Number(input.positionMilli.x) / 1_000,
+      y: Number(input.positionMilli.y) / 1_000,
+      z: Number(input.positionMilli.z) / 1_000,
+    }) }),
+    ...(input.velocityMilliPerSecond === undefined ? {} : { velocity: Object.freeze({
+      x: Number(input.velocityMilliPerSecond.x) / 1_000,
+      y: Number(input.velocityMilliPerSecond.y) / 1_000,
+      z: Number(input.velocityMilliPerSecond.z) / 1_000,
+    }) }),
+    ...(input.yawMicroturns === undefined ? {} : { yaw: Math.fround(input.yawMicroturns / 1_000_000 * Math.PI * 2) }),
+  });
+  const entities = entityExtraction(revision, authorityTick, [], [
+    record,
   ]);
-  const hud = domainBundle(revision, 10, new Map([
+  const hud = domainBundle(revision, authorityTick, new Map([
     [2, [playerRow(BigInt(revision), Item.StonePickaxe)]],
     [3, [dropRow({ ...input, entityRevision })]],
   ]), new Map(input.blockers === undefined ? [] : [[3, input.blockers]]));
@@ -405,7 +463,7 @@ function dropEnvelope(input: Readonly<{
       universeId: "presentation-universe",
       locationId: "presentation-location",
       revision: Object.freeze({ epoch: 1, world: 1, entities: 1, gameplay: 1, persistence: 1, network: 1, simulation: 1 }),
-      tick: 10,
+      tick: authorityTick,
       stateHash: "1".repeat(32),
     }),
     extractionRevision: revision,
@@ -498,6 +556,15 @@ function machineEnvelope(
   } satisfies RustIntegratedRuntimeExtractionV1);
 }
 
+function orphanEntityEnvelope(record: RustEntityExtractionR6V3["records"][number]) {
+  const source = envelope(Item.StonePickaxe);
+  const entities = entityExtraction(1, 10, [], [record]);
+  return Object.freeze({
+    ...source,
+    render: encodeRustEntityExtractionR6V3(entities),
+  } satisfies RustIntegratedRuntimeExtractionV1);
+}
+
 function context(frameSequence = 1, epoch = EPOCH): RenderEntityFrameContextR10 {
   return Object.freeze({
     epoch,
@@ -553,6 +620,74 @@ async function createAdapter(
   };
 }
 
+function assertExactBindingIdentity(
+  binding: RustPresentationBindingIdentityR10,
+  expected: Readonly<{
+    role: RustPresentationBindingIdentityR10["role"];
+    profileId: string;
+    modelId: string;
+    primaryContentRef: RustPresentationBindingIdentityR10["primaryContentRef"];
+  }>,
+  presentations: AttestedRenderPresentationCatalogV1,
+) {
+  assert.equal(binding.role, expected.role);
+  assert.equal(binding.profileId, expected.profileId);
+  assert.equal(binding.modelId, expected.modelId);
+  assert.deepEqual(binding.primaryContentRef, expected.primaryContentRef);
+  assert.deepEqual(binding.presentationCatalog, {
+    id: RENDER_PRESENTATION_CATALOG_ID_V1,
+    schema: presentations.profileCatalog.schema,
+    revision: RENDER_PRESENTATION_CATALOG_REVISION_V1,
+    contentVersion: PRESENTATION_ARTIFACT.contentVersion,
+    contentHash: hex(PRESENTATION_ARTIFACT.blobHash),
+  });
+  assert.deepEqual(binding.modelCatalog, {
+    revision: presentations.modelCatalog.revision,
+    canonicalHash: presentations.modelCatalog.catalogHashHex,
+    sha256: presentations.modelCatalog.contentSha256,
+  });
+}
+
+function presentationComposer(
+  presentations: AttestedRenderPresentationCatalogV1,
+) {
+  const resourceRevisions: bigint[] = [];
+  const coverage = createRenderPresentationCoverageInventoryR10(presentations.profileCatalog);
+  const composer = new RustRenderSceneComposerR10({
+    sink: {
+      resources(batch) { resourceRevisions.push(batch.revision); return true; },
+      frame() { return true; },
+      resize() {},
+      requestRecovery() { return true; },
+      diagnostics() { return Object.freeze({ schema: 1 }); },
+    },
+    epoch: EPOCH,
+    trustedContentManifestHash: hex(CONTENT_HASH),
+    trustedModelCatalogHash: presentations.modelCatalog.catalogHashHex,
+    trustedModelCatalogRevision: presentations.modelCatalog.revision,
+    presentationCoverage: coverage,
+  });
+  return { composer, coverage, resourceRevisions } as const;
+}
+
+function composeExactPresentationFrame(
+  result: RustPresentationEntityExtractionResultR10,
+  presentations: AttestedRenderPresentationCatalogV1,
+) {
+  const { composer, coverage, resourceRevisions } = presentationComposer(presentations);
+  assert.equal(composer.submitEntities(result), true);
+  const metadata = composer.presentationMetadata();
+  assert.equal(metadata.coverage, coverage);
+  assert.equal(metadata.frame?.coverageHash, coverage.coverageHash);
+  assert.deepEqual(metadata.frame?.bindings.map((binding) => binding.id),
+    result.presentationFrame.bindings.map((binding) => binding.id));
+  assert.equal(metadata.promotion.ready, false, "static source/schema blockers keep the wgpu promotion gate closed");
+  assert.ok(metadata.promotion.blockers.length > 0);
+  assert.equal(composer.diagnostics().presentationBindings, result.presentationFrame.bindings.length);
+  assert.equal(resourceRevisions.length, result.resources === null ? 0 : 1);
+  return composer;
+}
+
 test("same-envelope held item joins one exact BWM2 attachment into the R6 player", async () => {
   const { adapter, presentations } = await createAdapter();
   const source = envelope(Item.StonePickaxe);
@@ -575,6 +710,21 @@ test("same-envelope held item joins one exact BWM2 attachment into the R6 player
   assert.equal(adapter.diagnostics().heldAttachments, 1);
   assert.deepEqual(adapter.diagnostics().heldBlockers, []);
   if (heldProfile.status === "exact") assert.equal(held?.instanceIds.length, heldProfile.profile.model.nodeCount);
+  const exactHeld = result.presentationFrame.bindings.find((binding) => binding.role === "held-item");
+  assert.ok(exactHeld?.role === "held-item");
+  assert.equal(exactHeld.playerId, PLAYER_ID);
+  assert.equal(exactHeld.entityId, ENTITY_ID);
+  assert.equal(exactHeld.itemId, String(Item.StonePickaxe));
+  assert.deepEqual(exactHeld.instanceIds, held?.instanceIds);
+  assert.ok(heldProfile.status === "exact");
+  assertExactBindingIdentity(exactHeld.binding, {
+    role: "held-item",
+    profileId: heldProfile.profile.id,
+    modelId: heldProfile.profile.model.id,
+    primaryContentRef: { domain: "item", id: String(Item.StonePickaxe) },
+  }, presentations);
+  assert.deepEqual(adapter.diagnostics().heldPresentations, [exactHeld]);
+  composeExactPresentationFrame(result, presentations);
 });
 
 test("explicit missing held profile emits a sorted blocker and never fabricates equipment", async () => {
@@ -613,7 +763,36 @@ test("same-envelope dropped item keeps exact presentation identity on its R6 ent
     modelKey: exact.profile.model.id,
     modelRevision: PRESENTATION_ARTIFACT.contentVersion,
     modelHash: hex(PRESENTATION_ARTIFACT.blobHash),
+    velocityMilliPerSecond: Object.freeze({ x: BigInt(-125), y: BigInt(875), z: BigInt(-250) }),
+    yawMicroturns: 250_000,
+    createdTick: BigInt(7),
   });
+  const hot = planRustDroppedHotTransformsR10(source);
+  assert.equal(hot.transforms.length, 1);
+  assert.deepEqual(hot.transforms[0], {
+    schema: 1,
+    dropId: "drop:presentation-test",
+    entityId: DROP_ENTITY_ID,
+    entityRevision: BigInt(1),
+    rowRevision: hot.transforms[0]?.rowRevision,
+    custodyContainer: "container-key-v1/010203",
+    custodySlot: 0,
+    boundContainerRevision: BigInt(1),
+    itemCode: Item.CaptureOrb,
+    count: 1,
+    durabilityMillionths: null,
+    metadataHash: new Uint8Array(16),
+    position: { x: 2, y: 4, z: 0 },
+    velocity: { x: -0.125, y: 0.875, z: -0.25 },
+    rotationMicroturns: { yaw: 250_000, pitch: 0, roll: 0 },
+    yawRadians: Math.PI / 2,
+    createdTick: BigInt(7),
+    ageTicks: BigInt(0),
+    expiresTick: null,
+    pickupLockActorId: null,
+  });
+  assert.equal(hot.source.extractionRevision, BigInt(1));
+  assert.equal(hot.source.authorityTick, BigInt(10));
   const token = adapter.prepareRuntimeExtraction(source);
   const result = adapter.extractBytes(source.render, context());
   adapter.finishPreparedRuntimeExtraction(token, true);
@@ -622,6 +801,19 @@ test("same-envelope dropped item keeps exact presentation identity on its R6 ent
     exact.profile.model.id);
   assert.equal(adapter.diagnostics().droppedBindings, 1);
   assert.deepEqual(adapter.diagnostics().droppedBlockers, []);
+  const dropped = result.presentationFrame.bindings.find((binding) => binding.role === "dropped-item");
+  assert.ok(dropped?.role === "dropped-item");
+  assert.equal(dropped.dropId, "drop:presentation-test");
+  assert.equal(dropped.entityId, DROP_ENTITY_ID);
+  assert.equal(dropped.itemId, String(Item.CaptureOrb));
+  assertExactBindingIdentity(dropped.binding, {
+    role: "dropped-item",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    primaryContentRef: { domain: "item", id: String(Item.CaptureOrb) },
+  }, presentations);
+  assert.deepEqual(adapter.diagnostics().droppedPresentations, [dropped]);
+  composeExactPresentationFrame(result, presentations);
 });
 
 test("exact high-u64 Unicode projectile joins one stable BWR6 model across envelopes", async () => {
@@ -649,6 +841,19 @@ test("exact high-u64 Unicode projectile joins one stable BWR6 model across envel
   assert.equal(firstPresentation?.instanceIds.length, exact.profile.model.nodeCount);
   assert.equal(adapter.diagnostics().combatBindings, 1);
   assert.deepEqual(adapter.diagnostics().combatBlockers, []);
+  const projectile = firstResult.presentationFrame.bindings.find((binding) => binding.role === "projectile");
+  assert.ok(projectile?.role === "projectile");
+  assert.equal(projectile.recordId, recordId);
+  assert.equal(projectile.entityId, COMBAT_ENTITY_ID);
+  assert.equal(projectile.contentId, itemId);
+  assertExactBindingIdentity(projectile.binding, {
+    role: "projectile",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    primaryContentRef: { domain: "item", id: itemId },
+  }, presentations);
+  assert.deepEqual(adapter.diagnostics().combatPresentations, [projectile]);
+  composeExactPresentationFrame(firstResult, presentations);
 
   const second = combatEnvelope(row, record, [
     "combat-projectile-and-summon-render-presentation-not-authoritative",
@@ -685,6 +890,125 @@ test("exact summon requires its creature primary ref and paired spell profile", 
   assert.equal(result.presentations.find((value) => value.entityId === COMBAT_ENTITY_ID)?.modelKey,
     exact.profile.model.id);
   assert.equal(adapter.diagnostics().combatBindings, 1);
+  const summon = result.presentationFrame.bindings.find((binding) => binding.role === "summon");
+  assert.ok(summon?.role === "summon");
+  assert.equal(summon.recordId, recordId);
+  assert.equal(summon.entityId, COMBAT_ENTITY_ID);
+  assert.equal(summon.contentId, creatureId);
+  assertExactBindingIdentity(summon.binding, {
+    role: "summon",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    primaryContentRef: { domain: "creature-profile", id: creatureId },
+  }, presentations);
+  assert.deepEqual(adapter.diagnostics().combatPresentations, [summon]);
+  composeExactPresentationFrame(result, presentations);
+});
+
+test("unjoined dropped, projectile, summon, and vehicle records fail closed with stable runtime blockers", async () => {
+  const [, presentations] = await catalogs();
+  const dropped = presentations.registry.resolve("dropped-item", { domain: "item", id: String(Item.CaptureOrb) });
+  const projectile = presentations.registry.resolveProfileId("projectile", "projectile:arrow");
+  const summon = presentations.registry.resolveProfileId("summon", "summon:asterjaw");
+  const vehicle = presentations.registry.resolveProfileId("vehicle", "vehicle:sailboat");
+  assert.ok(dropped.status === "exact");
+  assert.ok(projectile.status === "exact");
+  assert.ok(summon.status === "exact");
+  assert.ok(vehicle.status === "exact");
+  const vehicleEntityId = BigInt("4294967299");
+  const cases = [
+    {
+      family: "dropped-item" as const,
+      entityId: DROP_ENTITY_ID,
+      sourceId: "drop:presentation-test",
+      blockerId: "dropped-item-semantic-binding-row-missing",
+      record: dropRecord(1, dropped.profile.model.id, PRESENTATION_ARTIFACT.contentVersion,
+        hex(PRESENTATION_ARTIFACT.blobHash)),
+    },
+    {
+      family: "projectile" as const,
+      entityId: COMBAT_ENTITY_ID,
+      sourceId: "orphan:projectile",
+      blockerId: "projectile-semantic-binding-row-missing",
+      record: combatRecord({
+        role: "projectile", recordId: "orphan:projectile", modelKey: projectile.profile.model.id,
+        modelRevision: PRESENTATION_ARTIFACT.contentVersion, modelHash: hex(PRESENTATION_ARTIFACT.blobHash),
+      }),
+    },
+    {
+      family: "summon" as const,
+      entityId: COMBAT_ENTITY_ID,
+      sourceId: "orphan:summon",
+      blockerId: "summon-semantic-binding-row-missing",
+      record: combatRecord({
+        role: "summon", recordId: "orphan:summon", modelKey: summon.profile.model.id,
+        modelRevision: PRESENTATION_ARTIFACT.contentVersion, modelHash: hex(PRESENTATION_ARTIFACT.blobHash),
+      }),
+    },
+    {
+      family: "vehicle" as const,
+      entityId: vehicleEntityId,
+      sourceId: "vehicle:sailboat:orphan",
+      blockerId: "vehicle-semantic-presentation-binding-not-exported",
+      record: Object.freeze({
+        ...entityRecord(1),
+        entityId: vehicleEntityId,
+        class: "vehicle" as const,
+        externalEntityId: "vehicle:sailboat:orphan",
+        specimenId: "vehicle:sailboat:orphan",
+        kindKey: "sailboat",
+        name: "Orphan Sailboat",
+        modelKey: vehicle.profile.model.id,
+        modelRevision: PRESENTATION_ARTIFACT.contentVersion,
+        modelHash: hex(PRESENTATION_ARTIFACT.blobHash),
+        equipment: Object.freeze([]),
+      }),
+    },
+  ];
+
+  for (const entry of cases) {
+    const { adapter } = await createAdapter();
+    const source = orphanEntityEnvelope(entry.record);
+    const token = adapter.prepareRuntimeExtraction(source);
+    const result = adapter.extractBytes(source.render, context());
+    adapter.finishPreparedRuntimeExtraction(token, true);
+    assert.equal(result.presentations.some((presentation) => presentation.entityId === entry.entityId), false,
+      entry.family);
+    assert.equal(result.presentationFrame.bindings.some((binding) => binding.role === entry.family), false,
+      entry.family);
+    assert.deepEqual(result.presentationFrame.runtimeBlockers, [{
+      id: `runtime:${entry.family}:source:${entry.sourceId}:entity:${entry.entityId}:${entry.blockerId}`,
+      family: entry.family,
+      status: "unavailable",
+      sourceId: entry.sourceId,
+      entityId: entry.entityId,
+      blockerId: entry.blockerId,
+    }]);
+    assert.deepEqual(adapter.diagnostics().runtimeBlockers, result.presentationFrame.runtimeBlockers);
+    composeExactPresentationFrame(result, presentations);
+  }
+
+  const { adapter } = await createAdapter();
+  const orphan = orphanEntityEnvelope(combatRecord({
+    role: "summon", recordId: "orphan:summon:no-domain", modelKey: summon.profile.model.id,
+    modelRevision: PRESENTATION_ARTIFACT.contentVersion, modelHash: hex(PRESENTATION_ARTIFACT.blobHash),
+  }));
+  const source = Object.freeze({ ...orphan, hud: new Uint8Array() });
+  const token = adapter.prepareRuntimeExtraction(source);
+  const result = adapter.extractBytes(source.render, context());
+  adapter.finishPreparedRuntimeExtraction(token, true);
+  assert.equal(result.presentations.some((presentation) => presentation.entityId === COMBAT_ENTITY_ID), false);
+  assert.equal(result.presentationFrame.bindings.length, 0);
+  assert.deepEqual(result.presentationFrame.runtimeBlockers, [{
+    id: `runtime:summon:source:orphan:summon:no-domain:entity:${COMBAT_ENTITY_ID}:summon-semantic-binding-row-missing`,
+    family: "summon",
+    status: "unavailable",
+    sourceId: "orphan:summon:no-domain",
+    entityId: COMBAT_ENTITY_ID,
+    blockerId: "summon-semantic-binding-row-missing",
+  }]);
+  assert.equal(result.presentationFrame.combatBlockers[0]?.blockerId, "domain-extraction-not-submitted");
+  composeExactPresentationFrame(result, presentations);
 });
 
 test("unmapped and legacy-unlinked combat entities are suppressed without creature fallback", async () => {
@@ -824,6 +1148,60 @@ test("same-envelope exact machine anchor compiles stable machine resources and i
   assert.equal(adapter.diagnostics().machineBindings, 1);
   assert.deepEqual(adapter.diagnostics().machineBlockers, []);
   assert.deepEqual(adapter.diagnostics().machines[0]?.instanceIds, machine.instanceIds);
+  const boundMachine = result.presentationFrame.bindings.find((binding) => binding.role === "machine");
+  assert.ok(boundMachine?.role === "machine");
+  assert.equal(boundMachine.id, machine.id);
+  assert.deepEqual(boundMachine.instanceIds, machine.instanceIds);
+  assertExactBindingIdentity(boundMachine.binding, {
+    role: "machine",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    primaryContentRef: { domain: "machine-profile", id: "apiary" },
+  }, presentations);
+  composeExactPresentationFrame(result, presentations);
+});
+
+test("composer rejects presentation coverage, profile, and instance tampering before touching its sink", async () => {
+  const { adapter, presentations } = await createAdapter();
+  const source = envelope(Item.StonePickaxe);
+  const token = adapter.prepareRuntimeExtraction(source);
+  const result = adapter.extractBytes(source.render, context());
+  adapter.finishPreparedRuntimeExtraction(token, true);
+  const binding = result.presentationFrame.bindings[0];
+  assert.ok(binding);
+  const cases = [
+    {
+      name: "coverage",
+      pattern: /presentation frame coverage identity differs/u,
+      frame: Object.freeze({ ...result.presentationFrame, coverageHash: "0".repeat(32) }),
+    },
+    {
+      name: "profile",
+      pattern: /has no exact coverage contract/u,
+      frame: Object.freeze({
+        ...result.presentationFrame,
+        bindings: Object.freeze([Object.freeze({
+          ...binding,
+          binding: Object.freeze({ ...binding.binding, profileId: "held:forged-profile" }),
+        })]),
+      }),
+    },
+    {
+      name: "instance",
+      pattern: /references a missing instance/u,
+      frame: Object.freeze({
+        ...result.presentationFrame,
+        bindings: Object.freeze([Object.freeze({ ...binding, instanceIds: Object.freeze([BigInt(0)]) })]),
+      }),
+    },
+  ];
+  for (const entry of cases) {
+    const { composer, resourceRevisions } = presentationComposer(presentations);
+    const tampered = Object.freeze({ ...result, presentationFrame: entry.frame });
+    assert.throws(() => composer.submitEntities(tampered), entry.pattern, entry.name);
+    assert.deepEqual(resourceRevisions, [], `${entry.name} reached the renderer sink`);
+    assert.equal(composer.diagnostics().presentationBindings, 0);
+  }
 });
 
 test("machine presentation resource replay is stable, ordered, and resets by epoch", async () => {
@@ -1040,9 +1418,17 @@ test("dropped item missing and unmapped bindings stay explicit and never borrow 
       modelHash: new Uint8Array(16),
       blockers: [`dropped-item-presentation-${status}`],
     });
+    const hot = planRustDroppedHotTransformsR10(source);
+    assert.equal(hot.transforms.length, 1,
+      "native hot transform admission must not depend on an exact visual presentation profile");
+    assert.equal(hot.transforms[0]?.dropId, "drop:presentation-test");
+    assert.equal(hot.transforms[0]?.entityId, DROP_ENTITY_ID);
     const token = adapter.prepareRuntimeExtraction(source);
-    assert.throws(() => adapter.extractBytes(source.render, context()), /BWR6 extraction is not promotable/u);
+    const result = adapter.extractBytes(source.render, context());
     adapter.finishPreparedRuntimeExtraction(token, true);
+    assert.equal(result.presentations.some((presentation) => presentation.entityId === DROP_ENTITY_ID), false);
+    assert.equal(result.presentationFrame.bindings.some((binding) => binding.role === "dropped-item"), false);
+    assert.deepEqual(result.presentationFrame.droppedBlockers, adapter.diagnostics().droppedBlockers);
     assert.equal(adapter.diagnostics().droppedBindings, 0);
     assert.deepEqual(adapter.diagnostics().droppedBlockers, [{
       id: `dropped-item:${status}:item:${itemId}:drop:drop:presentation-test:entity:${DROP_ENTITY_ID}${blockerId === undefined ? "" : `:${blockerId}`}`,
@@ -1075,6 +1461,130 @@ test("dropped item entity revision and model identity mismatches reject the prep
   const other = await createAdapter();
   assert.throws(() => other.adapter.prepareRuntimeExtraction(mismatch({ modelKey: "wrong-drop-model" })),
     /model key differs from its presentation profile/u);
+});
+
+test("dropped hot transform planner rejects missing, duplicate, cross-envelope, stale, and mismatched records", async () => {
+  const { presentations } = await createAdapter();
+  const exact = presentations.registry.resolve("dropped-item", { domain: "item", id: String(Item.CaptureOrb) });
+  assert.ok(exact.status === "exact");
+  const source = dropEnvelope({
+    itemCode: Item.CaptureOrb,
+    status: "exact",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    modelKey: exact.profile.model.id,
+    modelRevision: PRESENTATION_ARTIFACT.contentVersion,
+    modelHash: hex(PRESENTATION_ARTIFACT.blobHash),
+  });
+
+  const missingRecord = Object.freeze({
+    ...source,
+    render: encodeRustEntityExtractionR6V3(entityExtraction()),
+  });
+  assert.throws(() => planRustDroppedHotTransformsR10(missingRecord), /no same-envelope BWR6 entity/u);
+
+  const orphan = Object.freeze({
+    ...dropRecord(1, exact.profile.model.id, PRESENTATION_ARTIFACT.contentVersion, hex(PRESENTATION_ARTIFACT.blobHash)),
+    entityId: BigInt("4294967299"),
+    externalEntityId: "drop:orphan",
+    specimenId: "drop:orphan",
+  });
+  const duplicateRecord = Object.freeze({
+    ...source,
+    render: encodeRustEntityExtractionR6V3(entityExtraction(1, 10, [], [
+      dropRecord(1, exact.profile.model.id, PRESENTATION_ARTIFACT.contentVersion, hex(PRESENTATION_ARTIFACT.blobHash)),
+      orphan,
+    ])),
+  });
+  assert.throws(() => planRustDroppedHotTransformsR10(duplicateRecord), /has no same-envelope BWX0 row/u);
+
+  const duplicateRow = Object.freeze({
+    ...source,
+    hud: domainBundle(1, 10, new Map([
+      [2, [playerRow(BigInt(1), Item.StonePickaxe)]],
+      [3, [
+        dropRow({
+          itemCode: Item.CaptureOrb,
+          entityRevision: BigInt(1),
+          status: "exact",
+          profileId: exact.profile.id,
+          modelId: exact.profile.model.id,
+        }),
+        dropRow({
+          itemCode: Item.CaptureOrb,
+          entityRevision: BigInt(1),
+          status: "exact",
+          profileId: exact.profile.id,
+          modelId: exact.profile.model.id,
+          dropId: "drop:z-duplicate",
+        }),
+      ]],
+    ])),
+  });
+  assert.throws(() => planRustDroppedHotTransformsR10(duplicateRow), /duplicate or empty entity identity/u);
+
+  const crossEnvelope = Object.freeze({
+    ...source,
+    hud: domainBundle(2, 10, new Map([
+      [2, [playerRow(BigInt(1), Item.StonePickaxe)]],
+      [3, [dropRow({
+        itemCode: Item.CaptureOrb,
+        entityRevision: BigInt(1),
+        status: "exact",
+        profileId: exact.profile.id,
+        modelId: exact.profile.model.id,
+      })]],
+    ])),
+  });
+  assert.throws(() => planRustDroppedHotTransformsR10(crossEnvelope), /inner extraction revision/u);
+
+  const crossIdentity = Object.freeze({
+    ...source,
+    identity: Object.freeze({ ...source.identity, stateHash: "4".repeat(32) }),
+  });
+  assert.throws(() => planRustDroppedHotTransformsR10(crossIdentity), /BWX0 state hash differs/u);
+
+  const mismatchedPosition = Object.freeze({
+    ...source,
+    render: encodeRustEntityExtractionR6V3(entityExtraction(1, 10, [], [Object.freeze({
+      ...dropRecord(1, exact.profile.model.id, PRESENTATION_ARTIFACT.contentVersion, hex(PRESENTATION_ARTIFACT.blobHash)),
+      position: Object.freeze({ x: 2.001, y: 4, z: 0 }),
+    })])),
+  });
+  assert.throws(() => planRustDroppedHotTransformsR10(mismatchedPosition), /position differs from BWR6/u);
+
+  const newer = dropEnvelope({
+    itemCode: Item.CaptureOrb,
+    status: "exact",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    modelKey: exact.profile.model.id,
+    modelRevision: PRESENTATION_ARTIFACT.contentVersion,
+    modelHash: hex(PRESENTATION_ARTIFACT.blobHash),
+    revision: 2,
+    authorityTick: 11,
+    createdTick: BigInt(10),
+  });
+  const newerFrame = planRustDroppedHotTransformsR10(newer);
+  assert.throws(() => planRustDroppedHotTransformsR10(source, newerFrame), /regressed its monotonic source revision/u);
+
+  const staleEntity = dropEnvelope({
+    itemCode: Item.CaptureOrb,
+    status: "exact",
+    profileId: exact.profile.id,
+    modelId: exact.profile.model.id,
+    modelKey: exact.profile.model.id,
+    modelRevision: PRESENTATION_ARTIFACT.contentVersion,
+    modelHash: hex(PRESENTATION_ARTIFACT.blobHash),
+    revision: 3,
+    authorityTick: 12,
+    entityRevision: BigInt(1),
+    createdTick: BigInt(10),
+  });
+  assert.throws(() => planRustDroppedHotTransformsR10(staleEntity, newerFrame), /native entity revision or age/u);
+
+  const reusedRevision = Object.freeze({ ...newer, extractionHash: "3".repeat(32) });
+  assert.throws(() => planRustDroppedHotTransformsR10(reusedRevision, newerFrame), /revision was reused for different state/u);
 });
 
 test("same-envelope revision mismatch, reserved-slot collision, and byte substitution fail closed", async () => {

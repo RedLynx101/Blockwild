@@ -79,7 +79,8 @@ export type RustWorldRuntimeHostDependenciesV1 = Readonly<{
     generatorHash: string,
   ) => RustMultiplayerAuthorityV1;
   persistenceFactory?: (input: Readonly<{
-    worldId: string;
+    catalogWorldId: string;
+    persistenceWorldId: string;
     adapter: RustWorldRuntimeAdapterV1;
   }>) => RustWorldNativePersistenceBindingV1;
 }>;
@@ -207,8 +208,14 @@ function productionRuntimeService(adapter: RustWorldRuntimeAdapterV1) {
  * Builds the browser half of R8 around the service already owned by the sole
  * integrated runtime adapter. This function must never construct a worker.
  */
+export function rustNativePersistenceWorldIdV1(
+  identity: Pick<RustIntegratedRuntimeIdentityV1, "universeId" | "locationId">,
+) {
+  return `${identity.universeId}@${identity.locationId}`;
+}
+
 function productionNativePersistence(
-  input: Readonly<{ worldId: string; adapter: RustWorldRuntimeAdapterV1 }>,
+  input: Readonly<{ catalogWorldId: string; persistenceWorldId: string; adapter: RustWorldRuntimeAdapterV1 }>,
 ): RustWorldNativePersistenceBindingV1 {
   const service = productionRuntimeService(input.adapter);
   const platform = new IndexedDbPersistenceAdapterV1();
@@ -216,7 +223,7 @@ function productionNativePersistence(
   const port = new RustIntegratedPersistenceRuntimePortV1(service);
   const pump = new RustIntegratedPersistencePumpV1(service, browserRuntime);
   const session = new RustNativeWorldPersistenceSessionV1({
-    worldId: input.worldId,
+    worldId: input.persistenceWorldId,
     runtime: service,
     port,
     pump,
@@ -277,12 +284,13 @@ export class RustWorldRuntimeHostV1 {
         }
         nativePersistence = this.config.catalogWorldId
           ? (this.dependencies.persistenceFactory ?? productionNativePersistence)({
-            worldId: this.config.catalogWorldId,
+            catalogWorldId: this.config.catalogWorldId,
+            persistenceWorldId: rustNativePersistenceWorldIdV1(created),
             adapter,
           })
           : null;
-        if (nativePersistence && nativePersistence.session.worldId !== this.config.catalogWorldId) {
-          throw new Error("Rust native persistence session does not match its browser catalog world");
+        if (nativePersistence && nativePersistence.session.worldId !== rustNativePersistenceWorldIdV1(created)) {
+          throw new Error("Rust native persistence session does not match its attested runtime world");
         }
         this.adapter = adapter;
         this.nativePersistence = nativePersistence;

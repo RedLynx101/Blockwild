@@ -96,6 +96,22 @@ fn main() {
         std::fs::write(output, result).expect("write generation result");
         return;
     }
+    if arguments.first().map(String::as_str) == Some("--settlement-query") {
+        let input = arguments.get(1).expect("--settlement-query requires an input path");
+        let output = arguments.get(2).expect("--settlement-query requires an output path");
+        let request = std::fs::read(input).expect("read settlement query request");
+        let result = blockwild_generation::query_settlements_packet_v1(&request).expect("query settlements packet");
+        std::fs::write(output, result).expect("write settlement query result");
+        return;
+    }
+    if arguments.first().map(String::as_str) == Some("--dragon-lair-query") {
+        let input = arguments.get(1).expect("--dragon-lair-query requires an input path");
+        let output = arguments.get(2).expect("--dragon-lair-query requires an output path");
+        let request = std::fs::read(input).expect("read dragon-lair query request");
+        let result = blockwild_generation::query_dragon_lair_packet_v1(&request).expect("query dragon-lair packet");
+        std::fs::write(output, result).expect("write dragon-lair query result");
+        return;
+    }
     if arguments.first().map(String::as_str) == Some("--packet-benchmark") {
         let input = arguments.get(1).expect("--packet-benchmark requires an input path");
         let output = arguments.get(2).expect("--packet-benchmark requires an output path");

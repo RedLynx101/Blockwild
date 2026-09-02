@@ -20,15 +20,21 @@ export const RUST_INTEGRATED_RUNTIME_BULK_HEADER_BYTES_V1 = 64;
 export const RUST_INTEGRATED_RUNTIME_BULK_MAX_CONTROL_BYTES_V1 = 16 * 1024;
 export const RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1 = 1024 * 1024;
 export const RUST_INTEGRATED_RUNTIME_BULK_MAX_ATTACHMENT_BYTES_V1 = 256 * 1024 * 1024;
+export const RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_MAX_PACKET_BYTES_V1 = 128 * 1024 * 1024;
 export const RUST_INTEGRATED_RUNTIME_BULK_MAX_PENDING_V1 = 2;
 export const RUST_INTEGRATED_RUNTIME_BULK_MAX_QUEUED_BYTES_V1 = 256 * 1024 * 1024;
 export const RUST_INTEGRATED_RUNTIME_BULK_SAVE_CHUNK_BYTES_V1 = 4 * 1024 * 1024;
 export const RUST_INTEGRATED_RUNTIME_BULK_MAX_SAVE_CHUNKS_V1 = 64;
+export const RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1 = 4 * 1024;
+export const RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1 = 32 * 1024 * 1024;
 
 export const RUST_INTEGRATED_PERSISTENCE_REQUEST_TYPE_V1 = "blockwild.persistence.browser-request.r8.v1";
 export const RUST_INTEGRATED_PERSISTENCE_RESPONSE_TYPE_V1 = "blockwild.persistence.browser-response.r8.v1";
 export const RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_STAGE_CHUNK_TYPE_V1 = "blockwild.persistence.compatibility-stage-chunk.r8.v1";
 export const RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1 = "blockwild.persistence.compatibility-hydration-chunk.r8.v1";
+export const RUST_INTEGRATED_PERSISTENCE_STATUS_TYPE_V1 = "blockwild.persistence.status.r8.v1";
+export const RUST_INTEGRATED_PERSISTENCE_STATUS_RECEIPT_TYPE_V1 = "blockwild.persistence.status-receipt.r8.v1";
+export const RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1 = "blockwild.runtime.legacy-world-projection.r8.v1";
 
 const REQUEST_MAGIC = Uint8Array.of(0x42, 0x57, 0x52, 0x42); // BWRB
 const RESPONSE_MAGIC = Uint8Array.of(0x42, 0x57, 0x52, 0x43); // BWRC
@@ -111,9 +117,61 @@ export type RustIntegratedRuntimeBulkRequestV1 =
     expected: RustIntegratedRuntimeBulkStateV1;
     saveId: string;
     createdAt: number;
+  }>
+  | Readonly<{
+    type: "runtime-bulk-persistence-status-v1";
+    requestId: number;
+    clientEpoch: number;
+    expected: RustIntegratedRuntimeBulkStateV1;
+    typeId: typeof RUST_INTEGRATED_PERSISTENCE_STATUS_TYPE_V1;
+    payload: Uint8Array;
+  }>
+  | Readonly<{
+    /** Dedicated world-only migration; rich legacy flags are rejected by Rust without consuming the staged source. */
+    type: "runtime-bulk-migrate-legacy-world-v1";
+    requestId: number;
+    clientEpoch: number;
+    expected: RustIntegratedRuntimeBulkStateV1;
+    stageId: string;
+    createdAt: number;
+    legacyNonWorldStateFlags: number;
+    sourceKey: string;
+    sourceFormat: string;
+    typeId: typeof RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1;
+    worldProjection: Uint8Array;
   }>;
 
 export type RustIntegratedRuntimeBulkSaveStageStateV1 = "staged" | "finalized" | "cancelled";
+
+export type RustIntegratedRuntimeLegacyMigrationAttestationV1 = Readonly<{
+  migrationId: string;
+  createdAt: number;
+  sourceKey: string;
+  sourceFormat: string;
+  sourceByteLength: number;
+  sourceHash: string;
+  projectionHash: string;
+  projectionEditCount: number;
+  projectionFacingCount: number;
+  nativeWorldSemanticHash: string;
+  nativeWorldEditCount: number;
+  nativeWorldFacingCount: number;
+  worldId: string;
+  universeId: string;
+  locationId: string;
+  worldSeed: string;
+  generatorHash: string;
+  contentHash: string;
+  terrainContentHash: string;
+  generationOptionsHash: string;
+  backupByteLength: number;
+  backupHash: string;
+  backupChunks: number;
+  nativeRecordSetHash: string;
+  descriptorHash: string;
+  saveSetHash: string;
+  manifestHash: string;
+}>;
 
 export type RustIntegratedRuntimeBulkResponseV1 =
   | Readonly<{
@@ -169,6 +227,7 @@ export type RustIntegratedRuntimeBulkResponseV1 =
     chunkCount: number;
     totalBytes: number;
     compatibilityHash: string;
+    legacyMigration: RustIntegratedRuntimeLegacyMigrationAttestationV1 | null;
   }>
   | Readonly<{
     type: "runtime-bulk-data-v1";
@@ -180,6 +239,15 @@ export type RustIntegratedRuntimeBulkResponseV1 =
     typeId: typeof RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1;
     chunkIndex: number;
     chunkCount: number;
+    payload: Uint8Array;
+  }>
+  | Readonly<{
+    type: "runtime-bulk-persistence-status-v1";
+    requestId: number;
+    clientEpoch: number;
+    workerEpoch: number;
+    current: RustIntegratedRuntimeBulkStateV1;
+    typeId: typeof RUST_INTEGRATED_PERSISTENCE_STATUS_RECEIPT_TYPE_V1;
     payload: Uint8Array;
   }>
   | Readonly<{
@@ -281,6 +349,12 @@ class Writer {
     if (bytes.byteLength < 1 || bytes.byteLength > maximum) throw new RustIntegratedRuntimeBulkCodecError("string", `${label} exceeds its byte budget`);
     this.u16(bytes.byteLength); this.add(bytes);
   }
+  bytes(value: Uint8Array, label: string, maximum: number) {
+    if (!(value instanceof Uint8Array) || value.byteLength < 1 || value.byteLength > maximum) {
+      throw new RustIntegratedRuntimeBulkCodecError("bytes", `${label} exceeds its byte budget`);
+    }
+    this.u16(value.byteLength); this.add(value);
+  }
   state(value: RustIntegratedRuntimeBulkStateV1) {
     for (const revision of [
       value.revision.epoch, value.revision.world, value.revision.entities, value.revision.gameplay,
@@ -323,6 +397,11 @@ class Reader {
     if (length < 1 || length > maximum) throw new RustIntegratedRuntimeBulkCodecError("string", `${label} exceeds its byte budget`);
     try { return wellFormed(decoder.decode(this.take(length)), label); }
     catch (error) { if (error instanceof RustIntegratedRuntimeBulkCodecError) throw error; throw new RustIntegratedRuntimeBulkCodecError("unicode", `${label} is not valid UTF-8`); }
+  }
+  inlineBytes(label: string, maximum: number) {
+    const length = this.u16();
+    if (length < 1 || length > maximum) throw new RustIntegratedRuntimeBulkCodecError("bytes", `${label} exceeds its byte budget`);
+    return Uint8Array.from(this.take(length));
   }
   state(): RustIntegratedRuntimeBulkStateV1 {
     return Object.freeze({
@@ -393,7 +472,7 @@ function decodeControl(controlValue: Uint8Array | ArrayBuffer, attachmentValue: 
   for (let index = 0; index < magic.length; index += 1) if (control[index] !== magic[index]) throw new RustIntegratedRuntimeBulkCodecError("magic", "bulk control magic is invalid");
   const view = new DataView(control.buffer, control.byteOffset, control.byteLength);
   if (view.getUint16(4, true) !== RUST_INTEGRATED_RUNTIME_BULK_WIRE_V1 || view.getUint16(6, true) !== RUST_INTEGRATED_RUNTIME_BULK_SCHEMA_V2) throw new RustIntegratedRuntimeBulkCodecError("version", "bulk wire or runtime schema is unsupported");
-  if (view.getUint8(10) !== 4) throw new RustIntegratedRuntimeBulkCodecError("domain", "bulk lane currently accepts only opaque persistence browser messages");
+  if (view.getUint8(10) !== 4) throw new RustIntegratedRuntimeBulkCodecError("domain", "bulk lane currently accepts only persistence-domain transfers");
   if (view.getUint8(11) !== 0) throw new RustIntegratedRuntimeBulkCodecError("reserved", "bulk reserved header bits must be zero");
   const bodyLength = view.getUint32(24, true);
   const attachmentLength = view.getUint32(28, true);
@@ -465,6 +544,33 @@ export function encodeRustIntegratedRuntimeBulkRequestV1(request: RustIntegrated
       body.string(request.saveId, "bulk native save id", 180);
       body.u64(integer(request.createdAt, 0, U64_MAX_SAFE, "bulk native save creation time"));
       break;
+    case "runtime-bulk-persistence-status-v1":
+      operation = 9;
+      body.string(typeId(request.typeId, RUST_INTEGRATED_PERSISTENCE_STATUS_TYPE_V1), "bulk persistence status type", 160);
+      body.bytes(request.payload, "bulk persistence status payload", RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1);
+      break;
+    case "runtime-bulk-migrate-legacy-world-v1":
+      operation = 10;
+      body.string(request.stageId, "bulk legacy migration stage id", 180);
+      body.u64(integer(request.createdAt, 0, U64_MAX_SAFE, "bulk legacy migration creation time"));
+      body.u16(integer(request.legacyNonWorldStateFlags, 0, 0xffff, "bulk legacy non-world state flags"));
+      body.string(request.sourceKey, "bulk legacy source key", 512);
+      body.string(request.sourceFormat, "bulk legacy source format", 128);
+      body.string(
+        typeId(request.typeId, RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1),
+        "bulk legacy world projection type",
+        160,
+      );
+      if (!(request.worldProjection instanceof Uint8Array)
+        || request.worldProjection.byteLength < 1
+        || request.worldProjection.byteLength > RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1) {
+        throw new RustIntegratedRuntimeBulkCodecError(
+          "legacy-world-projection",
+          "bulk legacy world projection is outside its 32 MiB byte budget",
+        );
+      }
+      payload = request.worldProjection;
+      break;
   }
   return encodeControl(REQUEST_MAGIC, operation, 0, request.requestId, request.clientEpoch, 0, body.finish(), payload);
 }
@@ -509,6 +615,47 @@ export function decodeRustIntegratedRuntimeBulkRequestV1(control: Uint8Array | A
   } else if (envelope.operation === 8) {
     if (envelope.attachment.byteLength !== 0) throw new RustIntegratedRuntimeBulkCodecError("attachment", "bulk native save initialization cannot carry an attachment");
     request = Object.freeze({ type: "runtime-bulk-initialize-native-save-v1", requestId: envelope.requestId, clientEpoch: envelope.clientEpoch, expected, saveId: body.string("bulk native save id", 180), createdAt: body.u64() });
+  } else if (envelope.operation === 9) {
+    if (envelope.attachment.byteLength !== 0) throw new RustIntegratedRuntimeBulkCodecError("attachment", "bulk persistence status cannot carry an attachment");
+    const decodedType = typeId(body.string("bulk persistence status type", 160), RUST_INTEGRATED_PERSISTENCE_STATUS_TYPE_V1);
+    request = Object.freeze({
+      type: "runtime-bulk-persistence-status-v1",
+      requestId: envelope.requestId,
+      clientEpoch: envelope.clientEpoch,
+      expected,
+      typeId: decodedType as typeof RUST_INTEGRATED_PERSISTENCE_STATUS_TYPE_V1,
+      payload: body.inlineBytes("bulk persistence status payload", RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1),
+    });
+  } else if (envelope.operation === 10) {
+    const stageId = body.string("bulk legacy migration stage id", 180);
+    const createdAt = body.u64();
+    const legacyNonWorldStateFlags = body.u16();
+    const sourceKey = body.string("bulk legacy source key", 512);
+    const sourceFormat = body.string("bulk legacy source format", 128);
+    const decodedType = typeId(
+      body.string("bulk legacy world projection type", 160),
+      RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
+    );
+    if (envelope.attachment.byteLength < 1
+      || envelope.attachment.byteLength > RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1) {
+      throw new RustIntegratedRuntimeBulkCodecError(
+        "legacy-world-projection",
+        "bulk legacy world projection is outside its 32 MiB byte budget",
+      );
+    }
+    request = Object.freeze({
+      type: "runtime-bulk-migrate-legacy-world-v1",
+      requestId: envelope.requestId,
+      clientEpoch: envelope.clientEpoch,
+      expected,
+      stageId,
+      createdAt,
+      legacyNonWorldStateFlags,
+      sourceKey,
+      sourceFormat,
+      typeId: decodedType as typeof RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
+      worldProjection: envelope.attachment,
+    });
   } else throw new RustIntegratedRuntimeBulkCodecError("operation", "bulk request operation is unknown");
   body.finish();
   return request;
@@ -546,6 +693,37 @@ export function encodeRustIntegratedRuntimeBulkResponseV1(response: RustIntegrat
     body.u32(response.chunkCount);
     body.u64(response.totalBytes);
     body.hash(response.compatibilityHash, "bulk compatibility hash");
+    body.u8(response.legacyMigration ? 1 : 0);
+    if (response.legacyMigration) {
+      const value = response.legacyMigration;
+      body.string(value.migrationId, "bulk migration id", 180);
+      body.u64(value.createdAt);
+      body.string(value.sourceKey, "bulk migration source key", 512);
+      body.string(value.sourceFormat, "bulk migration source format", 128);
+      body.u64(value.sourceByteLength);
+      body.hash(value.sourceHash, "bulk migration source hash");
+      body.hash(value.projectionHash, "bulk migration projection hash");
+      body.u64(value.projectionEditCount);
+      body.u64(value.projectionFacingCount);
+      body.hash(value.nativeWorldSemanticHash, "bulk migration native world semantic hash");
+      body.u64(value.nativeWorldEditCount);
+      body.u64(value.nativeWorldFacingCount);
+      body.string(value.worldId, "bulk migration world id", 180);
+      body.string(value.universeId, "bulk migration universe id", 64);
+      body.string(value.locationId, "bulk migration location id", 128);
+      body.string(value.worldSeed, "bulk migration world seed", 512);
+      body.hash(value.generatorHash, "bulk migration generator hash");
+      body.hash(value.contentHash, "bulk migration content hash");
+      body.hash(value.terrainContentHash, "bulk migration terrain content hash");
+      body.hash(value.generationOptionsHash, "bulk migration generation options hash");
+      body.u64(value.backupByteLength);
+      body.hash(value.backupHash, "bulk migration backup hash");
+      body.u32(value.backupChunks);
+      body.hash(value.nativeRecordSetHash, "bulk migration native record set hash");
+      body.hash(value.descriptorHash, "bulk migration descriptor hash");
+      body.hash(value.saveSetHash, "bulk migration save set hash");
+      body.hash(value.manifestHash, "bulk migration manifest hash");
+    }
   } else if (response.type === "runtime-bulk-data-v1") {
     operation = 6;
     body.state(response.current);
@@ -557,6 +735,11 @@ export function encodeRustIntegratedRuntimeBulkResponseV1(response: RustIntegrat
       throw new RustIntegratedRuntimeBulkCodecError("hydration-data", "bulk hydration chunk metadata is invalid");
     }
     payload = response.payload;
+  } else if (response.type === "runtime-bulk-persistence-status-v1") {
+    operation = 7;
+    body.state(response.current);
+    body.string(typeId(response.typeId, RUST_INTEGRATED_PERSISTENCE_STATUS_RECEIPT_TYPE_V1), "bulk persistence status receipt type", 160);
+    body.bytes(response.payload, "bulk persistence status receipt payload", RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1);
   } else {
     operation = 255; status = 1; body.u8(response.current ? 1 : 0); if (response.current) body.state(response.current);
     body.string(response.code, "bulk error code", 96); body.string(response.message, "bulk error message", 2_048);
@@ -602,15 +785,53 @@ export function decodeRustIntegratedRuntimeBulkResponseV1(control: Uint8Array | 
     });
   } else if (envelope.operation === 5) {
     if (envelope.attachment.byteLength !== 0) throw new RustIntegratedRuntimeBulkCodecError("attachment", "bulk hydration receipt cannot carry an attachment");
+    const current = body.state();
+    const recoveryId = body.string("bulk recovery id", 256);
+    const nativeDomains = body.u16();
+    const chunkCount = body.u32();
+    const totalBytes = body.u64();
+    const compatibilityHash = body.hash();
+    const migrationFlag = body.u8();
+    if (migrationFlag > 1) throw new RustIntegratedRuntimeBulkCodecError("hydration-migration", "bulk hydration migration flag is invalid");
+    const legacyMigration = migrationFlag === 0 ? null : Object.freeze({
+      migrationId: body.string("bulk migration id", 180),
+      createdAt: body.u64(),
+      sourceKey: body.string("bulk migration source key", 512),
+      sourceFormat: body.string("bulk migration source format", 128),
+      sourceByteLength: body.u64(),
+      sourceHash: body.hash(),
+      projectionHash: body.hash(),
+      projectionEditCount: body.u64(),
+      projectionFacingCount: body.u64(),
+      nativeWorldSemanticHash: body.hash(),
+      nativeWorldEditCount: body.u64(),
+      nativeWorldFacingCount: body.u64(),
+      worldId: body.string("bulk migration world id", 180),
+      universeId: body.string("bulk migration universe id", 64),
+      locationId: body.string("bulk migration location id", 128),
+      worldSeed: body.string("bulk migration world seed", 512),
+      generatorHash: body.hash(),
+      contentHash: body.hash(),
+      terrainContentHash: body.hash(),
+      generationOptionsHash: body.hash(),
+      backupByteLength: body.u64(),
+      backupHash: body.hash(),
+      backupChunks: body.u32(),
+      nativeRecordSetHash: body.hash(),
+      descriptorHash: body.hash(),
+      saveSetHash: body.hash(),
+      manifestHash: body.hash(),
+    });
     response = Object.freeze({
       ...base,
       type: "runtime-bulk-hydration-v1",
-      current: body.state(),
-      recoveryId: body.string("bulk recovery id", 256),
-      nativeDomains: body.u16(),
-      chunkCount: body.u32(),
-      totalBytes: body.u64(),
-      compatibilityHash: body.hash(),
+      current,
+      recoveryId,
+      nativeDomains,
+      chunkCount,
+      totalBytes,
+      compatibilityHash,
+      legacyMigration,
     });
   } else if (envelope.operation === 6) {
     const current = body.state();
@@ -623,6 +844,17 @@ export function decodeRustIntegratedRuntimeBulkResponseV1(control: Uint8Array | 
       throw new RustIntegratedRuntimeBulkCodecError("hydration-data", "bulk hydration chunk metadata is invalid");
     }
     response = Object.freeze({ ...base, type: "runtime-bulk-data-v1", current, transferToken, typeId: decodedType as typeof RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1, chunkIndex, chunkCount, payload: envelope.attachment });
+  } else if (envelope.operation === 7) {
+    if (envelope.attachment.byteLength !== 0) throw new RustIntegratedRuntimeBulkCodecError("attachment", "bulk persistence status response cannot carry an attachment");
+    const current = body.state();
+    const decodedType = typeId(body.string("bulk persistence status receipt type", 160), RUST_INTEGRATED_PERSISTENCE_STATUS_RECEIPT_TYPE_V1);
+    response = Object.freeze({
+      ...base,
+      type: "runtime-bulk-persistence-status-v1",
+      current,
+      typeId: decodedType as typeof RUST_INTEGRATED_PERSISTENCE_STATUS_RECEIPT_TYPE_V1,
+      payload: body.inlineBytes("bulk persistence status receipt payload", RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1),
+    });
   } else if (envelope.operation === 255) {
     if (envelope.attachment.byteLength !== 0) throw new RustIntegratedRuntimeBulkCodecError("attachment", "bulk error response cannot carry an attachment");
     const present = body.u8(); if (present > 1) throw new RustIntegratedRuntimeBulkCodecError("optional-state", "bulk optional state flag is invalid");

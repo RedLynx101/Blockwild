@@ -108,14 +108,22 @@ test("device recovery replays durable resource pages and not stale frame history
   const resources = decodeRenderResourceBatchV2(await fixture("canonical-resources.bwrd"));
   const frame = decodeRenderFrameV2(await fixture("canonical-frame.bwrf"));
   service.start({} as OffscreenCanvas, { moduleUrl: "/renderer.js", wasmUrl: "/renderer.wasm" }, frame.epoch, 640, 360);
+  const observedStates: string[] = [];
+  const unsubscribe = service.subscribe((diagnostics) => { observedStates.push(diagnostics.state); });
   emitReady(fake);
   service.applyResources(resources);
+  service.present(frame);
+  fake.emit(framePresented(frame.frameSequence, frameLifecycle(fake)));
+  assert.equal(service.snapshot().lastPresentedSequence, frame.frameSequence);
   fake.emit({ type: "device-lost", reason: "synthetic reset", ...initializeLifecycle(fake) });
   assert.equal(fake.commands.at(-1)?.type, "recover");
+  assert.equal(service.snapshot().lastPresentedSequence, null, "a lost surface cannot retain a visibility-ready frame marker");
   emitReplayRequired(fake);
   assert.equal(fake.commands.filter((command) => command.type === "resources").length, 2);
   assert.equal(service.snapshot().replayedResourceBytes, 1097);
   assert.equal(service.snapshot().lastError, null);
+  assert.ok(observedStates.includes("recovering"));
+  unsubscribe();
 });
 
 test("explicit recovery and resize commands preserve one deterministic replay source", async () => {
@@ -179,11 +187,14 @@ test("world epoch switch clears replay history so source revisions restart at on
   const frame = decodeRenderFrameV2(await fixture("canonical-frame.bwrf"));
   service.start({} as OffscreenCanvas, { moduleUrl: "/renderer.js", wasmUrl: "/renderer.wasm" }, frame.epoch, 640, 360);
   emitReady(fake);
+  const observedStates: string[] = [];
+  const unsubscribe = service.subscribe((diagnostics) => { observedStates.push(diagnostics.state); });
   assert.equal(service.applyResources(resources), true);
   assert.equal(service.present(frame), true);
   const priorFrameLifecycle = frameLifecycle(fake);
   const nextEpoch = frame.epoch + BigInt(1);
   service.switchEpoch(nextEpoch);
+  assert.equal(observedStates.at(-1), "recovering", "the shell observes fallback before recovery is sent");
   assert.equal(service.snapshot().epoch, nextEpoch);
   assert.equal(service.snapshot().resourceRevision, BigInt(0));
   assert.deepEqual(fake.commands.at(-1), { type: "recover", ...recoveryLifecycle(fake) });
@@ -206,6 +217,7 @@ test("world epoch switch clears replay history so source revisions restart at on
   fake.emit(framePresented(nextFrame.frameSequence, frameLifecycle(fake), { cpuMicros: 2 }));
   assert.equal(service.snapshot().lastPresentedSequence, frame.frameSequence);
   assert.throws(() => service.switchEpoch(BigInt(0)), /positive u64/u);
+  unsubscribe();
 });
 
 test("stale epoch and surface-generation acknowledgements are inert", async () => {

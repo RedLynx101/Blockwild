@@ -138,9 +138,10 @@ function sampleSurfaceMap(world: ChunkWorld, count: number, step: number): Surfa
 function renderSurfaceComparison() {
   const count = 96;
   const step = 64;
-  const legacy = new ChunkWorld();
+  const legacy = new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
   legacy.reset(SHOWCASE_SEED, undefined, { profile: "legacy-v14", biomeScale: 1 });
-  const current = new ChunkWorld();
+  // Offline comparison oracle; production worldgen remains Rust-required.
+  const current = new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
   current.reset(SHOWCASE_SEED, undefined, { profile: "world-below-v15" });
   const maps = [
     { title: "BEFORE · LEGACY V14", subtitle: "Local climate intersections", map: sampleSurfaceMap(legacy, count, step) },
@@ -317,10 +318,10 @@ export async function renderWorldOverhaulShowcase(output = DEFAULT_OUTPUT) {
   const files: string[] = [];
   files.push(...await writeSvgAndPng(renderSurfaceComparison(), path.join(output, "world-below-surface-before-after")));
 
-  const world = new ChunkWorld();
+  const world = new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
   world.reset(SHOWCASE_SEED, undefined, { profile: "world-below-v15" });
   files.push(...await writeSvgAndPng(renderCaveAtlas(world), path.join(output, "world-below-cave-atlas")));
-  const dwarfWorld = new ChunkWorld();
+  const dwarfWorld = new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
   dwarfWorld.reset(DWARF_SHOWCASE_SEED, undefined, { profile: "world-below-v15" });
   files.push(...await writeSvgAndPng(renderDwarvenHold(dwarfWorld), path.join(output, "world-below-dwarven-hold")));
 

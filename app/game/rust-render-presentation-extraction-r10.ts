@@ -40,7 +40,13 @@ import {
 } from "./rust-render-extraction-v2.ts";
 import type {
   AttestedRenderPresentationCatalogV1,
+  RenderPresentationContentRefV1,
   RenderPresentationProfileV1,
+} from "./rust-render-presentation-profile.ts";
+import {
+  createRenderPresentationCoverageInventoryR10,
+  RENDER_PRESENTATION_CATALOG_ID_V1,
+  RENDER_PRESENTATION_CATALOG_REVISION_V1,
 } from "./rust-render-presentation-profile.ts";
 import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow.ts";
 
@@ -64,14 +70,81 @@ export type RustPresentationExtractionDiagnosticsR10 = Readonly<{
   schema: 1;
   extractionRevision: bigint | null;
   heldAttachments: number;
+  heldPresentations: readonly RustHeldPresentationR10[];
   heldBlockers: readonly RustHeldPresentationBlockerR10[];
   droppedBindings: number;
+  droppedPresentations: readonly RustDroppedPresentationR10[];
   droppedBlockers: readonly RustDroppedPresentationBlockerR10[];
   machineBindings: number;
   machineBlockers: readonly RustMachinePresentationBlockerR10[];
   machines: readonly RustMachinePresentationR10[];
   combatBindings: number;
+  combatPresentations: readonly RustCombatPresentationR10[];
   combatBlockers: readonly RustCombatPresentationBlockerR10[];
+  runtimeBlockers: readonly RustPresentationRuntimeBlockerR10[];
+  coverageHash: string;
+}>;
+
+export type RustPresentationRuntimeBlockerR10 = Readonly<{
+  id: string;
+  family: "dropped-item" | "held-item" | "projectile" | "summon" | "vehicle";
+  status: "unavailable";
+  sourceId: string;
+  entityId: bigint | null;
+  blockerId: string;
+}>;
+
+export type RustPresentationBindingIdentityR10 = Readonly<{
+  role: "held-item" | "dropped-item" | "machine" | "projectile" | "summon";
+  primaryContentRef: RenderPresentationContentRefV1;
+  profileId: string;
+  modelId: string;
+  presentationCatalog: Readonly<{
+    id: typeof RENDER_PRESENTATION_CATALOG_ID_V1;
+    schema: 1 | 2;
+    revision: number;
+    contentVersion: number;
+    contentHash: Uint8Array;
+  }>;
+  modelCatalog: Readonly<{
+    revision: bigint;
+    canonicalHash: string;
+    sha256: string;
+  }>;
+}>;
+
+export type RustHeldPresentationR10 = Readonly<{
+  id: string;
+  role: "held-item";
+  playerId: bigint;
+  entityId: bigint;
+  itemId: string;
+  count: number;
+  durability: number;
+  durabilityPresent: boolean;
+  metadataHash: Uint8Array;
+  binding: RustPresentationBindingIdentityR10;
+  instanceIds: readonly bigint[];
+}>;
+
+export type RustDroppedPresentationR10 = Readonly<{
+  id: string;
+  role: "dropped-item";
+  dropId: string;
+  entityId: bigint;
+  itemId: string;
+  binding: RustPresentationBindingIdentityR10;
+  instanceIds: readonly bigint[];
+}>;
+
+export type RustCombatPresentationR10 = Readonly<{
+  id: string;
+  role: "projectile" | "summon";
+  recordId: string;
+  entityId: bigint;
+  contentId: string;
+  binding: RustPresentationBindingIdentityR10;
+  instanceIds: readonly bigint[];
 }>;
 
 export type RustCombatPresentationBlockerR10 = Readonly<{
@@ -111,6 +184,8 @@ export type RustMachineLightPresentationR10 = Readonly<{
 }>;
 
 export type RustMachinePresentationR10 = Readonly<{
+  id: string;
+  role: "machine";
   machineId: string;
   anchorRevision: bigint;
   presentationId: string;
@@ -124,6 +199,7 @@ export type RustMachinePresentationR10 = Readonly<{
   gameplayRevision: bigint;
   gameplayActive: boolean;
   light: RustMachineLightPresentationR10 | null;
+  binding: RustPresentationBindingIdentityR10;
   instanceIds: readonly bigint[];
 }>;
 
@@ -137,6 +213,22 @@ export type RustMachinePresentationBlockerR10 = Readonly<{
 
 export type RustPresentationEntityExtractionResultR10 = RenderEntityExtractionResultR10 & Readonly<{
   machinePresentations: readonly RustMachinePresentationR10[];
+  presentationFrame: RustPresentationFrameR10;
+}>;
+
+export type RustPresentationFrameR10 = Readonly<{
+  schema: 1;
+  extractionRevision: bigint;
+  authorityTick: bigint;
+  coverageHash: string;
+  bindings: readonly (
+    RustHeldPresentationR10 | RustDroppedPresentationR10 | RustMachinePresentationR10 | RustCombatPresentationR10
+  )[];
+  heldBlockers: readonly RustHeldPresentationBlockerR10[];
+  droppedBlockers: readonly RustDroppedPresentationBlockerR10[];
+  machineBlockers: readonly RustMachinePresentationBlockerR10[];
+  combatBlockers: readonly RustCombatPresentationBlockerR10[];
+  runtimeBlockers: readonly RustPresentationRuntimeBlockerR10[];
 }>;
 
 type PreparedPresentationExtractionR10 = Readonly<{
@@ -145,19 +237,27 @@ type PreparedPresentationExtractionR10 = Readonly<{
   source: RustEntityExtractionR6V3 | null;
   extractionRevision: bigint;
   heldAttachments: number;
+  heldPresentations: readonly PreparedHeldPresentationR10[];
   heldBlockers: readonly RustHeldPresentationBlockerR10[];
   droppedBindings: number;
+  droppedPresentations: readonly PreparedDroppedPresentationR10[];
   droppedBlockers: readonly RustDroppedPresentationBlockerR10[];
   machines: readonly PreparedMachinePresentationR10[];
   machineBindings: number;
   machineBlockers: readonly RustMachinePresentationBlockerR10[];
   combatBindings: number;
+  combatPresentations: readonly PreparedCombatPresentationR10[];
   combatBlockers: readonly RustCombatPresentationBlockerR10[];
+  runtimeBlockers: readonly RustPresentationRuntimeBlockerR10[];
 }>;
 
 type PreparedMachinePresentationR10 = Omit<RustMachinePresentationR10, "instanceIds"> & Readonly<{
   model: RenderEntityCompiledModelR10;
 }>;
+
+type PreparedHeldPresentationR10 = Omit<RustHeldPresentationR10, "instanceIds">;
+type PreparedDroppedPresentationR10 = Omit<RustDroppedPresentationR10, "instanceIds">;
+type PreparedCombatPresentationR10 = Omit<RustCombatPresentationR10, "instanceIds">;
 
 type HeldStackR10 = Readonly<{
   itemId: string;
@@ -176,6 +276,41 @@ function equalBytes(left: Uint8Array, right: Uint8Array) {
   let difference = 0;
   for (let index = 0; index < left.byteLength; index += 1) difference |= left[index] ^ right[index];
   return difference === 0;
+}
+
+function exactBindingIdentity(
+  role: RustPresentationBindingIdentityR10["role"],
+  profile: RenderPresentationProfileV1,
+  primaryContentRef: RenderPresentationContentRefV1,
+  presentations: AttestedRenderPresentationCatalogV1,
+  presentationContent: RustPresentationContentIdentityR10,
+): RustPresentationBindingIdentityR10 {
+  invariant(profile.role === role, `R10 ${role} profile role is inconsistent`);
+  invariant(profile.contentRefs.some((reference) => reference.domain === primaryContentRef.domain
+    && reference.id === primaryContentRef.id), `R10 ${role} primary content ref is absent from its exact profile`);
+  invariant(presentations.modelsByProfileId.get(profile.id)?.modelId === profile.model.id,
+    `R10 ${role} profile has no exact attested BWM2 model`);
+  invariant(presentations.profileCatalog.catalog.canonicalHash === presentations.modelCatalog.catalogHashHex
+    && presentations.profileCatalog.catalog.sha256 === presentations.modelCatalog.contentSha256,
+  `R10 ${role} profile and model catalog identities differ`);
+  return Object.freeze({
+    role,
+    primaryContentRef: Object.freeze({ ...primaryContentRef }),
+    profileId: profile.id,
+    modelId: profile.model.id,
+    presentationCatalog: Object.freeze({
+      id: RENDER_PRESENTATION_CATALOG_ID_V1,
+      schema: presentations.profileCatalog.schema,
+      revision: RENDER_PRESENTATION_CATALOG_REVISION_V1,
+      contentVersion: presentationContent.contentVersion,
+      contentHash: Uint8Array.from(presentationContent.contentHash),
+    }),
+    modelCatalog: Object.freeze({
+      revision: presentations.modelCatalog.revision,
+      canonicalHash: presentations.modelCatalog.catalogHashHex,
+      sha256: presentations.modelCatalog.contentSha256,
+    }),
+  });
 }
 
 function exactField(row: RustDomainRowR10, name: string): RustDomainValueR10 {
@@ -364,6 +499,11 @@ function parseExactMachine(
   const model = presentations.modelsByProfileId.get(binding.profile.id);
   invariant(model !== undefined && model.modelId === binding.profile.model.id,
     `R10 machine anchor '${row.key}' has no attested BWM2 model`);
+  const primaryContentRef = binding.profile.contentRefs.find((reference) => reference.domain === "machine-profile");
+  invariant(primaryContentRef !== undefined, `R10 machine anchor '${row.key}' exact profile has no machine content ref`);
+  const bindingIdentity = exactBindingIdentity(
+    "machine", binding.profile, primaryContentRef, presentations, presentationContent,
+  );
   const positionMilli = Object.freeze([
     exactMachineI64(row, "position.xMilli"),
     exactMachineI64(row, "position.yMilli"),
@@ -389,6 +529,8 @@ function parseExactMachine(
   const expectedFields = light === null ? 21 : 31;
   invariant(row.fields.length === expectedFields, `R10 machine anchor '${row.key}' has unknown fields`);
   return Object.freeze({
+    id: `machine:anchor:${machineId}:profile:${binding.profile.id}`,
+    role: "machine",
     machineId,
     anchorRevision: exactMachineU64(row, "anchorRevision"),
     presentationId,
@@ -402,6 +544,7 @@ function parseExactMachine(
     gameplayRevision: exactMachineU64(row, "gameplayRevision"),
     gameplayActive: exactMachineBool(row, "gameplayActive"),
     light,
+    binding: bindingIdentity,
     model,
   });
 }
@@ -635,6 +778,8 @@ function augmentMachineFrame(
       ids.push(stableId);
     }
     machinePresentations.push(Object.freeze({
+      id: machine.id,
+      role: machine.role,
       machineId: machine.machineId,
       anchorRevision: machine.anchorRevision,
       presentationId: machine.presentationId,
@@ -648,6 +793,7 @@ function augmentMachineFrame(
       gameplayRevision: machine.gameplayRevision,
       gameplayActive: machine.gameplayActive,
       light: machine.light,
+      binding: machine.binding,
       instanceIds: Object.freeze(ids),
     }));
   }
@@ -668,7 +814,7 @@ function augmentMachineFrame(
     resourceRevision,
     instances: Object.freeze([...result.frame.instances, ...machineInstances]),
   });
-  const augmentedResult: RustPresentationEntityExtractionResultR10 = Object.freeze({
+  const augmentedResult = Object.freeze({
     ...result,
     resources,
     frame,
@@ -679,6 +825,129 @@ function augmentMachineFrame(
     resourceRevision,
     emittedMachineModelIds: Object.freeze(machines.map((machine) => machine.modelId)),
   });
+}
+
+function cloneBindingIdentity(binding: RustPresentationBindingIdentityR10): RustPresentationBindingIdentityR10 {
+  return Object.freeze({
+    ...binding,
+    primaryContentRef: Object.freeze({ ...binding.primaryContentRef }),
+    presentationCatalog: Object.freeze({
+      ...binding.presentationCatalog,
+      contentHash: Uint8Array.from(binding.presentationCatalog.contentHash),
+    }),
+    modelCatalog: Object.freeze({ ...binding.modelCatalog }),
+  });
+}
+
+function finalizePresentationFrame(
+  result: RenderEntityExtractionResultR10 & Readonly<{ machinePresentations: readonly RustMachinePresentationR10[] }>,
+  pending: PreparedPresentationExtractionR10,
+  coverageHash: string,
+  presentations: AttestedRenderPresentationCatalogV1,
+): RustPresentationEntityExtractionResultR10 {
+  const byEntity = new Map(result.presentations.map((presentation) => [presentation.entityId, presentation] as const));
+  const bindings: RustPresentationFrameR10["bindings"][number][] = [];
+  for (const held of pending.heldPresentations) {
+    const entity = byEntity.get(held.entityId);
+    invariant(entity !== undefined && entity.class === "player", `held presentation '${held.id}' has no player entity`);
+    const attachment = entity.equipment.find((equipment) => equipment.slotKey === RUST_HELD_PRESENTATION_SLOT_R10);
+    invariant(attachment !== undefined && attachment.itemKey === held.itemId,
+      `held presentation '${held.id}' has no exact equipment attachment`);
+    bindings.push(Object.freeze({
+      ...held,
+      metadataHash: Uint8Array.from(held.metadataHash),
+      binding: cloneBindingIdentity(held.binding),
+      instanceIds: Object.freeze([...attachment.instanceIds]),
+    }));
+  }
+  for (const dropped of pending.droppedPresentations) {
+    const entity = byEntity.get(dropped.entityId);
+    invariant(entity !== undefined && entity.class === "construct" && entity.kindKey === "dropped-item"
+      && entity.modelKey === dropped.binding.modelId,
+    `dropped presentation '${dropped.id}' has no exact BWR6 entity`);
+    bindings.push(Object.freeze({
+      ...dropped,
+      binding: cloneBindingIdentity(dropped.binding),
+      instanceIds: Object.freeze([...entity.instanceIds]),
+    }));
+  }
+  for (const combat of pending.combatPresentations) {
+    const entity = byEntity.get(combat.entityId);
+    invariant(entity !== undefined && entity.class === (combat.role === "projectile" ? "projectile" : "creature")
+      && entity.modelKey === combat.binding.modelId,
+    `combat presentation '${combat.id}' has no exact BWR6 entity`);
+    bindings.push(Object.freeze({
+      ...combat,
+      binding: cloneBindingIdentity(combat.binding),
+      instanceIds: Object.freeze([...entity.instanceIds]),
+    }));
+  }
+  for (const machine of result.machinePresentations) bindings.push(Object.freeze({
+    ...machine,
+    contentHash: Uint8Array.from(machine.contentHash),
+    binding: cloneBindingIdentity(machine.binding),
+    instanceIds: Object.freeze([...machine.instanceIds]),
+  }));
+  bindings.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
+  const allInstanceIds = new Set(result.frame.instances.map((instance) => instance.stableId));
+  const bindingIds = new Set<string>();
+  for (const binding of bindings) {
+    invariant(!bindingIds.has(binding.id), `duplicate exact presentation binding '${binding.id}'`);
+    bindingIds.add(binding.id);
+    invariant(binding.instanceIds.every((id) => allInstanceIds.has(id)),
+      `exact presentation binding '${binding.id}' references a missing frame instance`);
+  }
+  const boundProjectileEntities = new Set(bindings
+    .filter((binding): binding is RustCombatPresentationR10 => binding.role === "projectile")
+    .map((binding) => binding.entityId));
+  const boundDropEntities = new Set(bindings
+    .filter((binding): binding is RustDroppedPresentationR10 => binding.role === "dropped-item")
+    .map((binding) => binding.entityId));
+  const boundHeldEntities = new Set(bindings
+    .filter((binding): binding is RustHeldPresentationR10 => binding.role === "held-item")
+    .map((binding) => binding.entityId));
+  const boundSummonEntities = new Set(bindings
+    .filter((binding): binding is RustCombatPresentationR10 => binding.role === "summon")
+    .map((binding) => binding.entityId));
+  const summonModels = new Set(presentations.profileCatalog.profiles
+    .filter((profile) => profile.role === "summon")
+    .map((profile) => profile.model.id));
+  const summonKinds = new Set(presentations.profileCatalog.profiles
+    .filter((profile) => profile.role === "summon")
+    .flatMap((profile) => profile.contentRefs)
+    .filter((reference) => reference.domain === "creature-profile")
+    .map((reference) => reference.id));
+  for (const entity of result.presentations) {
+    invariant(entity.class !== "vehicle", `vehicle entity ${entity.entityId} escaped its explicit presentation blocker`);
+    if (entity.class === "projectile") invariant(boundProjectileEntities.has(entity.entityId),
+      `projectile entity ${entity.entityId} has no exact presentation binding`);
+    if (entity.class === "construct" && entity.kindKey === "dropped-item") invariant(boundDropEntities.has(entity.entityId),
+      `dropped entity ${entity.entityId} has no exact presentation binding`);
+    if (entity.class === "creature" && (summonModels.has(entity.modelKey) || summonKinds.has(entity.kindKey))) {
+      invariant(boundSummonEntities.has(entity.entityId), `summon entity ${entity.entityId} has no exact presentation binding`);
+    }
+    if (entity.equipment.some((equipment) => equipment.slotKey === RUST_HELD_PRESENTATION_SLOT_R10)) {
+      invariant(boundHeldEntities.has(entity.entityId), `held attachment for entity ${entity.entityId} has no exact presentation binding`);
+    }
+  }
+  const boundMachineInstances = new Set(bindings
+    .filter((binding): binding is RustMachinePresentationR10 => binding.role === "machine")
+    .flatMap((binding) => binding.instanceIds));
+  for (const instance of result.frame.instances) if (instance.domain === 5) invariant(boundMachineInstances.has(instance.stableId),
+    `machine instance ${instance.stableId} has no exact presentation binding`);
+  const presentationFrame: RustPresentationFrameR10 = Object.freeze({
+    schema: 1,
+    extractionRevision: result.extractionRevision,
+    authorityTick: result.authorityTick,
+    coverageHash,
+    bindings: Object.freeze(bindings),
+    heldBlockers: pending.heldBlockers,
+    droppedBlockers: pending.droppedBlockers,
+    machineBlockers: pending.machineBlockers,
+    combatBlockers: pending.combatBlockers,
+    runtimeBlockers: pending.runtimeBlockers,
+  });
+  return Object.freeze({ ...result, presentationFrame });
 }
 
 function parseHeldStack(row: RustDomainRowR10): HeldStackR10 | null {
@@ -800,6 +1069,77 @@ function combatBlocker(
   });
 }
 
+function runtimeBlocker(
+  family: RustPresentationRuntimeBlockerR10["family"],
+  sourceId: string,
+  entityId: bigint | null,
+  blockerId: string,
+): RustPresentationRuntimeBlockerR10 {
+  return Object.freeze({
+    id: `runtime:${family}:source:${sourceId}:entity:${entityId ?? "none"}:${blockerId}`,
+    family,
+    status: "unavailable",
+    sourceId,
+    entityId,
+    blockerId,
+  });
+}
+
+function residualPresentationBlockers(
+  records: RustEntityExtractionR6V3["records"],
+  presentations: AttestedRenderPresentationCatalogV1,
+  joinedHeldEntities: ReadonlySet<bigint>,
+  joinedDropEntities: ReadonlySet<bigint>,
+  joinedCombatEntities: ReadonlySet<bigint>,
+  reportUnjoinedPlayers: boolean,
+) {
+  const blockers: RustPresentationRuntimeBlockerR10[] = [];
+  const blockedEntityIds = new Set<bigint>();
+  const summonModels = new Set(presentations.profileCatalog.profiles
+    .filter((profile) => profile.role === "summon")
+    .map((profile) => profile.model.id));
+  const summonKinds = new Set(presentations.profileCatalog.profiles
+    .filter((profile) => profile.role === "summon")
+    .flatMap((profile) => profile.contentRefs)
+    .filter((reference) => reference.domain === "creature-profile")
+    .map((reference) => reference.id));
+  for (const record of records) {
+    if (reportUnjoinedPlayers && record.class === "player" && !joinedHeldEntities.has(record.entityId)) {
+      blockers.push(runtimeBlocker(
+        "held-item", record.externalEntityId, record.entityId, "player-held-presentation-binding-not-exported",
+      ));
+    }
+    if (record.class === "construct" && record.kindKey === "dropped-item"
+      && !joinedDropEntities.has(record.entityId)) {
+      blockedEntityIds.add(record.entityId);
+      blockers.push(runtimeBlocker(
+        "dropped-item", record.externalEntityId, record.entityId, "dropped-item-semantic-binding-row-missing",
+      ));
+    }
+    if (record.class === "projectile" && !joinedCombatEntities.has(record.entityId)) {
+      blockedEntityIds.add(record.entityId);
+      blockers.push(runtimeBlocker(
+        "projectile", record.externalEntityId, record.entityId, "projectile-semantic-binding-row-missing",
+      ));
+    }
+    if (record.class === "creature" && (summonModels.has(record.modelKey) || summonKinds.has(record.kindKey))
+      && !joinedCombatEntities.has(record.entityId)) {
+      blockedEntityIds.add(record.entityId);
+      blockers.push(runtimeBlocker(
+        "summon", record.externalEntityId, record.entityId, "summon-semantic-binding-row-missing",
+      ));
+    }
+    if (record.class === "vehicle") {
+      blockedEntityIds.add(record.entityId);
+      blockers.push(runtimeBlocker(
+        "vehicle", record.externalEntityId, record.entityId, "vehicle-semantic-presentation-binding-not-exported",
+      ));
+    }
+  }
+  blockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
+  return Object.freeze({ blockedEntityIds, blockers: Object.freeze(blockers) });
+}
+
 function assertExactCombatPresentation(
   row: RustDomainRowR10,
   role: "projectile" | "summon",
@@ -840,6 +1180,7 @@ function assertExactCombatPresentation(
     && record.modelRevision === contentIdentity.contentVersion
     && equalBytes(record.modelHash, contentIdentity.contentHash),
   `R10 combat '${row.key}' BWR6 identity differs from the exact profile`);
+  return binding.profile;
 }
 
 function augmentPresentations(
@@ -853,33 +1194,51 @@ function augmentPresentations(
   let heldAttachments = 0;
   let droppedBindings = 0;
   let combatBindings = 0;
+  const heldPresentations: PreparedHeldPresentationR10[] = [];
   const heldBlockers: RustHeldPresentationBlockerR10[] = [];
+  const droppedPresentations: PreparedDroppedPresentationR10[] = [];
   const droppedBlockers: RustDroppedPresentationBlockerR10[] = [];
   const machines: PreparedMachinePresentationR10[] = [];
   const machineBlockers: RustMachinePresentationBlockerR10[] = [];
+  const combatPresentations: PreparedCombatPresentationR10[] = [];
   const combatBlockers: RustCombatPresentationBlockerR10[] = [];
-  if (decoded.domains === null) {
-    heldBlockers.push(unavailableBlocker("player-domain-envelope-absent", "domain-extraction-not-submitted"));
-    droppedBlockers.push(droppedUnavailableBlocker("inventory-domain-envelope-absent", "domain-extraction-not-submitted"));
-    machineBlockers.push(machineUnavailableBlocker("machine-domain-envelope-absent", "domain-extraction-not-submitted"));
-    combatBlockers.push(combatBlocker("unavailable", null, null, null, null, null, "domain-extraction-not-submitted"));
-    return Object.freeze({
-      renderBytes: Uint8Array.from(extraction.render), source, extractionRevision: decoded.extractionRevision,
-      heldAttachments, heldBlockers: Object.freeze(heldBlockers),
-      droppedBindings, droppedBlockers: Object.freeze(droppedBlockers),
-      machines: Object.freeze(machines), machineBindings: 0, machineBlockers: Object.freeze(machineBlockers),
-      combatBindings, combatBlockers: Object.freeze(combatBlockers),
-    });
-  }
-  invariant(decoded.domains.contentReady, "R10 presentation content is not installed and attested");
-
+  const runtimeBlockers: RustPresentationRuntimeBlockerR10[] = [];
   const records = source === null ? null : [...source.records];
   const recordIndexes = new Map<bigint, number>();
   records?.forEach((record, index) => {
     invariant(!recordIndexes.has(record.entityId), "duplicate same-envelope BWR6 entity id");
     recordIndexes.set(record.entityId, index);
   });
+  if (decoded.domains === null) {
+    heldBlockers.push(unavailableBlocker("player-domain-envelope-absent", "domain-extraction-not-submitted"));
+    droppedBlockers.push(droppedUnavailableBlocker("inventory-domain-envelope-absent", "domain-extraction-not-submitted"));
+    machineBlockers.push(machineUnavailableBlocker("machine-domain-envelope-absent", "domain-extraction-not-submitted"));
+    combatBlockers.push(combatBlocker("unavailable", null, null, null, null, null, "domain-extraction-not-submitted"));
+    if (source !== null && records !== null) {
+      const residual = residualPresentationBlockers(
+        records, presentations, new Set(), new Set(), new Set(), false,
+      );
+      runtimeBlockers.push(...residual.blockers);
+      const visibleRecords = Object.freeze(records.filter((record) => !residual.blockedEntityIds.has(record.entityId)));
+      source = Object.freeze({
+        ...source,
+        total: visibleRecords.length + source.omitted,
+        selected: visibleRecords.length,
+        records: visibleRecords,
+      });
+    }
+    return Object.freeze({
+      renderBytes: Uint8Array.from(extraction.render), source, extractionRevision: decoded.extractionRevision,
+      heldAttachments, heldPresentations: Object.freeze(heldPresentations), heldBlockers: Object.freeze(heldBlockers),
+      droppedBindings, droppedPresentations: Object.freeze(droppedPresentations), droppedBlockers: Object.freeze(droppedBlockers),
+      machines: Object.freeze(machines), machineBindings: 0, machineBlockers: Object.freeze(machineBlockers),
+      combatBindings, combatPresentations: Object.freeze(combatPresentations), combatBlockers: Object.freeze(combatBlockers),
+      runtimeBlockers: Object.freeze(runtimeBlockers),
+    });
+  }
+  invariant(decoded.domains.contentReady, "R10 presentation content is not installed and attested");
 
+  const joinedHeldEntities = new Set<bigint>();
   const playerView = decoded.domains.views.find((view) => view.domain === 2);
   invariant(playerView !== undefined, "R10 domain bundle has no player view");
   if (playerView.status !== "complete") {
@@ -891,13 +1250,12 @@ function augmentPresentations(
   } else {
     const bindingRows = playerView.rows.filter((row) => row.kind === 2);
     if (bindingRows.length > 0) invariant(records !== null, "R10 player bindings have no same-envelope BWR6 entity extraction");
-    const joinedEntities = new Set<bigint>();
     for (const row of bindingRows) {
       const playerId = exactU64(row, "playerId");
       invariant(row.key === `binding:${playerId}`, `R10 player binding '${row.key}' key does not match playerId`);
       const entityId = exactU64(row, "entityId");
-      invariant(!joinedEntities.has(entityId), `R10 entity ${entityId} has multiple player bindings`);
-      joinedEntities.add(entityId);
+      invariant(!joinedHeldEntities.has(entityId), `R10 entity ${entityId} has multiple player bindings`);
+      joinedHeldEntities.add(entityId);
       const recordIndex = recordIndexes.get(entityId);
       invariant(recordIndex !== undefined && records !== null,
         `R10 player binding '${row.key}' references a missing BWR6 entity`);
@@ -931,6 +1289,24 @@ function augmentPresentations(
         }),
       ] as const)].sort(([left], [right]) => compareCanonicalUtf8R10(left, right));
       records[recordIndex] = Object.freeze({ ...record, equipment: Object.freeze(equipment) });
+      heldPresentations.push(Object.freeze({
+        id: `held-item:entity:${entityId}:item:${held.itemId}:profile:${binding.profile.id}`,
+        role: "held-item",
+        playerId,
+        entityId,
+        itemId: held.itemId,
+        count: held.count,
+        durability: held.durability,
+        durabilityPresent: held.durabilityPresent,
+        metadataHash: Uint8Array.from(held.metadataHash),
+        binding: exactBindingIdentity(
+          "held-item",
+          binding.profile,
+          { domain: "item", id: held.itemId },
+          presentations,
+          presentationContent,
+        ),
+      }));
       heldAttachments += 1;
     }
   }
@@ -953,6 +1329,7 @@ function augmentPresentations(
   if (dropRows.length > 0) invariant(records !== null, "R10 dropped items have no same-envelope BWR6 entity extraction");
   const joinedDrops = new Set<string>();
   const joinedDropEntities = new Set<bigint>();
+  const blockedDropEntities = new Set<bigint>();
   for (const row of dropRows) {
     const dropId = exactString(row, "dropId");
     invariant(row.key === `drop:${dropId}`, `R10 dropped item '${row.key}' key does not match dropId`);
@@ -979,6 +1356,20 @@ function augmentPresentations(
     if (binding.status === "exact") {
       invariant(status === "exact", `R10 dropped item '${row.key}' suppresses an exact presentation`);
       assertExactDroppedPresentation(row, binding.profile, presentationContent, record);
+      droppedPresentations.push(Object.freeze({
+        id: `dropped-item:drop:${dropId}:entity:${entityId}:profile:${binding.profile.id}`,
+        role: "dropped-item",
+        dropId,
+        entityId,
+        itemId,
+        binding: exactBindingIdentity(
+          "dropped-item",
+          binding.profile,
+          { domain: "item", id: itemId },
+          presentations,
+          presentationContent,
+        ),
+      }));
       droppedBindings += 1;
       continue;
     }
@@ -989,10 +1380,12 @@ function augmentPresentations(
       invariant(status === "missing" && exactString(row, "presentation.blockerId") === binding.blocker.id,
         `R10 dropped item '${row.key}' missing blocker differs from the attested registry`);
       droppedBlockers.push(droppedBlocker("missing", dropId, entityId, itemId, binding.blocker.id));
+      blockedDropEntities.add(entityId);
     } else {
       invariant(status === "unmapped" && optionalField(row, "presentation.blockerId") === undefined,
         `R10 dropped item '${row.key}' unmapped status is inconsistent`);
       droppedBlockers.push(droppedBlocker("unmapped", dropId, entityId, itemId, null));
+      blockedDropEntities.add(entityId);
     }
   }
 
@@ -1057,7 +1450,23 @@ function augmentPresentations(
     const binding = presentations.registry.resolveProfileId(role, presentationId);
     if (binding.status === "exact") {
       invariant(status === "exact", `R10 combat '${row.key}' suppresses an exact presentation`);
-      assertExactCombatPresentation(row, role, recordId, record, presentations, presentationContent);
+      const profile = assertExactCombatPresentation(
+        row, role, recordId, record, presentations, presentationContent,
+      );
+      combatPresentations.push(Object.freeze({
+        id: `${role}:record:${recordId}:entity:${entityId}:profile:${profile.id}`,
+        role,
+        recordId,
+        entityId,
+        contentId,
+        binding: exactBindingIdentity(
+          role,
+          profile,
+          { domain: expectedDomain, id: contentId },
+          presentations,
+          presentationContent,
+        ),
+      }));
       combatBindings += 1;
       continue;
     }
@@ -1120,13 +1529,24 @@ function augmentPresentations(
       }
     }
   }
+  const residual = residualPresentationBlockers(
+    records ?? Object.freeze([]), presentations, joinedHeldEntities, joinedDropEntities, joinedCombatEntities, true,
+  );
+  const blockedPresentationEntities = new Set<bigint>([
+    ...blockedCombatEntities, ...blockedDropEntities, ...residual.blockedEntityIds,
+  ]);
+  runtimeBlockers.push(...residual.blockers);
+  heldPresentations.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
   heldBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
+  droppedPresentations.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
   droppedBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
   machines.sort((left, right) => compareCanonicalUtf8R10(left.machineId, right.machineId));
   machineBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
+  combatPresentations.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
   combatBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
+  runtimeBlockers.sort((left, right) => compareCanonicalUtf8R10(left.id, right.id));
   if (source !== null && records !== null) {
-    const visibleRecords = Object.freeze(records.filter((record) => !blockedCombatEntities.has(record.entityId)));
+    const visibleRecords = Object.freeze(records.filter((record) => !blockedPresentationEntities.has(record.entityId)));
     source = Object.freeze({
       ...source,
       total: visibleRecords.length + source.omitted,
@@ -1139,14 +1559,18 @@ function augmentPresentations(
     source,
     extractionRevision: decoded.extractionRevision,
     heldAttachments,
+    heldPresentations: Object.freeze(heldPresentations),
     heldBlockers: Object.freeze(heldBlockers),
     droppedBindings,
+    droppedPresentations: Object.freeze(droppedPresentations),
     droppedBlockers: Object.freeze(droppedBlockers),
     machines: Object.freeze(machines),
     machineBindings: machines.length,
     machineBlockers: Object.freeze(machineBlockers),
     combatBindings,
+    combatPresentations: Object.freeze(combatPresentations),
     combatBlockers: Object.freeze(combatBlockers),
+    runtimeBlockers: Object.freeze(runtimeBlockers),
   });
 }
 
@@ -1176,6 +1600,7 @@ export function createProductionHeldEquipmentModelsR10(
 export class RustPresentationEntityExtractionR10 {
   private pending: PreparedPresentationExtractionR10 | null = null;
   private pendingMachinePresentations: readonly RustMachinePresentationR10[] | null = null;
+  private pendingPresentationFrame: RustPresentationFrameR10 | null = null;
   private pendingMachineResourceState: Readonly<{
     epoch: bigint;
     revision: bigint;
@@ -1186,19 +1611,8 @@ export class RustPresentationEntityExtractionR10 {
   private readonly emittedMachineModelIds = new Set<string>();
   private readonly maxInstances: number;
   private readonly maxResourceOperations: number;
-  private lastDiagnostics: RustPresentationExtractionDiagnosticsR10 = Object.freeze({
-    schema: 1,
-    extractionRevision: null,
-    heldAttachments: 0,
-    heldBlockers: Object.freeze([]),
-    droppedBindings: 0,
-    droppedBlockers: Object.freeze([]),
-    machineBindings: 0,
-    machineBlockers: Object.freeze([]),
-    machines: Object.freeze([]),
-    combatBindings: 0,
-    combatBlockers: Object.freeze([]),
-  });
+  private readonly coverageHash: string;
+  private lastDiagnostics: RustPresentationExtractionDiagnosticsR10;
 
   constructor(
     private readonly entityExtractor: RustEntityRenderExtractionR10,
@@ -1210,6 +1624,7 @@ export class RustPresentationEntityExtractionR10 {
       && presentationContent.contentVersion <= Number(U32_MAX), "render presentation content version is invalid");
     invariant(presentationContent.contentHash.byteLength === 16
       && presentationContent.contentHash.some((value) => value !== 0), "render presentation content hash is invalid");
+    this.coverageHash = createRenderPresentationCoverageInventoryR10(presentations.profileCatalog).coverageHash;
     this.maxInstances = limits.maxInstances ?? RENDER_MAX_INSTANCES_V2;
     this.maxResourceOperations = limits.maxResourceOperations ?? RENDER_MAX_RESOURCE_OPERATIONS_V2;
     invariant(Number.isInteger(this.maxInstances) && this.maxInstances > 0 && this.maxInstances <= RENDER_MAX_INSTANCES_V2,
@@ -1217,6 +1632,24 @@ export class RustPresentationEntityExtractionR10 {
     invariant(Number.isInteger(this.maxResourceOperations) && this.maxResourceOperations > 0
       && this.maxResourceOperations <= RENDER_MAX_RESOURCE_OPERATIONS_V2,
     "presentation resource operation cap is invalid");
+    this.lastDiagnostics = Object.freeze({
+      schema: 1,
+      extractionRevision: null,
+      heldAttachments: 0,
+      heldPresentations: Object.freeze([]),
+      heldBlockers: Object.freeze([]),
+      droppedBindings: 0,
+      droppedPresentations: Object.freeze([]),
+      droppedBlockers: Object.freeze([]),
+      machineBindings: 0,
+      machineBlockers: Object.freeze([]),
+      machines: Object.freeze([]),
+      combatBindings: 0,
+      combatPresentations: Object.freeze([]),
+      combatBlockers: Object.freeze([]),
+      runtimeBlockers: Object.freeze([]),
+      coverageHash: this.coverageHash,
+    });
   }
 
   prepareRuntimeExtraction(extraction: RustIntegratedRuntimeExtractionV1) {
@@ -1229,19 +1662,35 @@ export class RustPresentationEntityExtractionR10 {
 
   finishPreparedRuntimeExtraction(token: symbol, accepted: boolean) {
     invariant(this.pending?.token === token, "render presentation extraction token does not match");
-    if (accepted) this.lastDiagnostics = Object.freeze({
-      schema: 1,
-      extractionRevision: this.pending.extractionRevision,
-      heldAttachments: this.pending.heldAttachments,
-      heldBlockers: this.pending.heldBlockers,
-      droppedBindings: this.pending.droppedBindings,
-      droppedBlockers: this.pending.droppedBlockers,
-      machineBindings: this.pending.machineBindings,
-      machineBlockers: this.pending.machineBlockers,
-      machines: this.pendingMachinePresentations ?? Object.freeze([]),
-      combatBindings: this.pending.combatBindings,
-      combatBlockers: this.pending.combatBlockers,
-    });
+    if (accepted) {
+      const bindings = this.pendingPresentationFrame?.bindings ?? Object.freeze([]);
+      this.lastDiagnostics = Object.freeze({
+        schema: 1,
+        extractionRevision: this.pending.extractionRevision,
+        heldAttachments: this.pending.heldAttachments,
+        heldPresentations: Object.freeze(bindings.filter(
+          (binding): binding is RustHeldPresentationR10 => binding.role === "held-item",
+        )),
+        heldBlockers: this.pending.heldBlockers,
+        droppedBindings: this.pending.droppedBindings,
+        droppedPresentations: Object.freeze(bindings.filter(
+          (binding): binding is RustDroppedPresentationR10 => binding.role === "dropped-item",
+        )),
+        droppedBlockers: this.pending.droppedBlockers,
+        machineBindings: this.pending.machineBindings,
+        machineBlockers: this.pending.machineBlockers,
+        machines: Object.freeze(bindings.filter(
+          (binding): binding is RustMachinePresentationR10 => binding.role === "machine",
+        )),
+        combatBindings: this.pending.combatBindings,
+        combatPresentations: Object.freeze(bindings.filter(
+          (binding): binding is RustCombatPresentationR10 => binding.role === "projectile" || binding.role === "summon",
+        )),
+        combatBlockers: this.pending.combatBlockers,
+        runtimeBlockers: this.pending.runtimeBlockers,
+        coverageHash: this.coverageHash,
+      });
+    }
     if (accepted && this.pendingMachineResourceState !== null) {
       this.machineResourceEpoch = this.pendingMachineResourceState.epoch;
       this.machineResourceRevision = this.pendingMachineResourceState.revision;
@@ -1250,6 +1699,7 @@ export class RustPresentationEntityExtractionR10 {
     }
     this.pending = null;
     this.pendingMachinePresentations = null;
+    this.pendingPresentationFrame = null;
     this.pendingMachineResourceState = null;
   }
 
@@ -1274,13 +1724,15 @@ export class RustPresentationEntityExtractionR10 {
       this.maxResourceOperations,
     );
     for (const modelId of augmented.emittedMachineModelIds) emitted.add(modelId);
-    this.pendingMachinePresentations = augmented.result.machinePresentations;
+    const result = finalizePresentationFrame(augmented.result, pending, this.coverageHash, this.presentations);
+    this.pendingMachinePresentations = result.machinePresentations;
+    this.pendingPresentationFrame = result.presentationFrame;
     this.pendingMachineResourceState = Object.freeze({
       epoch: context.epoch,
       revision: augmented.resourceRevision,
       emittedModelIds: emitted,
     });
-    return augmented.result;
+    return result;
   }
 
   resetRevisionGuard() {

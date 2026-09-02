@@ -28,6 +28,12 @@ pub const PHYSICS_MAX_ABS_VELOCITY_V1: f64 = 4_096.0;
 pub const PHYSICS_MAX_DESIRED_SPEED_V1: f64 = 1_024.0;
 pub const PHYSICS_MAX_ACCELERATION_V1: f64 = 4_096.0;
 
+const PHYSICS_SHORE_LEDGE_MAX_HEIGHT_V1: f64 = 1.15;
+// The standard 0.30-radius player reaches the same facing cell as the
+// legacy 0.62 bank probe while larger bodies remain radius-aware.
+const PHYSICS_SHORE_PROBE_CLEARANCE_V1: f64 = 0.32;
+const PHYSICS_SHORE_STANDING_EPSILON_V1: f64 = 0.01;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PhysicsBodyV1 {
     pub handle: String,
@@ -46,6 +52,7 @@ pub struct PhysicsBodyV1 {
     pub swim_surface_breach_seconds: f64,
     pub swim_stroke_cooldown_seconds: f64,
     pub swim_surface_bob_active: bool,
+    pub swim_shore_exit_ready: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -311,6 +318,7 @@ fn write_body(hasher: &mut CanonicalHasher, body: &PhysicsBodyV1) {
     hasher.write_u16(u16::from(body.crouching));
     hasher.write_u16(u16::from(body.swim_surface_breach_ready));
     hasher.write_u16(u16::from(body.swim_surface_bob_active));
+    hasher.write_u16(u16::from(body.swim_shore_exit_ready));
 }
 
 #[must_use]
@@ -389,6 +397,7 @@ pub fn collides_body(window: &WorldReadWindowV1, position: Vec3, radius: f64, he
     let maximum_y = (position.y + height - 0.001 + 0.5).floor() as i32;
     let minimum_z = (position.z - radius + 0.5).floor() as i32;
     let maximum_z = (position.z + radius - 0.001 + 0.5).floor() as i32;
+    let mut blocked = false;
     let mut unknown_boundary = false;
     for y in minimum_y..=maximum_y {
         for z in minimum_z..=maximum_z {
@@ -399,12 +408,12 @@ pub fn collides_body(window: &WorldReadWindowV1, position: Vec3, radius: f64, he
                 let block_bottom = f64::from(y) - 0.5;
                 let block_top = block_bottom + 1.0;
                 if window.is_collision_solid(cell) && position.y + height > block_bottom && position.y < block_top {
-                    return (true, unknown_boundary);
+                    blocked = true;
                 }
             }
         }
     }
-    (false, unknown_boundary)
+    (blocked, unknown_boundary)
 }
 
 #[must_use]
@@ -446,7 +455,65 @@ pub fn sweep_body_axis(
     }
 }
 
-fn sample_liquid_environment(window: &WorldReadWindowV1, body: &PhysicsBodyV1, predicted: Vec3) -> SwimEnvironment {
+fn contiguous_liquid_surface_y(window: &WorldReadWindowV1, x: i32, z: i32, start_y: i32) -> Option<f64> {
+    // The immutable read window is the hard bound. Reaching unknown/unloaded
+    // data before open air means the surface is not authoritative.
+    let mut liquid_y = start_y;
+    loop {
+        let above_y = liquid_y.checked_add(1)?;
+        let above_position = CellPos::new(x, above_y, z);
+        let above = window.sample(above_position)?;
+        if !above.loaded {
+            return None;
+        }
+        if above.liquid_kind == LiquidKindV1::None {
+            return (!window.is_collision_solid(above_position)).then_some(f64::from(liquid_y) + 0.5);
+        }
+        liquid_y = above_y;
+    }
+}
+
+fn sample_shore_ledge_height(
+    window: &WorldReadWindowV1,
+    body: &PhysicsBodyV1,
+    yaw: f64,
+    surface_y: Option<f64>,
+) -> Option<f64> {
+    let surface_y = surface_y?;
+    let (sin, cos) = yaw.sin_cos();
+    let probe_distance = body.radius + PHYSICS_SHORE_PROBE_CLEARANCE_V1;
+    let target_x = (body.position.x - sin * probe_distance + 0.5).floor() as i32;
+    let target_z = (body.position.z - cos * probe_distance + 0.5).floor() as i32;
+    let minimum_support_y = (surface_y - 0.5).floor() as i32;
+    let maximum_support_y = (surface_y + PHYSICS_SHORE_LEDGE_MAX_HEIGHT_V1 - 0.5).floor() as i32;
+
+    for support_y in (minimum_support_y..=maximum_support_y).rev() {
+        let support_position = CellPos::new(target_x, support_y, target_z);
+        let support = window.sample(support_position)?;
+        if !support.loaded || !window.is_collision_solid(support_position) {
+            continue;
+        }
+        let support_top = f64::from(support_y) + 0.5;
+        let ledge_height = (support_top - surface_y).max(0.0);
+        let standing_position = Vec3::new(
+            f64::from(target_x),
+            support_top + PHYSICS_SHORE_STANDING_EPSILON_V1,
+            f64::from(target_z),
+        );
+        let (standing_blocked, standing_unknown) = collides_body(window, standing_position, body.radius, body.height);
+        if !standing_blocked && !standing_unknown {
+            return Some(ledge_height);
+        }
+    }
+    None
+}
+
+fn sample_liquid_environment(
+    window: &WorldReadWindowV1,
+    body: &PhysicsBodyV1,
+    predicted: Vec3,
+    forward_yaw: f64,
+) -> SwimEnvironment {
     let heights = [
         0.08,
         body.height * 0.25,
@@ -454,36 +521,48 @@ fn sample_liquid_environment(window: &WorldReadWindowV1, body: &PhysicsBodyV1, p
         body.height * 0.75,
         body.height * 0.92,
     ];
-    let liquid_samples = heights
-        .iter()
-        .filter(|height| {
-            window
-                .sample(CellPos::new(
-                    (body.position.x + 0.5).floor() as i32,
-                    (body.position.y + **height + 0.5).floor() as i32,
-                    (body.position.z + 0.5).floor() as i32,
-                ))
-                .is_some_and(|cell| cell.loaded && cell.liquid_kind != LiquidKindV1::None)
-        })
-        .count();
+    let sample_x = (body.position.x + 0.5).floor() as i32;
+    let sample_z = (body.position.z + 0.5).floor() as i32;
+    let mut liquid_samples = 0;
+    let mut highest_liquid_y = None;
+    for height in heights {
+        let sample_y = (body.position.y + height + 0.5).floor() as i32;
+        if window
+            .sample(CellPos::new(sample_x, sample_y, sample_z))
+            .is_some_and(|cell| cell.loaded && cell.liquid_kind != LiquidKindV1::None)
+        {
+            liquid_samples += 1;
+            highest_liquid_y = Some(highest_liquid_y.map_or(sample_y, |current: i32| current.max(sample_y)));
+        }
+    }
     let eye_y = body.position.y + body.height * 0.9;
-    let head_cell = CellPos::new(
-        (body.position.x + 0.5).floor() as i32,
-        (eye_y + 0.5).floor() as i32,
-        (body.position.z + 0.5).floor() as i32,
-    );
+    let head_cell = CellPos::new(sample_x, (eye_y + 0.5).floor() as i32, sample_z);
     let head_submerged = window
         .sample(head_cell)
         .is_some_and(|cell| cell.loaded && cell.liquid_kind != LiquidKindV1::None);
-    let surface_y = f64::from(head_cell.y) + 0.5;
-    let (horizontal_collision, _) = collides_body(window, predicted, body.radius, body.height);
+    let surface_y =
+        highest_liquid_y.and_then(|liquid_y| contiguous_liquid_surface_y(window, sample_x, sample_z, liquid_y));
+    let (sin, cos) = forward_yaw.sin_cos();
+    let forward_x = -sin;
+    let forward_z = -cos;
+    let attempted_forward_distance =
+        ((predicted.x - body.position.x) * forward_x + (predicted.z - body.position.z) * forward_z).max(0.0);
+    let forward_predicted = Vec3::new(
+        body.position.x + forward_x * attempted_forward_distance,
+        body.position.y,
+        body.position.z + forward_z * attempted_forward_distance,
+    );
+    let (horizontal_collision, horizontal_unknown) = collides_body(window, forward_predicted, body.radius, body.height);
+    let shore_ledge_height = (!horizontal_unknown && horizontal_collision)
+        .then(|| sample_shore_ledge_height(window, body, forward_yaw, surface_y))
+        .flatten();
     SwimEnvironment {
         submersion: liquid_samples as f64 / heights.len() as f64,
         head_submerged,
         horizontal_collision,
-        shore_ledge_height: horizontal_collision.then_some(1.0),
-        surface_gap: Some((surface_y - eye_y).abs()),
-        surface_clearance: Some(eye_y - surface_y),
+        shore_ledge_height,
+        surface_gap: surface_y.map(|surface_y| (surface_y - eye_y).max(0.0)),
+        surface_clearance: surface_y.map(|surface_y| eye_y - surface_y),
         entered_from_air: liquid_samples > 0 && body.swim_entry_momentum_speed <= f64::EPSILON,
     }
 }
@@ -504,7 +583,7 @@ pub fn step_physics(input: &PhysicsStepInputV1) -> Result<PhysicsStepResultV1, C
     let mut body = input.body.clone();
     let mut events = Vec::new();
     let was_grounded = body.grounded;
-    let initial_environment = sample_liquid_environment(&input.window, &body, body.position);
+    let initial_environment = sample_liquid_environment(&input.window, &body, body.position, input.controls.yaw);
     let was_in_liquid = initial_environment.submersion > 0.0;
 
     for external in &input.external_impulses {
@@ -532,6 +611,11 @@ pub fn step_physics(input: &PhysicsStepInputV1) -> Result<PhysicsStepResultV1, C
     }
 
     let jump_held = input.controls.flags & PHYSICS_CONTROL_JUMP != 0;
+    if !jump_held {
+        // This must also run on dry steps: releasing jump after climbing out
+        // is the sole action that arms a later shore-exit attempt.
+        body.swim_shore_exit_ready = true;
+    }
     if body.grounded && jump_held && !was_in_liquid {
         body.velocity.y = input.gravity.jump_velocity;
         body.grounded = false;
@@ -546,7 +630,7 @@ pub fn step_physics(input: &PhysicsStepInputV1) -> Result<PhysicsStepResultV1, C
         body.position.y,
         body.position.z + body.velocity.z * dt,
     );
-    let environment = sample_liquid_environment(&input.window, &body, predicted);
+    let environment = sample_liquid_environment(&input.window, &body, predicted, input.controls.yaw);
     if input.swimming.enabled && environment.submersion > 0.0 {
         let swim = step_swimming(
             SwimmerState {
@@ -558,6 +642,7 @@ pub fn step_physics(input: &PhysicsStepInputV1) -> Result<PhysicsStepResultV1, C
                 surface_breach_seconds: body.swim_surface_breach_seconds,
                 surface_stroke_cooldown_seconds: body.swim_stroke_cooldown_seconds,
                 surface_bob_active: body.swim_surface_bob_active,
+                shore_exit_ready: body.swim_shore_exit_ready,
             },
             SwimInput {
                 jump_held,
@@ -577,6 +662,7 @@ pub fn step_physics(input: &PhysicsStepInputV1) -> Result<PhysicsStepResultV1, C
         body.swim_surface_breach_seconds = swim.state.surface_breach_seconds;
         body.swim_stroke_cooldown_seconds = swim.state.surface_stroke_cooldown_seconds;
         body.swim_surface_bob_active = swim.state.surface_bob_active;
+        body.swim_shore_exit_ready = swim.state.shore_exit_ready;
         if swim.damage > 0.0 {
             events.push(PhysicsEventV1 {
                 kind: PhysicsEventKindV1::DrownDamage,
@@ -594,6 +680,9 @@ pub fn step_physics(input: &PhysicsStepInputV1) -> Result<PhysicsStepResultV1, C
         body.oxygen_seconds = (body.oxygen_seconds + input.swimming.oxygen_recovery_per_second * dt)
             .min(input.swimming.max_oxygen_seconds);
         body.drowning_accumulator = 0.0;
+        body.swim_surface_breach_seconds = 0.0;
+        body.swim_stroke_cooldown_seconds = 0.0;
+        body.swim_surface_bob_active = false;
     }
 
     let attempted_velocity = body.velocity;
@@ -641,9 +730,18 @@ pub fn step_physics(input: &PhysicsStepInputV1) -> Result<PhysicsStepResultV1, C
         body.velocity.z = 0.0;
     }
 
+    let final_environment = sample_liquid_environment(&input.window, &body, body.position, input.controls.yaw);
+    let in_liquid = final_environment.submersion > 0.0;
+    if was_in_liquid || in_liquid {
+        // Liquid contact breaks the causal chain from an earlier air fall.
+        // Clear before landing resolution so shallow-water landings cannot
+        // convert stale dry-air distance into damage.
+        body.fall_distance = 0.0;
+    }
+
     let probe = Vec3::new(body.position.x, body.position.y - 0.055, body.position.z);
     body.grounded = collides_body(&input.window, probe, body.radius, body.height).0;
-    if !was_grounded && body.grounded && !was_in_liquid {
+    if !was_grounded && body.grounded && !was_in_liquid && !in_liquid {
         events.push(PhysicsEventV1 {
             kind: PhysicsEventKindV1::Land,
             amount: 0.0,
@@ -658,8 +756,6 @@ pub fn step_physics(input: &PhysicsStepInputV1) -> Result<PhysicsStepResultV1, C
         body.fall_distance = 0.0;
     }
 
-    let final_environment = sample_liquid_environment(&input.window, &body, body.position);
-    let in_liquid = final_environment.submersion > 0.0;
     if !was_in_liquid && in_liquid {
         events.push(PhysicsEventV1 {
             kind: PhysicsEventKindV1::LiquidEnter,

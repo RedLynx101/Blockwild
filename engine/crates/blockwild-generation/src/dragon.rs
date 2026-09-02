@@ -7,7 +7,7 @@ const REGION_BLOCKS: i32 = 44 * 16;
 const MAX_HORIZONTAL_RADIUS: i32 = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DragonType {
+pub(crate) enum DragonType {
     Fire,
     Ice,
     Steel,
@@ -16,7 +16,7 @@ enum DragonType {
 }
 
 impl DragonType {
-    fn id(self) -> &'static str {
+    pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Fire => "fire",
             Self::Ice => "ice",
@@ -24,6 +24,12 @@ impl DragonType {
             Self::Gold => "gold",
             Self::Silver => "silver",
         }
+    }
+
+    pub(crate) fn from_id(value: &str) -> Option<Self> {
+        [Self::Fire, Self::Ice, Self::Steel, Self::Gold, Self::Silver]
+            .into_iter()
+            .find(|dragon_type| dragon_type.id() == value)
     }
 
     fn palette(self) -> (u16, u16) {
@@ -38,13 +44,13 @@ impl DragonType {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DragonSex {
+pub(crate) enum DragonSex {
     Female,
     Male,
 }
 
 impl DragonSex {
-    fn id(self) -> &'static str {
+    pub(crate) fn id(self) -> &'static str {
         match self {
             Self::Female => "female",
             Self::Male => "male",
@@ -53,21 +59,21 @@ impl DragonSex {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Candidate {
-    dragon_type: DragonType,
-    stage: u8,
-    sex: DragonSex,
-    region_x: i32,
-    region_z: i32,
-    x: i32,
-    y: i32,
-    z: i32,
+pub(crate) struct Candidate {
+    pub(crate) dragon_type: DragonType,
+    pub(crate) stage: u8,
+    pub(crate) sex: DragonSex,
+    pub(crate) region_x: i32,
+    pub(crate) region_z: i32,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) z: i32,
     radius_x: i32,
     radius_z: i32,
 }
 
 impl Candidate {
-    fn id(self) -> String {
+    pub(crate) fn id(self) -> String {
         format!(
             "dragon-lair:{}:{}:{}",
             self.dragon_type.id(),
@@ -165,6 +171,150 @@ fn candidate(seed: &str, region_x: i32, region_z: i32, generator: &TerrainGenera
         radius_x: if stage == 5 { 32 } else { 25 },
         radius_z: if stage == 5 { 28 } else { 22 },
     })
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum LairCandidate {
+    Terrestrial(Candidate),
+    Sea(SeaNest),
+}
+
+impl LairCandidate {
+    pub(crate) fn id(&self) -> String {
+        match self {
+            Self::Terrestrial(value) => value.id(),
+            Self::Sea(value) => value.id.clone(),
+        }
+    }
+    pub(crate) fn dragon_type(&self) -> &'static str {
+        match self {
+            Self::Terrestrial(value) => value.dragon_type.id(),
+            Self::Sea(_) => "sea",
+        }
+    }
+    pub(crate) fn stage(&self) -> u8 {
+        match self {
+            Self::Terrestrial(value) => value.stage,
+            Self::Sea(value) => u8::try_from(value.stage).expect("bounded sea stage"),
+        }
+    }
+    pub(crate) fn sex(&self) -> &'static str {
+        match self {
+            Self::Terrestrial(value) => value.sex.id(),
+            Self::Sea(value) => {
+                if value.female {
+                    "female"
+                } else {
+                    "male"
+                }
+            }
+        }
+    }
+    pub(crate) fn position(&self) -> (i32, i32, i32) {
+        match self {
+            Self::Terrestrial(value) => (value.x, value.y, value.z),
+            Self::Sea(value) => (value.x, value.y, value.z),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LocatedLair {
+    pub(crate) candidate: LairCandidate,
+    pub(crate) distance_squared: u64,
+}
+
+pub(crate) struct LairQuery<'a> {
+    pub(crate) origin_x_millis: i64,
+    pub(crate) origin_z_millis: i64,
+    pub(crate) dragon_type: &'a str,
+    pub(crate) minimum_stage: u8,
+    pub(crate) excluded_ids: &'a std::collections::BTreeSet<String>,
+    pub(crate) maximum_region_radius: u16,
+}
+
+fn later_shell_cannot_win(radius: i32, region_blocks: i32, distance_squared: u64) -> bool {
+    let minimum = (i128::from(radius) * i128::from(region_blocks) - i128::from(region_blocks * 3 / 2)) * 1_000;
+    minimum > 0 && u64::try_from(minimum * minimum).expect("bounded lair shell") > distance_squared
+}
+
+pub(crate) fn query_nearest_lair(
+    seed: &str,
+    generator: &TerrainGeneratorV18,
+    query: LairQuery<'_>,
+) -> Option<LocatedLair> {
+    let sea = query.dragon_type == "sea";
+    let terrestrial_type = if sea {
+        None
+    } else {
+        Some(DragonType::from_id(query.dragon_type)?)
+    };
+    let region_blocks = if sea { 48 * 16 } else { REGION_BLOCKS };
+    let origin_region_x = i32::try_from(query.origin_x_millis.div_euclid(i64::from(region_blocks) * 1_000))
+        .expect("bounded lair origin region");
+    let origin_region_z = i32::try_from(query.origin_z_millis.div_euclid(i64::from(region_blocks) * 1_000))
+        .expect("bounded lair origin region");
+    let mut best: Option<LocatedLair> = None;
+    for radius in 0..=i32::from(query.maximum_region_radius.min(64)) {
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                if radius > 0 && dx.abs().max(dz.abs()) != radius {
+                    continue;
+                }
+                let candidate = if sea {
+                    let Some(probe) = sea_nest(seed, origin_region_x + dx, origin_region_z + dz, -48) else {
+                        continue;
+                    };
+                    let column = generator.sample_column(probe.x, probe.z);
+                    if !matches!(column.biome, BiomeId::DeepOcean | BiomeId::LumenTrench) || column.height > 22 {
+                        continue;
+                    }
+                    let Some(value) = sea_nest(seed, origin_region_x + dx, origin_region_z + dz, column.height) else {
+                        continue;
+                    };
+                    LairCandidate::Sea(value)
+                } else {
+                    let Some(value) = candidate(seed, origin_region_x + dx, origin_region_z + dz, generator) else {
+                        continue;
+                    };
+                    if Some(value.dragon_type) != terrestrial_type {
+                        continue;
+                    }
+                    LairCandidate::Terrestrial(value)
+                };
+                if candidate.stage() < query.minimum_stage || query.excluded_ids.contains(&candidate.id()) {
+                    continue;
+                }
+                let (x, _, z) = candidate.position();
+                let delta_x = i64::from(x) * 1_000 - query.origin_x_millis;
+                let delta_z = i64::from(z) * 1_000 - query.origin_z_millis;
+                let distance_squared = u64::try_from(
+                    delta_x
+                        .checked_mul(delta_x)
+                        .and_then(|x| delta_z.checked_mul(delta_z).and_then(|z| x.checked_add(z)))
+                        .expect("bounded lair query distance arithmetic"),
+                )
+                .expect("bounded lair query distance");
+                let replace = best.as_ref().is_none_or(|current| {
+                    distance_squared < current.distance_squared
+                        || distance_squared == current.distance_squared && candidate.id() < current.candidate.id()
+                });
+                if replace {
+                    best = Some(LocatedLair {
+                        candidate,
+                        distance_squared,
+                    });
+                }
+            }
+        }
+        if best
+            .as_ref()
+            .is_some_and(|value| later_shell_cannot_win(radius, region_blocks, value.distance_squared))
+        {
+            break;
+        }
+    }
+    best
 }
 
 #[derive(Clone, Copy)]
@@ -579,7 +729,7 @@ fn base36_u32(mut value: u32) -> String {
 }
 
 #[derive(Clone, Debug)]
-struct SeaNest {
+pub(crate) struct SeaNest {
     id: String,
     x: i32,
     y: i32,
@@ -780,4 +930,36 @@ pub(crate) fn sea_nest_plans_for_chunk(
         }
     }
     plans
+}
+
+#[cfg(test)]
+mod locator_tests {
+    use super::*;
+    use crate::contract::GenerationOptions;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn sea_lair_query_has_a_positive_bounded_path() {
+        for index in 0..64 {
+            let seed = format!("sea-locator-positive-{index}");
+            let generator = TerrainGeneratorV18::new(&seed, GenerationOptions::default());
+            if let Some(result) = query_nearest_lair(
+                &seed,
+                &generator,
+                LairQuery {
+                    origin_x_millis: -250,
+                    origin_z_millis: 750,
+                    dragon_type: "sea",
+                    minimum_stage: 3,
+                    excluded_ids: &BTreeSet::new(),
+                    maximum_region_radius: 8,
+                },
+            ) {
+                assert_eq!(result.candidate.dragon_type(), "sea");
+                assert!(result.candidate.stage() >= 3);
+                return;
+            }
+        }
+        panic!("bounded positive sea-lair corpus must contain a real generated nest");
+    }
 }

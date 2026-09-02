@@ -22,11 +22,13 @@ import {
   type RustPresentationExtractionDiagnosticsR10,
 } from "./rust-render-presentation-extraction-r10.ts";
 import {
+  createRenderPresentationCoverageInventoryR10,
   loadAttestedRenderPresentationCatalogV1,
   RENDER_PRESENTATION_CATALOG_ID_V1,
   RENDER_PRESENTATION_CATALOG_SCHEMA_ID_V1,
   RENDER_PRESENTATION_CATALOG_SCHEMA_CURRENT,
   type AttestedRenderPresentationCatalogV1,
+  type RenderPresentationCoverageInventoryR10,
 } from "./rust-render-presentation-profile.ts";
 import {
   RustRenderSceneComposerR10,
@@ -80,6 +82,7 @@ export type RustLiveRenderRuntimeDiagnosticsR10 = Readonly<{
   lastAuthorityTick: bigint | null;
   lastFrameSequence: bigint | null;
   lastError: string | null;
+  presentationCoverage: RenderPresentationCoverageInventoryR10 | null;
   presentation: RustPresentationExtractionDiagnosticsR10 | null;
   composer: ReturnType<RustRenderSceneComposerR10["diagnostics"]> | null;
 }>;
@@ -269,6 +272,7 @@ export class RustLiveRenderRuntimeR10 {
   private lastFrameSequence: bigint | null = null;
   private lastAnimationTimeMicros: bigint | null = null;
   private lastError: string | null = null;
+  private presentationCoverage: RenderPresentationCoverageInventoryR10 | null = null;
 
   private constructor(private readonly options: RustLiveRenderRuntimeOptionsR10) {
     this.sink = options.sink;
@@ -369,6 +373,7 @@ export class RustLiveRenderRuntimeR10 {
     return Object.freeze({
       entity: composer.entityMetadata(),
       authoritative: composer.authoritativeMetadata(),
+      presentation: composer.presentationMetadata(),
     });
   }
 
@@ -411,6 +416,7 @@ export class RustLiveRenderRuntimeR10 {
       lastAuthorityTick: this.lastAuthorityTick,
       lastFrameSequence: this.lastFrameSequence,
       lastError: this.lastError,
+      presentationCoverage: this.presentationCoverage,
       presentation: this.extractor?.diagnostics() ?? null,
       composer: this.composer?.diagnostics() ?? null,
     });
@@ -433,6 +439,7 @@ export class RustLiveRenderRuntimeR10 {
           "live renderer content manifest differs from the active Rust runtime");
       }
       const presentationArtifact = attestProductionRenderPresentationsR10(profile, presentations, content.artifacts);
+      const presentationCoverage = createRenderPresentationCoverageInventoryR10(presentations.profileCatalog);
       const attestations = createProductionRenderModelAttestationsR10(profile, presentations, content.artifacts);
       const equipmentModels = createProductionHeldEquipmentModelsR10(presentations);
       const entityExtractor = new RustEntityRenderExtractionR10({
@@ -457,6 +464,7 @@ export class RustLiveRenderRuntimeR10 {
         trustedModelCatalogHash: profile.catalog.catalogHashHex,
         trustedModelCatalogRevision: profile.catalog.revision,
         entityExtractor: extractor,
+        presentationCoverage,
         maxInstances: this.options.maxInstances,
         maxParticles: this.options.maxParticles,
         maxResourceOperations: this.options.maxResourceOperations,
@@ -469,6 +477,7 @@ export class RustLiveRenderRuntimeR10 {
       this.composer = composer;
       this.modelAttestations = attestations.length;
       this.heldEquipmentModels = equipmentModels.length;
+      this.presentationCoverage = presentationCoverage;
       this.contentManifestHash = manifestHash;
       this.modelCatalogHash = profile.catalog.catalogHashHex;
       this.modelCatalogRevision = profile.catalog.revision;

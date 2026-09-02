@@ -4,6 +4,10 @@ import {
 } from "./rust-integrated-runtime-contract";
 import { rustIntegratedRuntimeWireChecksumV1 } from "./rust-integrated-runtime-codec";
 import {
+  RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1,
+  rustIntegratedRuntimeDomainWireFamilyV1,
+} from "./rust-integrated-runtime-domain-schema.generated";
+import {
   decodeRustEntityCompatibilityRecordR6V1,
   encodeRustEntityCompatibilityRecordR6V1,
 } from "./rust-entity-authority-codec-r6";
@@ -33,12 +37,19 @@ import {
   type RustIntegratedPlayerBindingV1,
 } from "./rust-integrated-runtime-player";
 
-export const RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1 = "blockwild.simulation.player-bootstrap-status.r5.v1";
-export const RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1 = "blockwild.simulation.player-bootstrap-status-receipt.r5.v1";
+const BWS5_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("player-bootstrap-status-v1");
+const BWO5_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("player-bootstrap-status-receipt-v1");
 
-const BWS5_MAGIC = Uint8Array.of(0x42, 0x57, 0x53, 0x35);
-const BWO5_MAGIC = Uint8Array.of(0x42, 0x57, 0x4f, 0x35);
+export const RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_TYPE_V1 = BWS5_SCHEMA.typeId;
+export const RUST_INTEGRATED_PLAYER_BOOTSTRAP_STATUS_RECEIPT_TYPE_V1 = BWO5_SCHEMA.typeId;
+
+const wireEncoder = new TextEncoder();
+const BWS5_MAGIC = wireEncoder.encode(BWS5_SCHEMA.magic);
+const BWO5_MAGIC = wireEncoder.encode(BWO5_SCHEMA.magic);
 const HEADER_BYTES = 28;
+// Match blockwild_gameplay::MAX_ID_LENGTH at the BWO5 custody boundary.
+// Other wire families can deliberately carry larger opaque metadata identities.
+const MAX_CUSTODY_METADATA_ID_BYTES_V1 = 160;
 const U64_MAX = (BigInt(1) << BigInt(64)) - BigInt(1);
 
 export type RustIntegratedPlayerBootstrapStatusQueryV1 = Readonly<{
@@ -139,15 +150,15 @@ function hashBytes(value: string, label: string) {
 
 function bytesHash(value: Uint8Array) { return [...value].map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
 
-function wrap(magic: Uint8Array, body: Uint8Array) {
+function wrap(magic: Uint8Array, schema: number, body: Uint8Array) {
   if (body.byteLength > RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES - HEADER_BYTES) fail("player-status-size", "player status packet exceeds its byte budget");
   const packet = new Uint8Array(HEADER_BYTES + body.byteLength); const view = new DataView(packet.buffer);
-  packet.set(magic); view.setUint16(4, 1, true); view.setUint16(6, 1, true); view.setUint32(8, body.byteLength, true); packet.set(hashBytes(rustIntegratedRuntimeWireChecksumV1(body), "status checksum"), 12); packet.set(body, HEADER_BYTES); return packet;
+  packet.set(magic); view.setUint16(4, RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1, true); view.setUint16(6, schema, true); view.setUint32(8, body.byteLength, true); packet.set(hashBytes(rustIntegratedRuntimeWireChecksumV1(body), "status checksum"), 12); packet.set(body, HEADER_BYTES); return packet;
 }
 
-function unwrap(packet: Uint8Array, magic: Uint8Array) {
+function unwrap(packet: Uint8Array, magic: Uint8Array, schema: number) {
   if (!(packet instanceof Uint8Array) || packet.byteLength < HEADER_BYTES || packet.byteLength > RUST_INTEGRATED_RUNTIME_MAX_DOMAIN_PAYLOAD_BYTES || !magic.every((byte, index) => packet[index] === byte)) fail("player-status-header", "player status packet header is malformed");
-  const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength); if (view.getUint16(4, true) !== 1 || view.getUint16(6, true) !== 1 || view.getUint32(8, true) !== packet.byteLength - HEADER_BYTES) fail("player-status-header", "player status packet version or length is invalid");
+  const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength); if (view.getUint16(4, true) !== RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1 || view.getUint16(6, true) !== schema || view.getUint32(8, true) !== packet.byteLength - HEADER_BYTES) fail("player-status-header", "player status packet version or length is invalid");
   const body = packet.subarray(HEADER_BYTES); if (bytesHash(packet.subarray(12, 28)) !== rustIntegratedRuntimeWireChecksumV1(body)) fail("player-status-checksum", "player status packet checksum is invalid"); return body;
 }
 
@@ -211,8 +222,18 @@ function readWorldViewBinding(reader: RustIntegratedPlayerInventoryReaderV1) {
   const value = Object.freeze({ playerId: reader.u64(), revision: reader.u64(), actorId: reader.string("binding actor"), entityId: reader.u64(), inventoryContainer: readRustIntegratedContainerKeyV1(reader), equipmentContainer: readRustIntegratedContainerKeyV1(reader), selectedSlot: reader.u16(), backSlot: reader.option(() => reader.u16()) }); const check = new RustIntegratedPlayerInventoryWriterV1(); writeWorldViewBinding(check, value); return value;
 }
 
+function validateCustodyMetadataIds(metadata: readonly RustIntegratedPlayerInventoryMetadataV1[]) {
+  for (const record of metadata) {
+    if (wireEncoder.encode(record.typeId).byteLength > MAX_CUSTODY_METADATA_ID_BYTES_V1
+      || wireEncoder.encode(record.schemaId).byteLength > MAX_CUSTODY_METADATA_ID_BYTES_V1) {
+      fail("player-status-metadata", "custody metadata type/schema identity exceeds native 160-byte UTF-8 bound");
+    }
+  }
+}
+
 function writeCustody(writer: RustIntegratedPlayerInventoryWriterV1, value: RustIntegratedPlayerCustodyAttestationV1) {
   writer.u8(value.status === "absent" ? 0 : 1); if (value.status === "absent") return;
+  validateCustodyMetadataIds(value.metadata);
   writeRustIntegratedContainerKeyV1(writer, value.inventoryContainer); writer.u64(value.inventoryRevision); writer.u32(RUST_INTEGRATED_PLAYER_INVENTORY_SLOT_COUNT_V1);
   validateRustIntegratedPlayerInventoryContentsV1(value.inventorySlots, value.metadata);
   for (const stack of value.inventorySlots) writer.option(stack, (entry) => writeRustIntegratedPlayerInventoryStackV1(writer, entry));
@@ -231,23 +252,24 @@ function readCustody(reader: RustIntegratedPlayerInventoryReaderV1): RustIntegra
   const equipmentSlots = Object.freeze(Array.from({ length: equipmentSlotCount }, () => reader.option(() => readRustIntegratedPlayerInventoryStackV1(reader))));
   const metadataCount = reader.u32(); if (metadataCount > 9) fail("player-status-custody", "custody metadata exceeds nine records");
   const metadata = Object.freeze(Array.from({ length: metadataCount }, () => readRustIntegratedPlayerInventoryMetadataV1(reader)));
+  validateCustodyMetadataIds(metadata);
   validateRustIntegratedPlayerInventoryContentsV1(inventorySlots, metadata);
   return Object.freeze({ status: "present" as const, inventoryContainer, inventoryRevision, inventorySlots, equipmentContainer, equipmentRevision, equipmentSlots, metadata });
 }
 
 export function encodeRustIntegratedPlayerBootstrapStatusQueryV1(value: RustIntegratedPlayerBootstrapStatusQueryV1) {
-  if (value.playerId <= BigInt(0) || value.playerId > U64_MAX) fail("player-status-player", "player id is outside its native range"); const writer = new RustIntegratedPlayerInventoryWriterV1(); writer.string(value.externalEntityId, "external entity id"); writer.string(value.actorId, "actor id"); writer.u64(value.playerId); return wrap(BWS5_MAGIC, writer.finish());
+  if (value.playerId <= BigInt(0) || value.playerId > U64_MAX) fail("player-status-player", "player id is outside its native range"); const writer = new RustIntegratedPlayerInventoryWriterV1(); writer.string(value.externalEntityId, "external entity id"); writer.string(value.actorId, "actor id"); writer.u64(value.playerId); return wrap(BWS5_MAGIC, BWS5_SCHEMA.innerSchema, writer.finish());
 }
 
 export function decodeRustIntegratedPlayerBootstrapStatusQueryV1(packet: Uint8Array) {
-  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWS5_MAGIC)); const value = Object.freeze({ externalEntityId: reader.string("external entity id"), actorId: reader.string("actor id"), playerId: reader.u64() }); reader.finish(); encodeRustIntegratedPlayerBootstrapStatusQueryV1(value); return value;
+  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWS5_MAGIC, BWS5_SCHEMA.innerSchema)); const value = Object.freeze({ externalEntityId: reader.string("external entity id"), actorId: reader.string("actor id"), playerId: reader.u64() }); reader.finish(); encodeRustIntegratedPlayerBootstrapStatusQueryV1(value); return value;
 }
 
 export function encodeRustIntegratedPlayerBootstrapStatusReceiptV1(value: RustIntegratedPlayerBootstrapStatusReceiptV1) {
-  const writer = new RustIntegratedPlayerInventoryWriterV1(); writer.raw(hashBytes(value.requestPayloadHash, "request payload hash")); writer.u64(value.worldAuthorityRevision.epoch); writer.u64(value.worldAuthorityRevision.mutation); writer.u64(value.worldAuthorityRevision.residency); writer.u64(value.entityAuthority.revision); writer.option(value.entityAuthority.nextSequence, (entry) => writer.u64(entry)); writer.u64(value.entityAuthority.tick); writeContinuity(writer, value.continuity); writer.option(value.entity, (entry) => writeEntity(writer, entry)); writer.option(value.runtimePlayer, (entry) => writeRuntimePlayer(writer, entry)); writer.option(value.worldViewBinding, (entry) => writeWorldViewBinding(writer, entry)); writeCustody(writer, value.custody); return wrap(BWO5_MAGIC, writer.finish());
+  const writer = new RustIntegratedPlayerInventoryWriterV1(); writer.raw(hashBytes(value.requestPayloadHash, "request payload hash")); writer.u64(value.worldAuthorityRevision.epoch); writer.u64(value.worldAuthorityRevision.mutation); writer.u64(value.worldAuthorityRevision.residency); writer.u64(value.entityAuthority.revision); writer.option(value.entityAuthority.nextSequence, (entry) => writer.u64(entry)); writer.u64(value.entityAuthority.tick); writeContinuity(writer, value.continuity); writer.option(value.entity, (entry) => writeEntity(writer, entry)); writer.option(value.runtimePlayer, (entry) => writeRuntimePlayer(writer, entry)); writer.option(value.worldViewBinding, (entry) => writeWorldViewBinding(writer, entry)); writeCustody(writer, value.custody); return wrap(BWO5_MAGIC, BWO5_SCHEMA.innerSchema, writer.finish());
 }
 
 export function decodeRustIntegratedPlayerBootstrapStatusReceiptV1(packet: Uint8Array, expectedRequestPayloadHash?: string) {
-  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWO5_MAGIC)); const requestPayloadHash = bytesHash(reader.take(16)); if (expectedRequestPayloadHash !== undefined && requestPayloadHash !== checkedHash(expectedRequestPayloadHash, "expected request payload hash")) fail("player-status-request", "BWO5 does not attest the exact BWS5 request");
+  const reader = new RustIntegratedPlayerInventoryReaderV1(unwrap(packet, BWO5_MAGIC, BWO5_SCHEMA.innerSchema)); const requestPayloadHash = bytesHash(reader.take(16)); if (expectedRequestPayloadHash !== undefined && requestPayloadHash !== checkedHash(expectedRequestPayloadHash, "expected request payload hash")) fail("player-status-request", "BWO5 does not attest the exact BWS5 request");
   const value = Object.freeze({ requestPayloadHash, worldAuthorityRevision: Object.freeze({ epoch: reader.u64(), mutation: reader.u64(), residency: reader.u64() }), entityAuthority: Object.freeze({ revision: reader.u64(), nextSequence: reader.option(() => reader.u64()), tick: reader.u64() }), continuity: readContinuity(reader), entity: reader.option(() => readEntity(reader)), runtimePlayer: reader.option(() => readRuntimePlayer(reader)), worldViewBinding: reader.option(() => readWorldViewBinding(reader)), custody: readCustody(reader) }); reader.finish(); return value;
 }

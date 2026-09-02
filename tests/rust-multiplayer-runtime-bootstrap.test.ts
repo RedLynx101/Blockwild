@@ -109,6 +109,16 @@ test("runtime descriptor V2 seals the exact canonical terrain identity", () => {
     ...RUNTIME_DESCRIPTOR,
     generationOptionsJson: JSON.stringify({ ...options, biomeScale: 4.01 }),
   }), /unsupported|non-normalized/iu);
+  assert.doesNotThrow(() => createRustMultiplayerRuntimeDescriptorV2({
+    ...RUNTIME_DESCRIPTOR,
+    generationOptionsJson: JSON.stringify({ ...options, settlementDensity: 2 }),
+  }));
+  for (const settlementDensity of [2.01, 3]) {
+    assert.throws(() => createRustMultiplayerRuntimeDescriptorV2({
+      ...RUNTIME_DESCRIPTOR,
+      generationOptionsJson: JSON.stringify({ ...options, settlementDensity }),
+    }), /unsupported|non-normalized/iu);
+  }
 
   const changedOptions = JSON.stringify({ ...options, resourceAbundance: 2 });
   const changed = createRustMultiplayerRuntimeDescriptorV2({

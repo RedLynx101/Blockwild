@@ -381,6 +381,22 @@ pub struct AcceptedReceipt {
     pub receipt_hash: CanonicalHash,
 }
 
+impl AcceptedReceipt {
+    /// Recompute the canonical receipt digest independently of its stored hash.
+    #[must_use]
+    pub fn calculate_hash(&self) -> CanonicalHash {
+        crate::authority::receipt_hash(
+            &self.batch_id,
+            &self.before,
+            &self.after,
+            &self.touched_domains,
+            &self.resource_deltas,
+            &self.stat_deltas,
+            &self.events,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RejectionCode {
     WrongWorld,

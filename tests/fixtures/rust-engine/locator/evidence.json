@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "corpusHash": "85d6e080c27222b8d06d25812d7d5535",
+  "settlementCases": 114,
+  "lairCases": 16,
+  "nativeByteEqualTwice": true,
+  "typescriptSemanticEqual": true,
+  "typescriptPacketByteEqual": true,
+  "checkedInWasmHash": "c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b",
+  "checkedInWasmExportsAvailable": true,
+  "byteEqual": true
+}

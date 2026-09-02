@@ -3,15 +3,35 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { MemoryPersistenceAdapterV1 } from "../app/game/indexeddb-persistence-adapter.ts";
+import { PERSISTENCE_MAX_RECORD_BYTES_V1 } from "../app/game/persistence-journal-contract.ts";
+import { RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_MAX_PACKET_BYTES_V1 } from "../app/game/rust-integrated-runtime-bulk-platform.ts";
 import { RustPersistenceBrowserRuntimeV1 } from "../app/game/rust-persistence-runtime-adapter.ts";
 import {
   RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1,
+  RUST_PERSISTENCE_BROWSER_HEADER_BYTES_V1,
+  RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1,
+  RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_OVERHEAD_BYTES_V1,
   decodeRustPersistenceResponseV1,
   encodeRustPersistencePlatformRequestV1,
   rustPersistencePlatformPayloadHashV1,
   type RustPersistencePlatformOperationV1,
   type RustPersistencePlatformRequestV1,
 } from "../app/game/rust-persistence-runtime-contract.ts";
+
+test("recovery-only page capacity matches one maximum record plus bounded overhead below the bulk packet", () => {
+  assert.equal(
+    RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1,
+    PERSISTENCE_MAX_RECORD_BYTES_V1 + RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_OVERHEAD_BYTES_V1,
+  );
+  assert.equal(RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_OVERHEAD_BYTES_V1, 64 * 1024);
+  assert.equal(RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1, 4 * 1024 * 1024, "ordinary import/export chunks remain unchanged");
+  const maximumDecodedBwpaEnvelope = RUST_PERSISTENCE_BROWSER_HEADER_BYTES_V1
+    + 2 + 1 + 8 + 16 + 1 + 8 + 4 + 4 + 4_096;
+  assert.ok(
+    RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1 + maximumDecodedBwpaEnvelope
+      < RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_MAX_PACKET_BYTES_V1,
+  );
+});
 
 function commitFixture() {
   const path = fileURLToPath(new URL("./fixtures/rust-engine/r8-r9/persistence-browser-runtime-v1.hex", import.meta.url));

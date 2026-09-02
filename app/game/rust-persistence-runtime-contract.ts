@@ -18,6 +18,9 @@ export const RUST_PERSISTENCE_BROWSER_PROTOCOL_V1 = 1 as const;
 export const RUST_PERSISTENCE_BROWSER_HEADER_BYTES_V1 = 36;
 export const RUST_PERSISTENCE_BROWSER_MAX_WIRE_BYTES_V1 = 256 * 1024 * 1024;
 export const RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1 = 4 * 1024 * 1024;
+export const RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_OVERHEAD_BYTES_V1 = 64 * 1024;
+export const RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1 =
+  PERSISTENCE_MAX_RECORD_BYTES_V1 + RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_OVERHEAD_BYTES_V1;
 export const RUST_PERSISTENCE_PLATFORM_MAX_PAGE_RECORDS_V1 = 4_096;
 
 const REQUEST_MAGIC = "BWPR";
@@ -155,7 +158,7 @@ function validatePlatformRequestV1(request: RustPersistencePlatformRequestV1) {
       }
       break;
     case "read-recovery-page":
-      if (!request.objectId || !empty || request.expectedHeadHash !== null || request.limit < 1 || request.limit > RUST_PERSISTENCE_PLATFORM_MAX_PAGE_RECORDS_V1 || request.totalBytes < 1 || request.totalBytes > RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1) {
+      if (!request.objectId || !empty || request.expectedHeadHash !== null || request.limit < 1 || request.limit > RUST_PERSISTENCE_PLATFORM_MAX_PAGE_RECORDS_V1 || request.totalBytes < 1 || request.totalBytes > RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1) {
         throw new RustPersistenceRuntimeContractError("platform-shape", "recovery page request is malformed");
       }
       break;
@@ -363,6 +366,22 @@ export function encodeRustPersistencePlatformRequestV1(request: RustPersistenceP
 const COMMIT_CODES: readonly RustPersistenceCommitCodeV1[] = Object.freeze(["committed", "stale-sequence", "record-conflict", "quota", "corrupt", "unavailable"]);
 const RECOVERY_CODES: readonly RustPersistenceRecoveryCodeV1[] = Object.freeze(["ready", "empty", "corrupt"]);
 
+function platformResponsePayloadLimitV1(operation: RustPersistencePlatformOperationV1) {
+  return operation === "read-recovery-page"
+    ? RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1
+    : RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1;
+}
+
+function validatePlatformResponsePayloadV1(operation: RustPersistencePlatformOperationV1, payload: Uint8Array) {
+  if (payload.byteLength <= platformResponsePayloadLimitV1(operation)) return;
+  throw new RustPersistenceRuntimeContractError(
+    "platform-size",
+    operation === "read-recovery-page"
+      ? "recovery page payload exceeds the 64 MiB record plus 64 KiB overhead budget"
+      : "platform response payload exceeds 4 MiB",
+  );
+}
+
 export function encodeRustPersistenceResponseV1(response: RustPersistenceResponseV1) {
   const payload = new Writer(); let kind: number;
   if (response.kind === "commit") {
@@ -377,7 +396,7 @@ export function encodeRustPersistenceResponseV1(response: RustPersistenceRespons
     payload.u32(response.corruptRecordKeys.length); for (const key of response.corruptRecordKeys) payload.string(key);
     payload.string(response.message);
   } else if (response.kind === "platform") {
-    if (response.payload.byteLength > RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1) throw new RustPersistenceRuntimeContractError("platform-size", "platform response payload exceeds 4 MiB");
+    validatePlatformResponsePayloadV1(response.operation, response.payload);
     if (response.code !== "accepted" && response.storageRevision !== 0) throw new RustPersistenceRuntimeContractError("platform-response", "rejected platform operation attempted to advance storage revision");
     if (response.code === "accepted" && ["compact", "delete-world", "preserve-legacy-backup-chunk", "import-chunk", "finalize-import"].includes(response.operation) && response.durableHash === ZERO_HASH) {
       throw new RustPersistenceRuntimeContractError("platform-response", "accepted durable mutation returned a zero durable hash");
@@ -418,8 +437,9 @@ export function decodeRustPersistenceResponseV1(message: Uint8Array): RustPersis
     const storageRevision = reader.u64();
     const durableHash = reader.hash();
     const nextCursor = reader.flag() ? reader.u64() : null;
-    const payload = reader.bytes(RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1);
+    const payload = reader.bytes(platformResponsePayloadLimitV1(operation));
     const message = reader.string();
+    validatePlatformResponsePayloadV1(operation, payload);
     if (code !== "accepted" && storageRevision !== 0) throw new RustPersistenceRuntimeContractError("platform-response", "rejected platform operation attempted to advance storage revision");
     result = Object.freeze({ kind: "platform", requestId: outer.requestId, operation, code, storageRevision, durableHash, nextCursor, payload, message });
   } else if (outer.kind === 255) result = Object.freeze({ kind: "error", requestId: outer.requestId, code: reader.string(), message: reader.string() });

@@ -733,6 +733,10 @@ mod tests {
         verify_persistence_recovery_v1(&value).unwrap();
         let bytes =
             encode_persistence_browser_response_v1(&PersistenceBrowserResponseV1::Recovery(value.clone())).unwrap();
+        let expected =
+            include_str!("../../../../tests/fixtures/rust-engine/r8-r9/persistence-browser-recovery-response-v1.hex")
+                .trim();
+        assert_eq!(hex(&bytes), expected);
         assert_eq!(
             decode_persistence_browser_response_v1(&bytes).unwrap(),
             PersistenceBrowserResponseV1::Recovery(value)

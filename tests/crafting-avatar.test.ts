@@ -691,6 +691,7 @@ test("multiplayer polling retains React state when the visible session is unchan
     reasons: [],
     status: "connected",
     role: "host" as const,
+    guestWorldReady: false,
     peers: [{ id: "guest", identity: { id: "guest", name: "Trailkeeper" }, state: "connected", latencyMs: 24 }],
     inviteCode: "WILD-42",
     answerCode: "",

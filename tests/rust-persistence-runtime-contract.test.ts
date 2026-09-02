@@ -7,12 +7,22 @@ import { RustPersistenceBrowserRuntimeV1 } from "../app/game/rust-persistence-ru
 import {
   decodeRustPersistenceRequestV1,
   decodeRustPersistenceResponseV1,
+  encodeRustPersistenceResponseV1,
   encodeRustPersistenceReadCheckpointRequestV1,
   encodeRustPersistenceRecoverLatestRequestV1,
 } from "../app/game/rust-persistence-runtime-contract.ts";
 
 function fixtureBytes() {
   const path = fileURLToPath(new URL("./fixtures/rust-engine/r8-r9/persistence-browser-runtime-v1.hex", import.meta.url));
+  const hex = readFileSync(path, "utf8").trim();
+  return Uint8Array.from({ length: hex.length / 2 }, (_, index) => Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16));
+}
+
+function recoveryFixtureBytes() {
+  const path = fileURLToPath(new URL(
+    "./fixtures/rust-engine/r8-r9/persistence-browser-recovery-response-v1.hex",
+    import.meta.url,
+  ));
   const hex = readFileSync(path, "utf8").trim();
   return Uint8Array.from({ length: hex.length / 2 }, (_, index) => Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16));
 }
@@ -27,6 +37,29 @@ test("native Rust persistence request decodes byte-exactly in TypeScript includi
   const mutation = request.transaction.mutations[0];
   assert.equal(mutation.operation, "put");
   if (mutation.operation === "put") assert.deepEqual([...mutation.payload], [0x00, 0x7f, 0x80, 0xff, 0xc3, 0xb1]);
+});
+
+test("native Rust recovery response decodes and re-encodes byte-exactly in TypeScript", () => {
+  const bytes = recoveryFixtureBytes();
+  const response = decodeRustPersistenceResponseV1(bytes);
+  assert.equal(response.kind, "recovery");
+  if (response.kind !== "recovery") return;
+  assert.equal(response.requestId, 9);
+  assert.equal(response.code, "ready");
+  assert.equal(response.worldId, "world:browser");
+  assert.equal(response.checkpoint?.checkpointId, "checkpoint:one");
+  assert.equal(response.checkpoint?.records[0]?.address.recordId, "creature:Ã±");
+  assert.deepEqual(response.recordPayloads.map((payload) => payload && [...payload]), [
+    [0x00, 0x7f, 0x80, 0xff, 0xc3, 0xb1],
+  ]);
+  assert.deepEqual(response.missingRecordKeys, []);
+  assert.deepEqual(response.corruptRecordKeys, []);
+  assert.equal(response.message, "ready");
+  assert.deepEqual([...encodeRustPersistenceResponseV1(response)], [...bytes]);
+
+  const corrupted = Uint8Array.from(bytes);
+  corrupted[corrupted.length - 1] ^= 0x80;
+  assert.throws(() => decodeRustPersistenceResponseV1(corrupted), /checksum/u);
 });
 
 test("Rust browser runtime commits, verifies, and hydrates through one async platform adapter", async () => {

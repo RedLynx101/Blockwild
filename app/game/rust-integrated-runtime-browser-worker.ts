@@ -36,6 +36,14 @@ export type RustIntegratedRuntimeWasmExportsV2 = RustEngineWasmExports & Readonl
   blockwild_runtime_extract_v2(handle: number, request: Uint8Array): RustEngineBytes;
   blockwild_runtime_export_save_v2(handle: number, request: Uint8Array): RustEngineBytes;
   blockwild_runtime_initialize_native_save_v2(handle: number, control: Uint8Array): RustEngineBytes;
+  blockwild_runtime_migrate_legacy_v2(
+    handle: number,
+    control: Uint8Array,
+    legacyNonWorldStateFlags: number,
+    sourceKey: string,
+    sourceFormat: string,
+    worldProjection: Uint8Array,
+  ): RustEngineBytes;
   blockwild_runtime_bulk_v2(handle: number, control: Uint8Array, attachment: Uint8Array): RustEngineBytes;
   blockwild_runtime_bulk_take_attachment_v2(handle: number, transferToken: number): RustEngineBytes;
   blockwild_runtime_destroy_v2(handle: number, request: Uint8Array): RustEngineBytes;
@@ -48,6 +56,7 @@ const integratedExportNames = Object.freeze([
   "blockwild_runtime_extract_v2",
   "blockwild_runtime_export_save_v2",
   "blockwild_runtime_initialize_native_save_v2",
+  "blockwild_runtime_migrate_legacy_v2",
   "blockwild_runtime_bulk_v2",
   "blockwild_runtime_bulk_take_attachment_v2",
   "blockwild_runtime_destroy_v2",
@@ -70,7 +79,7 @@ function asBytes(value: RustEngineBytes) {
 /**
  * Real Wasm kernel. Tests may exercise codecs and transports with protocol
  * fixtures, but production authority is granted only after this loader proves
- * the content-addressed artifact and all six integrated exports.
+ * the content-addressed artifact and every required integrated export.
  */
 export class RustIntegratedRuntimeBrowserKernelV1 implements RustIntegratedRuntimeWireKernelV1 {
   private exports: RustIntegratedRuntimeWasmExportsV2 | null = null;
@@ -138,19 +147,34 @@ export class RustIntegratedRuntimeBrowserKernelV1 implements RustIntegratedRunti
   async handleBulk(request: RustIntegratedRuntimeBulkRequestV1): Promise<RustIntegratedRuntimeBulkResponseV1> {
     const exports = await this.load();
     const nativeInitialization = request.type === "runtime-bulk-initialize-native-save-v1";
-    const encoded = encodeRustIntegratedRuntimeBulkRequestV1(nativeInitialization ? Object.freeze({
+    const legacyWorldMigration = request.type === "runtime-bulk-migrate-legacy-world-v1";
+    const translatedFinalize = nativeInitialization || legacyWorldMigration ? Object.freeze({
       type: "runtime-bulk-finalize-save-v1" as const,
       requestId: request.requestId,
       clientEpoch: request.clientEpoch,
       expected: request.expected,
-      stageId: request.saveId,
+      stageId: nativeInitialization ? request.saveId : request.stageId,
       createdAt: request.createdAt,
-    }) : request);
-    const control = asBytes(nativeInitialization
-      ? exports.blockwild_runtime_initialize_native_save_v2(this.requireHandle(), encoded.control)
-      : exports.blockwild_runtime_bulk_v2(this.requireHandle(), encoded.control, encoded.attachment));
+    }) : request;
+    const encoded = encodeRustIntegratedRuntimeBulkRequestV1(translatedFinalize);
+    const control = asBytes(
+      nativeInitialization
+        ? exports.blockwild_runtime_initialize_native_save_v2(this.requireHandle(), encoded.control)
+        : legacyWorldMigration
+          ? exports.blockwild_runtime_migrate_legacy_v2(
+            this.requireHandle(),
+            encoded.control,
+            request.legacyNonWorldStateFlags,
+            request.sourceKey,
+            request.sourceFormat,
+            request.worldProjection,
+          )
+          : exports.blockwild_runtime_bulk_v2(this.requireHandle(), encoded.control, encoded.attachment),
+    );
     const metadata = inspectRustIntegratedRuntimeBulkResponseAttachmentV1(control);
-    if (nativeInitialization && metadata.attachmentLength !== 0) throw new Error("native save initialization unexpectedly returned a bulk attachment");
+    if ((nativeInitialization || legacyWorldMigration) && metadata.attachmentLength !== 0) {
+      throw new Error(`${legacyWorldMigration ? "legacy world migration" : "native save initialization"} unexpectedly returned a bulk attachment`);
+    }
     const attachment = metadata.attachmentLength > 0
       ? asBytes(exports.blockwild_runtime_bulk_take_attachment_v2(this.requireHandle(), metadata.transferToken))
       : new Uint8Array();

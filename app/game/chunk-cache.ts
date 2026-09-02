@@ -65,6 +65,25 @@ export class ChunkMemoryCache {
   get byteLength() { return this.bytes; }
   has(cacheKey: string) { return this.entries.has(cacheKey); }
 
+  /**
+   * Non-destructive authoritative-column read. This deliberately does not
+   * refresh LRU order, increment ownership-transfer counters, or expose the
+   * cached typed arrays. Exact cache namespace and column schema must match.
+   */
+  peekColumn(cacheKey: string, columnIndex: number) {
+    const entry = this.entries.get(cacheKey);
+    const data = entry?.data;
+    if (!data
+      || data.cacheKey !== cacheKey
+      || !Number.isInteger(columnIndex)
+      || columnIndex < 0
+      || !(data.heightmap instanceof Int16Array)
+      || !(data.biomes instanceof Uint8Array)
+      || data.heightmap.length !== data.biomes.length
+      || columnIndex >= data.heightmap.length) return undefined;
+    return Object.freeze({ height: data.heightmap[columnIndex], biome: data.biomes[columnIndex] });
+  }
+
   clear() {
     this.entries.clear();
     this.bytes = 0;

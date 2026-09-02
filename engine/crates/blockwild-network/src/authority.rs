@@ -5,7 +5,7 @@ use blockwild_types::{CanonicalHash, CanonicalHasher};
 use crate::{
     NETWORK_AUTHORITY_SCHEMA_V1, NETWORK_MAX_IDEMPOTENCY_RECEIPTS_V1, NETWORK_MAX_SAFE_INTEGER_V1,
     NetworkAuthorityIdentityV1, NetworkCapabilityV1, NetworkCommandKindV1, NetworkCommandV1, NetworkError,
-    NetworkErrorCode, NetworkInterestSetV1, NetworkPeerKindV1, NetworkPeerRoleV1, normalize_capabilities,
+    NetworkErrorCode, NetworkInterestSetV1, NetworkPeerKindV1, NetworkPeerRoleV1, normalize_capabilities, safe_integer,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -125,6 +125,42 @@ struct CachedReceipt {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct NetworkPeerPresentationV1 {
+    connection_id: String,
+    delta_sequence: u64,
+    identity: NetworkAuthorityIdentityV1,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NetworkPeerPresentationCursorV1 {
+    pub peer_id: String,
+    pub connection_id: String,
+    pub delta_sequence: u64,
+    pub identity: NetworkAuthorityIdentityV1,
+}
+
+fn identity_extends(previous: &NetworkAuthorityIdentityV1, next: &NetworkAuthorityIdentityV1) -> bool {
+    previous.address == next.address
+        && previous.revision.epoch <= next.revision.epoch
+        && previous.revision.world <= next.revision.world
+        && previous.revision.entities <= next.revision.entities
+        && previous.revision.gameplay <= next.revision.gameplay
+        && previous.revision.persistence <= next.revision.persistence
+}
+
+fn presentation_is_reachable_from_current(
+    presented: &NetworkAuthorityIdentityV1,
+    current: &NetworkAuthorityIdentityV1,
+) -> bool {
+    presented.address == current.address
+        && presented.revision.epoch == current.revision.epoch
+        && presented.revision.world <= current.revision.world
+        && presented.revision.entities <= current.revision.entities
+        && presented.revision.gameplay <= current.revision.gameplay
+        && presented.revision.persistence <= current.revision.persistence
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActiveNetworkLeaseV1 {
     pub command_id: String,
     pub peer_id: String,
@@ -139,6 +175,7 @@ pub struct NetworkAuthorityV1 {
     receipts: BTreeMap<String, CachedReceipt>,
     receipt_order: VecDeque<String>,
     leases: BTreeMap<String, ActiveNetworkLeaseV1>,
+    presentations: BTreeMap<String, NetworkPeerPresentationV1>,
 }
 
 impl NetworkAuthorityV1 {
@@ -155,6 +192,7 @@ impl NetworkAuthorityV1 {
             receipts: BTreeMap::new(),
             receipt_order: VecDeque::new(),
             leases: BTreeMap::new(),
+            presentations: BTreeMap::new(),
         })
     }
 
@@ -172,13 +210,87 @@ impl NetworkAuthorityV1 {
             ));
         }
         grant.capabilities = normalize_capabilities(&grant.capabilities);
+        if self
+            .grants
+            .get(&grant.peer_id)
+            .is_some_and(|current| current.connection_id != grant.connection_id)
+        {
+            self.presentations.remove(&grant.peer_id);
+        }
         self.grants.insert(grant.peer_id.clone(), grant.clone());
         Ok(grant)
+    }
+
+    /// Bind the last successfully built host presentation to the exact active
+    /// connection. Presentation-bound commands may name this cursor while
+    /// unrelated native work advances the live authority identity.
+    pub fn record_peer_presentation(
+        &mut self,
+        peer_id: &str,
+        delta_sequence: u64,
+        identity: &NetworkAuthorityIdentityV1,
+    ) -> Result<bool, NetworkError> {
+        safe_integer(delta_sequence, "delta presentation sequence")?;
+        identity.validate()?;
+        let grant = self.grants.get(peer_id).ok_or_else(|| {
+            NetworkError::new(
+                NetworkErrorCode::InvalidLabel,
+                "delta presentation peer has no active host grant",
+            )
+        })?;
+        let next = NetworkPeerPresentationV1 {
+            connection_id: grant.connection_id.clone(),
+            delta_sequence,
+            identity: identity.clone(),
+        };
+        if let Some(current) = self.presentations.get(peer_id) {
+            if current.connection_id != next.connection_id {
+                return Err(NetworkError::new(
+                    NetworkErrorCode::InvalidLabel,
+                    "delta presentation connection does not match the active host grant",
+                ));
+            }
+            if delta_sequence < current.delta_sequence {
+                return Err(NetworkError::new(
+                    NetworkErrorCode::InvalidInteger,
+                    "delta presentation sequence regressed",
+                ));
+            }
+            if delta_sequence == current.delta_sequence {
+                if current != &next {
+                    return Err(NetworkError::new(
+                        NetworkErrorCode::HashMismatch,
+                        "delta presentation sequence was reused for another authority identity",
+                    ));
+                }
+                return Ok(false);
+            }
+            if !identity_extends(&current.identity, &next.identity) {
+                return Err(NetworkError::new(
+                    NetworkErrorCode::HashMismatch,
+                    "delta presentation identity does not extend the recorded authority chain",
+                ));
+            }
+        }
+        self.presentations.insert(peer_id.to_owned(), next);
+        Ok(true)
     }
 
     #[must_use]
     pub fn grant(&self, peer_id: &str) -> Option<&NetworkPeerGrantV1> {
         self.grants.get(peer_id)
+    }
+
+    #[must_use]
+    pub fn peer_presentation(&self, peer_id: &str) -> Option<NetworkPeerPresentationCursorV1> {
+        self.presentations
+            .get(peer_id)
+            .map(|presentation| NetworkPeerPresentationCursorV1 {
+                peer_id: peer_id.to_owned(),
+                connection_id: presentation.connection_id.clone(),
+                delta_sequence: presentation.delta_sequence,
+                identity: presentation.identity.clone(),
+            })
     }
 
     #[must_use]
@@ -224,6 +336,13 @@ impl NetworkAuthorityV1 {
             hasher.write_str(&lease.command_id);
             hasher.write_str(&lease.peer_id);
             hasher.write_u64(lease.expires_at);
+        }
+        hasher.write_u32(self.presentations.len() as u32);
+        for (peer_id, presentation) in &self.presentations {
+            hasher.write_str(peer_id);
+            hasher.write_str(&presentation.connection_id);
+            hasher.write_u64(presentation.delta_sequence);
+            hasher.write_str(&presentation.identity.state_hash.to_hex());
         }
         hasher.finish()
     }
@@ -310,12 +429,33 @@ impl NetworkAuthorityV1 {
                 "Command sequence does not match the host grant.",
             ));
         }
-        if command.expected != *current {
+        let presentation_bound = matches!(
+            command.kind,
+            NetworkCommandKindV1::Pose | NetworkCommandKindV1::PresentationState
+        );
+        let expected_identity_matches = if presentation_bound {
+            self.presentations.get(&command.peer_id).is_some_and(|presentation| {
+                presentation.connection_id == command.connection_id
+                    && presentation.identity == command.expected
+                    && presentation_is_reachable_from_current(&presentation.identity, current)
+            })
+        } else {
+            command.expected == *current
+        };
+        if !expected_identity_matches {
             return Ok(self.cache_rejection(
                 command,
                 current,
                 NetworkReceiptCodeV1::StaleRevision,
-                "Command was created from stale authoritative state.",
+                match command.kind {
+                    NetworkCommandKindV1::Pose => {
+                        "Pose command does not match the latest connection-bound authority presentation."
+                    }
+                    NetworkCommandKindV1::PresentationState => {
+                        "Player-state command does not match the latest connection-bound authority presentation."
+                    }
+                    _ => "Command was created from stale authoritative state.",
+                },
             ));
         }
         if !grant.capabilities.contains(&command.required_capability) {
@@ -380,6 +520,40 @@ impl NetworkAuthorityV1 {
         ))
     }
 
+    /// Authorize a browser command only while its exact connection and actor
+    /// are still active. This extra fence runs before idempotency lookup so an
+    /// accepted receipt from a released connection cannot be replayed as an
+    /// active projection after that peer reconnects.
+    pub fn authorize_active_peer_command(
+        &mut self,
+        command: &NetworkCommandV1,
+        current: &NetworkAuthorityIdentityV1,
+        now: u64,
+    ) -> Result<NetworkCommandReceiptV1, NetworkError> {
+        command.validate()?;
+        current.validate()?;
+        safe_integer(now, "authority clock")?;
+        let Some(grant) = self.grants.get(&command.peer_id) else {
+            return Ok(self.make_receipt(
+                command,
+                current,
+                NetworkReceiptStatusV1::Rejected,
+                Some(NetworkReceiptCodeV1::UnknownPeer),
+                "Peer has no active host grant.",
+            ));
+        };
+        if grant.connection_id != command.connection_id || grant.actor_id != command.actor_id {
+            return Ok(self.make_receipt(
+                command,
+                current,
+                NetworkReceiptStatusV1::Rejected,
+                Some(NetworkReceiptCodeV1::ConnectionMismatch),
+                "Command is not bound to the active connection and actor.",
+            ));
+        }
+        self.authorize(command, current, now)
+    }
+
     pub fn release_command(&mut self, command_id: &str) {
         self.leases.retain(|_, lease| lease.command_id != command_id);
     }
@@ -387,6 +561,7 @@ impl NetworkAuthorityV1 {
     pub fn release_peer(&mut self, peer_id: &str) {
         self.leases.retain(|_, lease| lease.peer_id != peer_id);
         self.grants.remove(peer_id);
+        self.presentations.remove(peer_id);
     }
 
     pub fn release_expired_leases(&mut self, now: u64) {

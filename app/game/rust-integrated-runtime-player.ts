@@ -3,16 +3,23 @@ import {
   createRustIntegratedRuntimeDomainOperationV1,
   rustIntegratedRuntimeWireChecksumV1,
 } from "./rust-integrated-runtime-codec";
+import {
+  RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1,
+  rustIntegratedRuntimeDomainWireFamilyV1,
+} from "./rust-integrated-runtime-domain-schema.generated";
 import { RustIntegratedRuntimeServiceV1 } from "./rust-integrated-runtime-service";
 
-export const RUST_INTEGRATED_PLAYER_BIND_TYPE_V2 = "blockwild.simulation.player-bind.r5.v2";
-export const RUST_INTEGRATED_PLAYER_BIND_RECEIPT_TYPE_V2 = "blockwild.simulation.player-bind-receipt.r5.v2";
+const BIND_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("simulation-player-bind-v2");
+const BIND_RECEIPT_SCHEMA = rustIntegratedRuntimeDomainWireFamilyV1("simulation-player-bind-receipt-v2");
 
-const MAGIC = Uint8Array.from([0x42, 0x57, 0x42, 0x36]); // BWB6
+export const RUST_INTEGRATED_PLAYER_BIND_TYPE_V2 = BIND_SCHEMA.typeId;
+export const RUST_INTEGRATED_PLAYER_BIND_RECEIPT_TYPE_V2 = BIND_RECEIPT_SCHEMA.typeId;
+
 const HEADER_BYTES = 28;
 const MAX_U64 = (BigInt(1) << BigInt(64)) - BigInt(1);
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
+const MAGIC = textEncoder.encode(BIND_SCHEMA.magic);
 
 export type RustIntegratedPlayerBindingV1 = Readonly<{
   externalEntityId: string;
@@ -111,8 +118,8 @@ export function encodeRustIntegratedPlayerBindingV1(value: RustIntegratedPlayerB
   const packet = new Uint8Array(HEADER_BYTES + body.byteLength);
   const header = new DataView(packet.buffer);
   packet.set(MAGIC, 0);
-  header.setUint16(4, 1, true);
-  header.setUint16(6, 1, true);
+  header.setUint16(4, RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1, true);
+  header.setUint16(6, BIND_SCHEMA.innerSchema, true);
   header.setUint32(8, body.byteLength, true);
   packet.set(checksumBytes(body), 12);
   packet.set(body, HEADER_BYTES);
@@ -125,7 +132,9 @@ export function decodeRustIntegratedPlayerBindingV1(packet: Uint8Array): RustInt
   }
   const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
   const length = view.getUint32(8, true);
-  if (view.getUint16(4, true) !== 1 || view.getUint16(6, true) !== 1 || length !== packet.byteLength - HEADER_BYTES) {
+  if (view.getUint16(4, true) !== RUST_INTEGRATED_RUNTIME_DOMAIN_WIRE_VERSION_V1
+    || view.getUint16(6, true) !== BIND_SCHEMA.innerSchema
+    || length !== packet.byteLength - HEADER_BYTES) {
     throw new RustIntegratedPlayerContractError("player-binding", "player binding packet version or length is invalid");
   }
   const body = packet.subarray(HEADER_BYTES);
@@ -205,7 +214,7 @@ export class RustIntegratedPlayerRuntimePortV1 {
       operations: [createRustIntegratedRuntimeDomainOperationV1({
         domain: "simulation",
         typeId: RUST_INTEGRATED_PLAYER_BIND_TYPE_V2,
-        schema: 2,
+        schema: BIND_SCHEMA.operationSchema,
         payload,
       })],
     })).then((receipt) => {
@@ -214,7 +223,7 @@ export class RustIntegratedPlayerRuntimePortV1 {
       if (receipt.domainReceipts.length !== 1
         || response.domain !== "simulation"
         || response.typeId !== RUST_INTEGRATED_PLAYER_BIND_RECEIPT_TYPE_V2
-        || response.schema !== 2) {
+        || response.schema !== BIND_RECEIPT_SCHEMA.operationSchema) {
         throw new RustIntegratedPlayerContractError("player-binding-receipt", "player binding returned an unexpected native receipt");
       }
     });

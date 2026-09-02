@@ -87,7 +87,7 @@ export type NetworkInterestSetSourceV1 = Omit<NetworkInterestSetV1, "chunks" | "
   entityIds: readonly string[];
 }>;
 
-export type NetworkCommandKindV1 = "world" | "gameplay" | "agent" | "chat" | "interest" | "reconnect";
+export type NetworkCommandKindV1 = "world" | "gameplay" | "agent" | "chat" | "interest" | "reconnect" | "pose" | "presentation-state";
 export type NetworkCommandV1 = Readonly<{
   schemaVersion: typeof NETWORK_AUTHORITY_SCHEMA_V1;
   protocolVersion: typeof NETWORK_AUTHORITY_PROTOCOL_V1;
@@ -148,6 +148,7 @@ export type NetworkDeltaV1 = Readonly<{
   peerId: string;
   keyframe: boolean;
   sequence: number;
+  /** Next stable gameplay-command sequence the host will admit for this peer; unlike delta sequence, it survives reconnect. */
   acknowledgedCommandSequence: number;
   from: NetworkAuthorityIdentityV1;
   to: NetworkAuthorityIdentityV1;
@@ -317,7 +318,7 @@ export function createNetworkCommandV1(source: NetworkCommandSourceV1): NetworkC
   label(source.sessionId, "sessionId"); label(source.commandId, "commandId"); label(source.idempotencyKey, "idempotencyKey", 256);
   label(source.peerId, "peerId"); label(source.connectionId, "connectionId"); label(source.actorId, "actorId");
   if (source.peerKind !== "human" && source.peerKind !== "agent") throw new NetworkAuthorityContractError("peer-kind", "peer kind must be human or agent");
-  if (!(["world", "gameplay", "agent", "chat", "interest", "reconnect"] as const).includes(source.kind)) throw new NetworkAuthorityContractError("command-kind", "unknown network command kind");
+  if (!(["world", "gameplay", "agent", "chat", "interest", "reconnect", "pose", "presentation-state"] as const).includes(source.kind)) throw new NetworkAuthorityContractError("command-kind", "unknown network command kind");
   normalizeCapabilities([source.requiredCapability]);
   if (!(source.payload instanceof Uint8Array) || source.payload.byteLength > NETWORK_MAX_COMMAND_BYTES_V1) throw new NetworkAuthorityContractError("command-payload", "command payload must be a Uint8Array inside the V1 budget");
   const sequence = integer(source.sequence, 0, Number.MAX_SAFE_INTEGER, "sequence");
@@ -398,13 +399,41 @@ export function diagnoseNetworkDesyncV1(checkpoint: NetworkReconnectCheckpointV1
 }
 
 type ActiveLease = Readonly<{ commandId: string; peerId: string; expiresAt: number }>;
+type PeerPresentation = Readonly<{ connectionId: string; deltaSequence: number; identity: NetworkAuthorityIdentityV1 }>;
+
+function hashBytes(value: string) {
+  hash(value, "canonicalHash");
+  return Uint8Array.from(value.match(/.{2}/gu) ?? [], (pair) => Number.parseInt(pair, 16));
+}
+
+function identityExtends(previous: NetworkAuthorityIdentityV1, next: NetworkAuthorityIdentityV1) {
+  return previous.address.universeId === next.address.universeId
+    && previous.address.locationId === next.address.locationId
+    && previous.revision.epoch <= next.revision.epoch
+    && previous.revision.world <= next.revision.world
+    && previous.revision.entities <= next.revision.entities
+    && previous.revision.gameplay <= next.revision.gameplay
+    && previous.revision.persistence <= next.revision.persistence;
+}
+
+function presentationIsReachableFromCurrent(presented: NetworkAuthorityIdentityV1, current: NetworkAuthorityIdentityV1) {
+  return presented.address.universeId === current.address.universeId
+    && presented.address.locationId === current.address.locationId
+    && presented.revision.epoch === current.revision.epoch
+    && presented.revision.world <= current.revision.world
+    && presented.revision.entities <= current.revision.entities
+    && presented.revision.gameplay <= current.revision.gameplay
+    && presented.revision.persistence <= current.revision.persistence;
+}
 
 /** TypeScript parity oracle. Rust becomes the authority; both human and agent commands use this one path. */
 export class TypeScriptNetworkAuthorityV1 {
   private readonly grants = new Map<string, NetworkPeerGrantV1>();
   private readonly receipts = new Map<string, NetworkCommandReceiptV1>();
+  private readonly receiptCommandHashes = new Map<string, string>();
   private readonly receiptOrder: string[] = [];
   private readonly leases = new Map<string, ActiveLease>();
+  private readonly presentations = new Map<string, PeerPresentation>();
 
   constructor(readonly sessionId: string) { label(sessionId, "sessionId"); }
 
@@ -412,25 +441,80 @@ export class TypeScriptNetworkAuthorityV1 {
     if (grant.sessionId !== this.sessionId) throw new NetworkAuthorityContractError("session-mismatch", "grant belongs to another session");
     label(grant.peerId, "peerId"); label(grant.connectionId, "connectionId"); label(grant.actorId, "actorId");
     const normalized = Object.freeze({ ...grant, capabilities: normalizeCapabilities(grant.capabilities), expiresAt: integer(grant.expiresAt, 0, Number.MAX_SAFE_INTEGER, "expiresAt"), nextSequence: integer(grant.nextSequence, 0, Number.MAX_SAFE_INTEGER, "nextSequence") });
+    const current = this.grants.get(grant.peerId);
+    if (current && current.connectionId !== normalized.connectionId) this.presentations.delete(grant.peerId);
     this.grants.set(grant.peerId, normalized);
     return normalized;
   }
 
   grant(peerId: string) { return this.grants.get(peerId) ?? null; }
 
-  private receipt(command: NetworkCommandV1, identity: NetworkAuthorityIdentityV1, status: "accepted" | "rejected", code?: Extract<NetworkCommandReceiptV1, { status: "rejected" }>["code"], message = "") {
+  recordPeerPresentation(peerId: string, deltaSequence: number, identity: NetworkAuthorityIdentityV1) {
+    label(peerId, "peerId");
+    const sequence = integer(deltaSequence, 0, Number.MAX_SAFE_INTEGER, "deltaSequence");
+    const grant = this.grants.get(peerId);
+    if (!grant) throw new NetworkAuthorityContractError("unknown-peer", "delta presentation peer has no active host grant");
+    const normalizedIdentity = normalizeIdentity(identity);
+    const next = Object.freeze({ connectionId: grant.connectionId, deltaSequence: sequence, identity: normalizedIdentity });
+    const current = this.presentations.get(peerId);
+    if (current) {
+      if (current.connectionId !== next.connectionId) throw new NetworkAuthorityContractError("connection-mismatch", "delta presentation connection does not match the active host grant");
+      if (sequence < current.deltaSequence) throw new NetworkAuthorityContractError("sequence", "delta presentation sequence regressed");
+      if (sequence === current.deltaSequence) {
+        if (!networkAuthorityIdentityEqualsV1(current.identity, next.identity)) throw new NetworkAuthorityContractError("hash-mismatch", "delta presentation sequence was reused for another authority identity");
+        return false;
+      }
+      if (!identityExtends(current.identity, next.identity)) throw new NetworkAuthorityContractError("hash-mismatch", "delta presentation identity does not extend the recorded authority chain");
+    }
+    this.presentations.set(peerId, next);
+    return true;
+  }
+
+  authorityFingerprint() {
+    const hasher = new TypeScriptCanonicalHasher("blockwild-network-authority-runtime-v1").writeString(this.sessionId);
+    const grants = [...this.grants].sort(([left], [right]) => compareOrdinal(left, right));
+    hasher.writeU32(grants.length);
+    for (const [peerId, grant] of grants) {
+      hasher.writeString(peerId).writeString(grant.connectionId).writeString(grant.actorId).writeString(grant.peerKind)
+        .writeU64(grant.expiresAt).writeU64(grant.nextSequence).writeString(grant.interest.interestHash);
+    }
+    hasher.writeU32(this.receiptOrder.length);
+    for (const key of this.receiptOrder) {
+      const receipt = this.receipts.get(key);
+      const commandHash = this.receiptCommandHashes.get(key);
+      if (receipt && commandHash) hasher.writeString(key).writeBytes(hashBytes(commandHash)).writeBytes(hashBytes(receipt.receiptHash));
+    }
+    const leases = [...this.leases].sort(([left], [right]) => compareOrdinal(left, right));
+    hasher.writeU32(leases.length);
+    for (const [key, lease] of leases) hasher.writeString(key).writeString(lease.commandId).writeString(lease.peerId).writeU64(lease.expiresAt);
+    const presentations = [...this.presentations].sort(([left], [right]) => compareOrdinal(left, right));
+    hasher.writeU32(presentations.length);
+    for (const [peerId, presentation] of presentations) {
+      hasher.writeString(peerId).writeString(presentation.connectionId).writeU64(presentation.deltaSequence)
+        .writeString(presentation.identity.stateHash);
+    }
+    return hasher.finishHex();
+  }
+
+  private receipt(command: NetworkCommandV1, identity: NetworkAuthorityIdentityV1, status: "accepted" | "rejected", code?: Extract<NetworkCommandReceiptV1, { status: "rejected" }>["code"], message = "", cache = true) {
     const hasher = new TypeScriptCanonicalHasher("blockwild-network-receipt-v1").writeString(status).writeString(command.commandId).writeString(command.idempotencyKey).writeString(command.peerId).writeString(identity.stateHash);
     if (code) hasher.writeString(code).writeString(message);
     const result: NetworkCommandReceiptV1 = status === "accepted"
       ? Object.freeze({ schemaVersion: NETWORK_AUTHORITY_SCHEMA_V1, status, commandId: command.commandId, idempotencyKey: command.idempotencyKey, peerId: command.peerId, identity, receiptHash: hasher.finishHex() })
       : Object.freeze({ schemaVersion: NETWORK_AUTHORITY_SCHEMA_V1, status, commandId: command.commandId, idempotencyKey: command.idempotencyKey, peerId: command.peerId, code: code ?? "invalid", message, identity, receiptHash: hasher.finishHex() });
-    this.receipts.set(command.idempotencyKey, result); this.receiptOrder.push(command.idempotencyKey);
-    while (this.receiptOrder.length > NETWORK_MAX_IDEMPOTENCY_RECEIPTS_V1) { const expired = this.receiptOrder.shift(); if (expired) this.receipts.delete(expired); }
+    if (cache) {
+      this.receipts.set(command.idempotencyKey, result); this.receiptCommandHashes.set(command.idempotencyKey, command.commandHash); this.receiptOrder.push(command.idempotencyKey);
+      while (this.receiptOrder.length > NETWORK_MAX_IDEMPOTENCY_RECEIPTS_V1) { const expired = this.receiptOrder.shift(); if (expired) { this.receipts.delete(expired); this.receiptCommandHashes.delete(expired); } }
+    }
     return result;
   }
 
   authorize(command: NetworkCommandV1, current: NetworkAuthorityIdentityV1, now: number): NetworkCommandReceiptV1 {
-    const replay = this.receipts.get(command.idempotencyKey); if (replay) return replay;
+    const replay = this.receipts.get(command.idempotencyKey);
+    if (replay) {
+      if (this.receiptCommandHashes.get(command.idempotencyKey) === command.commandHash) return replay;
+      return this.receipt(command, current, "rejected", "invalid", "Idempotency key was already used by a different command.", false);
+    }
     const reject = (code: Extract<NetworkCommandReceiptV1, { status: "rejected" }>["code"], message: string) => this.receipt(command, current, "rejected", code, message);
     if (command.sessionId !== this.sessionId) return reject("invalid", "Command belongs to another session.");
     const grant = this.grants.get(command.peerId);
@@ -440,7 +524,23 @@ export class TypeScriptNetworkAuthorityV1 {
     if (grant.expiresAt < now) return reject("session-expired", "Peer grant expired.");
     if (command.expiresAt < now) return reject("command-expired", "Command expired before host validation.");
     if (command.sequence !== grant.nextSequence) return reject("sequence", `Expected command sequence ${grant.nextSequence}.`);
-    if (!networkAuthorityIdentityEqualsV1(command.expected, current)) return reject("stale-revision", "Command was created from stale authoritative state.");
+    const presentationBound = command.kind === "pose" || command.kind === "presentation-state";
+    const expectedIdentityMatches = presentationBound
+      ? (() => {
+          const presentation = this.presentations.get(command.peerId);
+          return !!presentation && presentation.connectionId === command.connectionId
+            && networkAuthorityIdentityEqualsV1(presentation.identity, command.expected)
+            && presentationIsReachableFromCurrent(presentation.identity, current);
+        })()
+      : networkAuthorityIdentityEqualsV1(command.expected, current);
+    if (!expectedIdentityMatches) {
+      const message = command.kind === "pose"
+        ? "Pose command does not match the latest connection-bound authority presentation."
+        : command.kind === "presentation-state"
+          ? "Player-state command does not match the latest connection-bound authority presentation."
+          : "Command was created from stale authoritative state.";
+      return reject("stale-revision", message);
+    }
     if (!grant.capabilities.includes(command.requiredCapability)) return reject("capability-denied", `Host did not grant ${command.requiredCapability}.`);
     const locationInInterest = grant.interest.chunks.some((chunk) => chunk.universeId === command.expected.address.universeId && chunk.locationId === command.expected.address.locationId);
     if (!locationInInterest && command.kind !== "interest" && command.kind !== "reconnect" && command.kind !== "chat") return reject("interest-denied", "Command targets a location outside this peer's host-authorized interest set.");
@@ -452,7 +552,7 @@ export class TypeScriptNetworkAuthorityV1 {
   }
 
   releaseCommand(commandId: string) { for (const [key, lease] of this.leases) if (lease.commandId === commandId) this.leases.delete(key); }
-  releasePeer(peerId: string) { for (const [key, lease] of this.leases) if (lease.peerId === peerId) this.leases.delete(key); this.grants.delete(peerId); }
+  releasePeer(peerId: string) { for (const [key, lease] of this.leases) if (lease.peerId === peerId) this.leases.delete(key); this.grants.delete(peerId); this.presentations.delete(peerId); }
   releaseExpiredLeases(now: number) { for (const [key, lease] of this.leases) if (lease.expiresAt < now) this.leases.delete(key); }
   activeLeaseCount() { return this.leases.size; }
 }

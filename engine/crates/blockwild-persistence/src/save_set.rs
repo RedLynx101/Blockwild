@@ -2,7 +2,7 @@
 
 use crate::{
     Checkpoint, MAX_RECORD_BYTES_V1, MAX_RECORDS_PER_CHECKPOINT_V1, PERSISTENCE_SCHEMA_V1, PersistenceError,
-    RecordAddress, RecordDescriptor, RecordKind, payload_hash, validate_label,
+    RecordAddress, RecordDescriptor, RecordKind, StoredRecord, payload_hash, validate_label,
 };
 use blockwild_types::{CanonicalHash, CanonicalHasher};
 use std::collections::{BTreeMap, BTreeSet};
@@ -98,6 +98,66 @@ pub struct CanonicalWorldSaveSetV1 {
     /// Includes the encoded manifest itself and every referenced payload.
     pub records: BTreeMap<RecordAddress, Vec<u8>>,
     pub set_hash: CanonicalHash,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorldSaveSetAttestationV1 {
+    pub set_hash: CanonicalHash,
+    pub manifest_hash: CanonicalHash,
+}
+
+/// Reconstructs the exact canonical save identity from the terminal journal
+/// without copying record payloads. Extra, missing, or descriptor-mismatched
+/// records fail closed rather than attesting a partial or mixed save set.
+pub fn attest_world_save_set_records_v1(
+    records: &BTreeMap<RecordAddress, StoredRecord>,
+) -> Result<WorldSaveSetAttestationV1, PersistenceError> {
+    let manifests = records
+        .iter()
+        .filter(|(address, _)| {
+            address.kind == RecordKind::LocationManifest && address.record_id == WORLD_SAVE_MANIFEST_RECORD_ID_V1
+        })
+        .collect::<Vec<_>>();
+    if manifests.len() != 1 {
+        return Err(PersistenceError::new(
+            "save-set-completeness",
+            "terminal journal must contain exactly one canonical save manifest",
+        ));
+    }
+    let (stored_address, stored_manifest) = manifests[0];
+    let manifest = decode_world_save_manifest_v1(&stored_manifest.payload)?;
+    let expected_manifest_address = manifest_address(&manifest.universe_id, &manifest.location_id)?;
+    if stored_address != &expected_manifest_address || records.len() != manifest.records.len().saturating_add(1) {
+        return Err(PersistenceError::new(
+            "save-set-completeness",
+            "terminal journal does not exactly match its canonical save manifest",
+        ));
+    }
+    for entry in &manifest.records {
+        let stored = records
+            .get(&entry.address)
+            .ok_or_else(|| PersistenceError::new("save-set-completeness", "manifest record payload is missing"))?;
+        if stored.payload.len() != entry.byte_length as usize
+            || stored.payload_hash != entry.payload_hash
+            || payload_hash(&stored.payload) != entry.payload_hash
+        {
+            return Err(PersistenceError::new(
+                "corrupt",
+                "terminal journal record does not match its save manifest descriptor",
+            ));
+        }
+    }
+    let set_hash = save_set_hash_entries(
+        &manifest,
+        records.len(),
+        records
+            .iter()
+            .map(|(address, stored)| (address, stored.payload.as_slice())),
+    );
+    Ok(WorldSaveSetAttestationV1 {
+        set_hash,
+        manifest_hash: manifest.manifest_hash,
+    })
 }
 
 impl CanonicalWorldSaveSetV1 {
@@ -415,9 +475,21 @@ fn manifest_hash(value: &WorldSaveManifestV1) -> CanonicalHash {
 }
 
 fn save_set_hash(manifest: &WorldSaveManifestV1, records: &BTreeMap<RecordAddress, Vec<u8>>) -> CanonicalHash {
+    save_set_hash_entries(
+        manifest,
+        records.len(),
+        records.iter().map(|(address, payload)| (address, payload.as_slice())),
+    )
+}
+
+fn save_set_hash_entries<'a>(
+    manifest: &WorldSaveManifestV1,
+    record_count: usize,
+    records: impl IntoIterator<Item = (&'a RecordAddress, &'a [u8])>,
+) -> CanonicalHash {
     let mut hasher = CanonicalHasher::new("blockwild-world-save-set-v1");
     hasher.write_str(&manifest.manifest_hash.to_hex());
-    hasher.write_u32(records.len() as u32);
+    hasher.write_u32(record_count as u32);
     for (address, payload) in records {
         address.write_hash(&mut hasher);
         hasher.write_str(&payload_hash(payload).to_hex());
@@ -584,5 +656,55 @@ mod tests {
         let compatibility = compatibility_address("u", "surface", 0).unwrap();
         set.records.get_mut(&compatibility).unwrap()[0] ^= 1;
         assert_eq!(set.verify().unwrap_err().code, "corrupt");
+    }
+
+    #[test]
+    fn terminal_journal_attestation_reconstructs_the_exact_save_hashes_without_payload_copies() {
+        let set = CanonicalWorldSaveSetV1::build(
+            "world",
+            "u",
+            "surface",
+            hash(1),
+            hash(2),
+            vec![vec![1, 2]],
+            vec![NormalizedStateRecordV1 {
+                address: RecordAddress::new("u", "surface", RecordKind::Entity, "e:1").unwrap(),
+                payload: vec![7, 8, 9],
+            }],
+        )
+        .unwrap();
+        let mut records = set
+            .records
+            .iter()
+            .map(|(address, payload)| {
+                (
+                    address.clone(),
+                    StoredRecord {
+                        revision: 9,
+                        payload: payload.clone(),
+                        payload_hash: payload_hash(payload),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            attest_world_save_set_records_v1(&records).unwrap(),
+            WorldSaveSetAttestationV1 {
+                set_hash: set.set_hash,
+                manifest_hash: set.manifest.manifest_hash,
+            }
+        );
+        records.insert(
+            RecordAddress::new("u", "surface", RecordKind::Entity, "extra").unwrap(),
+            StoredRecord {
+                revision: 1,
+                payload: vec![1],
+                payload_hash: payload_hash(&[1]),
+            },
+        );
+        assert_eq!(
+            attest_world_save_set_records_v1(&records).unwrap_err().code,
+            "save-set-completeness"
+        );
     }
 }

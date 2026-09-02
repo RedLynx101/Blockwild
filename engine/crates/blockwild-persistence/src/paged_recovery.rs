@@ -1,11 +1,17 @@
 //! Paged checkpoint recovery that never requires one 256 MiB BWPA.
 
 use crate::{
-    Checkpoint, MAX_RECORDS_PER_CHECKPOINT_V1, PERSISTENCE_PLATFORM_CHUNK_BYTES_V1, PERSISTENCE_SCHEMA_V1,
-    PersistenceError, RecordAddress, RecordDescriptor, RecordKind, payload_hash,
+    Checkpoint, MAX_RECORDS_PER_CHECKPOINT_V1, PERSISTENCE_BROWSER_MAX_WIRE_BYTES_V1,
+    PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1, PERSISTENCE_SCHEMA_V1, PersistenceError, RecordAddress,
+    RecordDescriptor, RecordKind, payload_hash,
 };
 use blockwild_types::CanonicalHash;
 use std::collections::{BTreeMap, BTreeSet};
+
+/// A complete recovery may span multiple recovery-only pages, but its payload
+/// custody remains bounded by the existing 256 MiB persistence snapshot/wire
+/// contract. Page envelopes and descriptors are bounded independently.
+pub const PAGED_RECOVERY_MAX_AGGREGATE_PAYLOAD_BYTES_V1: usize = PERSISTENCE_BROWSER_MAX_WIRE_BYTES_V1;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PagedRecoveryHeadV1 {
@@ -143,20 +149,20 @@ pub fn encode_paged_recovery_page_v1(value: &PagedRecoveryPageV1) -> Result<Vec<
         writer.u32(next);
     }
     let bytes = writer.finish();
-    if bytes.len() > PERSISTENCE_PLATFORM_CHUNK_BYTES_V1 {
+    if bytes.len() > PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1 {
         return Err(PersistenceError::new(
             "recovery-page",
-            "encoded recovery page exceeds 4 MiB",
+            "encoded recovery page exceeds the 64 MiB record plus 64 KiB overhead budget",
         ));
     }
     Ok(bytes)
 }
 
 pub fn decode_paged_recovery_page_v1(bytes: &[u8]) -> Result<PagedRecoveryPageV1, PersistenceError> {
-    if bytes.len() > PERSISTENCE_PLATFORM_CHUNK_BYTES_V1 {
+    if bytes.len() > PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1 {
         return Err(PersistenceError::new(
             "recovery-page",
-            "encoded recovery page exceeds 4 MiB",
+            "encoded recovery page exceeds the 64 MiB record plus 64 KiB overhead budget",
         ));
     }
     let mut reader = Reader::new(bytes);
@@ -221,6 +227,7 @@ pub struct PagedRecoveryAssemblerV1 {
     next_record: u32,
     descriptors: Vec<RecordDescriptor>,
     payloads: BTreeMap<RecordAddress, Vec<u8>>,
+    payload_bytes: usize,
     missing: BTreeSet<String>,
 }
 
@@ -232,6 +239,7 @@ impl PagedRecoveryAssemblerV1 {
             next_record: 0,
             descriptors: Vec::new(),
             payloads: BTreeMap::new(),
+            payload_bytes: 0,
             missing: BTreeSet::new(),
         }
     }
@@ -239,6 +247,14 @@ impl PagedRecoveryAssemblerV1 {
     pub fn accept_page(
         &mut self,
         page: PagedRecoveryPageV1,
+    ) -> Result<Option<PagedRecoveryCompleteV1>, PersistenceError> {
+        self.accept_page_with_max_payload_bytes(page, PAGED_RECOVERY_MAX_AGGREGATE_PAYLOAD_BYTES_V1)
+    }
+
+    fn accept_page_with_max_payload_bytes(
+        &mut self,
+        page: PagedRecoveryPageV1,
+        max_payload_bytes: usize,
     ) -> Result<Option<PagedRecoveryCompleteV1>, PersistenceError> {
         if page.checkpoint_id != self.head.checkpoint_id
             || page.start_record != self.next_record
@@ -249,40 +265,83 @@ impl PagedRecoveryAssemblerV1 {
                 "recovery page is stale, empty, or reordered",
             ));
         }
-        for record in page.records {
-            let key = record.descriptor.address.canonical_key();
-            if let Some(payload) = record.payload {
-                if self
-                    .payloads
-                    .insert(record.descriptor.address.clone(), payload)
-                    .is_some()
-                {
-                    return Err(PersistenceError::new(
-                        "duplicate-record",
-                        "recovery page repeats a record",
-                    ));
-                }
-            } else {
-                self.missing.insert(key);
-            }
-            self.descriptors.push(record.descriptor);
+        let resulting_record_count = self
+            .descriptors
+            .len()
+            .checked_add(page.records.len())
+            .ok_or_else(|| PersistenceError::new("recovery-page", "recovery descriptor count overflow"))?;
+        if resulting_record_count > self.head.record_count as usize
+            || resulting_record_count > MAX_RECORDS_PER_CHECKPOINT_V1
+        {
+            return Err(PersistenceError::new(
+                "recovery-completeness",
+                "recovery page exceeds the declared checkpoint record count",
+            ));
         }
-        self.next_record = u32::try_from(self.descriptors.len())
+        let resulting_cursor = u32::try_from(resulting_record_count)
             .map_err(|_| PersistenceError::new("recovery-page", "recovery descriptor count exceeds u32"))?;
-        if page.next_record.is_some_and(|next| next != self.next_record) {
+        if page.next_record.is_some_and(|next| next != resulting_cursor)
+            || (page.next_record.is_some() && resulting_cursor == self.head.record_count)
+            || (page.next_record.is_none() && resulting_cursor != self.head.record_count)
+        {
             return Err(PersistenceError::new(
                 "recovery-page-order",
                 "recovery page next cursor is inconsistent",
             ));
         }
+        let existing_addresses = self
+            .descriptors
+            .iter()
+            .map(|descriptor| descriptor.address.clone())
+            .collect::<BTreeSet<_>>();
+        let mut page_addresses = BTreeSet::new();
+        let mut page_payload_bytes = 0_usize;
+        for record in &page.records {
+            if existing_addresses.contains(&record.descriptor.address)
+                || !page_addresses.insert(record.descriptor.address.clone())
+            {
+                return Err(PersistenceError::new(
+                    "duplicate-record",
+                    "recovery page repeats a record",
+                ));
+            }
+            if let Some(payload) = &record.payload {
+                if payload.len() != record.descriptor.byte_length as usize
+                    || payload_hash(payload) != record.descriptor.payload_hash
+                {
+                    return Err(PersistenceError::new(
+                        "corrupt",
+                        "recovery page payload does not match its descriptor",
+                    ));
+                }
+                page_payload_bytes = page_payload_bytes.checked_add(payload.len()).ok_or_else(|| {
+                    PersistenceError::new("recovery-capacity", "aggregate recovery byte count overflow")
+                })?;
+            }
+        }
+        let resulting_payload_bytes = self
+            .payload_bytes
+            .checked_add(page_payload_bytes)
+            .ok_or_else(|| PersistenceError::new("recovery-capacity", "aggregate recovery byte count overflow"))?;
+        if resulting_payload_bytes > max_payload_bytes {
+            return Err(PersistenceError::new(
+                "recovery-capacity",
+                "aggregate recovery payload exceeds the 256 MiB persistence snapshot budget",
+            ));
+        }
+        for record in page.records {
+            let key = record.descriptor.address.canonical_key();
+            if let Some(payload) = record.payload {
+                self.payloads.insert(record.descriptor.address.clone(), payload);
+            } else {
+                self.missing.insert(key);
+            }
+            self.descriptors.push(record.descriptor);
+        }
+        self.payload_bytes = resulting_payload_bytes;
+        self.next_record = resulting_cursor;
         if page.next_record.is_some() {
             return Ok(None);
-        }
-        if self.next_record != self.head.record_count {
-            return Err(PersistenceError::new(
-                "recovery-completeness",
-                "recovery ended before all descriptors arrived",
-            ));
         }
         let checkpoint = Checkpoint::new(
             self.head.checkpoint_id.clone(),
@@ -302,7 +361,7 @@ impl PagedRecoveryAssemblerV1 {
         }
         Ok(Some(PagedRecoveryCompleteV1 {
             checkpoint,
-            payloads: self.payloads.clone(),
+            payloads: std::mem::take(&mut self.payloads),
             missing_record_keys: self.missing.iter().cloned().collect(),
         }))
     }
@@ -430,6 +489,11 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        DEFAULT_DISPATCH_MAX_PACKET_BYTES_V1, MAX_RECORD_BYTES_V1, PersistencePlatformOperationV1,
+        PersistencePlatformResponseV1, PersistencePlatformResultCodeV1, decode_persistence_platform_response_v1,
+        encode_persistence_platform_response_v1,
+    };
     #[test]
     fn recovery_pages_reconstruct_exact_checkpoint_without_monolithic_response() {
         let address = RecordAddress::new("u", "surface", RecordKind::Entity, "e").unwrap();
@@ -471,5 +535,115 @@ mod tests {
             .unwrap();
         assert_eq!(complete.checkpoint, checkpoint);
         assert!(complete.missing_record_keys.is_empty());
+    }
+
+    #[test]
+    fn one_maximum_record_fits_recovery_page_and_complete_bwpa_stays_below_dispatch_packet() {
+        let address = RecordAddress::new("u", "surface", RecordKind::ChunkEdits, "native-world-state-v1").unwrap();
+        let payload = vec![0x5a; MAX_RECORD_BYTES_V1];
+        let page = PagedRecoveryPageV1 {
+            checkpoint_id: "checkpoint:max-record".into(),
+            start_record: 0,
+            records: vec![PagedRecoveryRecordV1 {
+                descriptor: RecordDescriptor {
+                    address,
+                    revision: 1,
+                    byte_length: u32::try_from(payload.len()).unwrap(),
+                    payload_hash: payload_hash(&payload),
+                },
+                payload: Some(payload),
+            }],
+            next_record: None,
+        };
+        let page_bytes = encode_paged_recovery_page_v1(&page).unwrap();
+        assert!(page_bytes.len() > MAX_RECORD_BYTES_V1);
+        assert!(page_bytes.len() <= PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1);
+        let expected_page_bytes = page_bytes.len();
+        let response = encode_persistence_platform_response_v1(&PersistencePlatformResponseV1 {
+            request_id: 1,
+            operation: PersistencePlatformOperationV1::ReadRecoveryPage,
+            code: PersistencePlatformResultCodeV1::Accepted,
+            storage_revision: 1,
+            durable_hash: CanonicalHash([7; 16]),
+            next_cursor: None,
+            payload: page_bytes,
+            message: "maximum record recovery page".into(),
+        })
+        .unwrap();
+        assert!(response.len() < DEFAULT_DISPATCH_MAX_PACKET_BYTES_V1);
+        let decoded = decode_persistence_platform_response_v1(&response).unwrap();
+        assert_eq!(decoded.payload.len(), expected_page_bytes);
+    }
+
+    #[test]
+    fn aggregate_recovery_budget_rejects_atomically_before_accumulating_another_page() {
+        let first_payload = vec![1, 2];
+        let second_payload = vec![3, 4];
+        let checkpoint = Checkpoint::new(
+            "bounded-cp",
+            None,
+            "world",
+            1,
+            CanonicalHash([1; 16]),
+            CanonicalHash([2; 16]),
+            3,
+            vec![
+                RecordDescriptor {
+                    address: RecordAddress::new("u", "surface", RecordKind::Entity, "bounded-a").unwrap(),
+                    revision: 1,
+                    byte_length: first_payload.len() as u32,
+                    payload_hash: payload_hash(&first_payload),
+                },
+                RecordDescriptor {
+                    address: RecordAddress::new("u", "surface", RecordKind::Entity, "bounded-b").unwrap(),
+                    revision: 1,
+                    byte_length: second_payload.len() as u32,
+                    payload_hash: payload_hash(&second_payload),
+                },
+            ],
+        )
+        .unwrap();
+        let mut assembler = PagedRecoveryAssemblerV1::new(PagedRecoveryHeadV1::from_checkpoint(&checkpoint));
+        assert!(
+            assembler
+                .accept_page_with_max_payload_bytes(
+                    PagedRecoveryPageV1 {
+                        checkpoint_id: checkpoint.checkpoint_id.clone(),
+                        start_record: 0,
+                        records: vec![PagedRecoveryRecordV1 {
+                            descriptor: checkpoint.records[0].clone(),
+                            payload: Some(first_payload),
+                        }],
+                        next_record: Some(1),
+                    },
+                    3,
+                )
+                .unwrap()
+                .is_none()
+        );
+        let before = assembler.clone();
+        let error = assembler
+            .accept_page_with_max_payload_bytes(
+                PagedRecoveryPageV1 {
+                    checkpoint_id: checkpoint.checkpoint_id,
+                    start_record: 1,
+                    records: vec![PagedRecoveryRecordV1 {
+                        descriptor: checkpoint.records[1].clone(),
+                        payload: Some(second_payload),
+                    }],
+                    next_record: None,
+                },
+                3,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "recovery-capacity");
+        assert_eq!(
+            error.message,
+            "aggregate recovery payload exceeds the 256 MiB persistence snapshot budget"
+        );
+        assert_eq!(
+            assembler, before,
+            "capacity rejection must not retain partial page custody"
+        );
     }
 }

@@ -4,6 +4,7 @@ import {
   encodeRustNetworkAgentRequestV1,
   encodeRustNetworkCommandBatchRequestV1,
   encodeRustNetworkDeltaDeliveryRequestV1,
+  encodeRustNetworkGuestPoseRequestV1,
   encodeRustNetworkHandshakeRequestV1,
   type RustNetworkResponseV1,
 } from "./rust-network-runtime-contract";
@@ -28,6 +29,7 @@ export class RustNetworkRuntimeServiceV1 {
   authorize(current: NetworkAuthorityIdentityV1, now: number, commandPackets: readonly Uint8Array[]) { return this.transact("command-batch", (id) => encodeRustNetworkCommandBatchRequestV1(id, current, now, commandPackets)); }
   validateDelta(checkpointPacket: Uint8Array, interest: NetworkInterestSetV1, deltaPacket: Uint8Array) { return this.transact("delta-delivery", (id) => encodeRustNetworkDeltaDeliveryRequestV1(id, checkpointPacket, interest, deltaPacket)); }
   authorizeAgent(current: NetworkAuthorityIdentityV1, now: number, envelopePacket: Uint8Array, workPacket: Uint8Array) { return this.transact("agent-command", (id) => encodeRustNetworkAgentRequestV1(id, current, now, envelopePacket, workPacket)); }
+  authorizeGuestPose(current: NetworkAuthorityIdentityV1, now: number, commandPacket: Uint8Array) { return this.transact("guest-pose", (id) => encodeRustNetworkGuestPoseRequestV1(id, current, now, commandPacket)); }
 
   private transact(expectedKind: Exclude<RustNetworkResponseV1["kind"], "error">, build: (requestId: number) => Uint8Array) {
     const requestId = this.nextRequestId++;
