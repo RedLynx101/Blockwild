@@ -24,6 +24,16 @@ test("Rust engine discovery excludes directories and unrelated or malformed test
   assert.deepEqual(selectRustEngineTestFiles(rejected), []);
 });
 
+test("R3 production integration regressions participate even without a rust filename prefix", () => {
+  const names = ["terrain-generation-authority.test.ts", "terrain-generation-code-bootstrap.test.ts",
+    "terrain-generation-pipeline.test.ts", "world-import-source.test.ts", "world-streaming-lookahead.test.ts",
+    "world-streaming-prediction-priority.test.ts", "world-streaming-seam-priority.test.ts"];
+  assert.deepEqual(selectRustEngineTestFiles(names.map(name => entry(name))), names.map(name => `tests/${name}`));
+  assert.deepEqual(selectRustEngineTestFiles([entry("world-streaming-directory.test.ts", false),
+    ...["world-streaming-.test.ts", "world-import-source-other.test.ts", "terrain-generation-case.ts",
+      "world-storage.test.ts", "world-import-source.test.ts.bak"].map(name => entry(name))]), []);
+});
+
 test("the checked-in R3 verifier and clock suites are discoverable without executing them", () => {
   const directory = resolve(import.meta.dirname);
   const entries = readdirSync(directory, { withFileTypes: true });
@@ -33,6 +43,9 @@ test("the checked-in R3 verifier and clock suites are discoverable without execu
   assert(r3.length >= 3, "expected the checked-in R3 production/performance suites");
   assert.deepEqual(discovered.filter(name => name.startsWith("tests/r3-")), r3);
   assert(discovered.includes("tests/rust-engine-test-discovery.test.mjs"));
+  for (const name of ["rust-terrain-generation-code-bootstrap", "terrain-generation-pipeline", "world-import-source", "world-streaming-prediction-priority"]) {
+    assert(discovered.includes(`tests/${name}.test.ts`), `missing production integration regression: ${name}`);
+  }
 });
 
 test("the runner forwards the complete selection once and propagates child status without spawning real tests", () => {

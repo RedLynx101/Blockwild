@@ -195,6 +195,7 @@ export type GeneratedChunkV2Payload = Readonly<{
 }>;
 
 export type TerrainGenerationWorkerRequestV2 =
+  | Readonly<{ type: "initialize-terrain-generation-v2"; bootstrapId: number; code: import("./rust-engine-code-cache").PreparedRustEngineCode }>
   | Readonly<{ type: "generate-chunk-v2"; request: GenerateChunkRequestV2 }>
   | Readonly<{ type: "query-settlements-v1"; request: SettlementLocatorRequestV1 }>
   | Readonly<{ type: "query-dragon-lair-v1"; request: DragonLairLocatorRequestV1 }>
@@ -207,6 +208,9 @@ export type TerrainGenerationWorkerResponseV2 =
     requestSchemaVersion: number;
     resultSchemaVersion: number;
     backend: "typescript-compatibility-oracle" | "rust-wasm-shadow" | "rust-wasm-authoritative";
+    /** Required by the real default pipeline; optional only for existing explicitly injected test workers. */
+    bootstrapId?: number;
+    codeIdentity?: string;
     certificate?: Readonly<{
       generatorVersion: number;
       generatorHash: string;

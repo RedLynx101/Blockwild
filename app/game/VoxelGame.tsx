@@ -84,6 +84,7 @@ import {
   type WorldMetadata,
   type WorldOptions,
 } from "./world-storage";
+import { WORLD_IMPORT_SOURCE_MAX_BYTES_V1 } from "./world-import-source";
 import {
   HobbitBankPanel,
   MapPanel,
@@ -2873,8 +2874,12 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = "";
     if (!storage || !file) return;
+    if (file.size < 1 || file.size > WORLD_IMPORT_SOURCE_MAX_BYTES_V1) {
+      setWorldNotice("World import files must be nonempty and no larger than 64 MiB.");
+      return;
+    }
     try {
-      const imported = storage.importWorld(await file.text());
+      const imported = await storage.importWorldBytes(new Uint8Array(await file.arrayBuffer()));
       if (!imported.ok) setWorldNotice(imported.error.message);
       else {
         storage.setActiveWorld(imported.value.id);

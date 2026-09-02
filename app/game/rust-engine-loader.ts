@@ -2,6 +2,7 @@ import {
   RUST_ENGINE_PROTOCOL_VERSION,
   RUST_ENGINE_SCHEMA_VERSION,
 } from "./rust-engine-protocol";
+import { RustEngineCodeCache, snapshotPreparedRustCode, type PreparedRustEngineCode, type RustEngineCodeFetcher } from "./rust-engine-code-cache";
 
 export type RustEngineBytes = Uint8Array | ArrayBuffer;
 
@@ -110,7 +111,7 @@ export type LoadedRustEngine = Readonly<{
   loadDurationMs: number;
 }>;
 
-export type RustEngineModuleImporter = (artifact: ResolvedRustEngineArtifact) => Promise<unknown>;
+export type RustEngineModuleImporter = (artifact: ResolvedRustEngineArtifact, verifiedGlue?: Uint8Array) => Promise<unknown>;
 export type RustEngineManifestFetcher = (url: string) => Promise<Readonly<{
   ok: boolean;
   status: number;
@@ -124,6 +125,9 @@ export type RustEngineLoaderOptions = Readonly<{
   now?: () => number;
   protocolVersion?: number;
   schemaVersion?: number;
+  /** Parent-verified immutable code only; each loader still imports/initializes its own namespace and instance. */
+  preparedCode?: PreparedRustEngineCode;
+  codeFetcher?: RustEngineCodeFetcher;
 }>;
 
 export type RustEngineLoaderDiagnostics = Readonly<{
@@ -134,6 +138,8 @@ export type RustEngineLoaderDiagnostics = Readonly<{
   lastDurationMs: number | null;
   lastError: Readonly<{ code: RustEngineLoadErrorCode; message: string }> | null;
   artifact: RustEngineArtifact;
+  /** Only a standalone default published loader owns this cache; worker code is pipeline-owned. */
+  codeCache: ReturnType<RustEngineCodeCache["diagnostics"]> | null;
 }>;
 
 const requiredExports: readonly (keyof RustEngineWasmExports)[] = [
@@ -154,15 +160,18 @@ const requiredExports: readonly (keyof RustEngineWasmExports)[] = [
  * short-lived module Blob preserves native ESM while keeping bundlers out of
  * the runtime path.
  */
-async function importUnbundledRustModule(artifact: ResolvedRustEngineArtifact) {
+async function importUnbundledRustModule(artifact: ResolvedRustEngineArtifact, verifiedGlue?: Uint8Array) {
   if (typeof fetch !== "function" || typeof URL?.createObjectURL !== "function" || typeof Blob === "undefined") {
     throw new RustEngineLoadError("artifact-unavailable", "Published Rust modules require browser fetch and Blob URL support");
   }
-  const response = await fetch(artifact.moduleUrl, { cache: "no-store" });
-  if (!response.ok) {
-    throw new RustEngineLoadError("artifact-unavailable", `Rust engine module returned HTTP ${response.status}`);
+  let source: string | ArrayBuffer;
+  if (verifiedGlue) source = verifiedGlue.slice().buffer;
+  else {
+    const response = await fetch(artifact.moduleUrl, { cache: "no-store" });
+    if (!response.ok) throw new RustEngineLoadError("artifact-unavailable", `Rust engine module returned HTTP ${response.status}`);
+    source = await response.text();
   }
-  const moduleUrl = URL.createObjectURL(new Blob([await response.text()], { type: "text/javascript" }));
+  const moduleUrl = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
   try {
     return await import(/* @vite-ignore */ /* webpackIgnore: true */ moduleUrl) as unknown;
   } finally {
@@ -192,6 +201,11 @@ export class RustEngineLoader {
   private readonly now: () => number;
   private readonly protocolVersion: number;
   private readonly schemaVersion: number;
+  private readonly preparedCode?: PreparedRustEngineCode;
+  private readonly customImporter: boolean;
+  private readonly codeFetcher?: RustEngineCodeFetcher;
+  private ownedCodeCache: RustEngineCodeCache | null = null;
+  private loadGeneration = 0;
   private inFlight: Promise<LoadedRustEngine> | null = null;
   private loaded: LoadedRustEngine | null = null;
   private state: RustEngineLoaderDiagnostics["state"] = "idle";
@@ -202,12 +216,15 @@ export class RustEngineLoader {
   private lastError: RustEngineLoaderDiagnostics["lastError"] = null;
 
   constructor(options: RustEngineLoaderOptions = {}) {
-    this.artifact = options.artifact ?? DEFAULT_RUST_ENGINE_ARTIFACT;
+    this.artifact = options.artifact ?? options.preparedCode?.artifact ?? DEFAULT_RUST_ENGINE_ARTIFACT;
     this.importer = options.importer ?? importUnbundledRustModule;
     this.fetcher = options.fetcher ?? (typeof fetch === "function" ? fetch.bind(globalThis) : null);
     this.now = options.now ?? (() => typeof performance === "undefined" ? Date.now() : performance.now());
     this.protocolVersion = options.protocolVersion ?? RUST_ENGINE_PROTOCOL_VERSION;
     this.schemaVersion = options.schemaVersion ?? RUST_ENGINE_SCHEMA_VERSION;
+    this.preparedCode = options.preparedCode;
+    this.customImporter = Boolean(options.importer);
+    this.codeFetcher = options.codeFetcher;
   }
 
   load(): Promise<LoadedRustEngine> {
@@ -216,7 +233,9 @@ export class RustEngineLoader {
     this.state = "loading";
     this.attempts += 1;
     const startedAt = this.now();
-    this.inFlight = this.loadOnce(startedAt).then((loaded) => {
+    const generation = this.loadGeneration;
+    const pending = this.loadOnce(startedAt, generation).then((loaded) => {
+      this.assertLoadGeneration(generation);
       this.loaded = loaded;
       this.state = "ready";
       this.successes += 1;
@@ -227,35 +246,63 @@ export class RustEngineLoader {
       const normalized = error instanceof RustEngineLoadError
         ? error
         : new RustEngineLoadError("artifact-unavailable", `Rust engine artifact could not be loaded: ${error instanceof Error ? error.message : String(error)}`, error);
-      this.state = "failed";
-      this.failures += 1;
-      this.lastDurationMs = Math.max(0, this.now() - startedAt);
-      this.lastError = { code: normalized.code, message: normalized.message };
+      if (generation === this.loadGeneration) {
+        this.state = "failed";
+        this.failures += 1;
+        this.lastDurationMs = Math.max(0, this.now() - startedAt);
+        this.lastError = { code: normalized.code, message: normalized.message };
+      }
       throw normalized;
     }).finally(() => {
-      this.inFlight = null;
+      if (this.inFlight === pending) this.inFlight = null;
     });
-    return this.inFlight;
+    this.inFlight = pending;
+    return pending;
   }
 
-  private async loadOnce(startedAt: number): Promise<LoadedRustEngine> {
-    const artifact = await this.resolveArtifact();
+  private assertLoadGeneration(generation: number) {
+    if (generation !== this.loadGeneration) throw new RustEngineLoadError("initialization-failed", "Rust engine load was superseded by reset");
+  }
+
+  private async loadOnce(startedAt: number, generation: number): Promise<LoadedRustEngine> {
+    let prepared = this.preparedCode ? await snapshotPreparedRustCode(this.preparedCode) : null;
+    if (!prepared && !this.customImporter && this.artifact.indexUrl && !this.artifact.moduleUrl && !this.artifact.wasmUrl) {
+      this.ownedCodeCache ??= new RustEngineCodeCache({ fetcher: this.codeFetcher });
+      prepared = await this.ownedCodeCache.prepare(this.artifact);
+    }
+    this.assertLoadGeneration(generation);
+    if (prepared) {
+      const selected = prepared.artifact;
+      const base = typeof location === "undefined" ? "http://localhost/" : location.href;
+      if ((this.artifact.buildHash && this.artifact.buildHash !== selected.buildHash)
+        || (this.artifact.variant && this.artifact.variant !== selected.variant)
+        || this.artifact.buildKind !== selected.buildKind
+        || (this.artifact.indexUrl && new URL(this.artifact.indexUrl, base).href !== selected.selectorUrl)
+        || (this.artifact.moduleUrl && this.artifact.moduleUrl !== selected.moduleUrl)
+        || (this.artifact.wasmUrl && this.artifact.wasmUrl !== selected.wasmUrl)) {
+        throw new RustEngineLoadError("invalid-module", "Prepared code differs from pinned artifact identity");
+      }
+    }
+    const artifact = prepared?.artifact ?? await this.resolveArtifact();
+    this.assertLoadGeneration(generation);
     let namespace: Record<string, unknown>;
     try {
-      namespace = asRecord(await this.importer(artifact));
+      namespace = asRecord(await this.importer(artifact, prepared?.glueBytes));
     } catch (error) {
       throw new RustEngineLoadError("artifact-unavailable", `Rust engine artifact is unavailable at ${artifact.moduleUrl}`, error);
     }
+    this.assertLoadGeneration(generation);
     const initializer = namespace.default;
     if (typeof initializer === "function") {
       try {
-        await (initializer as (options?: { module_or_path: string }) => unknown)({
-          module_or_path: artifact.wasmUrl,
+        await (initializer as (options?: { module_or_path: string | WebAssembly.Module }) => unknown)({
+          module_or_path: prepared?.wasmModule ?? artifact.wasmUrl,
         });
       } catch (error) {
         throw new RustEngineLoadError("initialization-failed", `Rust engine Wasm initialization failed for ${artifact.wasmUrl}`, error);
       }
     }
+    this.assertLoadGeneration(generation);
     const exports = validateExports(namespace);
     const protocolVersion = exports.blockwild_protocol_version();
     if (protocolVersion !== this.protocolVersion) {
@@ -333,6 +380,8 @@ export class RustEngineLoader {
   }
 
   reset() {
+    this.loadGeneration += 1;
+    this.ownedCodeCache?.dispose(); this.ownedCodeCache = null;
     this.loaded = null;
     this.inFlight = null;
     this.state = "idle";
@@ -349,6 +398,7 @@ export class RustEngineLoader {
       lastDurationMs: this.lastDurationMs,
       lastError: this.lastError,
       artifact: this.artifact,
+      codeCache: this.ownedCodeCache?.diagnostics() ?? null,
     };
   }
 }

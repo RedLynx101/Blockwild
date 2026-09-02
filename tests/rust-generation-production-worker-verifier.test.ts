@@ -4,7 +4,7 @@ import { cpSync, mkdirSync, readFileSync, renameSync, symlinkSync, writeFileSync
 import path from "node:path";
 import test from "node:test";
 import {
-  assertR3ProductionWorkerEvidence, auditR3ProductionWorkerSources, r3ProductionWorkerAsset,
+  assertR3ProductionWorkerEvidence, assertR3ImmutableCodeRequests, auditR3ProductionWorkerSources, r3ProductionWorkerAsset,
   resolveR3ProductionWorkerDirectory, resolveR3ProductionWorkerOutput, runR3WorkerSkillClient,
   selectR3ProductionWorkerArtifact,
 } from "../scripts/verify-rust-generation-production-worker.mjs";
@@ -140,10 +140,15 @@ function syntheticEvidence() {
   const forward = cases.map(entry => entry.id); const reverse = [...forward].reverse(); const zipper = [...forward.slice(1), forward[0]];
   const manifest: R3WorkerManifest = { schema: 1, artifactHash: "c".repeat(64), corpusHash: "d".repeat(32), coverageCount: 89, cases, schedules: { forward, reverse, zipper } };
   const rows = Object.entries(manifest.schedules).flatMap(([order, ids]) => ids.map(id => ({ id, order, canonicalHash: "a".repeat(32), milliseconds: 1, bytes: 24, markers: 1 })));
+  const startup = { disposed: false, maximumEntries: 2, entries: 1, pending: 0, resolutions: 1, cacheHits: 0,
+    compilations: 1, assetFetches: 2, failures: 0, verifiedBytes: 24 };
+  const reset = { ...startup, resolutions: 2, cacheHits: 1 };
   const state = { schema: 1, status: "passed", artifactHash: manifest.artifactHash, corpusHash: manifest.corpusHash, caseCount: 155, coverageCount: 89,
-    compared: 465, transferredStreams: 4650, rows, checks: ["1", "2", "3", "4", "5", "6"], schedules: { forward, reverse, zipper }, markerRows: 465,
+    compared: 465, transferredStreams: 4650, rows, checks: ["1", "2", "3", "4", "5", "6", "7"], schedules: { forward, reverse, zipper }, markerRows: 465,
+    codeReuse: { startup, reset, replacement: { ...reset } },
     diagnostics: { mode: "rust", selectionSource: "default-rust", state: "disposed", workers: 0, busy: 0, ready: 0, failed: 0, rejected: 0,
-      restarts: 1, submitted: 473, completed: 469, canceled: 1, stale: 2, lastError: null, acceptingRequests: false },
+      restarts: 1, submitted: 473, completed: 469, canceled: 1, stale: 2, lastError: null, acceptingRequests: false,
+      codeCache: { ...reset, disposed: true, entries: 0 } },
     transfers: { requests: 473, sourceInputsUnchanged: 473, nonemptyInputs: 20, detachedNonemptyInputs: 20 },
     cleanup: { pipelineDisposed: true, postDisposeRejected: true, prototypesRestored: true, observedWorkers: 5, terminatedWorkers: 5 } };
   return { manifest, state };
@@ -157,6 +162,15 @@ test("evidence validator rejects missing cases, hash/order drift, hidden recover
     (value: typeof state) => { value.schedules.forward = [...value.schedules.forward].reverse(); }, (value: typeof state) => { value.diagnostics.restarts = 2; },
     (value: typeof state) => { value.diagnostics.stale = 0; }, (value: typeof state) => { value.diagnostics.canceled = 0; },
     (value: typeof state) => { value.diagnostics.failed = 1; }, (value: typeof state) => { value.diagnostics.selectionSource = "test"; },
+    (value: typeof state) => { value.codeReuse.startup.compilations = 2; },
+    (value: typeof state) => { value.codeReuse.reset.resolutions = 1; },
+    (value: typeof state) => { value.codeReuse.reset.cacheHits = 0; },
+    (value: typeof state) => { value.codeReuse.replacement.assetFetches = 4; },
+    (value: typeof state) => { value.codeReuse.replacement.verifiedBytes += 1; },
+    (value: typeof state) => { value.diagnostics.codeCache.entries = 1; },
+    (value: typeof state) => { value.diagnostics.codeCache.disposed = false; },
+    (value: typeof state) => { value.diagnostics.codeCache.pending = 1; },
+    (value: typeof state) => { value.diagnostics.codeCache.failures = 1; },
     (value: typeof state) => { value.transfers.detachedNonemptyInputs -= 1; },
     (value: typeof state) => { value.cleanup.terminatedWorkers = 4; }, (value: typeof state) => { value.cleanup.prototypesRestored = false; },
   ];
@@ -167,7 +181,50 @@ test("production source audit pins the actual module factory and transferred-res
   const audit = auditR3ProductionWorkerSources();
   assert.equal(audit.workerPath, "app/game/terrain-generation-worker.ts");
   assert.equal(audit.defaultWorkerFactory, true); assert.equal(audit.outputTransferListInProductionSource, true);
+  assert.equal(audit.verifiedImmutableBootstrapInProductionSource, true);
   assert.equal(audit.outputSenderDetachmentObserved, false);
+});
+
+test("immutable code reuse requires exact single file delivery and fresh per-epoch manifest resolution", () => {
+  const { state } = syntheticEvidence(); const hash = state.artifactHash;
+  const files = [{ path: "engine.js", role: "glue", bytes: 8, sha256: "1".repeat(64) },
+    { path: "engine_bg.wasm", role: "wasm", bytes: 16, sha256: "2".repeat(64) }];
+  const artifact = { hash, files };
+  const routes = [...files.map(file => ({ url: `/engine/${hash}/${file.path}`, status: 200, bytes: file.bytes, sha256: file.sha256 })),
+    ...["/engine/manifest.json", `/engine/${hash}/manifest.json`].flatMap(url => [0, 1].map(() => ({ url, status: 200, bytes: 100, sha256: "3".repeat(64) })))];
+  assert.equal(assertR3ImmutableCodeRequests(routes, artifact, state).freshWorkers, 5);
+  for (const change of [
+    (value: typeof routes) => { value.push({ ...value[0] }); },
+    (value: typeof routes) => { value.splice(1, 1); },
+    (value: typeof routes) => { value[0].bytes -= 1; },
+    (value: typeof routes) => { value[1].sha256 = "0".repeat(64); },
+    (value: typeof routes) => { value.pop(); },
+    (value: typeof routes) => { value[2].status = 500; },
+  ]) { const changed = structuredClone(routes); change(changed); assert.throws(() => assertR3ImmutableCodeRequests(changed, artifact, state)); }
+  const changed = structuredClone(state); changed.diagnostics.codeCache.verifiedBytes += 1;
+  assert.throws(() => assertR3ImmutableCodeRequests(routes, artifact, changed));
+});
+
+test("production source audit rejects bootstrap, byte-verification and test-seam bypasses", t => {
+  const fixture = createRustEngineCandidateFixture(t);
+  const paths = ["app/game/terrain-generation-worker.ts", "app/game/terrain-generation-pipeline.ts", "app/game/rust-engine-loader.ts",
+    "app/game/rust-engine-code-cache.ts", "tests/fixtures/r3-production-worker.ts"];
+  for (const relative of paths) {
+    const destination = path.join(fixture.root, relative); mkdirSync(path.dirname(destination), { recursive: true });
+    writeFileSync(destination, readFileSync(new URL(`../${relative}`, import.meta.url)));
+  }
+  assert.doesNotThrow(() => auditR3ProductionWorkerSources(fixture.root));
+  for (const [relative, from, to] of [
+    [paths[0], "new RustTerrainGenerationBridgeV2({ preparedCode: preparedCode! })", "new RustTerrainGenerationBridgeV2()"],
+    [paths[1], "this.workerFactory ? null : new RustEngineCodeCache()", "this.workerFactory || this.authoritySelection.source === 'test' ? null : new RustEngineCodeCache()"],
+    [paths[2], "module_or_path: prepared?.wasmModule ?? artifact.wasmUrl", "module_or_path: artifact.wasmUrl"],
+    [paths[3], "bytes.byteLength === file.bytes", "true"],
+    [paths[3], "await sha256(bytes) === file.sha256", "true"],
+    [paths[4], "startupTimeoutMilliseconds:", "codeCache: injectedCache, startupTimeoutMilliseconds:"],
+  ]) {
+    const file = path.join(fixture.root, relative); const original = readFileSync(file, "utf8"); assert(original.includes(from));
+    writeFileSync(file, original.replace(from, to)); assert.throws(() => auditR3ProductionWorkerSources(fixture.root)); writeFileSync(file, original);
+  }
 });
 
 test("bounded skill client stops only the exact owned child on timeout and also accounts normal exit", async () => {

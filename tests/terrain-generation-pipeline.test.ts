@@ -88,7 +88,7 @@ const withFakeBrowserWorker = (run: () => void) => {
 
 test("a failed required generation worker installs nothing and reports terminal authority unavailable", () => {
   withFakeBrowserWorker(() => {
-    const pipeline = new TerrainGenerationPipeline(1, 0, { authoritySelection: rustAuthority });
+    const pipeline = new TerrainGenerationPipeline(1, 0, { authoritySelection: rustAuthority, workerFactory: () => new FailingWorker() });
     FailingWorker.instances[0].ready();
     let failed = 0;
     assert.equal(pipeline.submit({

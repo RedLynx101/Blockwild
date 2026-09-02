@@ -130,6 +130,38 @@ function platformChunkKey(operation: StoredPlatformChunk["operation"], worldId: 
   return `${platformChunkPrefix(operation, worldId, objectId)}${offset.toString().padStart(20, "0")}`;
 }
 
+export type PreservedLegacyBackupReadV1 = Readonly<{ worldId: string; objectId: string; totalBytes: number }>;
+
+/** Read only the canonical 4 MiB chunk layout used by original-file archives. */
+function preservedBackupAssembly(input: PreservedLegacyBackupReadV1) {
+  if (typeof input.worldId !== "string" || !input.worldId || input.worldId.length > 512
+    || typeof input.objectId !== "string" || !input.objectId || input.objectId.length > 512
+    || !Number.isSafeInteger(input.totalBytes) || input.totalBytes < 1 || input.totalBytes > 64 * 1024 * 1024) {
+    throw new Error("Preserved source readback identity or byte budget is invalid.");
+  }
+  const bytes = new Uint8Array(input.totalBytes);
+  let offset = 0;
+  return {
+    append(value: StoredPlatformChunk, key: unknown) {
+      const length = Math.min(RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1, input.totalBytes - offset);
+      if (!value || length < 1 || value.operation !== "preserve-legacy-backup-chunk"
+        || value.worldId !== input.worldId || value.objectId !== input.objectId
+        || value.offset !== offset || value.totalBytes !== input.totalBytes
+        || value.key !== key || key !== platformChunkKey(value.operation, input.worldId, input.objectId, offset)
+        || !(value.payload instanceof Uint8Array) || value.payload.byteLength !== length
+        || value.payloadHash !== rustPersistencePlatformPayloadHashV1(value.payload)) {
+        throw new Error("Preserved source chunks are corrupt, reordered, overlapping, or incomplete.");
+      }
+      bytes.set(value.payload, offset);
+      offset += length;
+    },
+    finish() {
+      if (offset !== input.totalBytes) throw new Error("Preserved source archive is incomplete.");
+      return bytes;
+    },
+  };
+}
+
 function recordBelongsToWorld(record: StoredRecord | undefined, worldId: string) {
   if (!record) return false;
   const address = record.address;
@@ -715,6 +747,35 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
     return Object.freeze({ usage: Math.max(0, estimate.usage ?? 0), quota: estimate.quota === undefined ? null : Math.max(0, estimate.quota) });
   }
 
+  /** Complete, strict readback without creating a checkpoint or import marker. */
+  async readPreservedLegacyBackup(input: PreservedLegacyBackupReadV1): Promise<Uint8Array> {
+    const assembly = preservedBackupAssembly(input);
+    const database = await this.open();
+    const idb = database.transaction([STORE_PLATFORM_CHUNKS], "readonly");
+    const done = transactionDone(idb);
+    try {
+      const prefix = platformChunkPrefix("preserve-legacy-backup-chunk", input.worldId, input.objectId);
+      const request = idb.objectStore(STORE_PLATFORM_CHUNKS).openCursor(IDBKeyRange.bound(prefix, `${prefix}\uffff`));
+      await new Promise<void>((resolve, reject) => {
+        request.onerror = () => reject(request.error ?? new Error("Preserved source readback failed."));
+        request.onsuccess = () => {
+          try {
+            const cursor = request.result;
+            if (!cursor) { resolve(); return; }
+            assembly.append(cursor.value as StoredPlatformChunk, cursor.key);
+            cursor.continue();
+          } catch (error) { reject(error); }
+        };
+      });
+      const bytes = assembly.finish();
+      await done;
+      return bytes;
+    } catch (error) {
+      await abortTransaction(idb, done);
+      throw error;
+    }
+  }
+
   async executePlatform(request: RustPersistencePlatformRequestV1): Promise<Extract<RustPersistenceResponseV1, { kind: "platform" }>> {
     try {
       switch (request.operation) {
@@ -1127,6 +1188,14 @@ export class MemoryPersistenceAdapterV1 implements PersistencePlatformAdapterV1 
     return inspectMigrationState(identity, this.migrationState(identity.bundle.worldId)).readback;
   }
   async estimate() { return Object.freeze({ usage: [...this.records.values()].reduce((total, record) => total + record.payload.byteLength, 0), quota: null }); }
+  async readPreservedLegacyBackup(input: PreservedLegacyBackupReadV1): Promise<Uint8Array> {
+    const assembly = preservedBackupAssembly(input);
+    const prefix = platformChunkPrefix("preserve-legacy-backup-chunk", input.worldId, input.objectId);
+    const chunks = [...this.platformChunks.entries()].filter(([key]) => key.startsWith(prefix))
+      .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+    for (const [key, value] of chunks) assembly.append(value, key);
+    return assembly.finish();
+  }
   async executePlatform(request: RustPersistencePlatformRequestV1): Promise<Extract<RustPersistenceResponseV1, { kind: "platform" }>> {
     const revision = () => this.storageRevisions.get(request.worldId) ?? 0;
     if (request.operation === "recover-head") {

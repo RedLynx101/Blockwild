@@ -17,12 +17,17 @@ declare const self: {
 const controllers = new Map<string, AbortController>();
 let backendPromise: Promise<TerrainGenerationBackendV2> | null = null;
 let rustBridge: RustTerrainGenerationBridgeV2 | null = null;
+let preparedCode: Extract<TerrainGenerationWorkerRequestV2, { type: "initialize-terrain-generation-v2" }>["code"] | null = null;
+let bootstrapStarted = false;
+let bootstrapFailed = false;
+let backendReady = false;
 
 function taskKey(epoch: number, taskId: number) { return `${epoch}:${taskId}`; }
 
 function backend() {
+  if (!preparedCode) return Promise.reject(new Error("Rust terrain worker has not received verified code bootstrap"));
   backendPromise ??= Promise.resolve().then(async () => {
-    rustBridge = new RustTerrainGenerationBridgeV2();
+    rustBridge = new RustTerrainGenerationBridgeV2({ preparedCode: preparedCode! });
     await rustBridge.initialize();
     return new InjectedTerrainGenerationBackendV2((request) => rustBridge!.generate(request), "rust-wasm-authoritative");
   });
@@ -33,28 +38,47 @@ function post(message: TerrainGenerationWorkerResponseV2, transfer: Transferable
   self.postMessage(message, { transfer });
 }
 
-void backend().then(() => {
-  const certificate = rustBridge?.diagnostics().certificate;
-  const locatorCertificate = rustBridge?.diagnostics().locatorCertificate;
-  if (!certificate || !locatorCertificate) throw new Error("Rust terrain authority certificates are unavailable after initialization");
-  post({
-  type: "terrain-generation-ready-v2",
-  protocolVersion: TERRAIN_GENERATION_PROTOCOL_V2,
-  requestSchemaVersion: GENERATE_CHUNK_REQUEST_SCHEMA_V2,
-  resultSchemaVersion: GENERATED_CHUNK_SCHEMA_V2,
-  backend: "rust-wasm-authoritative",
-  certificate,
-  locatorCertificate,
-  });
-}).catch((error) => post({
-  type: "terrain-generation-startup-error-v2",
-  message: error instanceof Error ? error.message : String(error),
-}));
+function initialize(message: Extract<TerrainGenerationWorkerRequestV2, { type: "initialize-terrain-generation-v2" }>) {
+  if (bootstrapStarted || bootstrapFailed || !Number.isSafeInteger(message.bootstrapId) || message.bootstrapId <= 0
+    || !message.code || !/^[a-f0-9]{64}$/u.test(message.code.identity)) {
+    bootstrapFailed = true;
+    post({ type: "terrain-generation-startup-error-v2", message: "Duplicate or invalid verified-code bootstrap" });
+    return;
+  }
+  bootstrapStarted = true; preparedCode = message.code;
+  const bootstrapId = message.bootstrapId; const codeIdentity = message.code.identity;
+  void backend().then(() => {
+    if (bootstrapFailed) throw new Error("Verified-code bootstrap was invalidated");
+    const certificate = rustBridge?.diagnostics().certificate;
+    const locatorCertificate = rustBridge?.diagnostics().locatorCertificate;
+    if (!certificate || !locatorCertificate) throw new Error("Rust terrain authority certificates are unavailable after initialization");
+    backendReady = true;
+    post({
+      type: "terrain-generation-ready-v2",
+      protocolVersion: TERRAIN_GENERATION_PROTOCOL_V2,
+      requestSchemaVersion: GENERATE_CHUNK_REQUEST_SCHEMA_V2,
+      resultSchemaVersion: GENERATED_CHUNK_SCHEMA_V2,
+      backend: "rust-wasm-authoritative",
+      bootstrapId,
+      codeIdentity,
+      certificate,
+      locatorCertificate,
+    });
+  }).catch((error) => post({
+    type: "terrain-generation-startup-error-v2",
+    message: error instanceof Error ? error.message : String(error),
+  }));
+}
 
 self.onmessage = (event: MessageEvent<TerrainGenerationWorkerRequestV2>) => {
   const message = event.data;
+  if (message.type === "initialize-terrain-generation-v2") { initialize(message); return; }
   if (message.type === "cancel-generate-chunk-v2") {
     controllers.get(taskKey(message.epoch, message.taskId))?.abort();
+    return;
+  }
+  if (!backendReady || bootstrapFailed) {
+    post({ type: "terrain-generation-startup-error-v2", message: "Task arrived before verified Rust startup completed" });
     return;
   }
   const { request } = message;

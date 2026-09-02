@@ -95,11 +95,22 @@ export function r3ProductionWorkerAsset(rawUrl, assets) {
 export function auditR3ProductionWorkerSources(repositoryRoot = ROOT) {
   const worker = readFileSync(path.join(repositoryRoot, "app/game/terrain-generation-worker.ts"), "utf8");
   const pipeline = readFileSync(path.join(repositoryRoot, "app/game/terrain-generation-pipeline.ts"), "utf8");
+  const loader = readFileSync(path.join(repositoryRoot, "app/game/rust-engine-loader.ts"), "utf8");
+  const codeCache = readFileSync(path.join(repositoryRoot, "app/game/rust-engine-code-cache.ts"), "utf8");
   const entry = readFileSync(path.join(repositoryRoot, "tests/fixtures/r3-production-worker.ts"), "utf8");
   assert.match(pipeline, /new Worker\(new URL\("\.\/terrain-generation-worker\.ts", import\.meta\.url\), \{ type: "module" \}\)/u);
   assert.match(entry, /new TerrainGenerationPipeline\(2, 2, \{ startupTimeoutMilliseconds:/u);
-  assert(!/workerFactory\s*:|authoritySelection\s*:|new\s+Worker\s*\(/u.test(entry), "fixture may not replace the factory or selected authority");
-  assert.match(worker, /new RustTerrainGenerationBridgeV2\(\)/u);
+  assert(!/workerFactory\s*:|authoritySelection\s*:|codeCache\s*:|new\s+Worker\s*\(/u.test(entry), "fixture may not replace the factory, code cache, or selected authority");
+  assert.match(worker, /new RustTerrainGenerationBridgeV2\(\{ preparedCode: preparedCode! \}\)/u);
+  assert.match(worker, /if \(message\.type === "initialize-terrain-generation-v2"\) \{ initialize\(message\); return; \}/u);
+  assert.match(worker, /if \(bootstrapStarted \|\|/u);
+  assert.match(pipeline, /new RustEngineCodeCache\(\)/u);
+  assert.match(pipeline, /this\.workerFactory \? null : new RustEngineCodeCache\(\)/u);
+  assert.match(pipeline, /slot\.worker\.postMessage\(\{ type: "initialize-terrain-generation-v2", bootstrapId: slot\.bootstrapId, code \}\)/u);
+  assert.match(pipeline, /message\.bootstrapId === slot\.bootstrapId && message\.codeIdentity === slot\.codeIdentity/u);
+  assert.match(loader, /module_or_path: prepared\?\.wasmModule \?\? artifact\.wasmUrl/u);
+  assert.match(codeCache, /bytes\.byteLength === file\.bytes/u);
+  assert.match(codeCache, /await sha256\(bytes\) === file\.sha256/u);
   assert.match(worker, /generatedChunkTransferListV2\(result\.chunk\)/u);
   const runtimeImports = [...worker.matchAll(/from\s+["']([^"']+)["']/gu)].map(match => match[1]).sort();
   assert.deepEqual(runtimeImports, ["./rust-terrain-generation-backend", "./rust-terrain-generation-bridge", "./terrain-generation-contract"]);
@@ -107,6 +118,8 @@ export function auditR3ProductionWorkerSources(repositoryRoot = ROOT) {
   return {
     workerPath: "app/game/terrain-generation-worker.ts", workerSha256: sha256(Buffer.from(worker)),
     pipelineSha256: sha256(Buffer.from(pipeline)), fixtureSha256: sha256(Buffer.from(entry)), runtimeImports,
+    loaderSha256: sha256(Buffer.from(loader)), codeCacheSha256: sha256(Buffer.from(codeCache)),
+    verifiedImmutableBootstrapInProductionSource: true,
     defaultWorkerFactory: true, outputTransferListInProductionSource: true,
     outputSenderDetachmentObserved: false,
   };
@@ -158,7 +171,7 @@ export function assertR3ProductionWorkerEvidence(state, manifest) {
   assert.equal(state.artifactHash, manifest.artifactHash); assert.equal(state.corpusHash, manifest.corpusHash);
   assert.equal(state.caseCount, 155); assert.equal(state.coverageCount, 89);
   assert.equal(state.compared, 465); assert.equal(state.transferredStreams, 4_650);
-  assert.equal(state.rows.length, 465); assert.equal(state.checks.length, 6);
+  assert.equal(state.rows.length, 465); assert.equal(state.checks.length, 7);
   assert.deepEqual(state.schedules, manifest.schedules, "browser execution did not preserve all three exact schedules");
   const expected = new Map(manifest.cases.map(entry => [entry.id, entry]));
   const unique = new Set();
@@ -179,10 +192,42 @@ export function assertR3ProductionWorkerEvidence(state, manifest) {
   assert.equal(diagnostics.restarts, 1); assert.equal(diagnostics.submitted, 473); assert.equal(diagnostics.completed, 469);
   assert.equal(diagnostics.canceled, 1); assert.equal(diagnostics.stale, 2); assert.equal(diagnostics.lastError, null);
   assert.equal(diagnostics.acceptingRequests, false);
+  for (const [phase, resolutions, cacheHits, disposed] of [
+    ["startup", 1, 0, false], ["reset", 2, 1, false], ["replacement", 2, 1, false], ["disposed", 2, 1, true],
+  ]) {
+    const cache = phase === "disposed" ? diagnostics.codeCache : state.codeReuse?.[phase];
+    assert(cache, `missing real code-cache ${phase} evidence`);
+    assert.equal(cache.disposed, disposed); assert.equal(cache.maximumEntries, 2);
+    assert.equal(cache.entries, disposed ? 0 : 1); assert.equal(cache.pending, 0);
+    assert.equal(cache.resolutions, resolutions); assert.equal(cache.cacheHits, cacheHits);
+    assert.equal(cache.compilations, 1); assert.equal(cache.assetFetches, 2); assert.equal(cache.failures, 0);
+    assert(Number.isSafeInteger(cache.verifiedBytes) && cache.verifiedBytes > 0);
+    assert.equal(cache.verifiedBytes, state.codeReuse.startup.verifiedBytes);
+  }
   assert.equal(state.transfers.requests, 473); assert.equal(state.transfers.sourceInputsUnchanged, 473);
   assert(state.transfers.nonemptyInputs > 0); assert.equal(state.transfers.nonemptyInputs, state.transfers.detachedNonemptyInputs);
   assert.deepEqual(state.cleanup, { pipelineDisposed: true, postDisposeRejected: true, prototypesRestored: true, observedWorkers: 5, terminatedWorkers: 5 });
   return true;
+}
+
+/** Bind observable cache counters to exact server delivery, not HTTP cache assumptions. */
+export function assertR3ImmutableCodeRequests(routes, artifact, state) {
+  let codeBytes = 0;
+  for (const role of ["glue", "wasm"]) {
+    const files = artifact.files.filter(file => file.role === role); assert.equal(files.length, 1);
+    const file = files[0]; const url = `/engine/${artifact.hash}/${file.path}`;
+    const delivered = routes.filter(route => route.url.split("?")[0] === url);
+    assert.equal(delivered.length, 1, `${role} must be fetched exactly once across all five fresh workers`);
+    assert.equal(delivered[0].status, 200); assert.equal(delivered[0].bytes, file.bytes); assert.equal(delivered[0].sha256, file.sha256);
+    codeBytes += file.bytes;
+  }
+  for (const url of ["/engine/manifest.json", `/engine/${artifact.hash}/manifest.json`]) {
+    const delivered = routes.filter(route => route.url.split("?")[0] === url);
+    assert.equal(delivered.length, 2, "each epoch must resolve current selector and manifest exactly once");
+    assert(delivered.every(route => route.status === 200));
+  }
+  assert.equal(state.diagnostics.codeCache.verifiedBytes, codeBytes);
+  return { glueFetches: 1, wasmFetches: 1, selectorResolutions: 2, compiledModules: 1, freshWorkers: 5, verifiedBytes: codeBytes };
 }
 
 export async function runR3WorkerSkillClient(client, args, options = {}) {
@@ -229,7 +274,7 @@ export async function verifyRustGenerationProductionWorker(argv = process.argv) 
     const { createServer } = await import("vite");
     server = await createServer({
       configFile: false, root: ROOT, publicDir: false, logLevel: "warn", resolve: { alias: { "@": ROOT } },
-      server: { host: "127.0.0.1", port: 0, fs: { strict: true, allow: [ROOT] } },
+      server: { host: "127.0.0.1", port: 0, hmr: false, watch: { ignored: ["**/*"] }, fs: { strict: true, allow: [ROOT] } },
       optimizeDeps: { noDiscovery: true },
       plugins: [{ name: "r3-production-worker-immutable-assets", configureServer(vite) {
         vite.middlewares.use((request, response, next) => {
@@ -265,10 +310,11 @@ export async function verifyRustGenerationProductionWorker(argv = process.argv) 
       assert(routes.some(route => route.url.split("?")[0] === `/engine/${suffix}` && route.status === 200), `production loader route /engine/${suffix} was not exercised`);
     }
     assert(!routes.some(route => route.status !== 200), "engine/reference route escaped the exact allowlist");
+    const immutableCodeReuse = assertR3ImmutableCodeRequests(routes, selection.artifact, state);
     assert(!requests.some(url => /^\/app\/game\/(world|rust-terrain-generation-legacy-oracle)\.ts(?:\?|$)/u.test(url)), "browser worker gate loaded legacy world/oracle production modules");
     const evidence = {
       schema: 1, output, artifactHash: selection.artifact.hash, sourceSnapshot: selection.sourceSnapshot, browserSource, sourceAudit,
-      workerScriptUrls, artifactFiles: selection.artifact.files, corpusHash: corpus.manifest.corpusHash,
+      workerScriptUrls, immutableCodeReuse, artifactFiles: selection.artifact.files, corpusHash: corpus.manifest.corpusHash,
       selectedPublicDirectory: path.relative(ROOT, selection.directory).replaceAll(path.sep, "/"),
       timingMilliseconds: { independentLegacyOracle: corpus.oracleTimingMilliseconds,
         actualWorkerEndToEnd: summarizeSamples(state.rows.map(row => row.milliseconds)), startup: state.timings.startupMilliseconds },

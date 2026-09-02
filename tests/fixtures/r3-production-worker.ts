@@ -16,6 +16,7 @@ const state = {
   schedules: { forward: [] as string[], reverse: [] as string[], zipper: [] as string[] },
   rows: [] as { id: string; order: string; canonicalHash: string; milliseconds: number; bytes: number; markers: number }[],
   checks: [] as string[], diagnostics: null as ReturnType<TerrainGenerationPipeline["diagnostics"]> | null,
+  codeReuse: { startup: null, reset: null, replacement: null } as Record<"startup" | "reset" | "replacement", ReturnType<TerrainGenerationPipeline["diagnostics"]>["codeCache"]>,
   cleanup: { pipelineDisposed: false, postDisposeRejected: false, prototypesRestored: false, observedWorkers: 0, terminatedWorkers: 0 },
   transfers: { requests: 0, nonemptyInputs: 0, detachedNonemptyInputs: 0, sourceInputsUnchanged: 0 },
   timings: { startupMilliseconds: 0, totalMilliseconds: 0 },
@@ -127,6 +128,12 @@ async function run() {
     const boot = performance.now();
     await until(() => pipeline.availableSlots === 2 || pipeline.authorityUnavailable, "worker startup");
     invariant(pipeline.state === "ready" && pipeline.mode === "rust" && pipeline.diagnostics().selectionSource !== "test", "normal certified Rust authority was not selected");
+    state.codeReuse.startup = pipeline.diagnostics().codeCache;
+    invariant(state.codeReuse.startup?.compilations === 1 && state.codeReuse.startup.resolutions === 1
+      && state.codeReuse.startup.cacheHits === 0 && state.codeReuse.startup.assetFetches === 2
+      && state.codeReuse.startup.entries === 1 && state.codeReuse.startup.pending === 0
+      && state.codeReuse.startup.failures === 0 && state.codeReuse.startup.verifiedBytes > 0,
+    "initial real workers did not share exactly one verified immutable code acquisition");
     state.timings.startupMilliseconds = performance.now() - boot;
 
     function launch(entry: R3WorkerCase) {
@@ -187,6 +194,11 @@ async function run() {
     invariant((await resetFailure)?.includes("world reset"), "in-flight old-world request survived epoch reset");
     await until(() => pipeline.availableSlots === 2 || pipeline.authorityUnavailable, "post-reset worker startup");
     invariant(pipeline.state === "ready", "reset did not recreate actual workers");
+    state.codeReuse.reset = pipeline.diagnostics().codeCache;
+    invariant(state.codeReuse.reset?.resolutions === 2 && state.codeReuse.reset.cacheHits === 1
+      && state.codeReuse.reset.compilations === 1 && state.codeReuse.reset.assetFetches === 2
+      && state.codeReuse.reset.verifiedBytes === state.codeReuse.startup.verifiedBytes,
+    "fresh reset workers refetched/recompiled code or failed to resolve the selector anew");
     check(probe, await launch(probe).result); state.checks.push("epoch reset terminates old workers and an exact new-world retry succeeds");
     invariant(pipeline.completed === 468 && pipeline.submitted === 471 && pipeline.canceled === 1 && pipeline.stale === 1,
       "production result/cancel/stale counters differ from exact expected outcomes");
@@ -194,6 +206,10 @@ async function run() {
     invariant(pipeline.simulateWorkerCrashForDiagnostics(), "production diagnostic crash seam did not select a real worker");
     await until(() => pipeline.availableSlots === 2 || pipeline.authorityUnavailable, "diagnostic crash replacement");
     invariant(pipeline.state === "ready" && pipeline.diagnostics().restarts === 1, "diagnostic worker crash did not restore configured capacity exactly once");
+    state.codeReuse.replacement = pipeline.diagnostics().codeCache;
+    invariant(JSON.stringify(state.codeReuse.replacement) === JSON.stringify(state.codeReuse.reset),
+      "same-epoch replacement refetched/recompiled already prepared immutable code");
+    state.checks.push("fresh reset/replacement workers reuse one verified Module while reset resolves the selector anew");
     // Occupy the surviving first slot, then require the newly appended replacement
     // to produce the newer same-lane result. No fake scheduling or worker injection.
     const survivor = launch(probe); const survivorStale = survivor.result.then(() => null, error => String(error));
@@ -214,6 +230,8 @@ async function run() {
   }
   invariant(state.cleanup.pipelineDisposed && state.cleanup.postDisposeRejected && state.cleanup.prototypesRestored
     && state.cleanup.observedWorkers === 5 && state.cleanup.terminatedWorkers === 5, "explicit worker cleanup failed");
+  invariant(state.diagnostics?.codeCache?.disposed && state.diagnostics.codeCache.entries === 0 && state.diagnostics.codeCache.pending === 0,
+    "pipeline disposal retained immutable code entries or owned acquisition");
   state.checks.push("every real worker terminated, native prototypes restored, disposed submissions rejected");
   state.status = "passed"; state.phase = "PASS · 155 cases × 3 orders; lifecycle and cleanup exact"; draw();
 }

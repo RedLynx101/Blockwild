@@ -26,6 +26,14 @@ import {
 import { encodeCanonicalWorldSaveValueV1 } from "./world-save-sharding";
 import { WorldPersistenceCoordinatorV1 } from "./world-persistence-coordinator";
 import {
+  WorldImportSourceError,
+  assertWorldImportSourceReferenceV1,
+  preserveWorldImportSourceV1,
+  readWorldImportSourceV1,
+  type WorldImportSourceAdapterV1,
+  type WorldImportSourceReferenceV1,
+} from "./world-import-source";
+import {
   LEGACY_TERRAIN_CONTENT_HASH_V2,
   legacyTerrainGeneratorHashV2,
   stableTerrainGenerationJsonV2,
@@ -122,6 +130,8 @@ export type StoredWorld = {
   metadata: WorldMetadata;
   options: WorldOptions;
   save: WorldSave;
+  /** Exact uploaded-file provenance, separate from normalized/native save state. */
+  importSource?: WorldImportSourceReferenceV1;
 };
 
 export type WorldCatalog = {
@@ -183,6 +193,8 @@ export type WorldStorageDependencies = {
   persistenceCoordinator?: WorldPersistenceCoordinatorV1 | null;
   /** Optional post-runtime Rust authority binding. Compatibility bytes stay protected, never relabeled. */
   nativePersistence?: Readonly<{ catalogWorldId: string; session: RustNativeWorldPersistenceSessionV1 }> | null;
+  /** Original-file archive only; independent of the native/generic world journal. */
+  importSourceAdapter?: WorldImportSourceAdapterV1 | null;
 };
 
 type StorageEventTarget = {
@@ -190,7 +202,7 @@ type StorageEventTarget = {
   removeEventListener(type: "storage", listener: (event: StorageEvent) => void): void;
 };
 
-type StoredWorldShell = Pick<StoredWorld, "version" | "metadata" | "options">
+type StoredWorldShell = Pick<StoredWorld, "version" | "metadata" | "options" | "importSource">
   & Readonly<{ save: Pick<WorldSave, "generatorProfile" | "generatorVersion"> }>;
 type CachedWorldShell = { revision: number; shell: StoredWorldShell };
 type StorageRevisionState = { catalog: number; documents: Map<string, number> };
@@ -614,6 +626,10 @@ export class WorldStorage {
   private readonly idFactory: () => string;
   private readonly storageEventTarget: StorageEventTarget | null;
   private readonly persistence: WorldPersistenceCoordinatorV1 | null;
+  private readonly importSourceAdapter: WorldImportSourceAdapterV1 | null;
+  private readonly ownedImportSourceAdapter: IndexedDbPersistenceAdapterV1 | null;
+  private importSourceOperations = 0;
+  private disposed = false;
   private nativePersistence: Readonly<{ catalogWorldId: string; session: RustNativeWorldPersistenceSessionV1 }> | null;
   private catalog: WorldCatalog = emptyCatalog();
   private catalogStored = false;
@@ -658,6 +674,8 @@ export class WorldStorage {
       ? this.defaultStorageEventTarget()
       : dependencies.storageEventTarget;
     this.persistence = dependencies.persistenceCoordinator === undefined ? defaultPersistenceCoordinator() : dependencies.persistenceCoordinator;
+    this.ownedImportSourceAdapter = dependencies.importSourceAdapter === undefined ? new IndexedDbPersistenceAdapterV1() : null;
+    this.importSourceAdapter = dependencies.importSourceAdapter === undefined ? this.ownedImportSourceAdapter : dependencies.importSourceAdapter;
     this.nativePersistence = dependencies.nativePersistence ?? null;
     this.readCatalog();
     this.observedCatalogRevision = revisionsFor(this.storage)?.catalog ?? 0;
@@ -666,8 +684,10 @@ export class WorldStorage {
   }
 
   dispose() {
+    this.disposed = true;
     this.storageEventTarget?.removeEventListener("storage", this.handleStorageEvent);
     this.trustedDocumentShells.clear();
+    this.closeIdleImportSourceAdapter();
   }
 
   async flushPersistence() {
@@ -937,6 +957,7 @@ export class WorldStorage {
       metadata,
       options,
       save,
+      ...(loaded.value.importSource ? { importSource: loaded.value.importSource } : {}),
     };
     const nextCatalog = this.copyCatalog({ worlds: this.catalog.worlds.map((entry) => entry.id === id ? metadata : entry) });
     const committed = this.commitDocument(document, nextCatalog, persistencePolicy);
@@ -1067,7 +1088,63 @@ export class WorldStorage {
     }
   }
 
+  /** Decoded-text compatibility API. It does not claim original-file provenance. */
   importWorld(json: string): WorldStorageResult<WorldMetadata> {
+    return this.publishImportedWorld(json);
+  }
+
+  /** Preserve and verify original bytes before any migration/normalization or catalog publication. */
+  async importWorldBytes(bytes: Uint8Array): Promise<WorldStorageResult<WorldMetadata>> {
+    if (this.disposed || !this.storage || !this.importSourceAdapter) {
+      return fail("unavailable", "Original-file import storage is unavailable.");
+    }
+    this.importSourceOperations += 1;
+    try {
+      const preserved = await preserveWorldImportSourceV1(this.importSourceAdapter, bytes);
+      if (this.disposed) return fail("unavailable", "World storage closed before the preserved import could be published.");
+      // Publication retains the established import semantics. The public UI
+      // already disables generic persistence; the archive itself never creates
+      // a checkpoint in this new world's native or compatibility namespace.
+      return this.publishImportedWorld(preserved.json, preserved.reference);
+    } catch (error) { return this.importSourceFailure(error); }
+    finally { this.importSourceOperations -= 1; this.closeIdleImportSourceAdapter(); }
+  }
+
+  async readOriginalImportedWorldSource(id: string): Promise<WorldStorageResult<Uint8Array>> {
+    if (this.disposed || !this.storage || !this.importSourceAdapter) return fail("unavailable", "Original-file archive is unavailable.");
+    this.ensureCatalogCurrent();
+    if (!this.catalog.worlds.some(world => world.id === id)) return fail("not-found", "That world does not exist on this device.", this.dataKey(id));
+    let reference: WorldImportSourceReferenceV1;
+    try {
+      // Recovering an original file must not depend on the current normalized
+      // save still being loadable, nor run save migration as a side effect.
+      const raw = this.storage.getItem(this.dataKey(id));
+      const document: unknown = raw === null ? null : JSON.parse(raw);
+      if (!isRecord(document) || document.version !== WORLD_CATALOG_VERSION) return fail("corrupt", "This world's local document is invalid.", this.dataKey(id));
+      if (document.importSource === undefined) return fail("not-found", "This world has no original uploaded-file provenance.", this.dataKey(id));
+      assertWorldImportSourceReferenceV1(document.importSource);
+      reference = Object.freeze({ ...document.importSource });
+    } catch (error) { return this.importSourceFailure(error); }
+    this.importSourceOperations += 1;
+    try { return ok(await readWorldImportSourceV1(this.importSourceAdapter, reference)); }
+    catch (error) { return this.importSourceFailure(error); }
+    finally { this.importSourceOperations -= 1; this.closeIdleImportSourceAdapter(); }
+  }
+
+  private importSourceFailure<T>(error: unknown): WorldStorageResult<T> {
+    return error instanceof WorldImportSourceError
+      ? fail(error.code, error.message)
+      : { ok: false, error: classifyStorageError(error) };
+  }
+
+  private closeIdleImportSourceAdapter() {
+    if (!this.disposed || this.importSourceOperations !== 0) return;
+    void this.ownedImportSourceAdapter?.close().catch(error => {
+      this.diagnostics.push(classifyStorageError(error));
+    });
+  }
+
+  private publishImportedWorld(json: string, importSource?: WorldImportSourceReferenceV1): WorldStorageResult<WorldMetadata> {
     this.ensureCatalogCurrent();
     let value: unknown;
     try {
@@ -1098,7 +1175,8 @@ export class WorldStorage {
       updatedAt: Math.max(sourceMetadata.updatedAt, now),
       generationIdentity: deriveWorldGenerationIdentityV1(save, options),
     };
-    const document: StoredWorld = { version: WORLD_CATALOG_VERSION, metadata, options, save };
+    const document: StoredWorld = { version: WORLD_CATALOG_VERSION, metadata, options, save,
+      ...(importSource ? { importSource } : {}) };
     const nextCatalog = this.copyCatalog({
       activeWorldId: this.catalog.activeWorldId ?? id,
       worlds: [...this.catalog.worlds, metadata],
@@ -1379,11 +1457,17 @@ export class WorldStorage {
     if (!isRecord(value) || value.version !== WORLD_CATALOG_VERSION) return fail("unsupported-version", "This world uses an unsupported storage version.", this.dataKey(id));
     const save = migrateLegacyWorldSave(value.save);
     if (!save) return fail("corrupt", "This world's save payload is corrupt or incomplete.", this.dataKey(id));
+    let importSource: WorldImportSourceReferenceV1 | undefined;
+    if (value.importSource !== undefined) {
+      try { assertWorldImportSourceReferenceV1(value.importSource); importSource = Object.freeze({ ...value.importSource }); }
+      catch { return fail("corrupt", "This world's original-file source reference is corrupt.", this.dataKey(id)); }
+    }
     const document: StoredWorld = {
       version: WORLD_CATALOG_VERSION,
       metadata: { ...catalogMetadata, seed: save.seed, mode: save.mode },
       options: migrateStoredWorldOptions(value.options, value.save),
       save,
+      ...(importSource ? { importSource } : {}),
     };
     this.rememberDocumentShell(document);
     return ok(document);
@@ -1496,6 +1580,7 @@ export class WorldStorage {
         version: document.version,
         metadata: { ...document.metadata },
         options: { ...document.options, enabledFactions: [...document.options.enabledFactions] },
+        ...(document.importSource ? { importSource: document.importSource } : {}),
         save: {
           generatorProfile: document.save.generatorProfile,
           generatorVersion: document.save.generatorVersion,

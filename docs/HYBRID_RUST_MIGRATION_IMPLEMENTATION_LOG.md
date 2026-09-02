@@ -13,6 +13,28 @@ This is the execution companion to [HYBRID_RUST_ENGINE_MIGRATION_MASTER_PLAN.md]
 
 ## Validated checkpoints
 
+### Predictive mesh progress survives lighting completion - 2026-09-02
+
+Committed `2690b7c35a416b3578c0ca1065d5565e14279d61` preserves useful partial
+predicted-ring mesh work when lighting completion queues already-built or deep
+current-chunk sections. Missing immediate-ring sections and explicitly owned
+player edits still preempt; stopped/reversed predictions are not protected.
+The existing discretionary budget, current-ring reserve, generation, lighting,
+rotation and production replay clock are unchanged.
+
+The real bounded lighting-completion path has twelve new regressions. The
+isolated two-file staged tree `820e211e68860e01f456eb73ae48fe98233f03fe` passes
+254 world/terrain regressions, the 1,808-test Rust/renderer/R3 matrix
+(1,806 passed, two existing skips), and full TypeScript. The first extraction
+exposed test-only TypeScript narrowing errors; they were corrected before a
+fresh complete rerun. Both attempts remain recorded. Final report:
+`work/hybrid-rust-migration/checkpoint-c7-extracted-20260902-6-validation.json`;
+archive SHA-256:
+`fb3a2a19784eb3736b1e501808ad025291dbb209133d23075fdd791aea669451`.
+Native source `e4fcec5a`/222 files and canonical `c7bfb66c` are unchanged.
+Browser readiness/performance acceptance is still pending; this checkpoint
+does not increase formal migration acceptance or retire the rollback path.
+
 ### Validated hash fast path and diagnostic 8 - 2026-09-02
 
 The canonical byte hasher now uses four unsigned 32-bit words for the same two

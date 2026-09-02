@@ -408,6 +408,75 @@ test("real IndexedDB preserves exact revisions across reopen, rejects stale tabs
     });
     assert.match(migration.marker, /^migration-v1\|[0-9a-f]{32}\|[0-9a-f]{32}$/u);
 
+    const originalSource = await page.evaluate(async () => {
+      const { IndexedDbPersistenceAdapterV1 } = await import("/app/game/indexeddb-persistence-adapter.ts");
+      const sourceModule = await import("/app/game/world-import-source.ts");
+      const databaseName = `blockwild-original-source-browser-${crypto.randomUUID()}`;
+      const input = {
+        format: "blockwild-world", version: 1,
+        world: { version: 1, metadata: {}, options: {}, save: { version: 2, generatorVersion: 16,
+          seed: "SOURCE-BROWSER", mode: "survival", player: { x: -120, y: 40, z: -8 }, edits: {} } },
+        unknownEnvelope: `café 🦊 ${"x".repeat(4 * 1024 * 1024)}`,
+      };
+      const bytes = new TextEncoder().encode(`\ufeff${JSON.stringify(input, null, 2).replaceAll("\n", "\r\n")}\r\n`);
+      const first = new IndexedDbPersistenceAdapterV1(indexedDB, databaseName);
+      let reopened;
+      let database;
+      const completed = transaction => new Promise((resolve, reject) => {
+        transaction.oncomplete = resolve;
+        transaction.onabort = () => reject(transaction.error ?? new Error("source fixture transaction aborted"));
+        transaction.onerror = () => reject(transaction.error ?? new Error("source fixture transaction failed"));
+      });
+      const value = request => new Promise((resolve, reject) => {
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+      try {
+        const preserved = await sourceModule.preserveWorldImportSourceV1(first, bytes);
+        await first.close();
+        reopened = new IndexedDbPersistenceAdapterV1(indexedDB, databaseName);
+        const restored = await sourceModule.readWorldImportSourceV1(reopened, preserved.reference);
+        const exact = restored.length === bytes.length && restored.every((byte, index) => byte === bytes[index]);
+        const retry = await sourceModule.preserveWorldImportSourceV1(reopened, bytes);
+        const noCheckpoint = await reopened.readLatestCheckpoint(sourceModule.WORLD_IMPORT_SOURCE_ARCHIVE_V1) === null;
+        database = await value(indexedDB.open(databaseName));
+        const read = database.transaction("platform-chunks", "readonly");
+        const readDone = completed(read);
+        const chunks = await value(read.objectStore("platform-chunks").getAll());
+        await readDone;
+        const rewrite = async (put, remove = []) => {
+          const transaction = database.transaction("platform-chunks", "readwrite", { durability: "strict" });
+          const done = completed(transaction);
+          for (const key of remove) transaction.objectStore("platform-chunks").delete(key);
+          for (const row of put) transaction.objectStore("platform-chunks").put(row);
+          await done;
+        };
+        const rejected = async () => {
+          try { await sourceModule.readWorldImportSourceV1(reopened, preserved.reference); return false; }
+          catch { return true; }
+        };
+        const corrupted = { ...chunks[0], payload: chunks[0].payload.slice() };
+        corrupted.payload[0] ^= 1;
+        await rewrite([corrupted]);
+        const corruptionRejected = await rejected();
+        await rewrite([chunks[0]], [chunks[1].key]);
+        const missingRejected = await rejected();
+        await rewrite([{ ...chunks[1], offset: 0 }]);
+        const reorderedRejected = await rejected();
+        await rewrite([chunks[1]]);
+        await sourceModule.readWorldImportSourceV1(reopened, preserved.reference);
+        return { exact, retryIdentity: JSON.stringify(retry.reference) === JSON.stringify(preserved.reference),
+          chunks: chunks.length, noCheckpoint, corruptionRejected, missingRejected, reorderedRejected };
+      } finally {
+        database?.close();
+        await first.close();
+        await reopened?.close();
+        await new IndexedDbPersistenceAdapterV1(indexedDB, databaseName).destroyForDiagnostics();
+      }
+    });
+    assert.deepEqual(originalSource, { exact: true, retryIdentity: true, chunks: 2, noCheckpoint: true,
+      corruptionRejected: true, missingRejected: true, reorderedRejected: true });
+
     const devtools = await page.context().newCDPSession(page);
     const origin = new URL(url).origin;
     const usage = await devtools.send("Storage.getUsageAndQuota", { origin });

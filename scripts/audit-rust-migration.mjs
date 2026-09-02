@@ -349,7 +349,7 @@ async function audit() {
   // Audit the actual runner's forwarding behavior without spawning tests. A
   // source-text spelling check incorrectly rejected expanded R3 discovery.
   const expectedTests = testEntries.filter(entry => entry.isFile()
-    && /^(rust|renderer|r3)-.+[.]test[.](mjs|ts)$/u.test(entry.name))
+    && /^(?:(?:rust|renderer|r3|terrain-generation|world-streaming)-.+|world-import-source)[.]test[.](mjs|ts)$/u.test(entry.name))
     .map(entry => `tests/${entry.name}`).sort();
   const discoveryCalls = [];
   runRustEngineTests({ root: ROOT, entries: testEntries, log: () => {},

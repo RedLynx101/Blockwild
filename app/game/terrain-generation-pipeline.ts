@@ -1,4 +1,6 @@
 import type { StructureMarker } from "./structures";
+import { RustEngineCodeCache, type PreparedRustEngineCode } from "./rust-engine-code-cache";
+import { DEFAULT_RUST_ENGINE_ARTIFACT } from "./rust-engine-loader";
 import {
   GENERATED_CHUNK_SCHEMA_V2,
   GENERATE_CHUNK_REQUEST_SCHEMA_V2,
@@ -75,6 +77,8 @@ export type TerrainGenerationPipelineOptions = Readonly<{
   authoritySelection?: TerrainGenerationAuthoritySelectionV2;
   setTimeout?: typeof globalThis.setTimeout;
   clearTimeout?: typeof globalThis.clearTimeout;
+  /** Explicit dependency seam for lifecycle tests. Real default workers always use the verified code cache. */
+  codeCache?: Pick<RustEngineCodeCache, "prepare" | "dispose" | "diagnostics">;
 }>;
 
 type WorkerCallback = Readonly<{
@@ -130,6 +134,8 @@ type Slot = {
   busy: boolean;
   currentId: number | null;
   generation: number;
+  bootstrapId: number | null;
+  codeIdentity: string | null;
   startupTimer: ReturnType<typeof setTimeout>;
 };
 
@@ -193,6 +199,8 @@ export class TerrainGenerationPipeline {
   private callbacks = new Map<number, WorkerCallback>();
   private readonly locatorAdmissions: LocatorAdmission[] = [];
   private readonly workerFactory?: () => TerrainGenerationWorkerLike;
+  private readonly codeCache: Pick<RustEngineCodeCache, "prepare" | "dispose" | "diagnostics"> | null;
+  private codePreparation: Promise<PreparedRustEngineCode> | null = null;
   private readonly taskTimeoutMilliseconds: number;
   private readonly startupTimeoutMilliseconds: number;
   private readonly configuredWorkerCount: number;
@@ -226,6 +234,8 @@ export class TerrainGenerationPipeline {
     this.taskTimeoutMilliseconds = Math.max(1, options.taskTimeoutMilliseconds ?? 30_000);
     this.startupTimeoutMilliseconds = Math.max(1, options.startupTimeoutMilliseconds ?? 30_000);
     this.authoritySelection = options.authoritySelection ?? configuredTerrainGenerationAuthorityV2();
+    this.codeCache = this.authoritySelection.mode !== "rust" ? null : options.codeCache
+      ?? (this.workerFactory ? null : new RustEngineCodeCache());
     this.authorityStateValue = this.authoritySelection.mode === "typescript" ? "typescript-rollback" : "starting";
     this.scheduleTimeout = options.setTimeout ?? globalThis.setTimeout.bind(globalThis);
     this.cancelTimeout = options.clearTimeout ?? globalThis.clearTimeout.bind(globalThis);
@@ -257,6 +267,8 @@ export class TerrainGenerationPipeline {
         busy: false,
         currentId: null,
         generation: ++this.workerGeneration,
+        bootstrapId: null,
+        codeIdentity: null,
         startupTimer: 0 as unknown as ReturnType<typeof setTimeout>,
       } satisfies Slot;
       slot.worker.onmessage = (event) => this.handleMessage(slot, event.data);
@@ -268,6 +280,7 @@ export class TerrainGenerationPipeline {
         new Error(`Rust terrain generation worker startup timed out after ${this.startupTimeoutMilliseconds} ms`),
       ), this.startupTimeoutMilliseconds);
       if (this.authorityStateValue !== "recovering") this.authorityStateValue = "starting";
+      if (this.codeCache) this.bootstrapWorker(slot);
     } catch (error) {
       this.lastError = {
         message: error instanceof Error ? error.message : String(error),
@@ -278,6 +291,29 @@ export class TerrainGenerationPipeline {
       };
       this.restartFailedAuthority();
     }
+  }
+
+  private bootstrapWorker(slot: Slot) {
+    if (!this.codePreparation) {
+      const pending = this.codeCache!.prepare(DEFAULT_RUST_ENGINE_ARTIFACT).catch(error => {
+        if (this.codePreparation === pending) this.codePreparation = null;
+        throw error;
+      });
+      this.codePreparation = pending;
+    }
+    void this.codePreparation.then(code => {
+      // Reset/dispose remove every retired slot. Request seed/options changes
+      // advance authorityEpoch too, but must not strand a live replacement.
+      if (this.authorityStateValue === "disposed" || !this.slots.includes(slot)) return;
+      slot.bootstrapId = slot.generation; slot.codeIdentity = code.identity;
+      // Module is structured-cloned, never transferred. Glue is also cloned so
+      // neither another worker nor the cache's retained bytes can be detached.
+      slot.worker.postMessage({ type: "initialize-terrain-generation-v2", bootstrapId: slot.bootstrapId, code });
+    }).catch(error => {
+      if (this.authorityStateValue !== "disposed" && this.slots.includes(slot)) {
+        this.failSlot(slot, error instanceof Error ? error : new Error(String(error)));
+      }
+    });
   }
 
   private restartFailedAuthority() {
@@ -382,12 +418,14 @@ export class TerrainGenerationPipeline {
       return;
     }
     if (message.type === "terrain-generation-ready-v2") {
-      const valid = message.protocolVersion === TERRAIN_GENERATION_PROTOCOL_V2
+      const bootstrapped = !this.codeCache || (!slot.ready && slot.bootstrapId !== null && slot.codeIdentity !== null
+        && message.bootstrapId === slot.bootstrapId && message.codeIdentity === slot.codeIdentity);
+      const valid = bootstrapped && message.protocolVersion === TERRAIN_GENERATION_PROTOCOL_V2
         && message.requestSchemaVersion === GENERATE_CHUNK_REQUEST_SCHEMA_V2
         && message.resultSchemaVersion === GENERATED_CHUNK_SCHEMA_V2
         && this.exactRustCertificate(message);
       if (!valid) {
-        this.failSlot(slot, new Error("Terrain generation worker did not present the exact authoritative Rust V2 certificate"));
+        this.failSlot(slot, new Error("Terrain generation worker did not present the exact authoritative Rust V2 certificate and code bootstrap binding"));
         return;
       }
       this.clearStartupTimer(slot);
@@ -845,6 +883,7 @@ export class TerrainGenerationPipeline {
       restarts: this.restarts,
       epoch: this.authorityEpoch,
       lastError: this.lastError,
+      codeCache: this.codeCache?.diagnostics() ?? null,
     } as const;
   }
 
@@ -863,6 +902,8 @@ export class TerrainGenerationPipeline {
    */
   resetAuthorityEpoch() {
     this.authorityEpoch = (this.authorityEpoch + 1) >>> 0 || 1;
+    // Fresh selector resolution per epoch; only verified immutable code survives.
+    this.codePreparation = null;
     this.authorityIdentity = null;
     this.latestTaskByLane.clear();
     for (const timer of this.canceledTaskTimers.values()) this.cancelTimeout(timer);
@@ -890,6 +931,8 @@ export class TerrainGenerationPipeline {
   }
 
   dispose() {
+    this.codePreparation = null;
+    this.codeCache?.dispose();
     for (const slot of this.slots) {
       slot.worker.onmessage = null;
       slot.worker.onerror = null;

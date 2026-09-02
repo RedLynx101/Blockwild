@@ -9,7 +9,9 @@ const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 /** Pure selection keeps discovery testable without launching the complete suite. */
 export function selectRustEngineTestFiles(entries) {
   return entries
-    .filter((entry) => entry.isFile() && /^(?:rust|renderer|r3)-.+\.test\.(?:mjs|ts)$/u.test(entry.name))
+    // R3's production seams predate the Rust-prefixed suites. Keep their
+    // scheduler, worker lifecycle and original-file regressions in this gate.
+    .filter((entry) => entry.isFile() && /^(?:(?:rust|renderer|r3|terrain-generation|world-streaming)-.+|world-import-source)\.test\.(?:mjs|ts)$/u.test(entry.name))
     .map((entry) => `tests/${entry.name}`)
     .sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
 }
