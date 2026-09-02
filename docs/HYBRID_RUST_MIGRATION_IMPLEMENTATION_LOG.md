@@ -13,6 +13,163 @@ This is the execution companion to [HYBRID_RUST_ENGINE_MIGRATION_MASTER_PLAN.md]
 
 ## Validated checkpoints
 
+### Predictive generation admission - 2026-09-02
+
+The ordinary Rust generation lane can now use a spare worker for a queued,
+missing predicted-ring chunk when the current ring is already drawable. This
+waives only the far-work presentation-debt veto: completed-result installation,
+current-ring work, the last reserved worker slot and frame budgets are
+unchanged. Selection scans the existing deterministic queue; stopped/reversed
+movement and nonpredicted candidates do not inherit stale priority. If a real
+pipeline task-ID rollover rejects submission, only this new middle-selection
+path re-sorts its returned candidate.
+
+Fourteen regression cases exercise the real pipeline/admission/lighting path,
+including negative-coordinate movement before crossing, background debt,
+incomplete current rings, reserved slots, completion priority and rejected
+submission. Initial tests exposed four admission failures; the rejection-order
+case independently failed before its correction. Final focused matrix is
+104/104, scoped lint and independent review pass. Browser readiness/timing and
+the combined isolated TypeScript/migration suite remain separate gates.
+
+The combined seven-file code/guide tranche was subsequently isolated as tree
+`b574670b3cb6586818e24ab8fdd31cd766bfa1ae` in extraction 8. It passes 254
+world regressions, 2,018 migration tests with zero failures and two existing
+skips, and full TypeScript. Archive SHA-256 is
+`ff7a9c77eb3ea5097e38d2cefa78c2ce4de26b0929701c077d26da4a1a2394e6`;
+report: `work/hybrid-rust-migration/checkpoint-c7-extracted-20260902-8-validation.json`.
+Only this log is updated after extraction to record these results and correct
+the single-startup-latency label in diagnostic 9; code/tests are unchanged.
+The native continuation codec remains outside this tranche, preserving the
+isolated C7 artifact/source identity. No live performance claim is added.
+
+### Explicit fresh-runtime review policy - 2026-09-02
+
+The new pure policy recognizes only the synthetic g16/g17 builder, empty-custody
+source subset. It retains the full original source and property inventory,
+separately records storage-normalized and actual legacy-load terms, and binds
+the selected target and complete character profile. Exact-review SHA-256 and
+equality preserve finite f64 values including negative zero; established
+16-byte semantic hashes retain their existing encoding. Midnight's legacy
+fallback, builder health and absent skill state are explicit review terms,
+not inferred historical continuity.
+
+Consent rederives the current proposal and requires every exact binding and
+ordered acknowledgement. Unknown/unsupported source fields, duplicate JSON
+keys, changed bytes/profile/target, copied-hash term changes, accessors and
+caller array/byte hooks fail closed. Review does not mint random identity
+material. Twenty-two focused regressions, scoped lint, targeted strict
+TypeScript and independent review pass. The new
+[maintainer guide](./RUST_FRESH_RUNTIME_REVIEW.md) explains the bounded API and
+future executor prerequisites.
+
+Both proposal and record remain review-only with `nativeExecutionAllowed: false`.
+No UI, native executor, checkpoint adoption, ownership attestation or
+existing guard relaxation is included. This does not close historical-save
+migration or increase formal acceptance.
+
+### Code-cache diagnostic 9: improved, not accepted - 2026-09-02
+
+The one-pair run from isolated tree `7c493afbc56470c4a1631cddaaf433216ba761e0`
+at extraction 7's
+`work/hybrid-rust-migration/r3-performance-code-cache-20260902-diagnostic-9/`
+passes both measured lanes' 155 exact generation cases and five continuous
+420-tick movement traces. The separate skill client fails one POI readiness
+callback; its other four traces have zero misses. All three screenshots were
+manually reviewed. Browser/server/world/worker cleanup, source/artifact
+immutability and mutex release pass. This is a failed diagnostic, not an
+accepted benchmark or authority promotion.
+
+Initialized generation p95 is 185.325 ms TypeScript versus 181.515 ms Rust
+(0.979442x); all initialized strata pass the 1.05x guard. Reset-to-accepted p95
+is still 185.510 versus 210.710 ms (1.135842x), with named and generic strata
+also failing. Four landscapes improve initial drawable latency, but the cave is
+1,119.940 versus 1,227.055 ms (1.095644x). Each initial drawable value is one
+startup latency per lane, not a p95 statistic. Update p95 improves in all five
+landscapes. A single pair cannot establish an accepted performance gain.
+
+Measured Rust code delivery is one glue file and six Wasm files across six
+pipeline instances, totaling 44,299,249 bytes. Diagnostic 8 delivered 483 of
+each, totaling 3,579,087,150 bytes. The new cache removes repeated per-worker
+delivery within each pipeline; it deliberately does not share mutable native
+state or retain a process-global module across disposed worlds.
+
+The remaining callback crosses from player chunk `-7,-1` to `-6,-1`; chunks
+`-5,-2` and `-5,-1` are absent. Before crossing, both workers are idle and the
+current ring is drawable, but background mesh debt makes ordinary distance-2
+generation ineligible. Lookahead changes queue order without overriding this
+admission rule. A bounded predictive-generation fix is being validated
+separately; it is not part of this frozen checkpoint.
+
+### Verified code reuse and original import-byte archive - 2026-09-02
+
+Committed as `fca0b9c929ee7ce0db67c6f13943e0b80cd32a70` after the isolated
+checks below, without including the later policy, continuation codec or
+predictive-generation admission changes.
+
+The pipeline now retains verified immutable glue bytes and a compiled Wasm
+module across worker resets. The mutable selector and manifest are resolved
+once per lifecycle epoch; each worker still receives a fresh Blob namespace,
+Wasm instance/memory, native generation/locator certificates, and slot-bound
+ready acknowledgement. File byte lengths and SHA-256 are checked before code
+execution. Disposal, failed acquisition and LRU eviction release owned entries;
+the two-entry default bounds retained code, not peak concurrent acquisition or
+unabortable compilation. See [the code-cache guide](./RUST_ENGINE_CODE_CACHE.md).
+
+Review found and repaired two asynchronous races: caller mutation during
+prepared-code verification, and a live replacement being stranded by an
+ordinary seed/options request-epoch change. Invalid bootstrap is terminal;
+default browser workers cannot bypass verification via a test authority label.
+The 86-test focused cache/loader/pipeline/worker/verifier set and independent
+review pass. No native code or published engine bytes changed in this checkpoint.
+
+Public file import now archives the exact uploaded UTF-8 bytes, including BOM,
+whitespace and unknown source fields, before normalized catalog publication.
+Files are capped at 64 MiB before allocation. Immutable 4 MiB chunks in a separate
+archive namespace receive contiguous complete readback and raw SHA-256
+verification; byte-distinct equal JSON has distinct raw identities. Failure,
+quota, corruption and disposal cannot publish an unverified import or delete
+its retained source. The decoded-string API cannot claim original-file
+provenance. References survive save/reload, and source recovery does not require
+the normalized save to remain semantically loadable. Existing native adoption
+and world-only refusal rules are unchanged.
+
+The archive has 87 passing related tests, including snapshot-race regressions.
+The real Chromium IndexedDB test also passes two-chunk reopen/retry and
+corrupt/missing/reordered-chunk negatives, with its preexisting quota checks
+unchanged. The successful archive phase runs before the restrictive quota
+fixture. This is source preservation, not historical native migration.
+
+Combined isolated tree `7c493afbc56470c4a1631cddaaf433216ba761e0` passes 254
+world/terrain regressions, the expanded 1,984-test migration suite (1,982 passed,
+two existing skips), and TypeScript. Standard discovery now includes the
+production terrain/streaming/source-import regressions; the independent release
+auditor expects the same complete set. Extraction 7's archive SHA-256 is
+`4d01dac978f0b9910f50b994e72536e0ea4ae9263f5cb0b571b34d4607507ce6`.
+
+The actual-worker browser gate under that extraction's
+`work/hybrid-rust-migration/browser/r3-production-worker-code-cache-20260902-1/`
+passes 465 exact comparisons, 4,650 streams, 741 POI rows and seven lifecycle
+checks. Five fresh workers share exactly one glue delivery, one Wasm delivery
+and one compilation (7,409,399 verified bytes). Reset resolves selector/manifest
+again without refetching code; crash replacement reuses the prepared module.
+All five workers terminate, retained entries/pending work reach zero, and
+source/artifact/server/client/mutex cleanup passes. The screenshot was manually
+reviewed. This proves reuse and correctness, not an accepted speedup; the
+matched timing gate remains separate.
+
+The same isolated tree also passes the full-game trusted edit/save/reload gate
+at extraction 7's `work/edit-gate-3/`: Sunstep Grass at `(4,43,-3)` becomes Air,
+and full reload/Continue retains the exact edit SHA-256
+`bf1440d65e21624215279e72bc27b0b2d2cd94d6074388ed77faede401415f2b`.
+All seven screenshots were manually reviewed; error streams are empty and all
+owned process/profile/server/mutex cleanup passes. The existing sparse title
+backdrop after reload remains a visual-closure caveat, not a new claimed pass.
+Two earlier attempts at longer nested output paths aborted the local Workers
+runtime before browser startup, including one outside the sandbox. Shortening
+only the output path let the unchanged extraction pass; the failed evidence is
+retained. No production config or gameplay guard was weakened to run it.
+
 ### Predictive mesh progress survives lighting completion - 2026-09-02
 
 Committed `2690b7c35a416b3578c0ca1065d5565e14279d61` preserves useful partial

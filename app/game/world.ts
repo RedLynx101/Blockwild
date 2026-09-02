@@ -5952,6 +5952,25 @@ export class ChunkWorld {
     return this.generationQueue.splice(index, 1)[0];
   }
 
+  /** A spare discretionary slot may warm the predicted ring despite background presentation debt. */
+  private queuedPredictedRingGenerationKey() {
+    if (this.terrainGenerationPipeline.availableSlots <= 1
+      || (!this.streamingLookaheadChunkX && !this.streamingLookaheadChunkZ)
+      || !Number.isFinite(this.playerChunkX) || !Number.isFinite(this.playerChunkZ)
+      || !this.immediateRingDrawable()) return undefined;
+    const predictedX = this.playerChunkX + this.streamingLookaheadChunkX;
+    const predictedZ = this.playerChunkZ + this.streamingLookaheadChunkZ;
+    // The existing queue is pop-ordered by camera, lookahead, age and coordinate
+    // ties. Skip unrelated far work without reordering it or minting residency.
+    for (let index = this.generationQueue.length - 1; index >= 0; index -= 1) {
+      const entry = this.generationQueue[index];
+      if (Math.max(Math.abs(entry.cx - predictedX), Math.abs(entry.cz - predictedZ)) > 1) continue;
+      const key = chunkKey(entry.cx, entry.cz);
+      if (this.generationQueued.has(key) && !this.chunks.has(key) && !this.pendingWorkerGeneration.has(key)) return key;
+    }
+    return undefined;
+  }
+
   processGenerationSlice(preferredKey?: string) {
     if (this.terrainGenerationAuthority.mode === "rust") {
       const completedIndex = preferredKey
@@ -6028,9 +6047,16 @@ export class ChunkWorld {
       // Blocking that lane behind lighting/mesh debt can deadlock startup:
       // the radius-one chunks create enough presentation work to prevent the
       // required radius-two ring from ever reaching an otherwise idle worker.
-      if (!preferredKey && this.chunks.has(currentKey) && downstreamDebt >= 32 && nearestQueuedDistance > 1) return false;
+      let admittedKey = preferredKey;
+      if (!preferredKey && this.chunks.has(currentKey) && downstreamDebt >= 32 && nearestQueuedDistance > 1) {
+        // Prediction waives only this far-debt veto, after completed installs,
+        // current-ring readiness and the reserved-slot guard above. It is not
+        // an explicit-residency request and gains no extra frame work budget.
+        admittedKey = this.queuedPredictedRingGenerationKey();
+        if (!admittedKey) return false;
+      }
       while (this.generationQueue.length) {
-        const next = this.takeQueuedGeneration(preferredKey);
+        const next = this.takeQueuedGeneration(admittedKey);
         if (!next) return false;
         const key = chunkKey(next.cx, next.cz);
         if (this.chunks.has(key) || this.pendingWorkerGeneration.has(key)) continue;
@@ -6074,6 +6100,7 @@ export class ChunkWorld {
           },
         )) {
           this.generationQueue.push(next);
+          if (!preferredKey && admittedKey) this.sortGenerationQueue();
           return false;
         }
         this.pendingWorkerGeneration.add(key);
