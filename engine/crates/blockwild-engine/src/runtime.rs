@@ -10,6 +10,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::Arc;
 
+#[path = "runtime_player_exact_pose.rs"]
+mod exact_pose;
+pub use exact_pose::*;
+
 use blockwild_authority::{
     BlockCatalogV1, CellPositionV1, ChunkAuxiliaryDataV1, DIRTY_SUBSYSTEMS_R4_V1, DirtySubsystemSeedV1,
     DirtySubsystemV1, LiquidMetadataV1, ReadOriginV1, ReadSizeV1, SectionInstallV1, WORLD_AIR_BLOCK_ID_V1,
@@ -190,6 +194,7 @@ const NATIVE_RUNTIME_CORE_SCHEMA_V13: u16 = 13;
 const NATIVE_RUNTIME_CORE_SCHEMA_V14: u16 = 14;
 const NATIVE_RUNTIME_CORE_SCHEMA_V15: u16 = 15;
 const NATIVE_RUNTIME_CORE_SCHEMA_V16: u16 = 16;
+const NATIVE_RUNTIME_CORE_SCHEMA_V17: u16 = 17;
 const DURABLE_SESSION_NEUTRAL_ID_V1: &str = "blockwild-durable-session-neutral-v1";
 const DEFAULT_TERRAIN_CONTENT_HASH_V2: CanonicalHash = CanonicalHash([
     0xcc, 0x59, 0x90, 0x3b, 0xe7, 0x7d, 0xfe, 0x30, 0x10, 0x9d, 0x15, 0xbf, 0xaf, 0x0e, 0x30, 0x22,
@@ -2744,6 +2749,7 @@ struct IntegratedRuntimeCoreSnapshotV1 {
     entity_command_sequence: u64,
     camera: IntegratedRuntimeCameraStateV1,
     player: Option<IntegratedRuntimePlayerStateV2>,
+    exact_player: Option<RuntimePlayerExactStateV1>,
     effect_events: VecDeque<IntegratedRuntimeEffectEventV2>,
     next_effect_sequence: u64,
     queued_inputs: VecDeque<RuntimeInputFrameV1>,
@@ -2866,6 +2872,7 @@ pub struct IntegratedRuntimeV2 {
     entity_schedule_diagnostics: IntegratedRuntimeEntityScheduleDiagnosticsV1,
     camera: IntegratedRuntimeCameraStateV1,
     player: Option<IntegratedRuntimePlayerStateV2>,
+    exact_player: Option<RuntimePlayerExactStateV1>,
     effect_events: VecDeque<IntegratedRuntimeEffectEventV2>,
     next_effect_sequence: u64,
     queued_inputs: VecDeque<RuntimeInputFrameV1>,
@@ -2985,6 +2992,7 @@ impl IntegratedRuntimeV2 {
             entity_schedule_diagnostics: IntegratedRuntimeEntityScheduleDiagnosticsV1::default(),
             camera: IntegratedRuntimeCameraStateV1::default(),
             player: None,
+            exact_player: None,
             effect_events: VecDeque::new(),
             next_effect_sequence: 1,
             queued_inputs: VecDeque::new(),
@@ -3792,6 +3800,7 @@ impl IntegratedRuntimeV2 {
     }
 
     fn validate_runtime_cross_domain_links_v1(&self) -> Result<(), IntegratedRuntimeError> {
+        self.validate_exact_player_projection()?;
         validate_world_view_runtime_links_v1(&self.world_view.state, &self.gameplay.state, &self.entities)
             .map_err(|error| IntegratedRuntimeError::new("runtime-cross-domain-links", error.to_string()))?;
         let linked_player_combatant = self.gameplay.state.combat.combatants.values().find(|combatant| {
@@ -4528,10 +4537,15 @@ impl IntegratedRuntimeV2 {
         let mut profile = self.camera.profile;
         profile.eye_height *= body_height_scale;
         profile.third_person_target_height *= body_height_scale;
+        let (look_yaw, look_pitch) = self.resolved_look(RuntimeInputFrameV1 {
+            look_yaw: self.camera.look_yaw,
+            look_pitch: self.camera.look_pitch,
+            ..RuntimeInputFrameV1::default()
+        });
         let input = CameraPoseInputV1 {
             body_position: player.body.position,
-            look_yaw: normalized_i16(self.camera.look_yaw) * std::f64::consts::PI,
-            look_pitch: normalized_i16(self.camera.look_pitch) * std::f64::consts::FRAC_PI_2,
+            look_yaw,
+            look_pitch,
             mode: self.camera.mode,
             aiming: self.camera_aiming(),
             viewport,
@@ -4965,6 +4979,7 @@ impl IntegratedRuntimeV2 {
         candidate.gameplay_authority_revision = core.gameplay_authority_revision;
         candidate.entity_command_sequence = core.entity_command_sequence;
         candidate.camera = core.camera;
+        candidate.exact_player = core.exact_player.clone();
         candidate.player = core.player;
         candidate.effect_events = core.effect_events;
         candidate.next_effect_sequence = core.next_effect_sequence;
@@ -5019,6 +5034,7 @@ impl IntegratedRuntimeV2 {
         candidate.validate_native_player_death_respawn_history_v1()?;
         candidate.validate_native_drop_pickup_history_v1()?;
         candidate.validate_combat_presentation_bindings_v1()?;
+        candidate.validate_exact_player_projection()?;
         if candidate
             .player
             .as_ref()
@@ -6602,6 +6618,7 @@ impl IntegratedRuntimeV2 {
             .map_err(|error| IntegratedRuntimeError::domain("legacy-migration-network", error))?;
         if !self.entities.is_empty()
             || self.player.is_some()
+            || self.exact_player.is_some()
             || self.tick != 0
             || self.accumulator_us != 0
             || self.simulation_revision != 0
@@ -7645,6 +7662,12 @@ impl IntegratedRuntimeV2 {
             hasher.write_bytes(hash.as_bytes());
         }
         hasher.write_u64(self.last_input_sequence.unwrap_or_default());
+        // Preserve every legacy V16 semantic hash byte when exact authority is
+        // absent. V17 adds a domain-separated, fully encoded exact-state suffix.
+        if let Some(exact) = &self.exact_player {
+            hasher.write_str("blockwild-runtime-exact-player-state-v1");
+            hasher.write_bytes(&exact_pose::encode_exact_state(exact).expect("validated exact player state"));
+        }
         hasher.write_u32(self.queued_inputs.len() as u32);
         for input in &self.queued_inputs {
             write_runtime_input(&mut hasher, input);
@@ -7999,7 +8022,9 @@ impl IntegratedRuntimeV2 {
                 .front()
                 .is_some_and(|input| input.target_tick <= self.tick)
             {
-                let input = self.queued_inputs.pop_front().expect("due input exists");
+                let input = *self.queued_inputs.front().expect("due input exists");
+                self.consume_exact_look(input)?;
+                self.queued_inputs.pop_front();
                 let previous_buttons = self.last_applied_input.map_or(0, |value| value.buttons);
                 self.apply_selected_slot(input)?;
                 action_receipts.extend(self.dispatch_input_edges(input, previous_buttons)?);
@@ -8009,6 +8034,9 @@ impl IntegratedRuntimeV2 {
             }
             if context_lane_enabled {
                 semantic_receipts.extend(self.dispatch_due_context_commands_v2());
+            }
+            if let Some(exact) = &self.exact_player {
+                (fixed_input.look_yaw, fixed_input.look_pitch) = exact_look_projection(exact.yaw, exact.pitch);
             }
             self.advance_authoritative_fixed_step(fixed_input)?;
         }
@@ -10492,6 +10520,7 @@ impl IntegratedRuntimeV2 {
 
     pub fn bind_player(&mut self, binding: RuntimePlayerBindingWireV1) -> Result<(), IntegratedRuntimeError> {
         self.ensure_running()?;
+        self.validate_exact_player_projection()?;
         binding
             .validate()
             .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
@@ -10531,7 +10560,7 @@ impl IntegratedRuntimeV2 {
             None => None,
         };
         let install_player_grant = existing.is_none();
-        let body = PhysicsBodyV1 {
+        let mut body = PhysicsBodyV1 {
             handle: binding.external_entity_id.clone(),
             position: SimulationVec3::new(
                 f64::from(record.position.x),
@@ -10560,6 +10589,31 @@ impl IntegratedRuntimeV2 {
             swim_surface_bob_active: existing.is_some_and(|player| player.body.swim_surface_bob_active),
             swim_shore_exit_ready: existing.is_none_or(|player| player.body.swim_shore_exit_ready),
         };
+        if let Some(existing) = existing
+            && record.position
+                == EntityVec3::new(
+                    existing.body.position.x as f32,
+                    existing.body.position.y as f32,
+                    existing.body.position.z as f32,
+                )
+            && record.velocity
+                == EntityVec3::new(
+                    existing.body.velocity.x as f32,
+                    existing.body.velocity.y as f32,
+                    existing.body.velocity.z as f32,
+                )
+        {
+            // R6 is a compatibility projection of the already bound f64 body.
+            // Rebinding that same authority must not turn its rounded projection
+            // back into a new origin. A changed R6 record remains an explicit
+            // legacy teleport/velocity source and follows the branch above.
+            if existing.binding == binding {
+                body = existing.body.clone();
+            } else {
+                body.position = existing.body.position;
+                body.velocity = existing.body.velocity;
+            }
+        }
         let flags = existing.map_or_else(
             || u8::from(binding.creative_mode) * RUNTIME_INPUT_FLAG_CREATIVE_V1,
             |player| player.flags,
@@ -10664,11 +10718,13 @@ impl IntegratedRuntimeV2 {
         });
         self.mining_state = None;
         self.simulation_revision = self.simulation_revision.saturating_add(1);
+        self.validate_exact_player_projection()?;
         self.invalidate_state_hash();
         Ok(())
     }
 
     fn advance_authoritative_fixed_step(&mut self, input: RuntimeInputFrameV1) -> Result<(), IntegratedRuntimeError> {
+        self.validate_exact_player_projection()?;
         if self.player.is_none() && self.last_applied_input.is_some() {
             return Err(IntegratedRuntimeError::new(
                 "player-binding-required",
@@ -11132,8 +11188,7 @@ impl IntegratedRuntimeV2 {
             })
         };
 
-        let yaw = normalized_i16(input.look_yaw) * std::f64::consts::PI;
-        let pitch = normalized_i16(input.look_pitch) * std::f64::consts::FRAC_PI_2;
+        let (yaw, pitch) = self.resolved_look(input);
         let horizontal = pitch.cos();
         let direction = SimulationVec3::new(-yaw.sin() * horizontal, pitch.sin(), -yaw.cos() * horizontal);
         let position = SimulationVec3::new(
@@ -11439,8 +11494,7 @@ impl IntegratedRuntimeV2 {
             .as_ref()
             .ok_or_else(|| IntegratedRuntimeError::new("player-binding-required", "target query requires a player"))?;
         let eye = self.action_eye_v1(player);
-        let yaw = normalized_i16(input.look_yaw) * std::f64::consts::PI;
-        let pitch = normalized_i16(input.look_pitch) * std::f64::consts::FRAC_PI_2;
+        let (yaw, pitch) = self.resolved_look(input);
         let horizontal = pitch.cos();
         let direction = SimulationVec3::new(-yaw.sin() * horizontal, pitch.sin(), -yaw.cos() * horizontal);
         let end = eye + direction * maximum_distance;
@@ -12498,7 +12552,7 @@ impl IntegratedRuntimeV2 {
             placed_profile,
             held.item_code,
         ) {
-            directional_placement_facing_v1(input.look_yaw)
+            self.directional_placement_facing(input)
         } else {
             return Ok(RuntimeInputActionOutcomeV1::Blocked);
         };
@@ -13177,6 +13231,7 @@ impl IntegratedRuntimeV2 {
     }
 
     fn advance_bound_player(&mut self, input: RuntimeInputFrameV1) -> Result<(), IntegratedRuntimeError> {
+        self.validate_exact_player_projection()?;
         if self.bound_player_dead_v1()? {
             self.mining_state = None;
             return Ok(());
@@ -13228,7 +13283,7 @@ impl IntegratedRuntimeV2 {
             z: floor_i32(body.position.z)?.saturating_sub(3),
         };
         let window = self.capture_player_physics_window_v1(origin, ReadSizeV1 { x: 7, y: 10, z: 7 })?;
-        let yaw = normalized_i16(input.look_yaw) * std::f64::consts::PI;
+        let yaw = self.resolved_look(input).0;
         let creative_flying = player.flags & (RUNTIME_INPUT_FLAG_CREATIVE_V1 | RUNTIME_INPUT_FLAG_FLYING_V1)
             == (RUNTIME_INPUT_FLAG_CREATIVE_V1 | RUNTIME_INPUT_FLAG_FLYING_V1);
         let sprinting = input.buttons & RUNTIME_INPUT_BUTTON_SPRINT_V1 != 0;
@@ -13554,6 +13609,7 @@ impl IntegratedRuntimeV2 {
             flags: if newly_dead { 0 } else { player.flags },
             last_input_sequence: input.sequence,
         });
+        staged_runtime.validate_exact_player_projection()?;
         staged_runtime.invalidate_state_hash();
         *self = staged_runtime;
         Ok(())
@@ -15959,6 +16015,9 @@ impl IntegratedRuntimeV2 {
         self.command_receipt_order.clear();
         self.command_receipt_bytes = 0;
         self.queued_inputs.clear();
+        if let Some(exact) = &mut self.exact_player {
+            exact.queued.clear();
+        }
         self.entity_scheduler = EntityScheduler::default();
         self.entity_ecology_jobs = EcologyJobQueue::default();
         self.entity_ecology_revisions.clear();
@@ -17655,6 +17714,19 @@ const fn directional_placement_facing_v1(look_yaw: i16) -> u8 {
     } else if look_yaw <= -8_192 {
         3
     } else if look_yaw <= 8_191 {
+        2
+    } else {
+        1
+    }
+}
+
+fn directional_placement_facing_exact_v1(look_yaw: f64) -> u8 {
+    debug_assert!(look_yaw.is_finite() && look_yaw.abs() <= std::f64::consts::PI);
+    if look_yaw <= -3.0 * std::f64::consts::FRAC_PI_4 || look_yaw >= 3.0 * std::f64::consts::FRAC_PI_4 {
+        0
+    } else if look_yaw <= -std::f64::consts::FRAC_PI_4 {
+        3
+    } else if look_yaw < std::f64::consts::FRAC_PI_4 {
         2
     } else {
         1
@@ -20486,7 +20558,11 @@ fn read_compatibility_journal_v1(
 
 fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> IntegratedRuntimeCoreSnapshotV1 {
     IntegratedRuntimeCoreSnapshotV1 {
-        schema: NATIVE_RUNTIME_CORE_SCHEMA_V16,
+        schema: if runtime.exact_player.is_some() {
+            NATIVE_RUNTIME_CORE_SCHEMA_V17
+        } else {
+            NATIVE_RUNTIME_CORE_SCHEMA_V16
+        },
         config: runtime.config.clone(),
         expected_revision: runtime.revision(),
         tick: runtime.tick,
@@ -20499,6 +20575,7 @@ fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> Integ
         entity_command_sequence: runtime.entity_command_sequence,
         camera: runtime.camera,
         player: runtime.player.clone(),
+        exact_player: runtime.exact_player.clone(),
         effect_events: runtime.effect_events.clone(),
         next_effect_sequence: runtime.next_effect_sequence,
         queued_inputs: runtime.queued_inputs.clone(),
@@ -20687,6 +20764,39 @@ fn encode_runtime_core_snapshot_body_v1(
     core: &IntegratedRuntimeCoreSnapshotV1,
     schema: u16,
 ) -> Result<Vec<u8>, IntegratedRuntimeError> {
+    if schema < NATIVE_RUNTIME_CORE_SCHEMA_V17 && core.exact_player.is_some() {
+        return Err(IntegratedRuntimeError::new(
+            "native-exact-pose-downgrade",
+            "exact player authority cannot be represented before V17",
+        ));
+    }
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V17 && core.exact_player.is_none() {
+        return Err(IntegratedRuntimeError::new(
+            "native-exact-pose-schema",
+            "V17 is reserved for a present exact player continuation",
+        ));
+    }
+    if let Some(exact) = &core.exact_player {
+        exact_pose::validate_exact_state(exact, core.player.as_ref(), core.camera, &core.queued_inputs)?;
+        let origin = exact.continuation.expected.revision;
+        let current = core.expected_revision;
+        if exact.continuation.expected.universe_id != core.config.universe_id
+            || exact.continuation.expected.location_id != core.config.location_id
+            || exact.continuation.expected.tick > core.tick
+            || origin.epoch > current.epoch
+            || origin.world > current.world
+            || origin.entities > current.entities
+            || origin.gameplay > current.gameplay
+            || origin.persistence > current.persistence
+            || origin.network > current.network
+            || origin.simulation > current.simulation
+        {
+            return Err(IntegratedRuntimeError::new(
+                "native-exact-pose-binding",
+                "continuation origin belongs to another world, tick, or future revision",
+            ));
+        }
+    }
     if schema < NATIVE_RUNTIME_CORE_SCHEMA_V16
         && (core.next_native_player_death_respawn_sequence != Some(1)
             || !core.native_player_death_respawn_receipts.is_empty())
@@ -20999,6 +21109,12 @@ fn encode_runtime_core_snapshot_body_v1(
             write_native_player_death_respawn_receipt_native_v1(&mut writer, receipt)?;
         }
     }
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V17 {
+        writer.bool(core.exact_player.is_some());
+        if let Some(exact) = &core.exact_player {
+            writer.bytes(&exact_pose::encode_exact_state(exact)?)?;
+        }
+    }
     writer.bytes(&core.unknown_extension_bytes)?;
     Ok(writer.finish())
 }
@@ -21013,7 +21129,12 @@ fn durable_runtime_core_state_proof_v1(
     let mut normalized = core.clone();
     normalized.config.session_id = DURABLE_SESSION_NEUTRAL_ID_V1.into();
     normalized.durable_network_drained_proof = None;
-    let proof_schema = if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V16 {
+    let proof_schema = if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V17 {
+        normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V17;
+        normalized.durable_state_proof = Some(CanonicalHash::default());
+        normalized.durable_replay_proof = Some(CanonicalHash::default());
+        NATIVE_RUNTIME_CORE_SCHEMA_V17
+    } else if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V16 {
         normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V16;
         normalized.durable_state_proof = Some(CanonicalHash::default());
         normalized.durable_replay_proof = Some(CanonicalHash::default());
@@ -21096,7 +21217,7 @@ fn encode_runtime_core_snapshot_v1(runtime: &IntegratedRuntimeV2) -> Result<Vec<
     core.durable_network_drained_proof = runtime.durable_network_save_boundary_proof().ok();
     core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&core)?);
     core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&core));
-    encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V16)
+    encode_runtime_core_snapshot_body_v1(&core, core.schema)
 }
 
 fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCoreSnapshotV1, IntegratedRuntimeError> {
@@ -21119,6 +21240,7 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V14
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V15
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V16
+        && schema != NATIVE_RUNTIME_CORE_SCHEMA_V17
     {
         return Err(IntegratedRuntimeError::new(
             "native-runtime-schema",
@@ -21449,6 +21571,13 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         } else {
             (Some(1), VecDeque::new())
         };
+    let exact_player = if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V17 && reader.bool()? {
+        Some(exact_pose::decode_exact_state(
+            &reader.bytes(MAX_INPUT_FRAMES * 1_204 + 2_048)?,
+        )?)
+    } else {
+        None
+    };
     let unknown_extension_bytes = reader.bytes(NATIVE_EXTENSION_MAX_BYTES_V1)?;
     reader.finish()?;
     let core = IntegratedRuntimeCoreSnapshotV1 {
@@ -21465,6 +21594,7 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         entity_command_sequence,
         camera,
         player,
+        exact_player,
         effect_events,
         next_effect_sequence,
         queued_inputs,
@@ -26619,6 +26749,173 @@ mod tests {
         ] {
             assert_eq!(directional_placement_facing_v1(look_yaw), expected, "yaw {look_yaw}");
         }
+    }
+
+    #[test]
+    fn exact_directional_placement_uses_f64_side_of_quarter_turn_without_changing_v1_bins() {
+        let below = std::f64::consts::FRAC_PI_4 - f64::EPSILON;
+        let above = std::f64::consts::FRAC_PI_4 + f64::EPSILON;
+        assert_eq!(exact_look_projection(below, 0.0).0, exact_look_projection(above, 0.0).0);
+        assert_eq!(directional_placement_facing_exact_v1(below), 2);
+        assert_eq!(directional_placement_facing_exact_v1(above), 1);
+        assert_eq!(directional_placement_facing_v1(exact_look_projection(below, 0.0).0), 1);
+
+        for (yaw, expected) in [(below, 2), (above, 1)] {
+            let mut runtime = runtime_with_directional_action_content(300);
+            let player = runtime.player().unwrap().clone();
+            let continuation = RuntimePlayerExactContinuationV1 {
+                expected: runtime.identity(),
+                binding: RuntimeExactPlayerBindingV1 {
+                    actor_id: player.binding.actor_id.clone(),
+                    external_entity_id: player.binding.external_entity_id.clone(),
+                    player_id: player.binding.player_id,
+                    entity_id: player.entity_id,
+                },
+                position: [player.body.position.x, player.body.position.y, player.body.position.z],
+                velocity: [player.body.velocity.x, player.body.velocity.y, player.body.velocity.z],
+                yaw,
+                pitch: 0.0,
+            };
+            runtime.continue_player_exact_pose_v1(continuation).unwrap();
+            let hit = action_target_position();
+            set_loaded_block(&mut runtime, "exact-directional-place-hit", hit, 1);
+            let mut input = action_input(1, RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1);
+            input.look_yaw = exact_look_projection(yaw, 0.0).0;
+            assert_eq!(
+                runtime.apply_basic_block_placement(input, hit, [0, 0, 1]).unwrap(),
+                RuntimeInputActionOutcomeV1::Applied,
+            );
+            assert_eq!(
+                runtime.native_block_edit_receipts.back().unwrap().replacement_facing,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn exact_core_v17_rejects_downgrade_binding_and_orphaned_input_sidecars() {
+        let mut runtime = runtime_with_bound_player();
+        let player = runtime.player().unwrap().clone();
+        runtime
+            .continue_player_exact_pose_v1(RuntimePlayerExactContinuationV1 {
+                expected: runtime.identity(),
+                binding: RuntimeExactPlayerBindingV1 {
+                    actor_id: player.binding.actor_id.clone(),
+                    external_entity_id: player.binding.external_entity_id.clone(),
+                    player_id: player.binding.player_id,
+                    entity_id: player.entity_id,
+                },
+                position: [player.body.position.x, player.body.position.y, player.body.position.z],
+                velocity: [-0.0, player.body.velocity.y, player.body.velocity.z],
+                yaw: -0.0,
+                pitch: 0.0,
+            })
+            .unwrap();
+        let core = runtime_core_snapshot_from_runtime_v1(&runtime);
+        assert_eq!(core.schema, NATIVE_RUNTIME_CORE_SCHEMA_V17);
+        assert_eq!(
+            encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V16)
+                .unwrap_err()
+                .code,
+            "native-exact-pose-downgrade"
+        );
+
+        let mut wrong_binding = core.clone();
+        wrong_binding
+            .exact_player
+            .as_mut()
+            .unwrap()
+            .continuation
+            .binding
+            .actor_id = "other:actor".into();
+        assert_eq!(
+            encode_runtime_core_snapshot_body_v1(&wrong_binding, NATIVE_RUNTIME_CORE_SCHEMA_V17)
+                .unwrap_err()
+                .code,
+            "exact-pose-binding"
+        );
+
+        let mut future_lineage = core.clone();
+        future_lineage
+            .exact_player
+            .as_mut()
+            .unwrap()
+            .continuation
+            .expected
+            .revision
+            .simulation = future_lineage.expected_revision.simulation + 1;
+        assert_eq!(
+            encode_runtime_core_snapshot_body_v1(&future_lineage, NATIVE_RUNTIME_CORE_SCHEMA_V17)
+                .unwrap_err()
+                .code,
+            "native-exact-pose-binding"
+        );
+
+        let mut orphaned = core;
+        let binding = orphaned.exact_player.as_ref().unwrap().continuation.binding.clone();
+        let controls = RuntimeInputFrameV1 {
+            sequence: 9,
+            target_tick: orphaned.tick,
+            ..RuntimeInputFrameV1::default()
+        };
+        orphaned.exact_player.as_mut().unwrap().queued.insert(
+            controls.sequence,
+            RuntimeExactInputFrameV2 {
+                binding,
+                controls,
+                yaw: 0.0,
+                pitch: 0.0,
+            },
+        );
+        assert_eq!(
+            encode_runtime_core_snapshot_body_v1(&orphaned, NATIVE_RUNTIME_CORE_SCHEMA_V17)
+                .unwrap_err()
+                .code,
+            "exact-input-binding"
+        );
+    }
+
+    #[test]
+    fn exact_checkpoint_rejects_resealed_activation_lineage_tamper() {
+        let mut runtime = runtime_with_bound_player();
+        let player = runtime.player().unwrap().clone();
+        runtime
+            .continue_player_exact_pose_v1(RuntimePlayerExactContinuationV1 {
+                expected: runtime.identity(),
+                binding: RuntimeExactPlayerBindingV1 {
+                    actor_id: player.binding.actor_id.clone(),
+                    external_entity_id: player.binding.external_entity_id.clone(),
+                    player_id: player.binding.player_id,
+                    entity_id: player.entity_id,
+                },
+                position: [player.body.position.x, player.body.position.y, player.body.position.z],
+                velocity: [player.body.velocity.x, player.body.velocity.y, player.body.velocity.z],
+                yaw: 0.123_456_789_012_345,
+                pitch: -0.234_567_890_123_456,
+            })
+            .unwrap();
+        accept_all_authority_commits(&mut runtime);
+        let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+        let forged = rewrite_checkpoint_cross_domain_records(&checkpoint, |_, core, _| {
+            core.exact_player.as_mut().unwrap().continuation.expected.state_hash.0[0] ^= 1;
+        });
+        let error = match IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &forged,
+            integrated_runtime_checkpoint_hash_v1(&forged),
+        ) {
+            Ok(_) => panic!("resealed lineage tamper restored"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(
+                error.code.as_str(),
+                "checkpoint-state-hash"
+                    | "checkpoint-state-drift"
+                    | "native-runtime-state-proof"
+                    | "native-runtime-bundle-hash"
+            ),
+            "unexpected exact lineage tamper rejection: {error:?}"
+        );
     }
 
     #[test]

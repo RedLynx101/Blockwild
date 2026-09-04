@@ -138,6 +138,38 @@ is not a migration executor, ownership proof, consent validator or capability.
 It makes review terms portable without authorizing historical state adoption;
 those execution and readback gates remain open.
 
+### Exact native player continuation and pose projection - 2026-09-03
+
+The integrated runtime can now continue an already-bound native player at the
+complete current identity without truncating authoritative position, velocity,
+yaw or pitch to the R6 f32/i16 compatibility views. Exact inputs retain the V1
+sequence, target-tick, button, slot and flag contract while binding a validated
+f64 look sidecar to the same queued controls. Movement, camera, raycast, drop and
+directional placement consume one exact look source. The runtime rejects stale
+or foreign activation, invalid finite domains, orphaned sidecars, external R6
+bit drift and partial consumption transactionally.
+
+Runtime-core V17 checkpoints store the activation lineage, exact current state
+and ordered pending sidecars under the durable state proof. Restore reproduces
+the same next real fixed step, and exact state contributes its raw f64 bits to
+the runtime identity, including signed zero. When exact state is absent the V16
+layout and unaffected-state bytes remain unchanged. Same-player rebinding now
+deliberately preserves the existing f64 body instead of recreating it from its
+lossy R6 projection, so state reached through that corrected rebind can differ
+from the historical quantizing behavior.
+
+R9's additive `BWPE` V2 projection carries the current seven-domain revision,
+state hash, tick/input sequence, full-width player/entity identities, runtime
+bindings and exact body/look/grounded values. It is distinct from quantized
+BWNP/BWPP V1 and is a read-only codec, not proof of native origin or a guest
+input path. Focused verification passes 11/11 runtime integration tests,
+206/206 engine library tests, 10/10 native codec tests and 14/14 TypeScript codec
+tests; broader network matrices, Clippy, formatting, lint and repository
+TypeScript checking also pass. Independent review found no blocking defect.
+
+No Wasm capability, published artifact, save-adoption executor, canonical
+selector or production authority row is promoted by this native-only tranche.
+
 ### Code-cache diagnostic 9: improved, not accepted - 2026-09-02
 
 The one-pair run from isolated tree `7c493afbc56470c4a1631cddaaf433216ba761e0`
