@@ -901,6 +901,32 @@ reviews. This closes one concrete machine-light transport omission. It does
 not add shadows or the other light kinds, prove pixel-level browser parity,
 promote R10, remove Three.js, or change the formal 9/32 acceptance count.
 
+### Predictive mesh readiness retains its fixed budget
+
+The 60 Hz browser skill loop exposed a callback-count asymmetry that the
+measured benchmark lanes hid: future leading-row chunks were already
+generated, installed, visible, and lit, but their required mesh sections could
+remain unbuilt at the first chunk boundary. Once the current nine-chunk ring is
+drawable, lane B now lends its otherwise-idle single correctness slice to one
+exact predicted-ring mesh target. That borrowed slice is subtracted from the
+existing ordinary mesh allowance, so the per-update mesh budget does not grow.
+Remaining mesh turns first finish exact current-ring work and then predicted
+presentation work, while urgent edits, required seam dependencies, and active
+protected tasks keep their existing precedence.
+
+The two new behaviors failed red first, including a real 120-update 60 Hz
+boundary regression, then the focused suite passed 42/42 and the broader
+streaming/generation matrix passed 147/147. Full TypeScript, scoped ESLint, and
+whitespace checks pass. The installed game client exercised the production
+Rust worker route with the required left/wait/space sequence and reached an
+immediate ring of 9/9; original-resolution title/terrain frames were manually
+reviewed. An independent live browser load reached the active game HUD with no
+warning or error logs. Its diagnostic hooks were not exposed, so this browser
+evidence does not claim positive machine-light composition or R10 promotion.
+The five-pair performance admission must be rerun from the committed immutable
+tree before this scheduler repair can close the failed R3 gate. Formal
+acceptance therefore remains 9/32 at this checkpoint.
+
 ## Open completion gates
 
 - Promote the complete v18 generator with seed/chunk/POI byte parity and no `ChunkWorld` construction in its worker.

@@ -203,6 +203,20 @@ test("current-ring repair retains its existing correctness reservation ahead of 
   assert.equal(report.meshSlices, 1);
 });
 
+test("remaining mesh turns continue the exact current ring ahead of unrelated seam depth", context => {
+  const { world, background, step } = prediction(context, 0);
+  const occupied = world.chunks.get("1,0")!; occupied.sections.delete(6); world.queueMesh(occupied.key, 6, true);
+  for (let column = 0; column < CHUNK_SIZE - 1; column += 1) world.processMesh(occupied.key, 6);
+  const neighbor = world.chunks.get("1,1")!; neighbor.sections.delete(6); world.queueMesh(neighbor.key, 6, true);
+  world.queueMesh(background.key, 3, true); world.seamMeshRebuilds.add(`${background.key}:3`);
+  const report = step();
+  assert.equal(occupied.sections.has(6), true, "the reserve must finish the active current section");
+  assert.deepEqual([world.activeMeshTask?.key, world.activeMeshTask?.section, world.activeMeshTask?.nextLocalX],
+    [neighbor.key, 6, world.meshWorkPerFrame * 2]);
+  assert.equal(world.urgentMeshQueued.has(`${background.key}:3`), true);
+  assert.equal(report.meshSlices, 1 + world.meshWorkPerFrame * 2);
+});
+
 for (const coalesced of [false, true]) {
   test(`urgent edit ownership precedes prediction${coalesced ? " when coalesced with a seam" : ""}`, context => {
     const { world, background, target, step } = prediction(context);
@@ -283,14 +297,16 @@ for (const invalid of ["hidden", "unlit", "reconciling", "unoccupied", "already-
   });
 }
 
-test("prediction does not add a beyond-budget reserved mesh turn", context => {
+test("prediction borrows one existing mesh turn when the ordinary frame budget is already exhausted", context => {
   const { world, target, step, elapsed } = prediction(context);
-  world.frame = 3; // Category0 is next; simulate generation consuming the normal allowance.
+  world.frame = 3; // Category0 is next and would consume the normal allowance without the reserve.
   world.processGenerationSlice = () => { elapsed(10); return true; };
   const budgets = [world.generationWorkPerFrame, world.meshWorkPerFrame, world.streamingFrameBudgetMilliseconds];
   const report = step();
-  assert.equal(report.generationSlices, 1); assert.equal(report.meshSlices, 0);
-  assert.equal(world.activeMeshTask, null); assert.equal(world.meshQueued.has(`${target.key}:5`), true);
+  assert.equal(report.generationSlices, 0); assert.equal(report.meshSlices, 1);
+  assert.deepEqual([world.activeMeshTask?.key, world.activeMeshTask?.section, world.activeMeshTask?.nextLocalX],
+    [target.key, 5, 1]);
+  assert.equal(world.meshQueued.has(`${target.key}:5`), false);
   assert.deepEqual([world.generationWorkPerFrame, world.meshWorkPerFrame, world.streamingFrameBudgetMilliseconds], budgets);
 });
 
@@ -300,6 +316,28 @@ test("prediction consumes no more than the existing background mesh slice count"
   assert.equal(report.meshSlices, world.meshWorkPerFrame * 2);
   assert.equal(world.activeMeshTask?.nextLocalX, report.meshSlices);
   assert.equal(report.generationSlices, 0); assert.equal(report.lightingSlices, 0);
+});
+
+test("a 60 Hz leading row is fully meshed before the first chunk boundary under ordinary work pressure", context => {
+  const { world, elapsed } = fixture(context, 0);
+  const leading: Chunk[] = [];
+  for (let z = -1; z <= 1; z += 1) {
+    const chunk = addChunk(world, 2, z); chunk.sections.clear(); occupy(chunk, 5);
+    world.queueMesh(chunk.key, 6); world.queueMesh(chunk.key, 5); leading.push(chunk);
+  }
+  let generationSlices = 0;
+  world.processGenerationSlice = () => { generationSlices += 1; elapsed(10); return true; };
+  for (let tick = 0; tick < 120; tick += 1) {
+    elapsed(0);
+    const report = world.update(8 + tick * 4 / 60, 8, 40, 4, 0);
+    assert.ok(report.meshSlices <= world.meshWorkPerFrame * 2, "prediction must borrow, not expand, the mesh budget");
+  }
+  assert.ok(generationSlices > 0, "the existing generation rotation must still make progress");
+  assert.equal(leading.every(chunk => chunk.sections.has(6) && chunk.sections.has(5)), true,
+    "all occupied sections in the future leading row must finish before the crossing");
+  elapsed(0);
+  world.update(CHUNK_SIZE, 8, 40, 8, 0);
+  assert.deepEqual(world.streamingDiagnostics().immediateRing, { desired: 9, ready: 9, ratio: 1 });
 });
 
 test("edit ownership survives requeue during an active seam build and retires only after final installation", context => {

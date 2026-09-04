@@ -5265,16 +5265,41 @@ export class ChunkWorld {
       }
       completedWork = true;
     }
+    let cachedPresentationMeshTarget: { key: string; section: number } | null | undefined;
+    const presentationMeshTarget = () => {
+      if (cachedPresentationMeshTarget === undefined) {
+        cachedPresentationMeshTarget = this.presentationRequiredMeshTarget();
+      }
+      return cachedPresentationMeshTarget;
+    };
+    const refreshPresentationMeshTarget = (target: { key: string; section: number } | null) => {
+      const active = this.activeMeshTask;
+      if (target) {
+        if (!active || active.key !== target.key || active.section !== target.section) {
+          cachedPresentationMeshTarget = undefined;
+        }
+      } else if (!active) cachedPresentationMeshTarget = undefined;
+    };
+    let borrowedPredictedMeshSlices = 0;
     // Correctness lane B: keep the full immediate ring warm, not merely the
     // occupied chunk. A small reserve survives an exhausted background budget
-    // so crossing a seam does not begin a multi-stage repair from zero.
+    // so crossing a seam does not begin a multi-stage repair from zero. Once
+    // that ring is complete, lend the otherwise-idle reserve to one exact
+    // leading-ring mesh target and repay it from the ordinary mesh turns below.
     const immediateRingDeadline = Math.max(deadline, performance.now() + 0.65);
     for (let pass = 0; pass < 1 && performance.now() < immediateRingDeadline; pass += 1) {
       const work = this.immediateRingWorkState();
-      if (!work) break;
       const startedAt = performance.now();
-      if (work.stage === "generation") {
+      if (!work) {
+        const target = presentationMeshTarget();
+        if (!target || !this.processBackgroundMesh(target)) break;
+        borrowedPredictedMeshSlices += 1;
+        refreshPresentationMeshTarget(target);
+        meshingMilliseconds += performance.now() - startedAt;
+        meshSlices += 1;
+      } else if (work.stage === "generation") {
         if (!this.processGenerationSlice(work.key)) break;
+        cachedPresentationMeshTarget = undefined;
         generationMilliseconds += performance.now() - startedAt;
         generationSlices += 1;
       } else if (work.stage === "lighting") {
@@ -5282,6 +5307,7 @@ export class ChunkWorld {
           ? this.processLightReconciliation(work.key)
           : this.processLightInitialization(work.key);
         if (!processed) break;
+        cachedPresentationMeshTarget = undefined;
         lightingMilliseconds += performance.now() - startedAt;
         lightingSlices += 1;
       } else {
@@ -5299,7 +5325,7 @@ export class ChunkWorld {
       this.generationWorkPerFrame,
       this.meshWorkPerFrame * 2,
       Math.max(1, Math.ceil(this.meshWorkPerFrame / 2)),
-      this.meshWorkPerFrame * 2,
+      Math.max(0, this.meshWorkPerFrame * 2 - borrowedPredictedMeshSlices),
     ];
     let cursor = this.frame % remaining.length;
     while (remaining.some((count) => count > 0) && (!completedWork || performance.now() < deadline)) {
@@ -5313,21 +5339,26 @@ export class ChunkWorld {
           const processed = this.processGenerationSlice();
           generationMilliseconds += performance.now() - startedAt;
           if (!processed) continue;
+          cachedPresentationMeshTarget = undefined;
           generationSlices += 1;
         } else if (category === 1) {
           const processed = this.processLightingSlice();
           lightingMilliseconds += performance.now() - startedAt;
           if (!processed) continue;
+          cachedPresentationMeshTarget = undefined;
           lightingSlices += 1;
         } else if (category === 2) {
           if (this.lightSectionQueued.size === 0) continue;
           this.processLightSection();
+          cachedPresentationMeshTarget = undefined;
           lightingMilliseconds += performance.now() - startedAt;
           lightingSlices += 1;
         } else {
-          const processed = this.processBackgroundMesh();
+          const target = presentationMeshTarget();
+          const processed = this.processBackgroundMesh(target);
           meshingMilliseconds += performance.now() - startedAt;
           if (!processed) continue;
+          refreshPresentationMeshTarget(target);
           meshSlices += 1;
         }
         cursor = (category + 1) % remaining.length;
@@ -6408,15 +6439,11 @@ export class ChunkWorld {
     return [...candidates.values()].sort((left, right) => this.compareMeshPriority(left, right))[0] ?? null;
   }
 
-  private predictedRequiredMeshTarget() {
-    if ((!this.streamingLookaheadChunkX && !this.streamingLookaheadChunkZ)
-      || !Number.isFinite(this.playerChunkX) || !Number.isFinite(this.playerChunkZ)
-      || this.ringCompleteness(1).ratio !== 1) return null;
+  private requiredRingMeshTarget(centerX: number, centerZ: number) {
     const candidates: Array<{ key: string; section: number }> = [];
     const active = this.activeMeshTask;
     for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
-      const key = chunkKey(this.playerChunkX + this.streamingLookaheadChunkX + dx,
-        this.playerChunkZ + this.streamingLookaheadChunkZ + dz);
+      const key = chunkKey(centerX + dx, centerZ + dz);
       const chunk = this.chunks.get(key);
       if (!chunk?.group.visible || !this.chunkLightPresentationReady(key)) continue;
       const local = this.playerRequiredMeshSections(chunk)
@@ -6434,14 +6461,30 @@ export class ChunkWorld {
     return candidates.sort((left, right) => this.compareMeshPriority(left, right))[0] ?? null;
   }
 
+  private predictedRequiredMeshTarget() {
+    if ((!this.streamingLookaheadChunkX && !this.streamingLookaheadChunkZ)
+      || !Number.isFinite(this.playerChunkX) || !Number.isFinite(this.playerChunkZ)
+      || !this.immediateRingDrawable()) return null;
+    return this.requiredRingMeshTarget(
+      this.playerChunkX + this.streamingLookaheadChunkX,
+      this.playerChunkZ + this.streamingLookaheadChunkZ,
+    );
+  }
+
+  private presentationRequiredMeshTarget() {
+    if (!Number.isFinite(this.playerChunkX) || !Number.isFinite(this.playerChunkZ)) return null;
+    const immediate = this.requiredRingMeshTarget(this.playerChunkX, this.playerChunkZ);
+    if (immediate || !this.immediateRingDrawable()) return immediate;
+    return this.predictedRequiredMeshTarget();
+  }
+
   private isProtectedUrgentMesh(entry: Readonly<{ key: string; section: number }>) {
     const queueKey = `${entry.key}:${entry.section}`;
     return this.pendingEditMeshes.has(queueKey) || !this.seamMeshRebuilds.has(queueKey);
   }
 
-  /** Prediction only spends the existing discretionary mesh turn, never a correctness reserve. */
-  private processBackgroundMesh() {
-    const target = this.predictedRequiredMeshTarget();
+  /** Required presentation borrows only existing mesh turns after its one bounded reserve. */
+  private processBackgroundMesh(target = this.predictedRequiredMeshTarget()) {
     if (!target) return this.processMesh();
     const active = this.activeMeshTask;
     if (active && (this.activeMeshTaskBlocksRequiredImmediateSeam()
