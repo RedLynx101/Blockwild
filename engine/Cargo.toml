@@ -41,8 +41,10 @@ blockwild-engine = { path = "crates/blockwild-engine" }
 blockwild-render = { path = "crates/blockwild-render" }
 blockwild-render-web = { path = "crates/blockwild-render-web" }
 blockwild-runtime-wire = { path = "crates/blockwild-runtime-wire" }
-wasm-bindgen = "=0.2.127"
-wasm-bindgen-futures = "=0.4.77"
+# wgpu 30's vendored Promise<GpuError?> binding uses JsOption; wasm-bindgen
+# 0.2.123+ treats a clean WebGPU null as present and traps in Error::from_js.
+wasm-bindgen = "=0.2.122"
+wasm-bindgen-futures = "=0.4.72"
 wgpu = { version = "=30.0.0", default-features = false, features = ["std", "wgsl"] }
 pollster = "=0.4.0"
 

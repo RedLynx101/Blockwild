@@ -13,8 +13,8 @@ wasm-bindgen-futures.workspace = true
 wgpu.workspace = true
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-js-sys = "=0.3.104"
-web-sys = { version = "=0.3.104", features = ["OffscreenCanvas"] }
+js-sys = "=0.3.99"
+web-sys = { version = "=0.3.99", features = ["OffscreenCanvas"] }
 
 [lib]
 crate-type = ["cdylib", "rlib"]
