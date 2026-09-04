@@ -8,6 +8,7 @@ mod contract;
 mod fixture;
 mod interest;
 mod pose;
+mod pose_v2;
 mod replay;
 mod wire;
 
@@ -18,6 +19,7 @@ pub use contract::*;
 pub use fixture::*;
 pub use interest::*;
 pub use pose::*;
+pub use pose_v2::*;
 pub use replay::*;
 pub use wire::*;
 
