@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,7 +21,7 @@ const fixtures = R3_OLD_SAVE_FIXTURES.map(descriptor => readHistoricalSaveFixtur
 before(() => { mkdirSync(path.join(repositoryRoot, "work"), { recursive: true }); });
 
 /** Synthetic validator data only. This never substitutes for browser execution. */
-function snapshot(fixture, phase = "playing", documentToken = "first-document", imported = true) {
+function snapshot(fixture, phase = "playing", documentToken = "first-document", imported = true, mode = "builder") {
   const worldId = fixture.document.world.metadata.id;
   const options = expectedHistoricalWorldOptions(fixture.descriptor.generatorVersion);
   const identity = expectedHistoricalGenerationIdentity(fixture.descriptor.generatorVersion);
@@ -36,8 +37,25 @@ function snapshot(fixture, phase = "playing", documentToken = "first-document", 
     requestHash: String(index + 1).repeat(32), generationOptions: expectedHistoricalGenerationOptions(fixture.descriptor.generatorVersion),
     edits: [...entries].sort((left, right) => left[0] - right[0]).flat(),
   }));
+  const importSource = {
+    schemaVersion: 1, provenance: "uploaded-file-bytes", sourceFormat: "blockwild-world-export-v1", encoding: "utf-8",
+    archiveWorldId: "blockwild-original-import-sources-v1", objectId: `sha256-${fixture.descriptor.sha256}`,
+    rawSha256: fixture.descriptor.sha256, byteLength: fixture.descriptor.bytes,
+  };
+  const document = { metadata: { ...fixture.document.world.metadata, mode, generationIdentity: identity }, options, importSource,
+    save: { ...structuredClone(fixture.document.world.save), mode, generatorVersion: 18 } };
+  const canonicalDocument = value => {
+    if (Array.isArray(value)) return value.map(canonicalDocument);
+    if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalDocument(value[key])]));
+    return value;
+  };
+  const documentBytes = Buffer.from(JSON.stringify(canonicalDocument(document)));
+  const documentSha256 = createHash("sha256").update(documentBytes).digest("hex");
+  const recovered = phase === "playing" && documentToken === "fresh-document";
+  const descriptorHash = recovered ? "2".repeat(32) : "1".repeat(32);
+  const checkpointId = recovered ? mode === "survival" ? "historical-checkpoint-3" : "historical-checkpoint-2" : "historical-checkpoint-1";
   return {
-    state: { state: phase, player: { position: [-120, 40.51, -8], yaw: 0, pitch: 0, mode: "builder" },
+    state: { state: phase, player: { position: [-120, 40.51, -8], yaw: 0, pitch: 0, mode },
       target: { type: "block", name: "Glowstone", position: [-120, 42, -10] },
       performance: { streaming: {
         playerChunk: "-8,-1", playerChunkReady: true, playerChunkStage: "ready", immediateRing: { desired: 9, ready: 9, ratio: 1 },
@@ -47,12 +65,24 @@ function snapshot(fixture, phase = "playing", documentToken = "first-document", 
         playerTerrainPresentation: { schema: 1, epoch: 2, centerKey: "-8,-1", desired: 9, ready: 9, chunks },
       } } },
     runtime: { ready: true, activeWorldId: worldId, manager: { state: "ready", host: {
-      artifactHash: REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH, adapter: { liveAuthorityReady: true },
+      artifactHash: REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH, adapter: { liveAuthorityReady: true }, nativePersistence: {
+        state: "open", historicalMigrations: recovered ? 0 : 1,
+        historicalSaves: recovered && mode === "survival" ? 1 : 0, historicalRecoveries: recovered ? 1 : 0,
+        historicalHead: {
+          authorityClaim: "rust-terrain-generation-plus-typescript-historical-save-compatibility-only",
+          authorityProfile: "typescript-historical-save-compatibility-v1", nativePlayer: "off", nativeRichState: "not-adopted",
+          sourceSha256: fixture.descriptor.sha256, sourceByteLength: fixture.descriptor.bytes,
+          descriptorHash, documentHash: "3".repeat(32), documentSha256, documentByteLength: documentBytes.byteLength,
+          documentRevision: recovered ? mode === "survival" ? 3 : 2 : 1, chunks: 1, chunkSetHash: "4".repeat(32), projectionHash: "5".repeat(32),
+          projectionEditCount: fixture.edits.count,
+          projectionFacingCount: Object.keys(fixture.document.world.save.blockFacings ?? {}).length,
+          nativeWorldSemanticHash: "5".repeat(32), checkpointId, checkpointHash: "6".repeat(32), journalSequence: recovered ? 2 : 1,
+        },
+      },
     } } },
     storage: { activeWorldId: worldId },
     historicalStorage: { activeWorldId: worldId, catalogWorldCount: 1, catalogGenerationIdentity: identity,
-      document: { metadata: { ...fixture.document.world.metadata, generationIdentity: identity }, options,
-        save: { ...structuredClone(fixture.document.world.save), generatorVersion: 18 } } },
+      documentCanonicalByteLength: documentBytes.byteLength, documentCanonicalSha256: documentSha256, document },
     audit: { documentToken,
       importClicks: imported ? [{ trusted: true }] : [],
       imports: imported ? [{ name: fixture.descriptor.filename, bytes: fixture.descriptor.bytes, sha256: fixture.descriptor.sha256, error: null }] : [],
@@ -66,9 +96,16 @@ function snapshot(fixture, phase = "playing", documentToken = "first-document", 
 function evidence(fixture) {
   const empty = snapshot(fixture, "title", "first-document", false);
   empty.historicalStorage = { activeWorldId: null, catalogWorldCount: 0, catalogGenerationIdentity: null, document: null };
+  const worldName = fixture.document.world.metadata.name;
   return { checkpoints: {
     emptyTitle: empty, imported: snapshot(fixture, "title"), firstPlaying: snapshot(fixture), titleAfterSave: snapshot(fixture, "title"),
-    titleAfterReload: snapshot(fixture, "title", "fresh-document", false), continued: snapshot(fixture, "playing", "fresh-document", false),
+    worldsAfterModeChange: snapshot(fixture, "title", "first-document", true, "survival"),
+    titleAfterReload: snapshot(fixture, "title", "fresh-document", false, "survival"),
+    continued: snapshot(fixture, "playing", "fresh-document", false, "survival"),
+  }, modeEditorEvidence: {
+    schema: 1, worldName, fromMode: "builder", toMode: "survival", dialogType: "confirm",
+    dialogMessage: `Change “${worldName}” to Survival before its next load? World edits and inventory are preserved.`,
+    accepted: true, notice: `${worldName} will load in Survival. Inventory and world progress were preserved.`,
   } };
 }
 
@@ -94,7 +131,8 @@ test("literal migration expectations distinguish omitted-g16 behavior from moder
 
 for (const fixture of fixtures) test(`${fixture.descriptor.id}: complete synthetic lifecycle validates every checkpoint and real-worker witness`, () => {
   const proof = assertHistoricalSaveScenarioEvidence(evidence(fixture), fixture);
-  assert.equal(proof.storage.length, 5); assert.equal(proof.importCount, 1); assert.equal(proof.hardReload, true);
+  assert.equal(proof.storage.length, 6); assert.equal(proof.importCount, 1); assert.equal(proof.hardReload, true);
+  assert.deepEqual(proof.modeEdit, { from: "builder", to: "survival", persistedAcrossRestart: true });
   assert.equal(proof.workerInputs.reduce((sum, result) => sum + result.editedCells, 0), 39);
   assert.equal(proof.exactEditSetPreserved, true);
 });
@@ -110,9 +148,12 @@ const mutations = [
   ["moved old edit index", value => { value.checkpoints.firstPlaying.historicalStorage.document.save.edits["-9,-1"][0][0] += 1; }],
   ["reimported world", value => { value.checkpoints.continued.historicalStorage.activeWorldId += "-2"; }],
   ["no hard reload", value => { value.checkpoints.titleAfterReload.audit.documentToken = "first-document"; }],
+  ["lost offline mode edit", value => { value.checkpoints.worldsAfterModeChange.historicalStorage.document.save.mode = "builder"; }],
+  ["unconfirmed mode edit", value => { value.modeEditorEvidence.accepted = false; }],
   ["reimport after reload", value => { value.checkpoints.continued.audit.importClicks.push({ trusted: true }); }],
   ["untrusted import click", value => { value.checkpoints.imported.audit.importClicks[0].trusted = false; }],
   ["changed uploaded file", value => { value.checkpoints.imported.audit.imports[0].sha256 = "0".repeat(64); }],
+  ["lost original archive identity", value => { value.checkpoints.continued.historicalStorage.document.importSource.rawSha256 = "0".repeat(64); }],
   ["duplicate upload", value => { value.checkpoints.firstPlaying.audit.imports.push(value.checkpoints.firstPlaying.audit.imports[0]); }],
   ["wrong worker generation options", value => { value.checkpoints.firstPlaying.audit.generationRequests[0].generationOptions.settlementPattern = "heartlands-v2"; }],
   ["no worker edit request", value => { value.checkpoints.firstPlaying.audit.generationRequests = []; }],
@@ -121,6 +162,15 @@ const mutations = [
   ["TypeScript fallback", value => { value.checkpoints.continued.state.performance.streaming.generationWorker.mode = "typescript"; }],
   ["worker recovery", value => { value.checkpoints.firstPlaying.state.performance.streaming.generationWorker.restarts = 1; }],
   ["wrong canonical artifact", value => { value.checkpoints.continued.runtime.manager.host.artifactHash = "0".repeat(64); }],
+  ["missing native historical head", value => { value.checkpoints.firstPlaying.runtime.manager.host.nativePersistence.historicalHead = null; }],
+  ["native source identity drift", value => { value.checkpoints.continued.runtime.manager.host.nativePersistence.historicalHead.sourceSha256 = "0".repeat(64); }],
+  ["native external document mismatch", value => { value.checkpoints.continued.runtime.manager.host.nativePersistence.historicalHead.documentSha256 = "0".repeat(64); }],
+  ["native R4 projection mismatch", value => { value.checkpoints.continued.runtime.manager.host.nativePersistence.historicalHead.nativeWorldSemanticHash = "0".repeat(32); }],
+  ["native R5 authority drift", value => { value.checkpoints.firstPlaying.runtime.manager.host.nativePersistence.historicalHead.nativePlayer = "authoritative"; }],
+  ["missing initial native migration", value => { value.checkpoints.firstPlaying.runtime.manager.host.nativePersistence.historicalMigrations = 0; }],
+  ["missing restarted native recovery", value => { value.checkpoints.continued.runtime.manager.host.nativePersistence.historicalRecoveries = 0; }],
+  ["nonadvancing native document revision", value => { value.checkpoints.continued.runtime.manager.host.nativePersistence.historicalHead.documentRevision = 1; }],
+  ["reused native checkpoint", value => { value.checkpoints.continued.runtime.manager.host.nativePersistence.historicalHead.checkpointId = "historical-checkpoint-1"; }],
   ["unready immediate ring", value => { value.checkpoints.continued.state.performance.streaming.immediateRing.ready = 8; }],
   ["missing drawable source", value => { value.checkpoints.continued.state.performance.streaming.playerTerrainPresentation.chunks[0].requiredSections[0].presentations.opaque.sourceVisible = false; }],
   ["live placed edit missing", value => { value.checkpoints.continued.state.target.position[2] = -11; }],
@@ -169,7 +219,7 @@ test("historical Continue captures production migration refusals as failures, ne
 
 test("historical UI locator includes the Worlds saved-count accessible description", () => {
   const source = readFileSync(new URL("../scripts/verify-rust-r3-old-save-browser.mjs", import.meta.url), "utf8");
-  assert.equal(source.split('getByRole("button", { name: /^Worlds\\b/u })').length - 1, 2);
+  assert.equal(source.split('getByRole("button", { name: /^Worlds\\b/u })').length - 1, 3);
   assert.ok(!source.includes('getByRole("button", { name: "Worlds", exact: true })'));
   assert.match(source, /snapshot\.historicalContinue = \{ notices: await harness\.page\.getByRole\("alert"\)\.allTextContents\(\) \}/);
   assert.match(source, /if \(snapshot\.state\?\.state === "playing"\) return harness\.waitForGameplay\(label\)/);

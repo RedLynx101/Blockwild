@@ -22,7 +22,14 @@ const SENTINEL = Object.freeze([-120, 42, -10]);
 const AIR_WITNESS = Object.freeze([-120, 42, -9]);
 const CURRENT_GENERATOR_VERSION = 18;
 const SOURCE_GUARD_FILES = Object.freeze([
-  "app/game/world-storage.ts", "app/game/world.ts", "app/game/engine.ts", "app/game/VoxelGame.tsx",
+  "app/game/world-storage.ts", "app/game/world-save-normalization.ts", "app/game/world.ts",
+  "app/game/rust-historical-save-compatibility.ts", "app/game/rust-historical-save-persistence.ts",
+  "app/game/rust-native-world-persistence.ts", "app/game/rust-integrated-runtime-bulk-platform.ts",
+  "app/game/rust-integrated-runtime-service.ts", "app/game/rust-integrated-runtime-browser-worker.ts",
+  "app/game/rust-integrated-runtime-worker.ts", "app/game/rust-integrated-runtime-adapter.ts",
+  "engine/crates/blockwild-persistence/src/historical_external_descriptor.rs",
+  "engine/crates/blockwild-engine/src/runtime.rs", "engine/crates/blockwild-wasm/src/integrated_runtime.rs",
+  "app/game/engine.ts", "app/game/VoxelGame.tsx",
   "scripts/verify-rust-terrain-edit-reload-browser.mjs", "scripts/verify-rust-r3-old-save-browser.mjs",
 ]);
 // Frozen current-generation identity constants, independently pinned by the R3 155-case certificate.
@@ -104,23 +111,87 @@ export function readHistoricalSaveFixture(repositoryRoot, descriptor) {
       bytes: bytes.length, sha256: descriptor.sha256, editCount: edits.count, editSha256: edits.sha256 }) });
 }
 
-export function assertHistoricalStorageCheckpoint(snapshot, fixture, expectedWorldId) {
+export function assertHistoricalStorageCheckpoint(snapshot, fixture, expectedWorldId, expectedMode = "builder") {
   const storage = snapshot?.historicalStorage; const document = storage?.document;
   invariant(storage?.catalogWorldCount === 1 && storage.activeWorldId === expectedWorldId && document?.metadata?.id === expectedWorldId,
     "world was reimported, duplicated, or replaced during the lifecycle");
   const save = document?.save;
   invariant(save?.version === 2 && save.generatorVersion === CURRENT_GENERATOR_VERSION
-    && save.generatorProfile === "world-below-v15" && save.seed === "WILDERNESS" && save.mode === "builder",
+    && save.generatorProfile === "world-below-v15" && save.seed === "WILDERNESS" && save.mode === expectedMode
+    && document.metadata.mode === expectedMode,
   "migrated save identity/profile/version mismatch");
   equal(document.options, expectedHistoricalWorldOptions(fixture.descriptor.generatorVersion), "migrated world options differ from the independent expectation");
   const identity = expectedHistoricalGenerationIdentity(fixture.descriptor.generatorVersion);
   equal(document.metadata.generationIdentity, identity, "stored generation identity was not freshly derived from the migrated inputs");
   equal(storage.catalogGenerationIdentity, identity, "catalog and document generation identities disagree");
+  equal(document.importSource, {
+    schemaVersion: 1,
+    provenance: "uploaded-file-bytes",
+    sourceFormat: "blockwild-world-export-v1",
+    encoding: "utf-8",
+    archiveWorldId: "blockwild-original-import-sources-v1",
+    objectId: `sha256-${fixture.descriptor.sha256}`,
+    rawSha256: fixture.descriptor.sha256,
+    byteLength: fixture.descriptor.bytes,
+  }, "local mirror lost its exact original-file archive identity");
+  invariant(Number.isSafeInteger(storage.documentCanonicalByteLength) && storage.documentCanonicalByteLength > 0
+    && /^[0-9a-f]{64}$/u.test(storage.documentCanonicalSha256),
+  "local historical StoredWorld has no canonical byte/SHA-256 identity");
   const edits = canonicalSavedEdits({ save });
   invariant(edits.count === fixture.edits.count && edits.sha256 === fixture.edits.sha256, "old-save edit bytes were moved, dropped, added, or changed");
   equal(edits.entries, fixture.edits.entries, "canonical old-save edit records differ");
   return { generatorVersion: save.generatorVersion, generatorProfile: save.generatorProfile,
-    options: document.options, generationIdentity: identity, editCount: edits.count, editSha256: edits.sha256 };
+    mode: save.mode, options: document.options, generationIdentity: identity, editCount: edits.count, editSha256: edits.sha256 };
+}
+
+export function assertHistoricalNativeCheckpoint(snapshot, fixture, phase) {
+  const persistence = snapshot?.runtime?.manager?.host?.nativePersistence;
+  const head = persistence?.historicalHead;
+  invariant(persistence?.state === "open" && head, `${phase}: exact native historical head is absent`);
+  invariant(head.authorityClaim === R3_OLD_SAVE_AUTHORITY
+    && head.authorityProfile === "typescript-historical-save-compatibility-v1"
+    && head.nativePlayer === "off" && head.nativeRichState === "not-adopted",
+  `${phase}: historical head drifted into R5/player or native-rich authority`);
+  invariant(head.sourceSha256 === fixture.descriptor.sha256
+    && head.sourceByteLength === fixture.descriptor.bytes,
+  `${phase}: native descriptor lost the frozen raw archive identity`);
+  invariant(head.documentSha256 === snapshot.historicalStorage.documentCanonicalSha256
+    && head.documentByteLength === snapshot.historicalStorage.documentCanonicalByteLength,
+  `${phase}: native external document differs from the canonical local mirror`);
+  invariant(Number.isSafeInteger(head.documentRevision) && head.documentRevision >= 1
+    && head.chunks === Math.ceil(head.documentByteLength / (4 * 1024 * 1024)),
+  `${phase}: external document revision/chunk identity is invalid`);
+  invariant(/^[0-9a-f]{32}$/u.test(head.descriptorHash)
+    && /^[0-9a-f]{32}$/u.test(head.documentHash)
+    && /^[0-9a-f]{32}$/u.test(head.chunkSetHash)
+    && /^[0-9a-f]{32}$/u.test(head.projectionHash)
+    && /^[0-9a-f]{32}$/u.test(head.checkpointHash)
+    && typeof head.checkpointId === "string" && head.checkpointId.length > 0
+    && Number.isSafeInteger(head.journalSequence) && head.journalSequence >= 1,
+  `${phase}: native descriptor/checkpoint fingerprints are incomplete`);
+  invariant(head.nativeWorldSemanticHash === head.projectionHash
+    && head.projectionEditCount === fixture.edits.count
+    && head.projectionFacingCount === Object.keys(fixture.document.world.save.blockFacings ?? {}).length,
+  `${phase}: restarted Rust R4 readback differs from the admitted BWAS projection`);
+  return {
+    descriptorHash: head.descriptorHash,
+    documentHash: head.documentHash,
+    documentSha256: head.documentSha256,
+    documentByteLength: head.documentByteLength,
+    documentRevision: head.documentRevision,
+    chunks: head.chunks,
+    chunkSetHash: head.chunkSetHash,
+    projectionHash: head.projectionHash,
+    projectionEditCount: head.projectionEditCount,
+    projectionFacingCount: head.projectionFacingCount,
+    nativeWorldSemanticHash: head.nativeWorldSemanticHash,
+    checkpointId: head.checkpointId,
+    checkpointHash: head.checkpointHash,
+    journalSequence: head.journalSequence,
+    historicalMigrations: persistence.historicalMigrations,
+    historicalSaves: persistence.historicalSaves,
+    historicalRecoveries: persistence.historicalRecoveries,
+  };
 }
 
 export function assertHistoricalWorkerInputs(snapshot, fixture) {
@@ -156,18 +227,21 @@ function assertLiveHistoricalTerrain(snapshot) {
 }
 
 export function assertHistoricalSaveScenarioEvidence(value, fixture) {
-  const { emptyTitle, imported, firstPlaying, titleAfterSave, titleAfterReload, continued } = value.checkpoints ?? {};
+  const { emptyTitle, imported, firstPlaying, titleAfterSave, worldsAfterModeChange, titleAfterReload, continued } = value.checkpoints ?? {};
   invariant(emptyTitle?.historicalStorage?.catalogWorldCount === 0 && emptyTitle.historicalStorage.activeWorldId === null,
     "historical acceptance did not start in an empty isolated catalog");
   const worldId = fixture.document.world.metadata.id;
-  const storage = [imported, firstPlaying, titleAfterSave, titleAfterReload, continued]
-    .map(snapshot => assertHistoricalStorageCheckpoint(snapshot, fixture, worldId));
+  const storage = [
+    [imported, "builder"], [firstPlaying, "builder"], [titleAfterSave, "builder"],
+    [worldsAfterModeChange, "survival"], [titleAfterReload, "survival"], [continued, "survival"],
+  ].map(([snapshot, mode]) => assertHistoricalStorageCheckpoint(snapshot, fixture, worldId, mode));
   const firstToken = imported?.audit?.documentToken; const secondToken = titleAfterReload?.audit?.documentToken;
   invariant(typeof firstToken === "string" && firstToken.length > 0 && typeof secondToken === "string"
     && firstToken !== secondToken && emptyTitle.audit.documentToken === firstToken
     && firstPlaying.audit.documentToken === firstToken && titleAfterSave.audit.documentToken === firstToken
+    && worldsAfterModeChange.audit.documentToken === firstToken
     && continued.audit.documentToken === secondToken, "hard reload/new document boundary is absent or inconsistent");
-  for (const snapshot of [imported, firstPlaying, titleAfterSave]) {
+  for (const snapshot of [imported, firstPlaying, titleAfterSave, worldsAfterModeChange]) {
     equal(snapshot.audit.importClicks, [{ trusted: true }], "public IMPORT was not clicked exactly once");
     equal(snapshot.audit.imports, [{ name: fixture.descriptor.filename, bytes: fixture.descriptor.bytes, sha256: fixture.descriptor.sha256, error: null }],
       "public file upload differs from the frozen source or was repeated");
@@ -177,23 +251,59 @@ export function assertHistoricalSaveScenarioEvidence(value, fixture) {
     equal(snapshot.audit.imports, [], "fixture was reseeded or reimported after hard reload");
   }
   invariant(titleAfterSave.state?.state === "title" && titleAfterReload.state?.state === "title", "save/reload did not pass through the real title");
+  const expectedDialog = `Change “${fixture.document.world.metadata.name}” to Survival before its next load? World edits and inventory are preserved.`;
+  const expectedNotice = `${fixture.document.world.metadata.name} will load in Survival. Inventory and world progress were preserved.`;
+  invariant(value.modeEditorEvidence?.schema === 1
+    && value.modeEditorEvidence.worldName === fixture.document.world.metadata.name
+    && value.modeEditorEvidence.fromMode === "builder" && value.modeEditorEvidence.toMode === "survival"
+    && value.modeEditorEvidence.dialogType === "confirm" && value.modeEditorEvidence.dialogMessage === expectedDialog
+    && value.modeEditorEvidence.accepted === true && value.modeEditorEvidence.notice === expectedNotice,
+  "historical offline mode edit lacks exact visible Worlds confirmation evidence");
   assertLiveHistoricalTerrain(firstPlaying); assertLiveHistoricalTerrain(continued);
+  const firstNative = assertHistoricalNativeCheckpoint(firstPlaying, fixture, "historical-first-playing");
+  const continuedNative = assertHistoricalNativeCheckpoint(continued, fixture, "historical-fresh-continue");
+  invariant(firstNative.documentRevision === 1 && firstNative.historicalMigrations === 1
+    && firstNative.historicalSaves === 0 && firstNative.historicalRecoveries === 0,
+  "initial browser session did not establish exactly one Rust-bound historical migration head");
+  invariant(continuedNative.documentRevision > firstNative.documentRevision
+    && continuedNative.historicalMigrations === 0 && continuedNative.historicalSaves === 1
+    && continuedNative.historicalRecoveries === 1
+    && continuedNative.checkpointId !== firstNative.checkpointId,
+  "fresh browser session did not recover the post-save native historical successor");
+  invariant(titleAfterSave.historicalStorage.documentCanonicalSha256
+    !== worldsAfterModeChange.historicalStorage.documentCanonicalSha256
+    && worldsAfterModeChange.historicalStorage.documentCanonicalSha256
+    === titleAfterReload.historicalStorage.documentCanonicalSha256
+    && continuedNative.documentSha256 === titleAfterReload.historicalStorage.documentCanonicalSha256,
+  "offline mode edit, hard reload, and Rust recovery do not agree on one external StoredWorld head");
   const workerInputs = assertHistoricalWorkerInputs(firstPlaying, fixture);
   const ray = proveReloadedTerrainRay(firstPlaying, continued, AIR_WITNESS);
-  return { worldId, source: fixture.provenance, storage, workerInputs, ray,
+  return { worldId, source: fixture.provenance, storage, native: { first: firstNative, continued: continuedNative }, workerInputs, ray,
+    modeEdit: { from: "builder", to: "survival", persistedAcrossRestart: true },
     importCount: 1, hardReload: true, reimportedAfterReload: false, exactEditSetPreserved: true };
 }
 
 async function historicalSnapshot(harness, label, expectedState = null) {
   const snapshot = await harness.readAndRecord(label, expectedState);
-  const historicalStorage = await harness.page.evaluate(() => {
+  const historicalStorage = await harness.page.evaluate(async () => {
     const catalog = JSON.parse(localStorage.getItem("blockwild-world-catalog-v1") ?? "null");
     const activeWorldId = typeof catalog?.activeWorldId === "string" ? catalog.activeWorldId : null;
     const document = activeWorldId ? JSON.parse(localStorage.getItem(`blockwild-world-data-v1:${activeWorldId}`) ?? "null") : null;
     const metadata = catalog?.worlds?.find(world => world.id === activeWorldId);
+    const canonical = value => {
+      if (Array.isArray(value)) return value.map(canonical);
+      if (value && typeof value === "object") return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+      return value;
+    };
+    const canonicalBytes = document ? new TextEncoder().encode(JSON.stringify(canonical(document))) : null;
+    const documentCanonicalSha256 = canonicalBytes
+      ? Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", canonicalBytes)), value => value.toString(16).padStart(2, "0")).join("")
+      : null;
     return { activeWorldId, catalogWorldCount: catalog?.worlds?.length ?? 0,
       catalogGenerationIdentity: metadata?.generationIdentity ?? null,
-      document: document ? { metadata: document.metadata, options: document.options, save: {
+      documentCanonicalByteLength: canonicalBytes?.byteLength ?? null,
+      documentCanonicalSha256,
+      document: document ? { metadata: document.metadata, options: document.options, importSource: document.importSource, save: {
         version: document.save?.version, generatorVersion: document.save?.generatorVersion, generatorProfile: document.save?.generatorProfile,
         seed: document.save?.seed, mode: document.save?.mode, player: document.save?.player, edits: document.save?.edits,
       } } : null };
@@ -220,7 +330,7 @@ async function waitForHistoricalGameplay(harness, label) {
 }
 
 async function runHistoricalScenario(harness, fixture) {
-  const { page, timeoutMilliseconds } = harness; const checkpoints = {};
+  const { page, timeoutMilliseconds } = harness; const checkpoints = {}; let modeEditorEvidence = null;
   const waitForTerrain = label => waitForRustMultiplayerVisualTerrainReadiness(page, timeoutMilliseconds, {
     label, failureStage: label, readSnapshot: () => harness.readAndRecord(label, "playing"),
   });
@@ -257,11 +367,42 @@ async function runHistoricalScenario(harness, fixture) {
   await harness.waitForTitleVisualReadiness();
   checkpoints.titleAfterSave = await historicalSnapshot(harness, "historical-title-after-save");
   await harness.captureScreenshot("02-historical-saved-title");
+  await page.getByRole("button", { name: /^Worlds\b/u }).click();
+  await page.getByRole("heading", { name: "Worlds", exact: true }).waitFor();
+  const worldCard = page.locator("button.world-catalog-card").filter({ hasText: fixture.document.world.metadata.name });
+  invariant(await worldCard.count() === 1, "Worlds UI did not expose the one imported historical world");
+  await worldCard.click();
+  const modeEditor = page.getByRole("region", { name: `Game mode for ${fixture.document.world.metadata.name}` });
+  await modeEditor.waitFor({ state: "visible" });
+  const survivalButton = modeEditor.getByRole("button", { name: /^SURVIVAL\b/u });
+  invariant(await survivalButton.getAttribute("aria-pressed") === "false", "historical world did not begin in Builder mode");
+  const dialogPromise = page.waitForEvent("dialog");
+  const modeClickPromise = survivalButton.click({ noWaitAfter: true });
+  const dialog = await dialogPromise;
+  modeEditorEvidence = {
+    schema: 1,
+    worldName: fixture.document.world.metadata.name,
+    fromMode: "builder",
+    toMode: "survival",
+    dialogType: dialog.type(),
+    dialogMessage: dialog.message(),
+    accepted: true,
+    notice: `${fixture.document.world.metadata.name} will load in Survival. Inventory and world progress were preserved.`,
+  };
+  await dialog.accept();
+  await modeClickPromise;
+  await page.locator(".world-catalog-notice").filter({ hasText: modeEditorEvidence.notice }).waitFor({ state: "visible" });
+  checkpoints.worldsAfterModeChange = await historicalSnapshot(harness, "historical-worlds-after-survival-mode");
+  assertHistoricalStorageCheckpoint(checkpoints.worldsAfterModeChange, fixture, fixture.document.world.metadata.id, "survival");
+  invariant(await survivalButton.getAttribute("aria-pressed") === "true", "Worlds UI did not retain the confirmed Survival mode");
+  await harness.captureScreenshot("03-historical-offline-survival-mode");
+  await page.getByRole("button", { name: /Main Menu$/u }).click();
+  await harness.waitForTitleVisualReadiness();
   await page.reload({ waitUntil: "domcontentloaded", timeout: timeoutMilliseconds });
   await harness.waitForHarness();
   const titleVisualReadiness = await harness.waitForTitleVisualReadiness();
   checkpoints.titleAfterReload = await historicalSnapshot(harness, "historical-title-after-hard-reload");
-  await harness.captureScreenshot("03-historical-fresh-title");
+  await harness.captureScreenshot("04-historical-fresh-title");
   await page.getByRole("button", { name: /^Continue/u }).click({ noWaitAfter: true });
   await waitForHistoricalGameplay(harness, "historical-fresh-continue");
   const continuedTerrainReadiness = await waitForTerrain("historical-continued-drawable");
@@ -270,14 +411,15 @@ async function runHistoricalScenario(harness, fixture) {
     return state.target?.type === "block" && state.target.name === "Glowstone" && JSON.stringify(state.target.position) === JSON.stringify(position);
   }, SENTINEL, { timeout: timeoutMilliseconds });
   checkpoints.continued = await historicalSnapshot(harness, "historical-fresh-continue-settled", "playing");
-  const proof = assertHistoricalSaveScenarioEvidence({ checkpoints }, fixture);
-  await harness.captureScreenshot("04-historical-continued-live");
+  const proof = assertHistoricalSaveScenarioEvidence({ checkpoints, modeEditorEvidence }, fixture);
+  await harness.captureScreenshot("05-historical-continued-live");
   return { fixture: fixture.provenance, proof, checkpoints, titleVisualReadiness,
     terrainReadiness: { firstPlaying: firstTerrainReadiness, continued: continuedTerrainReadiness },
     exclusions: { fixture: "Synthetic historical-format fixture, not an archived user save.",
       authority: "No R5 player or R8 native persistence authority promotion.",
-      remaining: "Generator-2 raw-key migration and actual terrain-cache eviction/IndexedDB rehydration remain separate gates.",
-      mutationSurface: "Public IMPORT file upload and ordinary Save/Quit/Continue only; no engine/world mutation hooks or save seeding." } };
+      remaining: "Generator-2 raw-key migration, rich-save native adoption, and formal R3 promotion review remain separate gates.",
+      coveredSeparately: "Live terrain-cache eviction and IndexedDB rehydration are covered by the accepted canonical persistent-cache gate.",
+      mutationSurface: "Public IMPORT, Save/Quit, Worlds mode editing with exact confirmation, hard reload, and Continue only; no engine/world mutation hooks or save seeding." } };
 }
 
 export function parseOldSaveBrowserOptions(argv = process.argv, context = {}) {
@@ -328,13 +470,15 @@ export async function runOldSaveBrowser(argv = process.argv) {
   const result = { schema: 1, gate: R3_OLD_SAVE_GATE, status: passed ? "passed" : "failed", createdAt: new Date().toISOString(),
     authorityClaim: passed ? R3_OLD_SAVE_AUTHORITY : "none", sourceFixturesUnchanged, guardedSourcesUnchanged, guardedSources: sources,
     fixtures: fixtures.map(fixture => fixture.provenance),
-    lanes, error, remaining: ["g2-raw-key-migration", "live-persistent-terrain-cache-evict-rehydrate", "formal-R3-promotion-review"] };
+    lanes, error,
+    coveredBySeparateGate: ["live-persistent-terrain-cache-evict-rehydrate"],
+    remaining: ["g2-raw-key-migration", "rich-save-native-adoption", "formal-R3-promotion-review"] };
   const outputPath = path.join(options.outputDirectory, "result.json");
   writeFileSync(outputPath, `${JSON.stringify(result, null, 2)}\n`, "utf8");
   return { ...result, outputPath };
 }
 export function usage() {
-  return `Usage: node scripts/verify-rust-r3-old-save-browser.mjs --engine-dir public/engine --expected-artifact-hash ${REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH} --output work/rust-r3-old-saves [--repo-root .] [--timeout-ms 300000] [--headed]\nRuns both frozen synthetic g16/g17 exports through public Import, canonical Rust workers, Save/Quit, hard reload and Continue. No R8 authority claim.\n`;
+  return `Usage: node scripts/verify-rust-r3-old-save-browser.mjs --engine-dir public/engine --expected-artifact-hash ${REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH} --output work/rust-r3-old-saves [--repo-root .] [--timeout-ms 300000] [--headed]\nRuns both frozen synthetic g16/g17 exports through public Import, canonical Rust workers, Save/Quit, a confirmed offline Builder-to-Survival edit, hard reload and Continue. No R8 authority claim.\n`;
 }
 if (isDirectInvocation(import.meta.url)) {
   runOldSaveBrowser().then(result => {
