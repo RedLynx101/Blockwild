@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { engineFacadeWiringCheck } from "../scripts/audit-rust-migration.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const rollbackWindowPath = path.join(root, "docs", "RUST_ENGINE_ROLLBACK_WINDOWS.json");
@@ -89,7 +90,17 @@ test("Rust migration completion audit emits a bounded, machine-readable release 
   assert.equal(report.checks.schemaConvergenceScriptPresent, true);
   assert.equal(report.checks.rustTestDiscoveryPresent, true);
   assert.equal(report.checks.basicRenderProductionOff, true);
-  assert.equal(typeof report.checks.facadeWired, "boolean");
+  assert.equal(report.checks.facadeWired, true);
+  assert.deepEqual(report.facadeWiring, {
+    dormantCommentAbsent: true,
+    imported: true,
+    constructed: true,
+    started: true,
+    shutdown: true,
+    diagnostics: true,
+    wired: true,
+  });
+  assert.ok(!report.blockers.includes("EngineFacade is not wired into VoxelGame"));
   assert.equal(typeof report.checks.runtimeEngineDefault, "string");
   assert.equal(typeof report.checks.runtimeRendererDefault, "string");
   assert.equal(report.checks.artifactValid, true);
@@ -104,6 +115,52 @@ test("Rust migration completion audit emits a bounded, machine-readable release 
   assert.equal(report.wireSchemaConvergence.completeDomains, 5);
   assert.deepEqual(report.wireSchemaConvergence.partialDomains, []);
   assert.ok(!report.blockers.some((blocker) => blocker.startsWith("wire schema convergence is partial:")));
+});
+
+test("facade wiring audit rejects token imports and requires one constructed lifecycle", () => {
+  const facadeSource = "export class EngineFacade {}";
+  const importOnly = 'import { EngineFacade } from "./engine-facade";';
+  assert.deepEqual(engineFacadeWiringCheck(facadeSource, importOnly), {
+    dormantCommentAbsent: true,
+    imported: true,
+    constructed: false,
+    started: false,
+    shutdown: false,
+    diagnostics: false,
+    wired: false,
+  });
+
+  const constructedOnly = `${importOnly}\nconst facade = new EngineFacade({});`;
+  assert.equal(engineFacadeWiringCheck(facadeSource, constructedOnly).wired, false);
+  const commentOnly = `${constructedOnly}
+// facade.start(); facade.diagnostics(); facade.shutdown();`;
+  assert.equal(engineFacadeWiringCheck(facadeSource, commentOnly).wired, false);
+
+  const complete = `${constructedOnly}
+void facade.start();
+facade.diagnostics();
+void facade.shutdown();`;
+  assert.deepEqual(engineFacadeWiringCheck(facadeSource, complete), {
+    dormantCommentAbsent: true,
+    imported: true,
+    constructed: true,
+    started: true,
+    shutdown: true,
+    diagnostics: true,
+    wired: true,
+  });
+
+  const splitLifecycle = `${importOnly}
+const first = new EngineFacade({});
+const second = new EngineFacade({});
+void first.start();
+first.diagnostics();
+void second.shutdown();`;
+  const splitResult = engineFacadeWiringCheck(facadeSource, splitLifecycle);
+  assert.equal(splitResult.started, true);
+  assert.equal(splitResult.shutdown, true);
+  assert.equal(splitResult.diagnostics, true);
+  assert.equal(splitResult.wired, false);
 });
 
 test("the migration audit keeps explicit partial wire evidence separate from whole-project completion", () => {

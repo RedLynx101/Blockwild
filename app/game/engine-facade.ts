@@ -37,8 +37,8 @@ export interface EngineBackend {
 
 export type TypeScriptEngineAdapter = Readonly<{
   start?: () => void | Promise<void>;
-  ingest: (batch: Uint8Array) => void | Promise<void>;
-  step: (request: EngineStepRequest) => EngineStepResult | Promise<EngineStepResult>;
+  ingest?: (batch: Uint8Array) => void | Promise<void>;
+  step?: (request: EngineStepRequest) => EngineStepResult | Promise<EngineStepResult>;
   shutdown?: () => void | Promise<void>;
   diagnostics?: () => Readonly<Record<string, unknown>>;
 }>;
@@ -49,10 +49,22 @@ export class TypeScriptEngineBackend implements EngineBackend {
   constructor(private readonly adapter: TypeScriptEngineAdapter) {}
 
   async start() { await this.adapter.start?.(); }
-  async ingest(batch: Uint8Array) { await this.adapter.ingest(batch); }
-  async step(request: EngineStepRequest) { return this.adapter.step(request); }
+  async ingest(batch: Uint8Array) {
+    if (!this.adapter.ingest) throw new Error("TypeScript lifecycle adapter does not support coarse ingest");
+    await this.adapter.ingest(batch);
+  }
+  async step(request: EngineStepRequest) {
+    if (!this.adapter.step) throw new Error("TypeScript lifecycle adapter does not support coarse step");
+    return this.adapter.step(request);
+  }
   async shutdown() { await this.adapter.shutdown?.(); }
-  diagnostics() { return this.adapter.diagnostics?.() ?? {}; }
+  diagnostics() {
+    return {
+      ...(this.adapter.diagnostics?.() ?? {}),
+      coarseIngestSupported: Boolean(this.adapter.ingest),
+      coarseStepSupported: Boolean(this.adapter.step),
+    };
+  }
 }
 
 export class RustWorkerEngineBackend implements EngineBackend {
@@ -182,10 +194,7 @@ export type EngineFacadeOptions = Readonly<{
   maximumDivergences?: number;
 }>;
 
-/**
- * Strangler facade for R0. It is intentionally not wired into VoxelGame yet:
- * consumers opt in one domain at a time while TypeScript remains authoritative.
- */
+/** Strangler facade used by the production shell while authority gates remain explicit. */
 export class EngineFacade {
   private readonly typescript: EngineBackend;
   private readonly rust: EngineBackend | null;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   EngineFacade,
+  TypeScriptEngineBackend,
   resolveEngineSelection,
   resolveRendererSelection,
   type EngineBackend,
@@ -29,6 +30,34 @@ class StubBackend implements EngineBackend {
   async shutdown() { this.shutdowns += 1; }
   diagnostics() { return { starts: this.starts, steps: this.steps }; }
 }
+
+test("lifecycle-only TypeScript adapters fail closed for unsupported coarse execution", async () => {
+  let starts = 0;
+  let shutdowns = 0;
+  const backend = new TypeScriptEngineBackend({
+    start: () => { starts += 1; },
+    shutdown: () => { shutdowns += 1; },
+    diagnostics: () => ({ integration: "voxel-engine-lifecycle" }),
+  });
+
+  await backend.start();
+  await assert.rejects(
+    backend.ingest(new Uint8Array([1, 2, 3])),
+    /does not support coarse ingest/u,
+  );
+  await assert.rejects(
+    backend.step({ monotonicTimeUs: 1, budgetUs: 1 }),
+    /does not support coarse step/u,
+  );
+  assert.deepEqual(backend.diagnostics(), {
+    integration: "voxel-engine-lifecycle",
+    coarseIngestSupported: false,
+    coarseStepSupported: false,
+  });
+  await backend.shutdown();
+  assert.equal(starts, 1);
+  assert.equal(shutdowns, 1);
+});
 
 test("facade defaults keep authority and both shadow policies closed", async () => {
   const typescript = new StubBackend("typescript", "same");

@@ -3,6 +3,8 @@
 import { readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { runRustEngineTests } from "./run-rust-engine-tests.mjs";
 import {
   INTEGRATED_RUNTIME_SCHEMA_MANIFEST,
@@ -257,6 +259,70 @@ function isMigratedMode(mode) {
   return mode === "rust-authoritative" || mode === "retired-typescript";
 }
 
+export function engineFacadeWiringCheck(facadeSource, voxelGameSource) {
+  const sourceFile = ts.createSourceFile("VoxelGame.tsx", voxelGameSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const facadeBindings = new Set();
+  for (const statement of sourceFile.statements) {
+    if (!ts.isImportDeclaration(statement)
+      || !ts.isStringLiteral(statement.moduleSpecifier)
+      || statement.moduleSpecifier.text !== "./engine-facade"
+      || statement.importClause?.isTypeOnly
+      || !statement.importClause?.namedBindings
+      || !ts.isNamedImports(statement.importClause.namedBindings)) continue;
+    for (const binding of statement.importClause.namedBindings.elements) {
+      if (!binding.isTypeOnly && (binding.propertyName?.text ?? binding.name.text) === "EngineFacade") {
+        facadeBindings.add(binding.name.text);
+      }
+    }
+  }
+
+  const callsByFacade = new Map();
+  const visitConstructions = (node) => {
+    if (ts.isVariableDeclaration(node)
+      && ts.isIdentifier(node.name)
+      && node.initializer
+      && ts.isNewExpression(node.initializer)
+      && ts.isIdentifier(node.initializer.expression)
+      && facadeBindings.has(node.initializer.expression.text)) {
+      callsByFacade.set(node.name.text, new Set());
+    }
+    ts.forEachChild(node, visitConstructions);
+  };
+  visitConstructions(sourceFile);
+
+  const lifecycleMethods = new Set(["start", "shutdown", "diagnostics"]);
+  const visitCalls = (node) => {
+    if (ts.isCallExpression(node)
+      && ts.isPropertyAccessExpression(node.expression)
+      && ts.isIdentifier(node.expression.expression)
+      && callsByFacade.has(node.expression.expression.text)
+      && lifecycleMethods.has(node.expression.name.text)) {
+      callsByFacade.get(node.expression.expression.text).add(node.expression.name.text);
+    }
+    ts.forEachChild(node, visitCalls);
+  };
+  visitCalls(sourceFile);
+
+  const imported = facadeBindings.size > 0;
+  const constructed = callsByFacade.size > 0;
+  const started = [...callsByFacade.values()].some((methods) => methods.has("start"));
+  const shutdown = [...callsByFacade.values()].some((methods) => methods.has("shutdown"));
+  const diagnostics = [...callsByFacade.values()].some((methods) => methods.has("diagnostics"));
+  const completeLifecycle = [...callsByFacade.values()].some((methods) => (
+    methods.has("start") && methods.has("shutdown") && methods.has("diagnostics")
+  ));
+  const dormantCommentAbsent = !facadeSource.includes("intentionally not wired into VoxelGame yet");
+  return {
+    dormantCommentAbsent,
+    imported,
+    constructed,
+    started,
+    shutdown,
+    diagnostics,
+    wired: dormantCommentAbsent && imported && constructed && completeLifecycle,
+  };
+}
+
 async function audit() {
   const [plan, ledger, log, packageJson, facade, voxelGame, legacyEngine, legacyWorld, wasm, performance, testEntries, rollbackWindowDocument, wireSchemaConvergence] = await Promise.all([
     text(PLAN),
@@ -332,9 +398,7 @@ async function audit() {
   const declaredSimulationPlayerDefault = /Public simulation\/player default:\s*([^\r\n]+)/u.exec(ledger)?.[1]?.trim() ?? null;
   const declaredTerrainGenerationDefault = /Public terrain-generation implementation:\s*([^\r\n]+)/u.exec(ledger)?.[1]?.trim() ?? null;
   const declaredRendererDefault = /Public renderer default:\s*([^\r\n]+)/u.exec(ledger)?.[1]?.trim() ?? null;
-  const facadeStillDormant = facade.includes("intentionally not wired into VoxelGame yet");
-  const facadeImportedByVoxelGame = /from\s+["']\.\/engine-facade["']/u.test(voxelGame)
-    || /import\s*\(["']\.\/engine-facade["']\)/u.test(voxelGame);
+  const facadeWiring = engineFacadeWiringCheck(facade, voxelGame);
   const runtimeEngineDefault = /engineSelection\s*\?\?\s*["']([^"']+)["']/u.exec(facade)?.[1] ?? null;
   const runtimeRendererDefault = /rendererSelection\s*\?\?\s*["']([^"']+)["']/u.exec(facade)?.[1] ?? null;
   const basicRenderProductionOff = performance.includes("BASIC_RENDER_DISTANCE_ENABLED")
@@ -400,7 +464,7 @@ async function audit() {
     blockers.push(`ledger terrain-generation implementation is ${declaredTerrainGenerationDefault ?? "unset"}`);
   }
   if (declaredRendererDefault?.toLowerCase() !== "wgpu") blockers.push(`ledger renderer default is ${declaredRendererDefault ?? "unset"}`);
-  if (facadeStillDormant || !facadeImportedByVoxelGame) blockers.push("EngineFacade is not wired into VoxelGame");
+  if (!facadeWiring.wired) blockers.push("EngineFacade is not wired into VoxelGame");
   if (runtimeEngineDefault !== "rust") blockers.push(`runtime engine default is ${runtimeEngineDefault ?? "unset"}`);
   if (runtimeRendererDefault !== "wgpu") blockers.push(`runtime renderer default is ${runtimeRendererDefault ?? "unset"}`);
   if (!basicRenderProductionOff) blockers.push("Basic Render Distance production-off gate is not detectable");
@@ -441,7 +505,7 @@ async function audit() {
     },
     checks: {
       basicRenderProductionOff,
-      facadeWired: !facadeStillDormant && facadeImportedByVoxelGame,
+      facadeWired: facadeWiring.wired,
       runtimeEngineDefault,
       runtimeRendererDefault,
       strictScriptPresent,
@@ -452,6 +516,7 @@ async function audit() {
       terrainRollbackWindowValid: terrainRollbackWindow.valid,
       terrainRollbackWindowReason: terrainRollbackWindow.reason,
     },
+    facadeWiring,
     terrainRollbackWindow: terrainRollbackWindow.summary,
     wireSchemaConvergence,
     pendingAuthority: pendingAuthority.map(({ domain, mode, rustTarget }) => ({ domain, mode, rustTarget })),
@@ -465,8 +530,10 @@ async function audit() {
   };
 }
 
-const report = await audit();
-const rendered = `${JSON.stringify(report, null, 2)}\n`;
-if (outputPath) await writeFile(outputPath, rendered, "utf8");
-process.stdout.write(rendered);
-if (strict && !report.complete) process.exitCode = 1;
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const report = await audit();
+  const rendered = `${JSON.stringify(report, null, 2)}\n`;
+  if (outputPath) await writeFile(outputPath, rendered, "utf8");
+  process.stdout.write(rendered);
+  if (strict && !report.complete) process.exitCode = 1;
+}

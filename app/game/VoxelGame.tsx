@@ -39,6 +39,7 @@ import {
   type RecipePlanResult,
   type WorldOriginPreviewV1,
 } from "./engine";
+import { EngineFacade, TypeScriptEngineBackend } from "./engine-facade";
 import { BUTTERFLY_ORDER } from "./mobs";
 import type { AgentCapability, AgentChatMessage, AgentSessionRecord, AgentTaskRecord, AgentWaypointRecord } from "./agent-platform";
 import { createAgentBrowserBridge, type AgentBrowserBridge } from "./agent-bridge";
@@ -2213,6 +2214,22 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       window.queueMicrotask(() => setWebglError(true));
       return;
     }
+    const engineFacade = new EngineFacade({
+      typescript: new TypeScriptEngineBackend({
+        shutdown: () => engine.shutdown(),
+        diagnostics: () => ({ integration: "voxel-engine-lifecycle" }),
+      }),
+      engineSelection: "typescript",
+      rendererSelection: "three",
+      policy: {
+        allowRustAuthority: false,
+        allowRustShadow: false,
+        allowWgpuShadow: false,
+        allowWgpuPrimary: false,
+        webGpuAvailable: false,
+      },
+    });
+    void engineFacade.start();
     (engine as VoxelEngine & { setCharacterProfile?: (profile: CharacterProfile) => void }).setCharacterProfile?.(selectedCharacter);
     engine.localPlayerModel.setAppearance(selectedCharacter.appearance).setPlayerName(selectedCharacter.name);
     engineRef.current = engine;
@@ -2243,8 +2260,10 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       engineErrors: engine.renderExtractionErrors,
       engineLastError: engine.renderExtractionLastError,
     }, (_, value) => typeof value === "bigint" ? value.toString() : value);
-    automationWindow.render_rust_runtime_to_text = () => JSON.stringify(
-      engine.getRustRuntimeDiagnostics(),
+    automationWindow.render_rust_runtime_to_text = () => JSON.stringify({
+      ...engine.getRustRuntimeDiagnostics(),
+      facade: engineFacade.diagnostics(),
+    },
       (_, value) => typeof value === "bigint" ? value.toString() : value,
     );
     automationWindow.request_renderer_recovery = (reason) => rendererCutover.requestRecovery(reason);
@@ -2397,7 +2416,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       if (rendererCutoverRef.current === rendererCutover) rendererCutoverRef.current = null;
       if (rendererCanvasLifecycleRef.current === rendererCanvasLifecycle) rendererCanvasLifecycleRef.current = null;
       rendererCanvasLifecycle.dispose();
-      void engine.shutdown().catch(() => undefined).finally(() => rendererCutover.stop());
+      void engineFacade.shutdown().catch(() => undefined).finally(() => rendererCutover.stop());
       engineRef.current = null;
       worldStorageRef.current = null;
       characterStoreRef.current = null;

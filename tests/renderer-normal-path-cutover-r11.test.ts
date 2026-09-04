@@ -30,11 +30,21 @@ test("shipping runtime keeps wgpu primary policy closed and shadow opt-in explic
   assert.match(voxelGame, /render_renderer_cutover_to_text/u);
   assert.match(voxelGame, /request_renderer_recovery/u);
   assert.match(voxelGame, /rendererCanvasLifecycle\.prepareReplacement\(request\.reason\)[\s\S]*?setRendererPrimarySurfaceKey/u);
+  assert.match(voxelGame, /const engineFacade = new EngineFacade\(\{/u);
+  assert.match(voxelGame, /typescript:\s*new TypeScriptEngineBackend\(\{/u);
+  assert.match(voxelGame, /engineSelection:\s*"typescript"/u);
+  assert.match(voxelGame, /rendererSelection:\s*"three"/u);
+  for (const flag of ["allowRustAuthority", "allowRustShadow", "allowWgpuShadow", "allowWgpuPrimary"]) {
+    assert.match(voxelGame, new RegExp(`${flag}:\\s*false`, "u"));
+  }
+  assert.doesNotMatch(voxelGame, /new RustWorkerEngineBackend/u);
+  assert.match(voxelGame, /facade:\s*engineFacade\.diagnostics\(\)/u);
   assert.match(
     voxelGame,
-    /rendererCanvasLifecycle\.dispose\(\);\s*void engine\.shutdown\(\)\.catch\(\(\) => undefined\)\.finally\(\(\) => rendererCutover\.stop\(\)\)/u,
-    "normal teardown drains engine shutdown before stopping the renderer cutover",
+    /rendererCanvasLifecycle\.dispose\(\);\s*void engineFacade\.shutdown\(\)\.catch\(\(\) => undefined\)\.finally\(\(\) => rendererCutover\.stop\(\)\)/u,
+    "normal teardown routes VoxelEngine shutdown through the facade before stopping renderer cutover",
   );
+  assert.doesNotMatch(voxelGame, /void engine\.shutdown\(\)/u);
 });
 
 test("avatar previews lazy-load Three behind a deterministic no-WebGL fallback", async () => {

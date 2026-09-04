@@ -19,7 +19,8 @@ test("React shell transfers the cutover sink and epoch without constructing a pa
   assert.match(shell, /rustRenderEpoch:\s*rendererCutover\.needsExtraction \? rendererEpoch : undefined/u);
   assert.doesNotMatch(shell, /new RendererShellExtractionPublisherR11/u);
   assert.match(shell, /producer:\s*engine\.getRustLiveRenderDiagnosticsR10\(\)/u);
-  assert.match(shell, /engine\.shutdown\(\).*\.finally\(\(\) => rendererCutover\.stop\(\)\)/u);
+  assert.match(shell, /engineFacade\.shutdown\(\).*\.finally\(\(\) => rendererCutover\.stop\(\)\)/u);
+  assert.doesNotMatch(shell, /void engine\.shutdown\(\)/u);
 });
 
 test("each activated world switches epoch before creating one composer and one terrain publisher", async () => {
