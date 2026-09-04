@@ -9,6 +9,7 @@ import {
 import { RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1 } from "./rust-persistence-runtime-contract";
 import { TypeScriptCanonicalHasher } from "./rust-kernel-shadow";
 import type { RustHistoricalSaveCompatibilityPlanV1 } from "./rust-historical-save-compatibility";
+import { deriveWorldGenerationIdentityV1 } from "./world-save-normalization";
 import {
   assertWorldImportSourceReferenceV1,
   type WorldImportSourceReferenceV1,
@@ -1472,17 +1473,42 @@ function assertInitialDocumentMatchesPlan(
 ) {
   const document = ordinaryRecord(documentValue, "initial historical StoredWorld");
   const metadata = ordinaryRecord(document.metadata, "initial historical StoredWorld.metadata");
+  const save = ordinaryRecord(document.save, "initial historical StoredWorld.save");
   const plan = planValue;
-  const saveBytes = canonicalJsonBytes(document.save);
-  const optionsBytes = canonicalJsonBytes(document.options);
+  const normalizedBytes = copyBytes(plan.source.normalized.canonicalBytes, "plan normalized canonical bytes");
+  if (normalizedBytes.byteLength !== plan.source.normalized.byteLength
+    || persistencePayloadHashV1(normalizedBytes) !== plan.source.normalized.semanticHash) {
+    fail("plan-source", "Historical plan normalized bytes differ from their hash/length identity");
+  }
+  let normalizedValue: unknown;
+  try { normalizedValue = JSON.parse(textDecoder.decode(normalizedBytes)); }
+  catch { return fail("plan-source", "Historical plan normalized bytes are not canonical JSON"); }
+  if (!equalBytes(canonicalJsonBytes(normalizedValue), normalizedBytes)) {
+    fail("plan-source", "Historical plan normalized bytes are not canonical JSON");
+  }
+  const normalizedSave = ordinaryRecord(normalizedValue, "plan normalized source save");
+  const sourceReference = sourceReferenceFromDescriptor(normalizeSourceWithGenerator(plan.source.raw));
+  const generationIdentity = deriveWorldGenerationIdentityV1(documentValue.save, documentValue.options);
+  const sourceBoundSaveProperties = Object.freeze([
+    "generatorVersion", "generatorProfile", "agentWorldFingerprint", "edits", "blockFacings",
+  ]);
+  let sourceBoundSaveDrift = false;
+  for (const property of sourceBoundSaveProperties) {
+    const currentHasProperty = Object.hasOwn(save, property);
+    const sourceHasProperty = Object.hasOwn(normalizedSave, property);
+    if (currentHasProperty !== sourceHasProperty
+      || currentHasProperty && !equalJson(save[property], normalizedSave[property])) {
+      sourceBoundSaveDrift = true;
+      break;
+    }
+  }
   if (metadata.id !== plan.target.catalogWorldId || metadata.seed !== plan.target.worldSeed
-    || ordinaryRecord(document.save, "initial historical StoredWorld.save").seed !== plan.target.worldSeed
-    || saveBytes.byteLength !== plan.source.normalized.byteLength
-    || persistencePayloadHashV1(saveBytes) !== plan.source.normalized.semanticHash
-    || optionsBytes.byteLength !== plan.target.optionsByteLength
-    || persistencePayloadHashV1(optionsBytes) !== plan.target.optionsSemanticHash
-    || !equalJson(metadata.generationIdentity, plan.target.generationIdentity)) {
-    fail("plan-document", "Initial StoredWorld document differs from the plan's exact normalized source or target");
+    || save.seed !== plan.target.worldSeed
+    || !equalJson(document.importSource, sourceReference)
+    || sourceBoundSaveDrift
+    || !equalJson(metadata.generationIdentity, plan.target.generationIdentity)
+    || !equalJson(generationIdentity, plan.target.generationIdentity)) {
+    fail("plan-document", "Initial StoredWorld document crossed its archived R4 projection or immutable generation target");
   }
 }
 
@@ -1496,9 +1522,14 @@ function assertCurrentDocumentTarget(documentValue: StoredWorld, immutable: Rust
     terrainContentHash: immutable.target.generationIdentity.terrainContentHash,
     generationOptionsJson: immutable.target.generationIdentity.generationOptionsJson,
   };
+  const derivedGenerationIdentity = deriveWorldGenerationIdentityV1(
+    documentValue.save,
+    documentValue.options,
+  );
   if (metadata.id !== immutable.target.catalogWorldId || metadata.seed !== immutable.target.worldSeed
     || save.seed !== immutable.target.worldSeed
-    || !equalJson(metadata.generationIdentity, generationIdentity)) {
+    || !equalJson(metadata.generationIdentity, generationIdentity)
+    || !equalJson(derivedGenerationIdentity, generationIdentity)) {
     fail("document-target", "Current external StoredWorld crossed its immutable world, seed, or generation target");
   }
 }

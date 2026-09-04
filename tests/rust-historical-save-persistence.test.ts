@@ -32,6 +32,7 @@ import type { RustHistoricalSaveCompatibilityPlanV1 } from "../app/game/rust-his
 import { encodeCanonicalWorldSaveValueV1 } from "../app/game/world-save-sharding.ts";
 import type { WorldImportSourceReferenceV1 } from "../app/game/world-import-source.ts";
 import type { StoredWorld } from "../app/game/world-storage.ts";
+import { deriveWorldGenerationIdentityV1 } from "../app/game/world-save-normalization.ts";
 
 const encoder = new TextEncoder();
 const SOURCE_SHA = "11".repeat(32);
@@ -58,9 +59,20 @@ const GENERATION_IDENTITY = Object.freeze({
   terrainContentHash: hash(0x27),
   generationOptionsJson: GENERATION_OPTIONS_JSON,
 });
+const STORED_WORLD_OPTIONS = Object.freeze({ biomeScale: 1.35 }) as StoredWorld["options"];
+const STORED_WORLD_GENERATION_IDENTITY = deriveWorldGenerationIdentityV1({
+  generatorVersion: 18,
+  generatorProfile: "world-below-v15",
+}, STORED_WORLD_OPTIONS);
 
 function storedWorld(turn = 1): StoredWorld {
-  const save: Record<string, unknown> = { seed: "water-🌿", edits: {}, player: { x: turn } };
+  const save: Record<string, unknown> = {
+    seed: "water-🌿",
+    generatorVersion: 18,
+    generatorProfile: "world-below-v15",
+    edits: {},
+    player: { x: turn },
+  };
   if (turn === 1) Object.defineProperty(save, "__proto__", {
     enumerable: true, configurable: true, writable: true, value: { retained: true },
   });
@@ -77,9 +89,9 @@ function storedWorld(turn = 1): StoredWorld {
       lastPlayedAt: null,
       playTimeMs: turn,
       lastSavedGameVersion: "1.12.0",
-      generationIdentity: GENERATION_IDENTITY,
+      generationIdentity: STORED_WORLD_GENERATION_IDENTITY,
     },
-    options: { biomeScale: 1.35 } as StoredWorld["options"],
+    options: STORED_WORLD_OPTIONS,
     save: save as unknown as StoredWorld["save"],
     importSource: source(),
   };
@@ -99,7 +111,15 @@ function nativeRecords(): readonly PersistenceRecordDescriptorV1[] {
   })));
 }
 
-function immutable(initialDocument: RustHistoricalStoredWorldEnvelopeV2["initialDocument"]): RustHistoricalExternalImmutableV2 {
+function immutable(
+  initialDocument: RustHistoricalStoredWorldEnvelopeV2["initialDocument"],
+  generationIdentity: Readonly<{
+    schemaVersion: 1;
+    generatorHash: string;
+    terrainContentHash: string;
+    generationOptionsJson: string;
+  }> = GENERATION_IDENTITY,
+): RustHistoricalExternalImmutableV2 {
   return {
     authority: {
       claim: RUST_HISTORICAL_EXTERNAL_AUTHORITY_CLAIM_V2,
@@ -120,9 +140,9 @@ function immutable(initialDocument: RustHistoricalStoredWorldEnvelopeV2["initial
       worldSeed: "water-🌿",
       contentHash: hash(0x25),
       generationIdentity: {
-        ...GENERATION_IDENTITY,
-        generationOptionsHash: persistencePayloadHashV1(encoder.encode(GENERATION_OPTIONS_JSON)),
-        generationOptionsByteLength: encoder.encode(GENERATION_OPTIONS_JSON).byteLength,
+        ...generationIdentity,
+        generationOptionsHash: persistencePayloadHashV1(encoder.encode(generationIdentity.generationOptionsJson)),
+        generationOptionsByteLength: encoder.encode(generationIdentity.generationOptionsJson).byteLength,
       },
       optionsSemanticHash: hash(0x28),
       optionsByteLength: 127,
@@ -149,7 +169,7 @@ function fingerprints(envelope: RustHistoricalStoredWorldEnvelopeV2) {
 
 function fixtureProposal(envelope: RustHistoricalStoredWorldEnvelopeV2) {
   return createRustHistoricalExternalDescriptorProposalV2({
-    immutable: immutable(envelope.initialDocument),
+    immutable: immutable(envelope.initialDocument, STORED_WORLD_GENERATION_IDENTITY),
     currentDocument: envelope.currentDocument,
     expectedPreviousDocument: envelope.expectedPreviousDocument,
     chunks: fingerprints(envelope),
@@ -184,7 +204,7 @@ function compatibilityPlan(document: StoredWorld): RustHistoricalSaveCompatibili
       locationId: "overworld",
       worldSeed: "water-🌿",
       contentHash: hash(0x25),
-      generationIdentity: GENERATION_IDENTITY,
+      generationIdentity: document.metadata.generationIdentity!,
       options: document.options,
       optionsSemanticHash: persistencePayloadHashV1(optionsBytes),
       optionsByteLength: optionsBytes.byteLength,
@@ -337,6 +357,60 @@ test("plan-bound initial and successor proposals preserve immutable custody", as
     },
   };
   await assert.rejects(assertRustHistoricalExternalDescriptorPlanV2(descriptor, stalePlan, envelope), /freshly revalidated/u);
+});
+
+test("initial custody admits opaque edits but rejects generation and R4 bypasses", async () => {
+  const archived = storedWorld();
+  const plan = compatibilityPlan(archived);
+  const opaqueEdit = structuredClone(archived);
+  opaqueEdit.metadata = {
+    ...opaqueEdit.metadata,
+    name: "Renamed before native custody",
+  };
+  opaqueEdit.options = { ...opaqueEdit.options, difficulty: "hard" };
+  (opaqueEdit.save.player as { x: number }).x = 42;
+  const acceptedEnvelope = await createRustHistoricalStoredWorldEnvelopeV2({
+    document: opaqueEdit,
+    source: source(),
+    previous: null,
+  });
+  await assert.doesNotReject(createInitialRustHistoricalExternalDescriptorProposalV2(plan, acceptedEnvelope));
+
+  const generationOptionDrift = structuredClone(opaqueEdit);
+  generationOptionDrift.options = { ...generationOptionDrift.options, structures: false };
+  const generationOptionEnvelope = await createRustHistoricalStoredWorldEnvelopeV2({
+    document: generationOptionDrift,
+    source: source(),
+    previous: null,
+  });
+  await assert.rejects(
+    createInitialRustHistoricalExternalDescriptorProposalV2(plan, generationOptionEnvelope),
+    (error: unknown) => error instanceof RustHistoricalSavePersistenceError && error.code === "plan-document",
+  );
+
+  const directGeneratorDrift = structuredClone(opaqueEdit);
+  directGeneratorDrift.save.generatorVersion = 17;
+  const directGeneratorEnvelope = await createRustHistoricalStoredWorldEnvelopeV2({
+    document: directGeneratorDrift,
+    source: source(),
+    previous: null,
+  });
+  await assert.rejects(
+    createInitialRustHistoricalExternalDescriptorProposalV2(plan, directGeneratorEnvelope),
+    (error: unknown) => error instanceof RustHistoricalSavePersistenceError && error.code === "plan-document",
+  );
+
+  const r4Drift = structuredClone(opaqueEdit);
+  r4Drift.save.edits = { "0,0": [[0, 9]] };
+  const r4Envelope = await createRustHistoricalStoredWorldEnvelopeV2({
+    document: r4Drift,
+    source: source(),
+    previous: null,
+  });
+  await assert.rejects(
+    createInitialRustHistoricalExternalDescriptorProposalV2(plan, r4Envelope),
+    (error: unknown) => error instanceof RustHistoricalSavePersistenceError && error.code === "plan-document",
+  );
 });
 
 test("chunk address identity is deterministic and separate from BWHE", () => {
