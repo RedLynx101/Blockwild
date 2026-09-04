@@ -10,7 +10,7 @@ import { encodeCanonicalWorldSaveValueV1 } from "./world-save-sharding";
 import {
   deriveWorldGenerationIdentityV1, migrateLegacyWorldSave, normalizeWorldOptions,
   type WorldGenerationIdentityV1, type WorldOptions,
-} from "./world-storage";
+} from "./world-save-normalization";
 
 /**
  * Review contract only. It neither attests archive durability nor proves that a

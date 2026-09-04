@@ -18,11 +18,7 @@ import {
   normalizeWorldOptions,
   type WorldGenerationIdentityV1,
   type WorldOptions,
-} from "./world-storage";
-
-// These normalization helpers are intentionally invoked only while a plan is
-// built. Before WorldStorage consumes this planner, move the pure helpers to a
-// shared leaf module so storage never imports back through this file.
+} from "./world-save-normalization";
 
 /**
  * Pure planning contract for the narrow R3 historical-save lane.
