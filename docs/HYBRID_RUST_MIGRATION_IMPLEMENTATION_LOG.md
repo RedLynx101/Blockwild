@@ -109,6 +109,35 @@ No UI, native executor, checkpoint adoption, ownership attestation or
 existing guard relaxation is included. This does not close historical-save
 migration or increase formal acceptance.
 
+### Standalone legacy continuation envelope - 2026-09-03
+
+The review policy now has a separate byte-exact Rust/TypeScript transport
+envelope, `BWLC` V1. It preserves the original source bytes, normalized world
+state, actual legacy-load time, complete target options, selected character
+profile and the four explicit review decisions. Raw-source and review identities
+remain 32-byte SHA-256 values; established semantic state identities remain
+their existing 16-byte hashes. Signed zero, subnormal and maximum finite pose
+values retain their exact f64 bits. Typed option tags, bounded strict UTF-8,
+canonical faction order and every nested field are validated before acceptance.
+
+Two independently authored Rust vectors cover g16 and the richer g17 shape;
+TypeScript decodes and re-encodes both byte-for-byte. Mutation, truncation,
+resealed invalid-tag/nonfinite data, oversized preallocation, sparse/accessor
+records and inherited byte/array hook cases fail closed. Five of the six frozen
+files match the retained backup under `work/legacy-codec-c1-20260902/`
+byte-for-byte after line-ending normalization. The only delta is a test-only
+replacement of seven bigint literals with the same hexadecimal values via
+`BigInt(...)`, so the repository's ES2017 TypeScript target accepts the suite
+without changing any tested bits or assertions. The tranche passes 8 native
+tests, 13 TypeScript tests, scoped lint, full-repository TypeScript checking,
+Clippy and owned-file formatting; the TypeScript tests and lint were repeated
+after that syntax-only adjustment.
+
+This envelope is deliberately not stored or consumed by the native runtime and
+is not a migration executor, ownership proof, consent validator or capability.
+It makes review terms portable without authorizing historical state adoption;
+those execution and readback gates remain open.
+
 ### Code-cache diagnostic 9: improved, not accepted - 2026-09-02
 
 The one-pair run from isolated tree `7c493afbc56470c4a1631cddaaf433216ba761e0`

@@ -1,5 +1,6 @@
 //! Deterministic shadow engine used by R0/R1 worker and replay laboratories.
 
+pub mod legacy_world_continuation;
 mod runtime;
 mod runtime_domain_schema_generated;
 mod runtime_domain_wire;
