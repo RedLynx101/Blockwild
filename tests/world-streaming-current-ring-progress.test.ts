@@ -31,7 +31,7 @@ function addChunk(world: ChunkWorld, cx: number, cz: number) {
   return chunk;
 }
 function fixture(context: TestContext, targetX = 1, missingPlayerSection = false,
-  additionalMissing?: Readonly<{ key: string; section: number }>) {
+  additionalMissing?: Readonly<{ key: string; section: number }>, sliceCostMilliseconds = 10) {
   const world = new ChunkWorld({ terrainGenerationAuthorityMode: "typescript" });
   context.after(() => world.dispose());
   world.reset("CURRENT-RING-PARTIAL-PROGRESS", undefined, { structures: false });
@@ -58,7 +58,7 @@ function fixture(context: TestContext, targetX = 1, missingPlayerSection = false
   // Charge real mesh work a deterministic over-budget cost. This tests slice
   // reservations, not timing, and does not replace meshing or scheduling.
   context.mock.method(world, "rebuildSection", (...args: Parameters<ChunkWorld["rebuildSection"]>) => {
-    rebuild(...args); now += 10;
+    rebuild(...args); now += sliceCostMilliseconds;
   });
   world.queueMesh(target.key, REQUIRED_SECTION);
   assert.equal(world.processMesh(target.key, REQUIRED_SECTION), true);
@@ -176,6 +176,94 @@ test("lower-priority required neighbor work does not discard a useful higher-pri
   assert.equal(step().meshSlices, 1);
   assert.ok(world.activeMeshTask === active); assert.equal(active.nextLocalX, 2);
   assert.equal(world.meshQueued.has(`${competitor.key}:${competitor.section}`), true);
+});
+
+test("mixed ordinary and urgent current-ring sections retain partial progress until both complete", context => {
+  const { world, target, step, budgets } = fixture(
+    context,
+    1,
+    false,
+    { key: "0,1", section: REQUIRED_SECTION },
+    0,
+  );
+  // Persistent restoration can queue a surface section before the player-height
+  // schedule is established, then admit another required section through the
+  // urgent immediate-ring lane. Both are correctness work; neither may restart
+  // the other's 16-column build on every frame.
+  world.streamingViewX = 1; world.streamingViewZ = 0;
+  const urgent = world.chunks.get("0,1")!;
+  world.queueMesh(urgent.key, REQUIRED_SECTION, true);
+  for (let frame = 0; frame < CHUNK_SIZE; frame += 1) {
+    const report = step();
+    assert.ok(report.meshSlices <= 1 + world.meshWorkPerFrame * 2,
+      "current-ring convergence must stay inside the existing reserve and mesh turns");
+  }
+  assert.equal(target.sections.has(REQUIRED_SECTION), true,
+    "the ordinary required section must not be restarted by another required urgent section");
+  assert.equal(urgent.sections.has(REQUIRED_SECTION), true,
+    "the urgent required section must retain its own partial progress between frames");
+  assert.deepEqual(world.streamingDiagnostics().immediateRing, { desired: 9, ready: 9, ratio: 1 });
+  assert.deepEqual([world.generationWorkPerFrame, world.meshWorkPerFrame, world.streamingFrameBudgetMilliseconds], budgets);
+});
+
+test("an unchanged schedule refresh does not duplicate active current-ring work", context => {
+  const { world, target, active } = fixture(context, 1, false, undefined, 0);
+  const queueKey = `${target.key}:${REQUIRED_SECTION}`;
+  assert.equal(world.meshQueued.has(queueKey), false);
+  assert.equal(world.urgentMeshQueued.has(queueKey), false);
+  world.renderDistance = 1;
+  world.scheduleAround(8, 8, true, -18);
+  assert.ok(world.activeMeshTask === active, "refresh must retain the exact partial build");
+  assert.equal(world.meshQueued.has(queueKey), false,
+    "scanning a dirty active section must not manufacture a second ordinary pass");
+  assert.equal(world.urgentMeshQueued.has(queueKey), false);
+  for (let column = active.nextLocalX; column < CHUNK_SIZE; column += 1) {
+    assert.equal(world.processMesh(target.key, REQUIRED_SECTION), true);
+  }
+  assert.equal(target.sections.has(REQUIRED_SECTION), true);
+  assert.equal(world.meshQueued.has(queueKey), false);
+  assert.equal(world.urgentMeshQueued.has(queueKey), false);
+});
+
+test("the immediate-ring reserve follows the exact aged mesh target across chunks", context => {
+  const { world, target, active, step, budgets } = fixture(
+    context,
+    1,
+    false,
+    { key: "1,1", section: REQUIRED_SECTION },
+    0,
+  );
+  const alternate = world.chunks.get("1,1")!;
+  world.streamingViewX = -1;
+  world.streamingViewZ = 0;
+  world.meshEnqueuedAt.set(`${target.key}:${REQUIRED_SECTION}`, -100_000);
+  world.queueMesh(alternate.key, REQUIRED_SECTION);
+  world.seamMeshRebuilds.add(`${alternate.key}:${PLAYER_SECTION}`);
+  world.queueMesh(alternate.key, PLAYER_SECTION, true);
+
+  const priorities = world as unknown as {
+    chunkStreamingPriority(key: string): number;
+    compareMeshPriority(
+      left: Readonly<{ key: string; section: number }>,
+      right: Readonly<{ key: string; section: number }>,
+    ): number;
+  };
+  assert.ok(priorities.chunkStreamingPriority(alternate.key) < priorities.chunkStreamingPriority(target.key),
+    "the raw immediate-ring scan must prefer the alternate chunk");
+  assert.ok(priorities.compareMeshPriority(
+    { key: target.key, section: REQUIRED_SECTION },
+    { key: alternate.key, section: REQUIRED_SECTION },
+  ) < 0, "aged exact mesh priority must prefer the partially built target");
+  assert.ok(world.activeMeshTask === active);
+
+  for (let frame = 0; frame < CHUNK_SIZE; frame += 1) step();
+
+  assert.equal(target.sections.has(REQUIRED_SECTION), true,
+    "the exact aged target must not restart behind the raw chunk-order reserve");
+  assert.equal(alternate.sections.has(REQUIRED_SECTION), true,
+    "the remaining required section must converge after the aged target");
+  assert.deepEqual(world.streamingDiagnostics().immediateRing, { desired: 9, ready: 9, ratio: 1 });
+  assert.deepEqual([world.generationWorkPerFrame, world.meshWorkPerFrame, world.streamingFrameBudgetMilliseconds], budgets);
 });
 
 test("without current-chunk candidates the existing immediate-ring dispatch still preempts for a higher-priority neighbor", context => {

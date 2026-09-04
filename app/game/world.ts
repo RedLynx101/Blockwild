@@ -5312,7 +5312,9 @@ export class ChunkWorld {
         lightingSlices += 1;
       } else {
         this.ensurePlayerChunkMeshQueue(work.key);
-        if (!this.processMesh(work.key)) break;
+        const target = presentationMeshTarget();
+        if (!target || !this.processBackgroundMesh(target)) break;
+        refreshPresentationMeshTarget(target);
         meshingMilliseconds += performance.now() - startedAt;
         meshSlices += 1;
       }
@@ -5529,6 +5531,7 @@ export class ChunkWorld {
           if (!chunk.lightInitialized) this.queueLightInitialization(key);
           else if (this.chunkLightPresentationReady(key)) for (let section = 0; section < SECTION_COUNT; section += 1) {
             if (this.seamPresentationPending.has(`${key}:${section}`)) continue;
+            if (this.activeMeshTask?.key === key && this.activeMeshTask.section === section) continue;
             if (chunk.dirty.has(section) || (!chunk.sections.has(section) && chunk.sectionBlockCounts[section] > 0)) this.queueMesh(key, section);
           }
         }
@@ -6439,7 +6442,7 @@ export class ChunkWorld {
     return [...candidates.values()].sort((left, right) => this.compareMeshPriority(left, right))[0] ?? null;
   }
 
-  private requiredRingMeshTarget(centerX: number, centerZ: number) {
+  private requiredRingMeshTarget(centerX: number, centerZ: number, preserveActive = true) {
     const candidates: Array<{ key: string; section: number }> = [];
     const active = this.activeMeshTask;
     for (let dx = -1; dx <= 1; dx += 1) for (let dz = -1; dz <= 1; dz += 1) {
@@ -6455,7 +6458,8 @@ export class ChunkWorld {
       const targets = blocker ? [blocker] : local;
       // A useful partial build must finish instead of restarting whenever another
       // predicted chunk becomes eligible. Reversal naturally changes this set.
-      if (active && targets.some((target) => target.key === active.key && target.section === active.section)) return active;
+      if (preserveActive && active
+        && targets.some((target) => target.key === active.key && target.section === active.section)) return active;
       candidates.push(...targets);
     }
     return candidates.sort((left, right) => this.compareMeshPriority(left, right))[0] ?? null;
@@ -6473,7 +6477,9 @@ export class ChunkWorld {
 
   private presentationRequiredMeshTarget() {
     if (!Number.isFinite(this.playerChunkX) || !Number.isFinite(this.playerChunkZ)) return null;
-    const immediate = this.requiredRingMeshTarget(this.playerChunkX, this.playerChunkZ);
+    // Immediate correctness follows the best exact aged/dependency-aware target;
+    // predictive work remains sticky until movement invalidates its active target.
+    const immediate = this.requiredRingMeshTarget(this.playerChunkX, this.playerChunkZ, false);
     if (immediate || !this.immediateRingDrawable()) return immediate;
     return this.predictedRequiredMeshTarget();
   }
@@ -6481,6 +6487,15 @@ export class ChunkWorld {
   private isProtectedUrgentMesh(entry: Readonly<{ key: string; section: number }>) {
     const queueKey = `${entry.key}:${entry.section}`;
     return this.pendingEditMeshes.has(queueKey) || !this.seamMeshRebuilds.has(queueKey);
+  }
+
+  private isUnbuiltImmediateRingMesh(entry: Readonly<{ key: string; section: number }>) {
+    const chunk = this.chunks.get(entry.key);
+    if (!chunk?.group.visible || !this.chunkLightPresentationReady(entry.key)) return false;
+    return Math.max(Math.abs(chunk.cx - this.playerChunkX), Math.abs(chunk.cz - this.playerChunkZ)) <= 1
+      && this.playerRequiredMeshSections(chunk).includes(entry.section)
+      && !chunk.sections.has(entry.section)
+      && !this.seamPresentationPending.has(`${entry.key}:${entry.section}`);
   }
 
   /** Required presentation borrows only existing mesh turns after its one bounded reserve. */
@@ -6498,9 +6513,24 @@ export class ChunkWorld {
       const entry = this.urgentMeshQueue[index];
       if (!this.urgentMeshQueued.has(`${entry.key}:${entry.section}`) || !this.isProtectedUrgentMesh(entry)
         || !this.hasRunnableQueuedMeshForKey(entry.key, entry.section)) continue;
+      // Startup and persistent restoration can admit the same current-ring
+      // correctness set through both ordinary and urgent queues. Let the exact
+      // presentation target retain its partial columns instead of treating a
+      // second never-built ring section as unrelated urgent work. A real edit
+      // remains protected by explicit pending-edit ownership.
+      if (!this.pendingEditMeshes.has(`${entry.key}:${entry.section}`)
+        && this.isUnbuiltImmediateRingMesh(entry)) continue;
       if (!urgent || this.compareMeshPriority(entry, urgent) < 0) urgent = entry;
     }
-    return this.processMesh(urgent?.key ?? target.key, urgent?.section ?? target.section);
+    // A direct seam dependency is the exact runnable work that makes a parked
+    // immediate-ring section drawable. Queued unclassified urgent depth cannot
+    // displace it; explicit player edits retain their latency precedence.
+    const urgentQueueKey = urgent ? `${urgent.key}:${urgent.section}` : null;
+    const selected = urgent && (!this.meshBlocksRequiredImmediateSeam(target)
+      || (urgentQueueKey !== null && this.pendingEditMeshes.has(urgentQueueKey)))
+      ? urgent
+      : target;
+    return this.processMesh(selected.key, selected.section);
   }
 
   processMesh(preferredKey?: string, preferredSection?: number) {
