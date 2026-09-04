@@ -876,6 +876,31 @@ The first integrated runtime recomputed every resident cell and every generated 
 
 The combined-runtime benchmark then exposed three additional linear costs: cloning the complete runtime for a one-domain command, rebuilding the entire authored-edit digest, and replaying up to 8,192 history entries into every fixed-step hash. Single-domain commands now use each domain's already-atomic transaction directly; multi-domain batches clone only the domains they touch and publish them only after every stage accepts. Authored edits and replay entries use incrementally maintained canonical digests, repeated root reads use an invalidation-safe cache, and a prevalidated generated chunk installs without cloning all resident chunks. On the same 108-section fixture, nine generation/install operations improved from **135.113 ms** to **118.330 ms**, 500 near-field pages from **1,433.110 ms** to **1,129.178 ms**, 10,000 integrated edits from **4,316.104 ms** to **1,766.615 ms** (**2.44× faster**), and 20,000 fixed steps from **19,110.151 ms** to **2,262.171 ms** (**8.45× faster**). Both runs ended at canonical hash `49ddb341b8fa86f0e069665df1fb01c4`.
 
+### Exact machine light reaches the renderer frame
+
+R10 composition now carries the exact BWX0 machine-light presentation into
+the BWRF v2 machine-light slot instead of retaining the TypeScript shell
+value. Selection is deterministic: the nearest eligible light wins, with
+canonical UTF-8 machine ID as the equal-distance tie-breaker. Native
+millimetres become renderer world units, millionth-scale linear color becomes
+RGB8 with nearest rounding, and 900,000 millilumens becomes 0.9 in the
+reviewed compatibility renderer scale. Held and base lighting remain intact.
+
+The current BWRF slot can represent one enabled, non-shadowing Point light.
+Disabled, missing, Spot, area, emissive, shadow-casting, over-budget, and
+missing-lighting-extension cases remain explicit diagnostics; unsupported or
+removed exact sources clear the compatibility-shell slot so stale TypeScript
+light cannot survive. One detached, ordinary, data-only BWX0 snapshot binds
+retry identity, validation, and composition. A rejected renderer submission
+does not advance diagnostics, and an exact entity revision recomposes against
+retained terrain even when its frame sequence is unchanged.
+
+Validation passes 21 focused helper/composer/live-runtime tests, full
+TypeScript checking, scoped ESLint, whitespace checks, and two independent
+reviews. This closes one concrete machine-light transport omission. It does
+not add shadows or the other light kinds, prove pixel-level browser parity,
+promote R10, remove Three.js, or change the formal 9/32 acceptance count.
+
 ## Open completion gates
 
 - Promote the complete v18 generator with seed/chunk/POI byte parity and no `ChunkWorld` construction in its worker.

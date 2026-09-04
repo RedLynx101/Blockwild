@@ -69,6 +69,7 @@ class DomainWriter {
     }
     return this;
   }
+  i64(value: bigint | number) { return this.u64(BigInt.asUintN(64, BigInt(value))); }
   f64(value: number) {
     const bytes = new Uint8Array(8);
     new DataView(bytes.buffer).setFloat64(0, value, true);
@@ -89,13 +90,23 @@ class DomainWriter {
   }
 }
 
+type SignedDomainValue = Readonly<{ signedI64: bigint }>;
+type FixtureDomainValue = RustDomainValueR10 | SignedDomainValue;
+
+function signedI64(value: bigint | number): SignedDomainValue {
+  return Object.freeze({ signedI64: BigInt(value) });
+}
+
 function hex(value: string) {
   assert.match(value, /^[0-9a-f]{32}$/u);
   return Uint8Array.from(value.match(/../gu)!.map((part) => Number.parseInt(part, 16)));
 }
 
-function encodeDomainValue(value: RustDomainValueR10) {
+function encodeDomainValue(value: FixtureDomainValue) {
   const writer = new DomainWriter();
+  if (typeof value === "object" && !(value instanceof Uint8Array) && "signedI64" in value) {
+    return writer.u8(2).i64(value.signedI64).finish();
+  }
   if (typeof value === "boolean") return writer.u8(0).u8(value ? 1 : 0).finish();
   if (typeof value === "bigint") return writer.u8(1).u64(value).finish();
   if (typeof value === "number") return writer.u8(3).f64(value).finish();
@@ -103,17 +114,76 @@ function encodeDomainValue(value: RustDomainValueR10) {
   return writer.u8(5).raw(value).finish();
 }
 
-function cameraPlayerDomain(revision: number, tick: number, itemCode?: number) {
+type MachineLightFixture = Readonly<{
+  machineId: string;
+  positionMilli: readonly [bigint, bigint, bigint];
+  enabled?: boolean;
+  kind?: 0 | 1 | 2 | 3;
+  castsShadows?: boolean;
+}>;
+
+function exactMachineRow(fixture: MachineLightFixture) {
+  const kind = fixture.kind ?? 0;
+  const fields = new Map<string, FixtureDomainValue>([
+    ["anchorRevision", BigInt(9)],
+    ["gameplayActive", true],
+    ["gameplayRevision", BigInt(12)],
+    ["halfExtents.xMilli", BigInt(500)],
+    ["halfExtents.yMilli", BigInt(1_000)],
+    ["halfExtents.zMilli", BigInt(750)],
+    ["light.castsShadows", fixture.castsShadows ?? false],
+    ["light.color.blueMillionths", BigInt(300_000)],
+    ["light.color.greenMillionths", BigInt(700_000)],
+    ["light.color.redMillionths", BigInt(1_000_000)],
+    ["light.enabled", fixture.enabled ?? true],
+    ["light.innerConeMicroturns", BigInt(kind === 1 ? 50_000 : 0)],
+    ["light.kind", BigInt(kind)],
+    ["light.luminousFluxMillilumens", BigInt(900_000)],
+    ["light.outerConeMicroturns", BigInt(kind === 1 ? 100_000 : 0)],
+    ["light.present", true],
+    ["light.rangeMilli", BigInt(12_000)],
+    ["machineId", fixture.machineId],
+    ["position.xMilli", signedI64(fixture.positionMilli[0])],
+    ["position.yMilli", signedI64(fixture.positionMilli[1])],
+    ["position.zMilli", signedI64(fixture.positionMilli[2])],
+    ["presentation.contentHash", hex(PRESENTATION_ARTIFACT.blobHash)],
+    ["presentation.contentVersion", BigInt(PRESENTATION_ARTIFACT.contentVersion)],
+    ["presentation.modelId", "wildwood-apiary"],
+    ["presentation.profileId", "machine:apiary"],
+    ["presentation.role", "machine"],
+    ["presentation.status", "exact"],
+    ["presentationId", "machine:apiary"],
+    ["rotation.pitchMicroturns", BigInt(0)],
+    ["rotation.rollMicroturns", BigInt(0)],
+    ["rotation.yawMicroturns", BigInt(250_000)],
+  ]);
+  return { kind: 5, key: `anchor:${fixture.machineId}`, fields };
+}
+
+function cameraPlayerDomain(revision: number, tick: number, itemCode?: number, machine?: MachineLightFixture) {
   const source = decodeRustDomainBundleR10(GOLDEN_BWX0);
-  const views = source.views.map((view) => view.rows.map((row) => ({
-    kind: row.kind,
-    key: row.key,
-    fields: new Map(row.fields.map(([key, value]) => [
-      key,
-      value instanceof Uint8Array ? Uint8Array.from(value) : value,
-    ])),
-  })));
-  const binding = views[1].find((row) => row.kind === 2)!;
+  const views = source.views.map((view) => ({
+    domain: view.domain,
+    schema: view.schema,
+    status: view.status,
+    total: view.total,
+    selected: view.selected,
+    omitted: view.omitted,
+    nextCursor: view.nextCursor,
+    blockers: [...view.blockers],
+    rows: view.rows.map((row) => ({
+      kind: row.kind,
+      key: row.key,
+      fields: new Map<string, FixtureDomainValue>(row.fields.map(([key, value]) => [
+        key,
+        value instanceof Uint8Array ? Uint8Array.from(value) : value,
+      ])),
+    })),
+  }));
+  const playerView = views.find((view) => view.domain === 2);
+  assert.ok(playerView, "golden BWX0 must carry the player domain");
+  const binding = playerView.rows.find((row) => row.kind === 2);
+  assert.ok(binding, "golden BWX0 must carry the player binding");
   binding.fields.set("entityRevision", BigInt(revision));
   if (itemCode === undefined) {
     for (const key of [...binding.fields.keys()]) if (key.startsWith("held.")) binding.fields.delete(key);
@@ -126,12 +196,23 @@ function cameraPlayerDomain(revision: number, tick: number, itemCode?: number) {
     binding.fields.set("held.durability.value", BigInt(900_000));
     binding.fields.set("held.metadataHash", Uint8Array.from({ length: 16 }, () => 3));
   }
+  if (machine !== undefined) {
+    const machineView = views.find((view) => view.domain === 4);
+    assert.ok(machineView, "golden BWX0 must carry the machine domain");
+    machineView.status = "complete";
+    machineView.total = 1;
+    machineView.selected = 1;
+    machineView.omitted = 0;
+    machineView.nextCursor = 1;
+    machineView.blockers = [];
+    machineView.rows = [exactMachineRow(machine)];
+  }
 
   const output = new DomainWriter().raw(new TextEncoder().encode("BWX0")).u16(1)
     .u64(revision).u64(tick).raw(source.stateHash).raw(hex(CONTENT_HASH)).u8(1).u16(source.views.length);
-  source.views.forEach((view, index) => {
+  views.forEach((view) => {
     const payloadWriter = new DomainWriter();
-    for (const row of views[index]) {
+    for (const row of view.rows) {
       const fields = [...row.fields]
         .sort(([left], [right]) => compareCanonicalUtf8R10(left, right))
         .map(([name, value]) => [name, encodeDomainValue(value)] as const);
@@ -197,7 +278,13 @@ function options(sink: CaptureSink, overrides: Partial<Parameters<typeof createR
   } satisfies Parameters<typeof createRustLiveRenderRuntimeR10>[0];
 }
 
-function context(input: Readonly<{ epoch?: bigint; sequence?: bigint; tick?: bigint; time?: bigint }> = {}): RenderRuntimeFrameContextR10 {
+function context(input: Readonly<{
+  epoch?: bigint;
+  sequence?: bigint;
+  tick?: bigint;
+  time?: bigint;
+  lighting?: boolean;
+}> = {}): RenderRuntimeFrameContextR10 {
   return Object.freeze({
     epoch: input.epoch ?? EPOCH,
     frameSequence: input.sequence ?? BigInt(1),
@@ -215,6 +302,25 @@ function context(input: Readonly<{ epoch?: bigint; sequence?: bigint; tick?: big
       fogFar: 220,
       underwater: 0,
       caveOcclusion: 0,
+      ...(input.lighting ? {
+        lighting: Object.freeze({
+          blockIntensity: 1.35,
+          minimumAmbient: 0.026,
+          waterPhase: 0.375,
+          held: Object.freeze({
+            position: Object.freeze([1, 2, 3] as const),
+            colorRgb8: Object.freeze([255, 116, 40] as const),
+            intensity: 0.72,
+            radius: 9,
+          }),
+          machine: Object.freeze({
+            position: Object.freeze([777, 778, 779] as const),
+            colorRgb8: Object.freeze([1, 2, 3] as const),
+            intensity: 99,
+            radius: 98,
+          }),
+        }),
+      } : {}),
     }),
   });
 }
@@ -230,7 +336,12 @@ function terrainCamera() {
   });
 }
 
-function extraction(revision = 1, tick = 0, heldItemCode?: number): RustIntegratedRuntimeExtractionV1 {
+function extraction(
+  revision = 1,
+  tick = 0,
+  heldItemCode?: number,
+  machine?: MachineLightFixture,
+): RustIntegratedRuntimeExtractionV1 {
   const entities: RustEntityExtractionR6V3 = Object.freeze({
     schema: 3,
     extractionRevision: BigInt(revision),
@@ -282,7 +393,7 @@ function extraction(revision = 1, tick = 0, heldItemCode?: number): RustIntegrat
     }),
     extractionRevision: revision,
     render: encodeRustEntityExtractionR6V3(entities),
-    hud: cameraPlayerDomain(revision, tick, heldItemCode),
+    hud: cameraPlayerDomain(revision, tick, heldItemCode, machine),
     audio: new Uint8Array(),
     platformRequests: new Uint8Array(),
     diagnostics: new Uint8Array(),
@@ -350,6 +461,74 @@ test("terrain and authoritative runtime extraction share the sole composer", asy
     assert.equal(diagnostics.composer?.terrainFrameSequence, BigInt(1));
     assert.equal(sink.framesSeen.length, 1);
     assert.equal(runtime.metadata(GENERATION).entity.extractionRevision, BigInt(1));
+  } finally {
+    await runtime.dispose();
+  }
+});
+
+test("live BWX0 machine light replaces and clears the BWRF shell slot without a terrain refresh", async () => {
+  const sink = new CaptureSink();
+  const runtime = await createRustLiveRenderRuntimeR10(options(sink));
+  try {
+    assert.equal(arm(runtime), true);
+    const lit = context({ lighting: true });
+    assert.equal(await runtime.submitRuntimeExtraction(GENERATION, extraction(1, 0, undefined, {
+      machineId: "machine:apiary:live",
+      positionMilli: Object.freeze([BigInt(4_000), BigInt(65_000), BigInt(-8_000)] as const),
+    }), lit), true);
+    assert.equal(runtime.terrain.resources(createRenderResourceBatchV2({
+      epoch: EPOCH,
+      revision: BigInt(1),
+      operations: [],
+    })), true);
+    assert.equal(runtime.terrain.frame(createRenderFrameV2({
+      epoch: EPOCH,
+      frameSequence: BigInt(1),
+      simulationTick: BigInt(0),
+      animationTimeMicros: BigInt(500_000),
+      resourceRevision: BigInt(1),
+      camera: terrainCamera(),
+      environment: lit.environment,
+      instances: [],
+      particles: [],
+    })), true);
+    assert.equal(sink.framesSeen.length, 1);
+    assert.deepEqual(sink.framesSeen[0]?.environment.lighting?.machine, {
+      position: [4, 65, -8],
+      colorRgb8: [255, 179, 77],
+      intensity: Math.fround(0.9),
+      radius: 12,
+    });
+    const bound = runtime.metadata(GENERATION).presentation.frame?.bindings.find((binding) =>
+      binding.role === "machine");
+    assert.equal(bound?.role, "machine");
+    assert.equal(bound?.machineId, "machine:apiary:live");
+    assert.equal(runtime.diagnostics().presentation?.machineBindings, 1);
+    assert.deepEqual(runtime.diagnostics().composer?.machineLight, {
+      schema: 1,
+      status: "selected",
+      sourcePresentations: 1,
+      exactLightProfiles: 1,
+      eligiblePointLights: 1,
+      selectedMachineId: "machine:apiary:live",
+      selectedAnchorRevision: BigInt(9),
+      selectedGameplayRevision: BigInt(12),
+      selectedCastsShadows: false,
+      omitted: [],
+    });
+
+    assert.equal(await runtime.submitRuntimeExtraction(
+      GENERATION,
+      extraction(2, 0),
+      context({ sequence: BigInt(2), lighting: true }),
+    ), true);
+    assert.equal(sink.framesSeen.length, 2,
+      "machine removal must recompose against the retained terrain frame");
+    assert.deepEqual(sink.framesSeen[1]?.environment.lighting?.machine, {
+      position: [0, 0, 0], colorRgb8: [0, 0, 0], intensity: 0, radius: 0,
+    });
+    assert.equal(runtime.diagnostics().composer?.machineLight.status, "cleared");
+    assert.equal(runtime.diagnostics().composer?.machineLight.sourcePresentations, 0);
   } finally {
     await runtime.dispose();
   }

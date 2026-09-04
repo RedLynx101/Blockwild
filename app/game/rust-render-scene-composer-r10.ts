@@ -36,6 +36,13 @@ import type {
   RustPresentationBindingIdentityR10,
   RustPresentationFrameR10,
 } from "./rust-render-presentation-extraction-r10.ts";
+import {
+  composeRustRenderMachineLightR10,
+  RUST_RENDER_MACHINE_LIGHT_NOT_COMPOSED_R10,
+  snapshotRustRenderMachineLightSourceR10,
+  type RustRenderMachineLightDiagnosticsR10,
+  type RustRenderMachineLightSourceR10,
+} from "./rust-render-machine-light-r10.ts";
 import type { RenderPresentationCoverageInventoryR10 } from "./rust-render-presentation-profile.ts";
 import {
   decodeRustAuthoritativeExtractionR10,
@@ -163,6 +170,7 @@ export type RustRenderSceneComposerDiagnosticsR10 = Readonly<{
   presentationCoverageHash: string | null;
   presentationBindings: number;
   presentationBlockers: number;
+  machineLight: RustRenderMachineLightDiagnosticsR10;
   sink: Readonly<Record<string, unknown>>;
 }>;
 
@@ -248,6 +256,149 @@ function equalIds(left: readonly bigint[], right: readonly bigint[]) {
 
 function hex(bytes: Uint8Array) {
   return [...bytes].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+const PRESENTATION_IDENTITY_MAX_DEPTH = 32;
+
+function presentationIdentityBytes(value: Uint8Array) {
+  invariant(Object.getPrototypeOf(value) === Uint8Array.prototype,
+    "presentation frame identity contains a non-ordinary byte array");
+  const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
+  const bufferGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, "buffer")?.get;
+  const byteLengthGetter = Object.getOwnPropertyDescriptor(typedArrayPrototype, "byteLength")?.get;
+  invariant(bufferGetter !== undefined && byteLengthGetter !== undefined,
+    "presentation frame identity byte-array intrinsics are unavailable");
+  let buffer: ArrayBuffer;
+  let byteLength: number;
+  try {
+    buffer = Reflect.apply(bufferGetter, value, []) as ArrayBuffer;
+    byteLength = Reflect.apply(byteLengthGetter, value, []) as number;
+  } catch {
+    throw new TypeError("presentation frame identity contains a proxied or detached byte array");
+  }
+  invariant(Object.getPrototypeOf(buffer) === ArrayBuffer.prototype,
+    "presentation frame identity byte array is not backed by an ordinary ArrayBuffer");
+  const resizableGetter = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, "resizable")?.get;
+  invariant(resizableGetter === undefined || Reflect.apply(resizableGetter, buffer, []) === false,
+    "presentation frame identity byte array is backed by a resizable ArrayBuffer");
+
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  invariant(keys.every((key) => typeof key === "string"),
+    "presentation frame identity byte array contains a symbol property");
+  invariant(keys.length === byteLength,
+    "presentation frame identity byte array contains an extra or missing property");
+  const snapshot = new Uint8Array(byteLength);
+  for (let index = 0; index < byteLength; index += 1) {
+    const descriptor = descriptors[String(index)];
+    invariant(descriptor !== undefined && descriptor.enumerable && "value" in descriptor
+      && Number.isInteger(descriptor.value) && descriptor.value >= 0 && descriptor.value <= 255,
+    "presentation frame identity byte array is not a dense data-only Uint8Array");
+    snapshot[index] = descriptor.value;
+  }
+  return snapshot;
+}
+
+/**
+ * Takes one descriptor image of an injected BWX0 frame and returns only owned,
+ * ordinary, immutable containers. Deduplication and later validation consume
+ * this same snapshot, so accessors or mutable/proxied follow-up reads cannot
+ * splice two presentation envelopes together.
+ */
+function snapshotPresentationIdentityValue(value: unknown, depth = 0): unknown {
+  invariant(depth <= PRESENTATION_IDENTITY_MAX_DEPTH,
+    "presentation frame identity exceeds its maximum nesting depth");
+  if (value === null) return null;
+  if (value instanceof Uint8Array) return presentationIdentityBytes(value);
+  if (Array.isArray(value)) {
+    invariant(Object.getPrototypeOf(value) === Array.prototype,
+      "presentation frame identity contains a non-ordinary array");
+    const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>;
+    const keys = Reflect.ownKeys(descriptors);
+    invariant(keys.every((key) => typeof key === "string"),
+      "presentation frame identity array contains a symbol property");
+    const lengthDescriptor = descriptors.length;
+    invariant(lengthDescriptor !== undefined && !lengthDescriptor.enumerable && "value" in lengthDescriptor
+      && typeof lengthDescriptor.value === "number" && Number.isInteger(lengthDescriptor.value)
+      && lengthDescriptor.value >= 0
+      && lengthDescriptor.value <= RENDER_MAX_INSTANCES_V2,
+    "presentation frame identity array length is invalid");
+    const length = lengthDescriptor.value as number;
+    invariant(keys.length === length + 1,
+      "presentation frame identity array contains an extra or missing property");
+    const snapshot = new Array<unknown>(length);
+    for (let index = 0; index < length; index += 1) {
+      const descriptor = descriptors[String(index)];
+      invariant(descriptor !== undefined && descriptor.enumerable && "value" in descriptor,
+        "presentation frame identity array is not dense and data-only");
+      snapshot[index] = snapshotPresentationIdentityValue(descriptor.value, depth + 1);
+    }
+    return Object.freeze(snapshot);
+  }
+  if (typeof value === "string" || typeof value === "boolean" || typeof value === "bigint") return value;
+  if (typeof value === "number") {
+    invariant(Number.isFinite(value), "presentation frame identity contains a non-finite number");
+    return value;
+  }
+  invariant(typeof value === "object", "presentation frame identity contains an unsupported value");
+  const prototype = Object.getPrototypeOf(value);
+  invariant(prototype === Object.prototype || prototype === null,
+    "presentation frame identity contains a non-record object");
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  invariant(keys.every((key) => typeof key === "string"),
+    "presentation frame identity record contains a symbol property");
+  const snapshot = Object.create(prototype) as Record<string, unknown>;
+  for (const key of keys as string[]) {
+    const descriptor = descriptors[key]!;
+    invariant(descriptor.enumerable, "presentation frame identity contains a non-enumerable field");
+    invariant("value" in descriptor, "presentation frame identity contains an accessor");
+    Object.defineProperty(snapshot, key, {
+      value: snapshotPresentationIdentityValue(descriptor.value, depth + 1),
+      enumerable: true,
+      configurable: false,
+      writable: false,
+    });
+  }
+  return Object.freeze(snapshot);
+}
+
+function canonicalPresentationIdentity(value: unknown): unknown {
+  if (value === null) return ["null"];
+  if (value instanceof Uint8Array) {
+    let encoded = "";
+    for (let index = 0; index < value.byteLength; index += 1) {
+      encoded += value[index]!.toString(16).padStart(2, "0");
+    }
+    return ["bytes", encoded];
+  }
+  if (Array.isArray(value)) {
+    const entries = new Array<unknown>(value.length);
+    for (let index = 0; index < value.length; index += 1) {
+      entries[index] = canonicalPresentationIdentity(value[index]);
+    }
+    return ["array", entries];
+  }
+  if (typeof value === "string") return ["string", value];
+  if (typeof value === "boolean") return ["boolean", value];
+  if (typeof value === "bigint") return ["bigint", value.toString()];
+  if (typeof value === "number") {
+    invariant(Number.isFinite(value), "presentation frame identity contains a non-finite number");
+    return ["number", Object.is(value, -0) ? "-0" : value.toString()];
+  }
+  invariant(typeof value === "object", "presentation frame identity contains an unsupported value");
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const entries = Object.keys(descriptors).sort().map((key) => {
+    const descriptor = descriptors[key]!;
+    invariant(descriptor.enumerable && "value" in descriptor,
+      "presentation frame identity snapshot is not an enumerable data-only record");
+    return [key, canonicalPresentationIdentity(descriptor.value)] as const;
+  });
+  return ["record", entries];
+}
+
+function presentationFrameIdentity(frame: RustPresentationFrameR10 | null) {
+  return JSON.stringify(canonicalPresentationIdentity(frame));
 }
 
 function checkedHash16(value: Uint8Array, label: string) {
@@ -435,10 +586,12 @@ function safePresentation(value: RenderEntityPresentationR10): RenderEntityPrese
 }
 
 function presentationFrameFromResult(result: RenderEntityExtractionResultR10): RustPresentationFrameR10 | null {
-  const candidate = (result as RenderEntityExtractionResultR10 & Readonly<{
-    presentationFrame?: RustPresentationFrameR10;
-  }>).presentationFrame;
-  return candidate ?? null;
+  const descriptor = Object.getOwnPropertyDescriptor(result, "presentationFrame");
+  if (descriptor === undefined) return null;
+  invariant(descriptor.enumerable && "value" in descriptor,
+    "entity presentation frame must be an enumerable data property");
+  if (descriptor.value === null) return null;
+  return snapshotPresentationIdentityValue(descriptor.value) as RustPresentationFrameR10;
 }
 
 function safeBindingIdentity(binding: RustPresentationBindingIdentityR10) {
@@ -667,6 +820,8 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
   private entityResult: RenderEntityExtractionResultR10 | null = null;
   private presentations: readonly RenderEntityPresentationViewR10[] = Object.freeze([]);
   private presentationFrame: ReturnType<typeof safePresentationFrame> | null = null;
+  private machineLightSources: readonly RustRenderMachineLightSourceR10[] = Object.freeze([]);
+  private machineLightDiagnostics = RUST_RENDER_MACHINE_LIGHT_NOT_COMPOSED_R10;
   private domainBundle: RustDomainBundleR10 | null = null;
   private audioExtraction: RustAudioExtractionR10 | null = null;
   private runtimeDiagnostics: RustRuntimeDiagnosticsR10 | null = null;
@@ -780,7 +935,8 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
       return true;
     }
     const camera = renderCameraFromAuthority(cameraView);
-    const compositionKey = `${terrainFrame.frameSequence}:${cameraView.poseHash}:${cameraView.viewRevision}`;
+    const compositionKey = `${terrainFrame.frameSequence}:${cameraView.poseHash}:${cameraView.viewRevision}`
+      + `:${this.entityExtractionRevision?.toString() ?? "-"}`;
     if (compositionKey === this.lastCompositionKey) {
       this.counters.deduplicatedCompositions += 1;
       return true;
@@ -820,6 +976,12 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
       invariant(this.resident.has(`material:${particle.material}`), `particle ${particle.stableId} references non-resident material`);
     }
 
+    const machineLight = composeRustRenderMachineLightR10(
+      terrainFrame.environment,
+      camera,
+      entityFrame === null ? Object.freeze([]) : this.machineLightSources,
+    );
+
     const nextSequence = this.globalFrameSequence + BigInt(1);
     const composed = canonicalFrame(createRenderFrameV2({
       epoch: this.epoch,
@@ -828,7 +990,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
       animationTimeMicros: terrainFrame.animationTimeMicros,
       resourceRevision: this.globalResourceRevision,
       camera,
-      environment: terrainFrame.environment,
+      environment: machineLight.environment,
       instances,
       particles: allParticles,
     }));
@@ -836,6 +998,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     this.globalFrameSequence = nextSequence;
     this.terrainFrameSequence = terrainFrame.frameSequence;
     this.lastCompositionKey = compositionKey;
+    this.machineLightDiagnostics = machineLight.diagnostics;
     this.counters.submittedFrames += 1;
     return true;
   }
@@ -885,7 +1048,9 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     invariant(result.modelCatalogRevision === this.trustedModelCatalogRevision, "entity model catalog revision mismatch");
     invariant(result.frame.epoch === this.epoch, "entity frame epoch does not match the composed scene");
     invariant(result.frame.simulationTick === result.authorityTick, "entity frame tick does not match entity authority");
-    const signature = `${hex(result.frame.frameHash)}:${result.resources ? hex(result.resources.batchHash) : "-"}`;
+    const presentationFrame = presentationFrameFromResult(result);
+    const signature = `${hex(result.frame.frameHash)}:${result.resources ? hex(result.resources.batchHash) : "-"}`
+      + `:${presentationFrameIdentity(presentationFrame)}`;
     if (this.entityExtractionRevision !== null && result.extractionRevision <= this.entityExtractionRevision) {
       if (result.extractionRevision === this.entityExtractionRevision && signature === this.entityExtractionSignature) return true;
       this.counters.staleEntityExtractions += 1;
@@ -893,8 +1058,9 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     }
     const frame = canonicalFrame(result.frame);
     invariant(frame.resourceRevision === (result.resources?.revision ?? this.entity.revision), "entity frame resource revision does not match its source stream");
-    const presentationFrame = presentationFrameFromResult(result);
     this.validatePresentationFrame(result, presentationFrame);
+    const machineLightSources = Object.freeze((presentationFrame?.bindings ?? []).flatMap((binding) =>
+      binding.role === "machine" ? [snapshotRustRenderMachineLightSourceR10(binding)] : []));
     const presentations = Object.freeze(result.presentations.map(safePresentation));
     this.validateEntityPhases(frame, presentations);
     const desired = referencedResourceKeys(frame);
@@ -910,6 +1076,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
     });
     this.presentations = presentations;
     this.presentationFrame = presentationFrame === null ? null : safePresentationFrame(presentationFrame);
+    this.machineLightSources = machineLightSources;
     this.entityExtractionRevision = result.extractionRevision;
     this.entityExtractionSignature = signature;
     this.metadataRevision += BigInt(1);
@@ -1058,6 +1225,7 @@ export class RustRenderSceneComposerR10 implements RenderSceneExtractionSinkR10 
       presentationCoverageHash: this.presentationCoverage?.coverageHash ?? null,
       presentationBindings: this.presentationFrame?.bindings.length ?? 0,
       presentationBlockers: this.presentationMetadata().promotion.blockers.length,
+      machineLight: this.machineLightDiagnostics,
       sink: this.sink.diagnostics(),
     });
   }
