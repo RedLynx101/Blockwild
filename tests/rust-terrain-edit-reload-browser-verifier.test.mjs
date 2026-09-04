@@ -425,9 +425,14 @@ test("post-reload title visual wait precedes read, retained screenshot, and Cont
     reload,
   );
   const read = source.indexOf('titleAfterReload = await readAndRecord("title-after-full-reload");', visualReady);
-  const screenshot = source.indexOf('"06-title-after-full-reload"', read);
+  const visualReadyAfterRead = source.indexOf(
+    "titleVisualReadiness = await waitForTerrainEditReloadTitleVisualReadiness(",
+    read,
+  );
+  const screenshot = source.indexOf('"06-title-after-full-reload"', visualReadyAfterRead);
   const click = source.indexOf("await freshContinue.click({ noWaitAfter: true });", screenshot);
-  assert.ok(reload >= 0 && visualReady > reload && read > visualReady && screenshot > read && click > screenshot);
+  assert.ok(reload >= 0 && visualReady > reload && read > visualReady
+    && visualReadyAfterRead > read && screenshot > visualReadyAfterRead && click > screenshot);
 });
 
 test("error and cleanup assertions fail closed", () => {
@@ -568,13 +573,13 @@ test("verifier source uses real UI and trusted player input without a mutation h
   assert.doesNotMatch(source, /exerciseImmediateEdit/u);
   assert.match(usage(), new RegExp(REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH, "u"));
   assert.equal(REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH,
-    "c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b");
+    "6a70291bc1655b6a01436b25590d646f064212d20e807dbbfe409b88e8f2322f");
   assert.equal(REQUIRED_TERRAIN_EDIT_SOURCE_DIGEST,
-    "e4fcec5a5762968647960f41e5c18ee7688c81c4c56fa833cb3d476b7f2a0cda");
-  assert.equal(REQUIRED_TERRAIN_EDIT_SOURCE_FILE_COUNT, 222);
+    "7a815caf45a4721aa5798c1d2509fd1a926e557b8cd853636b05470357318d19");
+  assert.equal(REQUIRED_TERRAIN_EDIT_SOURCE_FILE_COUNT, 230);
   assert.equal(REQUIRED_TERRAIN_EDIT_WASM_SHA256,
-    "27581732bb4b6ac744b31ca870211b9656036b6f949b78f875f65c0fb54c1d30");
-  assert.equal(REQUIRED_TERRAIN_EDIT_WASM_BYTES, 7_377_970);
+    "2283f2c4f6510f5d80f4c49874d34029a6e0c3cd36f3ab19a0957c2ee2f86687");
+  assert.equal(REQUIRED_TERRAIN_EDIT_WASM_BYTES, 7_424_470);
   assert.match(usage(), /--engine-dir public\/engine /u);
 });
 

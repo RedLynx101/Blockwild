@@ -2,7 +2,7 @@ import { decodeTerrainGenerationMarkerTableV2, type GeneratedChunkV2 } from "../
 import { encodeR3WorkerExpectedBytes, R3_WORKER_STREAM_NAMES, r3WorkerStreams, type R3WorkerCase } from "./r3-production-worker-contract.ts";
 import { assertR3PerformanceReadiness, type R3PerformanceReadiness } from "./r3-generation-performance-contract.ts";
 
-export const R3_PERSISTENT_CACHE_ARTIFACT = "c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b";
+export const R3_PERSISTENT_CACHE_ARTIFACT = "6a70291bc1655b6a01436b25590d646f064212d20e807dbbfe409b88e8f2322f";
 export const R3_PERSISTENT_CACHE_CASE = "surface-poi-negative";
 export const R3_CACHE_DATABASE = "blockwild-terrain-cache-v2";
 export const R3_CACHE_STORE = "chunks";

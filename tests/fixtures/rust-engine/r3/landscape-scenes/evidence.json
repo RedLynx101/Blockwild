@@ -1,9 +1,14 @@
 {
   "schema": 2,
-  "createdAt": "2026-09-02T15:44:22.281Z",
-  "mode": "update-tracked-fixtures",
+  "createdAt": "2026-09-04T04:59:21.405Z",
+  "mode": "stale-after-artifact-promotion",
   "candidate": false,
-  "source": "validated content-addressed Rust/Wasm generation and shared BWRD/BWRF records",
+  "source": "retained pre-promotion browser observations; canonical landscape rerun required",
+  "evidenceStatus": {
+    "observationsApplyToCurrentArtifact": false,
+    "rerunRequired": true,
+    "reason": "The canonical artifact was rebuilt with the wasm-bindgen 0.2.122 compatibility family after these browser observations were captured."
+  },
   "rendererContract": "RenderResourceBatchV2/RenderFrameV2",
   "threeOracle": {
     "implementation": "app/three-compat/renderer-extraction-oracle-r11.ts#ThreeExtractionOracleR11",
@@ -12,13 +17,13 @@
   },
   "artifact": {
     "variant": "compatibility",
-    "hash": "c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b",
+    "hash": "6a70291bc1655b6a01436b25590d646f064212d20e807dbbfe409b88e8f2322f",
     "publicDirectory": "public/engine",
-    "selectedPath": "public/engine/c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b",
+    "selectedPath": "public/engine/6a70291bc1655b6a01436b25590d646f064212d20e807dbbfe409b88e8f2322f",
     "sourceSnapshot": {
       "schema": 1,
-      "digest": "e4fcec5a5762968647960f41e5c18ee7688c81c4c56fa833cb3d476b7f2a0cda",
-      "fileCount": 222
+      "digest": "7a815caf45a4721aa5798c1d2509fd1a926e557b8cd853636b05470357318d19",
+      "fileCount": 230
     }
   },
   "certificate": {
@@ -77,7 +82,7 @@
     }
   ],
   "images": {
-    "contactSheet": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/r3-landscape-three-wgpu-contact-sheet.png",
+    "contactSheet": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/r3-landscape-three-wgpu-contact-sheet.png",
     "contactSheetMetrics": {
       "sha256": "af83a68f235156904e6a68b72e4037e5d4b4b4bd96ea0b4f6828978ad2ff1446",
       "bytes": 224252,
@@ -107,10 +112,10 @@
       },
       "chunkHash": "f8078d0b6424a9d75010483aa79cd9bc",
       "sceneRecords": {
-        "directory": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records",
-        "resources": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/poi-negative-chunk.bwrd",
-        "frame": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/poi-negative-chunk.bwrf",
-        "metadata": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/poi-negative-chunk.json",
+        "directory": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records",
+        "resources": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/poi-negative-chunk.bwrd",
+        "frame": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/poi-negative-chunk.bwrf",
+        "metadata": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/poi-negative-chunk.json",
         "resourcesSha256": "70cc0a5f8cdadacc50325419916712090a83b5af93cd31d4467cf3e1aac6dd0e",
         "frameSha256": "dc512a5fa16d25be87ea7d9bb96cc69be31c23cacc6ad1db2524ba7a7cebd454",
         "fixtureCheck": {
@@ -119,8 +124,8 @@
         }
       },
       "images": {
-        "three": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/1-poi-negative-chunk-three.png",
-        "wgpu": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/1-poi-negative-chunk-wgpu.png",
+        "three": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/1-poi-negative-chunk-three.png",
+        "wgpu": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/1-poi-negative-chunk-wgpu.png",
         "metrics": {
           "three": {
             "sha256": "b8a0f5c818b648c33b94e1e5d4b6e5c9573c5662ccefb6934ff8144cf7a6384e",
@@ -210,10 +215,10 @@
       },
       "chunkHash": "e9f1c24b9fb4d43ac83a575691bb62bd",
       "sceneRecords": {
-        "directory": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records",
-        "resources": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/connected-ocean-horizon.bwrd",
-        "frame": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/connected-ocean-horizon.bwrf",
-        "metadata": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/connected-ocean-horizon.json",
+        "directory": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records",
+        "resources": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/connected-ocean-horizon.bwrd",
+        "frame": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/connected-ocean-horizon.bwrf",
+        "metadata": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/connected-ocean-horizon.json",
         "resourcesSha256": "79b4cc4ab47b65e15d6018db5d204a2cd2d0729f3af8256ce7a2e8237192264e",
         "frameSha256": "68fbc49840e4a489774a1043f6203a59517d3f7212b6a1fdf6cab316f457a6f4",
         "fixtureCheck": {
@@ -222,8 +227,8 @@
         }
       },
       "images": {
-        "three": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/2-connected-ocean-horizon-three.png",
-        "wgpu": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/2-connected-ocean-horizon-wgpu.png",
+        "three": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/2-connected-ocean-horizon-three.png",
+        "wgpu": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/2-connected-ocean-horizon-wgpu.png",
         "metrics": {
           "three": {
             "sha256": "a992f2464c1069c576c95f015661c0f91e3f3dad2977a800f9a7292c865d238d",
@@ -313,10 +318,10 @@
       },
       "chunkHash": "5bfddc0fb1ffd238c83a575691bb623d",
       "sceneRecords": {
-        "directory": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records",
-        "resources": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/deep-ocean-flora.bwrd",
-        "frame": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/deep-ocean-flora.bwrf",
-        "metadata": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/deep-ocean-flora.json",
+        "directory": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records",
+        "resources": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/deep-ocean-flora.bwrd",
+        "frame": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/deep-ocean-flora.bwrf",
+        "metadata": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/deep-ocean-flora.json",
         "resourcesSha256": "0a5ab0e748f3918322600477f83e675faf48415b4d2fe76a3fcc908935d8089f",
         "frameSha256": "b2f11e1d9e156d1a9a954daf44b5f34bb4d8331c92a69453842eedaac85ea8e7",
         "fixtureCheck": {
@@ -325,8 +330,8 @@
         }
       },
       "images": {
-        "three": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/3-deep-ocean-flora-three.png",
-        "wgpu": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/3-deep-ocean-flora-wgpu.png",
+        "three": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/3-deep-ocean-flora-three.png",
+        "wgpu": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/3-deep-ocean-flora-wgpu.png",
         "metrics": {
           "three": {
             "sha256": "7c88278d9b8f8f4aeec17a88af4917cf8a6ad593d3d10bb1edaf73bb93684761",
@@ -384,7 +389,7 @@
           "applied": true
         },
         "rendered": {
-          "cpuMicros": 2000,
+          "cpuMicros": 3000,
           "gpuMicros": null,
           "backend": "BrowserWebGpu",
           "adapter": "",
@@ -416,10 +421,10 @@
       },
       "chunkHash": "7527b8ab71de0602c83a575691bb62bd",
       "sceneRecords": {
-        "directory": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records",
-        "resources": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/cave-aquifer-section.bwrd",
-        "frame": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/cave-aquifer-section.bwrf",
-        "metadata": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/cave-aquifer-section.json",
+        "directory": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records",
+        "resources": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/cave-aquifer-section.bwrd",
+        "frame": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/cave-aquifer-section.bwrf",
+        "metadata": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/cave-aquifer-section.json",
         "resourcesSha256": "5a250c65971b3b5e875ca1e7b50611013e14bddcf6807db3150556ca9e6410fd",
         "frameSha256": "9834d062c4a4f93cbc9bd1b3e4b764c9a7666f486c9704ca58ba1a562a56b8f5",
         "fixtureCheck": {
@@ -428,8 +433,8 @@
         }
       },
       "images": {
-        "three": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/4-cave-aquifer-section-three.png",
-        "wgpu": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/4-cave-aquifer-section-wgpu.png",
+        "three": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/4-cave-aquifer-section-three.png",
+        "wgpu": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/4-cave-aquifer-section-wgpu.png",
         "metrics": {
           "three": {
             "sha256": "65356fa84305f60c1bc893de5571cb86cc2c3ee1aad5c17845c315ae323d5fcb",
@@ -519,10 +524,10 @@
       },
       "chunkHash": "dcc26b6583c21ebfc83a575691bb623d",
       "sceneRecords": {
-        "directory": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records",
-        "resources": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/biome-transition-negative-space.bwrd",
-        "frame": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/biome-transition-negative-space.bwrf",
-        "metadata": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/scene-records/biome-transition-negative-space.json",
+        "directory": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records",
+        "resources": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/biome-transition-negative-space.bwrd",
+        "frame": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/biome-transition-negative-space.bwrf",
+        "metadata": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/scene-records/biome-transition-negative-space.json",
         "resourcesSha256": "1c8d50e70468515b821fd9b7d3d6e190929738ac6a6341404a9a2a15de3c2034",
         "frameSha256": "7596f48651d4ae7956d1115cd4a94370855a98b6941250fe714a6aff42f3e492",
         "fixtureCheck": {
@@ -531,8 +536,8 @@
         }
       },
       "images": {
-        "three": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/5-biome-transition-negative-space-three.png",
-        "wgpu": "work/hybrid-rust-migration/r3-canonical-current/landscapes-refresh/5-biome-transition-negative-space-wgpu.png",
+        "three": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/5-biome-transition-negative-space-three.png",
+        "wgpu": "work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-refresh-1/5-biome-transition-negative-space-wgpu.png",
         "metrics": {
           "three": {
             "sha256": "8f183f8526f4a720dec55ec3bf292ba646ee8235c8cd367e93a0113c42ca1612",
@@ -590,7 +595,7 @@
           "applied": true
         },
         "rendered": {
-          "cpuMicros": 2000,
+          "cpuMicros": 3000,
           "gpuMicros": null,
           "backend": "BrowserWebGpu",
           "adapter": "",
@@ -613,13 +618,15 @@
   ],
   "errors": [],
   "assertions": {
-    "completeArtifactAndSourceSnapshotValidated": true,
-    "exactArtifactHash": true,
+    "completeArtifactAndSourceSnapshotValidated": false,
+    "exactArtifactHash": false,
     "exact155CaseCertificate": true,
     "exactFiveLandscapeCaseIdentities": true,
     "threeUsesAppExtractionOracleR11": true,
     "rendererPixelParityWithinBounds": true,
     "candidateEvidenceOnly": true,
-    "trackedFixturesUpdated": true
+    "trackedFixturesUpdated": false,
+    "observationsApplyToCurrentArtifact": false,
+    "rerunRequired": true
   }
 }

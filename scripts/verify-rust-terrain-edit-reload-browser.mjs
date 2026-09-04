@@ -40,11 +40,11 @@ import {
   waitForRustMultiplayerVisualTerrainReadiness,
 } from "./verify-rust-multiplayer-browser.mjs";
 
-export const REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH = "c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b";
-export const REQUIRED_TERRAIN_EDIT_SOURCE_DIGEST = "e4fcec5a5762968647960f41e5c18ee7688c81c4c56fa833cb3d476b7f2a0cda";
-export const REQUIRED_TERRAIN_EDIT_SOURCE_FILE_COUNT = 222;
-export const REQUIRED_TERRAIN_EDIT_WASM_SHA256 = "27581732bb4b6ac744b31ca870211b9656036b6f949b78f875f65c0fb54c1d30";
-export const REQUIRED_TERRAIN_EDIT_WASM_BYTES = 7_377_970;
+export const REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH = "6a70291bc1655b6a01436b25590d646f064212d20e807dbbfe409b88e8f2322f";
+export const REQUIRED_TERRAIN_EDIT_SOURCE_DIGEST = "7a815caf45a4721aa5798c1d2509fd1a926e557b8cd853636b05470357318d19";
+export const REQUIRED_TERRAIN_EDIT_SOURCE_FILE_COUNT = 230;
+export const REQUIRED_TERRAIN_EDIT_WASM_SHA256 = "2283f2c4f6510f5d80f4c49874d34029a6e0c3cd36f3ab19a0957c2ee2f86687";
+export const REQUIRED_TERRAIN_EDIT_WASM_BYTES = 7_424_470;
 export const TERRAIN_EDIT_GENERATION_CERTIFICATE = Object.freeze({
   corpusCases: 155,
   corpusHash: "5d4e6b1445b00f3430164d1a8093d8dc",
@@ -2064,6 +2064,14 @@ export async function runTerrainEditReloadBrowser(argv = process.argv, scenario 
     titleAfterReload = await readAndRecord("title-after-full-reload");
     assertCondition(savedEditAt(titleAfterReload.storage, targetEvidence.position).type === AIR_BLOCK_ID,
       "Fresh browser document did not retain Air at the exact broken coordinate.");
+    // The state read can land on the first client catalog reconciliation after
+    // hydration. Require the complete menu to settle again before retaining
+    // pixels; DOM bounds from the earlier pass alone do not prove that the
+    // reinserted dynamic labels reached the compositor.
+    titleVisualReadiness = await waitForTerrainEditReloadTitleVisualReadiness(
+      page,
+      Math.min(options.timeoutMilliseconds, 120_000),
+    );
     await captureScreenshot(page, options.repositoryRoot, options.outputDirectory, screenshots, "06-title-after-full-reload");
     await freshContinue.click({ noWaitAfter: true });
     continued = await waitForGameplay("fresh-continue-ready");

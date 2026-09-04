@@ -116,11 +116,111 @@ export function blockwild_engine_take_events(handle) {
 }
 
 /**
+ * Generate one complete generator-v18 chunk through the coarse BWR2 packet
+ * contract. Malformed or unsupported requests fail closed as an empty result;
+ * the browser bridge rejects that before any authoritative installation.
+ * @param {Uint8Array} request
+ * @returns {Uint8Array}
+ */
+export function blockwild_generate_chunk_v2(request) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_generate_chunk_v2(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Checked-in exact-parity certificate for the fail-closed R3 corpus.
+ * @returns {Uint8Array}
+ */
+export function blockwild_generation_parity_certificate_v2() {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.blockwild_generation_parity_certificate_v2(retptr);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * @returns {Uint8Array}
+ */
+export function blockwild_locator_parity_certificate_v1() {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.blockwild_locator_parity_certificate_v1(retptr);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * @returns {number}
  */
 export function blockwild_protocol_version() {
     const ret = wasm.blockwild_protocol_version();
     return ret >>> 0;
+}
+
+/**
+ * @param {Uint8Array} request
+ * @returns {Uint8Array}
+ */
+export function blockwild_query_dragon_lair_v1(request) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_query_dragon_lair_v1(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Independently selects the nearest eligible settlement and its canonical
+ * public arrival through the bounded Rust planner query contract.
+ * @param {Uint8Array} request
+ * @returns {Uint8Array}
+ */
+export function blockwild_query_settlements_v1(request) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_query_settlements_v1(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 
 /**
@@ -151,11 +251,429 @@ export function blockwild_render_smoke_fixture() {
 }
 
 /**
+ * Return the validated BWRM V1 canonical root as 16 raw bytes. Empty output
+ * means validation failed; this does not persist or adopt the envelope.
+ * @param {Uint8Array} envelope_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_rich_save_migration_root_v1(envelope_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(envelope_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_rich_save_migration_root_v1(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Validate one complete BWRM V1 envelope against a caller-retained root and
+ * return its canonical bytes. Empty output is the fail-closed result for a
+ * malformed envelope, wrong root, or non-canonical encoding.
+ * @param {Uint8Array} envelope_bytes
+ * @param {Uint8Array} expected_root
+ * @returns {Uint8Array}
+ */
+export function blockwild_rich_save_migration_roundtrip_v1(envelope_bytes, expected_root) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(envelope_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(expected_root, wasm.__wbindgen_export);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.blockwild_rich_save_migration_roundtrip_v1(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Moves one Rust-owned platform attachment out of Wasm exactly once.
+ * @param {number} handle
+ * @param {number} transfer_token
+ * @returns {Uint8Array}
+ */
+export function blockwild_runtime_bulk_take_attachment_v2(handle, transfer_token) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        wasm.blockwild_runtime_bulk_take_attachment_v2(retptr, handle, transfer_token);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v1 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v1;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Lower-priority detached platform lane. Rust owns request identity,
+ * backpressure, retry policy, durable receipt validation, and dispatcher
+ * revisions. TypeScript only executes one complete opaque BWPR and returns
+ * its exact BWPA under the Rust-issued transfer token.
+ * @param {number} handle
+ * @param {Uint8Array} control_bytes
+ * @param {Uint8Array} attachment_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_runtime_bulk_v2(handle, control_bytes, attachment_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(control_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(attachment_bytes, wasm.__wbindgen_export);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.blockwild_runtime_bulk_v2(retptr, handle, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Applies one reliable command envelope and returns one deterministic receipt.
+ * Unknown domain payloads reject rather than being silently discarded.
+ * @param {number} handle
+ * @param {Uint8Array} request_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_runtime_command_v2(handle, request_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_runtime_command_v2(retptr, handle, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Creates a fresh integrated runtime or atomically restores one exact R8
+ * checkpoint before assigning a Worker-generation handle.
+ * @param {Uint8Array} request_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_runtime_create_v2(request_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_runtime_create_v2(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Destroys the generational handle. A stale expected identity is rejected and
+ * leaves the authority alive for an explicit synchronized retry.
+ * @param {number} handle
+ * @param {Uint8Array} request_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_runtime_destroy_v2(handle, request_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_runtime_destroy_v2(retptr, handle, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Exports one exact, bounded Worker-replacement checkpoint. Large durable
+ * browser saves remain on the detached chunked persistence lane.
+ * @param {number} handle
+ * @param {Uint8Array} request_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_runtime_export_save_v2(handle, request_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_runtime_export_save_v2(retptr, handle, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Returns one bounded renderer-neutral extraction. Entity/model identity,
+ * transforms, health, protection, input/HUD state, and diagnostics are copied
+ * once per coarse extraction rather than queried per object.
+ * @param {number} handle
+ * @param {Uint8Array} request_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_runtime_extract_v2(handle, request_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_runtime_extract_v2(retptr, handle, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Creates the first canonical save set for a new native world without
+ * fabricating a legacy WorldSave source. The control payload reuses the
+ * bounded `FinalizeSave` identity/timestamp shape. Worlds that already own
+ * compatibility source bytes fail closed so this route cannot delete them.
+ * @param {number} handle
+ * @param {Uint8Array} control_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_runtime_initialize_native_save_v2(handle, control_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(control_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_runtime_initialize_native_save_v2(retptr, handle, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Migrates a provably world-only legacy source after that exact source has
+ * been streamed into `stage_id` through `StageSaveChunk`. The control is an
+ * ordinary `FinalizeSave` bulk request, while `world_projection_bytes` is one
+ * validated BWAS record. Non-zero legacy state flags fail closed and leave the
+ * source stage intact for a richer host-domain adapter.
+ * @param {number} handle
+ * @param {Uint8Array} control_bytes
+ * @param {number} legacy_non_world_state_flags
+ * @param {string} source_key
+ * @param {string} source_format
+ * @param {Uint8Array} world_projection_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_runtime_migrate_legacy_v2(handle, control_bytes, legacy_non_world_state_flags, source_key, source_format, world_projection_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(control_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(source_key, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(source_format, wasm.__wbindgen_export, wasm.__wbindgen_export2);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passArray8ToWasm0(world_projection_bytes, wasm.__wbindgen_export);
+        const len3 = WASM_VECTOR_LEN;
+        wasm.blockwild_runtime_migrate_legacy_v2(retptr, handle, ptr0, len0, legacy_non_world_state_flags, ptr1, len1, ptr2, len2, ptr3, len3);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v5 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v5;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Advances bounded fixed steps after atomically accepting the complete,
+ * strictly sequenced input batch into Rust-owned authority.
+ * @param {number} handle
+ * @param {Uint8Array} request_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_runtime_step_v2(handle, request_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_runtime_step_v2(retptr, handle, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
  * @returns {number}
  */
 export function blockwild_schema_version() {
     const ret = wasm.blockwild_schema_version();
     return ret >>> 0;
+}
+
+/**
+ * Create one long-lived R4 authority. The request includes the complete
+ * directional/waterlogging catalog required to preserve mutation semantics.
+ * @param {Uint8Array} request_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_world_authority_create_r4(request_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_world_authority_create_r4(retptr, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Destroy a live R4 authority. Destruction is identity-bound so an obsolete
+ * worker cannot tear down a replacement authority that reused a request path.
+ * @param {number} handle
+ * @param {Uint8Array} request_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_world_authority_destroy_r4(handle, request_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_world_authority_destroy_r4(retptr, handle, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Execute a bounded R4 authority request against a live handle.
+ * @param {number} handle
+ * @param {Uint8Array} request_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_world_authority_request_r4(handle, request_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(request_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.blockwild_world_authority_request_r4(retptr, handle, ptr0, len0);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v2 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v2;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Rebuild packed sky/R/G/B light for one complete section. `direct_sky_above`
+ * is exactly 256 nibble levels in x + 16*z order. The result uses the same
+ * `BWL1`/`BWI1`/`BWE1` coarse-payload convention as meshing.
+ * @param {Uint8Array} snapshot_bytes
+ * @param {Uint8Array} registry_bytes
+ * @param {Uint8Array} direct_sky_above
+ * @returns {Uint8Array}
+ */
+export function blockwild_world_light_section_v1(snapshot_bytes, registry_bytes, direct_sky_above) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(snapshot_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(registry_bytes, wasm.__wbindgen_export);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passArray8ToWasm0(direct_sky_above, wasm.__wbindgen_export);
+        const len2 = WASM_VECTOR_LEN;
+        wasm.blockwild_world_light_section_v1(retptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v4 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v4;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
+}
+
+/**
+ * Validate and mesh one complete R2 section. The returned payload begins with
+ * `BWM1` on success, `BWI1` when the whole section must fall back to the
+ * TypeScript oracle, or `BWE1` on malformed input. This is intentionally one
+ * coarse call per section, never one call per voxel.
+ * @param {Uint8Array} snapshot_bytes
+ * @param {Uint8Array} registry_bytes
+ * @returns {Uint8Array}
+ */
+export function blockwild_world_mesh_section_v1(snapshot_bytes, registry_bytes) {
+    try {
+        const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
+        const ptr0 = passArray8ToWasm0(snapshot_bytes, wasm.__wbindgen_export);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray8ToWasm0(registry_bytes, wasm.__wbindgen_export);
+        const len1 = WASM_VECTOR_LEN;
+        wasm.blockwild_world_mesh_section_v1(retptr, ptr0, len0, ptr1, len1);
+        var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
+        var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
+        var v3 = getArrayU8FromWasm0(r0, r1).slice();
+        wasm.__wbindgen_export5(r0, r1 * 1, 1);
+        return v3;
+    } finally {
+        wasm.__wbindgen_add_to_stack_pointer(16);
+    }
 }
 function __wbg_get_imports() {
     const import0 = {
@@ -168,30 +686,34 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).WorkerGlobalScope;
             return addHeapObject(ret);
         },
-        __wbg___wbindgen_debug_string_a57024b9c6e4a48b: function(arg0, arg1) {
+        __wbg___wbindgen_debug_string_0accd80f45e5faa2: function(arg0, arg1) {
             const ret = debugString(getObject(arg1));
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);
             const len1 = WASM_VECTOR_LEN;
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
-        __wbg___wbindgen_is_function_5e4570eb24ffa122: function(arg0) {
+        __wbg___wbindgen_is_function_754e9f305ff6029e: function(arg0) {
             const ret = typeof(getObject(arg0)) === 'function';
             return ret;
         },
-        __wbg___wbindgen_is_null_7d13f41e1a2d5140: function(arg0) {
+        __wbg___wbindgen_is_null_87c3bfe968c6a5ad: function(arg0) {
             const ret = getObject(arg0) === null;
             return ret;
         },
-        __wbg___wbindgen_is_string_e6f02f0ea5f20a32: function(arg0) {
+        __wbg___wbindgen_is_null_or_undefined_cf617b836541fad3: function(arg0) {
+            const ret = getObject(arg0) == null;
+            return ret;
+        },
+        __wbg___wbindgen_is_string_c236cabd84a4d769: function(arg0) {
             const ret = typeof(getObject(arg0)) === 'string';
             return ret;
         },
-        __wbg___wbindgen_is_undefined_6cff064c44e0d823: function(arg0) {
+        __wbg___wbindgen_is_undefined_67b456be8673d3d7: function(arg0) {
             const ret = getObject(arg0) === undefined;
             return ret;
         },
-        __wbg___wbindgen_string_get_d154f1e671052120: function(arg0, arg1) {
+        __wbg___wbindgen_string_get_72bdf95d3ae505b1: function(arg0, arg1) {
             const obj = getObject(arg1);
             const ret = typeof(obj) === 'string' ? obj : undefined;
             var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_export, wasm.__wbindgen_export2);
@@ -199,17 +721,17 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
-        __wbg___wbindgen_throw_bb96b2010945f0bc: function(arg0, arg1) {
+        __wbg___wbindgen_throw_1506f2235d1bdba0: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
-        __wbg__wbg_cb_unref_be22cc64ae6946a0: function(arg0) {
+        __wbg__wbg_cb_unref_61db23ac97f16c31: function(arg0) {
             getObject(arg0)._wbg_cb_unref();
         },
         __wbg_beginRenderPass_aa22c432e793359a: function() { return handleError(function (arg0, arg1) {
             const ret = getObject(arg0).beginRenderPass(getObject(arg1));
             return addHeapObject(ret);
         }, arguments); },
-        __wbg_call_35dba3c747ad7521: function() { return handleError(function (arg0, arg1, arg2) {
+        __wbg_call_9c758de292015997: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = getObject(arg0).call(getObject(arg1), getObject(arg2));
             return addHeapObject(ret);
         }, arguments); },
@@ -265,7 +787,7 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).finish();
             return addHeapObject(ret);
         },
-        __wbg_getContext_c5236e0057b35024: function() { return handleError(function (arg0, arg1, arg2) {
+        __wbg_getContext_7d3a8f461c828713: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = getObject(arg0).getContext(getStringFromWasm0(arg1, arg2));
             return isLikeNone(ret) ? 0 : addHeapObject(ret);
         }, arguments); },
@@ -451,34 +973,34 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).minUniformBufferOffsetAlignment;
             return ret;
         },
-        __wbg_navigator_6cfdd5fa246d910f: function(arg0) {
+        __wbg_navigator_3833ecdbc19d2757: function(arg0) {
             const ret = getObject(arg0).navigator;
             return addHeapObject(ret);
         },
-        __wbg_navigator_e5c345298a9609cd: function(arg0) {
+        __wbg_navigator_391291470f58c650: function(arg0) {
             const ret = getObject(arg0).navigator;
             return addHeapObject(ret);
         },
-        __wbg_new_652118cdee90118f: function() { return handleError(function (arg0, arg1) {
+        __wbg_new_3b242422c588a8f3: function() { return handleError(function (arg0, arg1) {
             const ret = new OffscreenCanvas(arg0 >>> 0, arg1 >>> 0);
             return addHeapObject(ret);
         }, arguments); },
-        __wbg_new_ebe3e0f6837f0879: function() {
+        __wbg_new_ce1ab61c1c2b300d: function() {
             const ret = new Object();
             return addHeapObject(ret);
         },
-        __wbg_new_typed_ad9b105a7be50737: function() {
+        __wbg_new_typed_41c97238ee4583e3: function() {
             const ret = new Object();
             return addHeapObject(ret);
         },
-        __wbg_new_typed_cceaf62d8d95e9f2: function(arg0, arg1) {
+        __wbg_new_typed_bf31d18f92484486: function(arg0, arg1) {
             try {
                 var state0 = {a: arg0, b: arg1};
                 var cb0 = (arg0, arg1) => {
                     const a = state0.a;
                     state0.a = 0;
                     try {
-                        return __wasm_bindgen_func_elem_1261(a, state0.b, arg0, arg1);
+                        return __wasm_bindgen_func_elem_1871(a, state0.b, arg0, arg1);
                     } finally {
                         state0.a = a;
                     }
@@ -500,10 +1022,10 @@ function __wbg_get_imports() {
         __wbg_pushErrorScope_fa23d1206bc26dce: function(arg0, arg1) {
             getObject(arg0).pushErrorScope(__wbindgen_enum_GpuErrorFilter[arg1]);
         },
-        __wbg_queueMicrotask_ac694eae12e92dfb: function(arg0) {
+        __wbg_queueMicrotask_35c611f4a14830b2: function(arg0) {
             queueMicrotask(getObject(arg0));
         },
-        __wbg_queueMicrotask_be5fe34a8f4cad4d: function(arg0) {
+        __wbg_queueMicrotask_404ed0a58e0b63cc: function(arg0) {
             const ret = getObject(arg0).queueMicrotask;
             return addHeapObject(ret);
         },
@@ -519,14 +1041,14 @@ function __wbg_get_imports() {
             const ret = getObject(arg0).requestDevice(getObject(arg1));
             return addHeapObject(ret);
         },
-        __wbg_resolve_020f95d838c6ef25: function(arg0) {
+        __wbg_resolve_25a7e548d5881dca: function(arg0) {
             const ret = Promise.resolve(getObject(arg0));
             return addHeapObject(ret);
         },
         __wbg_setPipeline_c41bf46790f27f9e: function(arg0, arg1) {
             getObject(arg0).setPipeline(getObject(arg1));
         },
-        __wbg_set_8155bb79a948541b: function() { return handleError(function (arg0, arg1, arg2) {
+        __wbg_set_6e30c9374c26414c: function() { return handleError(function (arg0, arg1, arg2) {
             const ret = Reflect.set(getObject(arg0), getObject(arg1), getObject(arg2));
             return ret;
         }, arguments); },
@@ -851,19 +1373,19 @@ function __wbg_get_imports() {
         __wbg_set_write_mask_d45279e56abbfcb5: function(arg0, arg1) {
             getObject(arg0).writeMask = arg1 >>> 0;
         },
-        __wbg_static_accessor_GLOBAL_THIS_466428f93b4eaa76: function() {
-            const ret = typeof globalThis === 'undefined' ? null : globalThis;
-            return isLikeNone(ret) ? 0 : addHeapObject(ret);
-        },
-        __wbg_static_accessor_GLOBAL_c7aea38d4de089bc: function() {
+        __wbg_static_accessor_GLOBAL_9d53f2689e622ca1: function() {
             const ret = typeof global === 'undefined' ? null : global;
             return isLikeNone(ret) ? 0 : addHeapObject(ret);
         },
-        __wbg_static_accessor_SELF_42d4fae05e59267a: function() {
+        __wbg_static_accessor_GLOBAL_THIS_a1a35cec07001a8a: function() {
+            const ret = typeof globalThis === 'undefined' ? null : globalThis;
+            return isLikeNone(ret) ? 0 : addHeapObject(ret);
+        },
+        __wbg_static_accessor_SELF_4c59f6c7ea29a144: function() {
             const ret = typeof self === 'undefined' ? null : self;
             return isLikeNone(ret) ? 0 : addHeapObject(ret);
         },
-        __wbg_static_accessor_WINDOW_e0db14a0eba6a812: function() {
+        __wbg_static_accessor_WINDOW_e70ae9f2eb052253: function() {
             const ret = typeof window === 'undefined' ? null : window;
             return isLikeNone(ret) ? 0 : addHeapObject(ret);
         },
@@ -878,35 +1400,35 @@ function __wbg_get_imports() {
         __wbg_submit_ce44115121cd166c: function(arg0, arg1, arg2) {
             getObject(arg0).submit(getArrayJsValueViewFromWasm0(arg1, arg2));
         },
-        __wbg_then_7026b513a94278a8: function(arg0, arg1) {
-            const ret = getObject(arg0).then(getObject(arg1));
+        __wbg_then_18f476d590e58992: function(arg0, arg1, arg2) {
+            const ret = getObject(arg0).then(getObject(arg1), getObject(arg2));
             return addHeapObject(ret);
         },
-        __wbg_then_72819b8d4e081fb5: function(arg0, arg1, arg2) {
-            const ret = getObject(arg0).then(getObject(arg1), getObject(arg2));
+        __wbg_then_ac7b025999b52837: function(arg0, arg1) {
+            const ret = getObject(arg0).then(getObject(arg1));
             return addHeapObject(ret);
         },
         __wbg_unconfigure_0a07a0a40de8988d: function(arg0) {
             getObject(arg0).unconfigure();
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 75, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_1247);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 90, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_1853);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUDevice")], shim_idx: 28, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_315);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("GPUDevice")], shim_idx: 43, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_917);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("any")], shim_idx: 28, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_315_2);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("any")], shim_idx: 43, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_917_2);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("undefined")], shim_idx: 28, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_315_3);
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("undefined")], shim_idx: 43, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, __wasm_bindgen_func_elem_917_3);
             return addHeapObject(ret);
         },
         __wbindgen_cast_0000000000000005: function(arg0) {
@@ -933,10 +1455,10 @@ function __wbg_get_imports() {
     };
 }
 
-function __wasm_bindgen_func_elem_1247(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_1853(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_1247(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_1853(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -947,10 +1469,10 @@ function __wasm_bindgen_func_elem_1247(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_315(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_917(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_315(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_917(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -961,10 +1483,10 @@ function __wasm_bindgen_func_elem_315(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_315_2(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_917_2(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_315_2(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_917_2(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -975,10 +1497,10 @@ function __wasm_bindgen_func_elem_315_2(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_315_3(arg0, arg1, arg2) {
+function __wasm_bindgen_func_elem_917_3(arg0, arg1, arg2) {
     try {
         const retptr = wasm.__wbindgen_add_to_stack_pointer(-16);
-        wasm.__wasm_bindgen_func_elem_315_3(retptr, arg0, arg1, addHeapObject(arg2));
+        wasm.__wasm_bindgen_func_elem_917_3(retptr, arg0, arg1, addHeapObject(arg2));
         var r0 = getDataViewMemory0().getInt32(retptr + 4 * 0, true);
         var r1 = getDataViewMemory0().getInt32(retptr + 4 * 1, true);
         if (r1) {
@@ -989,8 +1511,8 @@ function __wasm_bindgen_func_elem_315_3(arg0, arg1, arg2) {
     }
 }
 
-function __wasm_bindgen_func_elem_1261(arg0, arg1, arg2, arg3) {
-    wasm.__wasm_bindgen_func_elem_1261(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
+function __wasm_bindgen_func_elem_1871(arg0, arg1, arg2, arg3) {
+    wasm.__wasm_bindgen_func_elem_1871(arg0, arg1, addHeapObject(arg2), addHeapObject(arg3));
 }
 
 
@@ -1307,15 +1829,11 @@ function __wbg_finalize_init(instance, module) {
 
 async function __wbg_load(module, imports) {
     if (typeof Response === 'function' && module instanceof Response) {
-        if (!module.ok) {
-            throw new Error(`failed to fetch Wasm: ${module.status} ${module.statusText} fetching '${module.url}'`);
-        }
-
         if (typeof WebAssembly.instantiateStreaming === 'function') {
             try {
                 return await WebAssembly.instantiateStreaming(module, imports);
             } catch (e) {
-                const validResponse = expectedResponseType(module.type);
+                const validResponse = module.ok && expectedResponseType(module.type);
 
                 if (validResponse && module.headers.get('Content-Type') !== 'application/wasm') {
                     console.warn("`WebAssembly.instantiateStreaming` failed because your server does not serve Wasm with `application/wasm` MIME type. Falling back to `WebAssembly.instantiate` which is slower. Original error:\n", e);
