@@ -1490,9 +1490,16 @@ function assertCurrentDocumentTarget(documentValue: StoredWorld, immutable: Rust
   const document = ordinaryRecord(documentValue, "current historical StoredWorld");
   const metadata = ordinaryRecord(document.metadata, "current historical StoredWorld.metadata");
   const save = ordinaryRecord(document.save, "current historical StoredWorld.save");
+  const generationIdentity = {
+    schemaVersion: immutable.target.generationIdentity.schemaVersion,
+    generatorHash: immutable.target.generationIdentity.generatorHash,
+    terrainContentHash: immutable.target.generationIdentity.terrainContentHash,
+    generationOptionsJson: immutable.target.generationIdentity.generationOptionsJson,
+  };
   if (metadata.id !== immutable.target.catalogWorldId || metadata.seed !== immutable.target.worldSeed
-    || save.seed !== immutable.target.worldSeed) {
-    fail("document-target", "Current external StoredWorld crossed its immutable world target or seed");
+    || save.seed !== immutable.target.worldSeed
+    || !equalJson(metadata.generationIdentity, generationIdentity)) {
+    fail("document-target", "Current external StoredWorld crossed its immutable world, seed, or generation target");
   }
 }
 

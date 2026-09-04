@@ -298,6 +298,37 @@ test("plan-bound initial and successor proposals preserve immutable custody", as
   assert.deepEqual(successor.immutable, descriptor.immutable);
   assert.equal(successor.external.currentDocument.revision, 2);
 
+  const mutableRules = storedWorld(2);
+  mutableRules.options = { ...mutableRules.options, difficulty: "hard" };
+  const mutableRulesEnvelope = await createRustHistoricalStoredWorldEnvelopeV2({
+    document: mutableRules,
+    source: source(),
+    previous: { source: envelope.source, initialDocument: envelope.initialDocument, currentDocument: envelope.currentDocument },
+  });
+  await assert.doesNotReject(
+    advanceRustHistoricalExternalDescriptorProposalV2(descriptor, mutableRulesEnvelope),
+    "non-generation world rules remain opaque TypeScript compatibility state",
+  );
+
+  const generationDrift = structuredClone(storedWorld(2));
+  assert(generationDrift.metadata.generationIdentity);
+  generationDrift.metadata = {
+    ...generationDrift.metadata,
+    generationIdentity: {
+      ...generationDrift.metadata.generationIdentity,
+      generatorHash: hash(0x7d),
+    },
+  };
+  const generationDriftEnvelope = await createRustHistoricalStoredWorldEnvelopeV2({
+    document: generationDrift,
+    source: source(),
+    previous: { source: envelope.source, initialDocument: envelope.initialDocument, currentDocument: envelope.currentDocument },
+  });
+  await assert.rejects(
+    advanceRustHistoricalExternalDescriptorProposalV2(descriptor, generationDriftEnvelope),
+    (error: unknown) => error instanceof RustHistoricalSavePersistenceError && error.code === "document-target",
+  );
+
   const stalePlan = {
     ...structuredClone(plan),
     target: {
