@@ -9009,7 +9009,10 @@ export class VoxelEngine {
     this.rustNativePersistenceWorldId = input.worldId;
     const result = input.kind === "create"
       ? await this.worldStorage.initializeNativeWorld(input.worldId)
-      : await this.worldStorage.hydrateNativeWorld(input.worldId);
+      : await this.worldStorage.hydrateNativeWorld(input.worldId, {
+        contentHash: input.host.diagnostics().contentHash ?? undefined,
+        nativePlayerAuthorityRequested: this.rustLivePlayerAuthorityRequestedR5,
+      });
     if (!result.ok) throw new Error(result.error.message);
   }
 
@@ -10733,24 +10736,45 @@ export class VoxelEngine {
       const generation = ++this.rustRuntimeTransitionGeneration;
       readiness = this.replaceTerrainGenerationReadiness();
       this.assertTerrainGenerationTransition(generation, readiness, "saved-world transition");
-      const normalizedOptions = normalizeWorldOptions(options);
+      let authoritativeSave = save;
+      let normalizedOptions = normalizeWorldOptions(options);
+      const expectedGenerationIdentity = deriveWorldGenerationIdentityV1(save, normalizedOptions);
       const host = await this.activateRustWorldRuntime(
         generation,
         "load",
         worldId,
         save.seed,
         save,
-        deriveWorldGenerationIdentityV1(save, normalizedOptions),
+        expectedGenerationIdentity,
       );
       this.assertTerrainGenerationTransition(generation, readiness, "saved-world native activation");
-      if (this.terrainGenerationMode() === "rust") {
-        await this.prepareRustLoadedWorldTerrain(generation, readiness, save, normalizedOptions);
+      // Native historical recovery may have repaired the catalog mirror while
+      // activating. Never continue presenting the stale pre-hydration caller
+      // snapshot when this ID belongs to a durable browser world.
+      const recovered = this.worldStorage.loadWorld(worldId, false);
+      if (recovered.ok) {
+        const recoveredOptions = normalizeWorldOptions(recovered.value.options);
+        const recoveredGenerationIdentity = deriveWorldGenerationIdentityV1(recovered.value.save, recoveredOptions);
+        if (recovered.value.save.seed !== save.seed
+          || recoveredGenerationIdentity.schemaVersion !== expectedGenerationIdentity.schemaVersion
+          || recoveredGenerationIdentity.generatorHash !== expectedGenerationIdentity.generatorHash
+          || recoveredGenerationIdentity.terrainContentHash !== expectedGenerationIdentity.terrainContentHash
+          || recoveredGenerationIdentity.generationOptionsJson !== expectedGenerationIdentity.generationOptionsJson) {
+          throw new Error("Native hydration repaired the browser mirror across its immutable seed or generation target");
+        }
+        authoritativeSave = recovered.value.save;
+        normalizedOptions = recoveredOptions;
+      } else if (recovered.error.code !== "not-found") {
+        throw new Error(recovered.error.message);
       }
-      this.loadWorld(save, normalizedOptions, worldId);
+      if (this.terrainGenerationMode() === "rust") {
+        await this.prepareRustLoadedWorldTerrain(generation, readiness, authoritativeSave, normalizedOptions);
+      }
+      this.loadWorld(authoritativeSave, normalizedOptions, worldId);
       this.running = false;
       this.paused = true;
       this.assertTerrainGenerationTransition(generation, readiness, "saved-world mirror finalization");
-      await this.finalizeRustWorldRuntime(generation, "load", save, host);
+      await this.finalizeRustWorldRuntime(generation, "load", authoritativeSave, host);
       if (this.rustLivePlayerAuthorityProductionGate === true) this.reapplyRustLivePlayerViewR10(generation, host);
       this.rustRuntimeOperationsBlocked = false;
       this.running = true;

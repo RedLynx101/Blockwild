@@ -232,6 +232,13 @@ class FakeStorage {
   loadWorld(id: string) {
     this.documentReads += 1;
     this.events.push(`mirror-read:${id}`);
+    if (id !== this.metadata.id) {
+      return { ok: false as const, error: {
+        code: "not-found" as const,
+        message: "That world does not exist on this device.",
+        key: id,
+      } };
+    }
     return { ok: true as const, value: {
       version: 2 as const,
       metadata: { ...this.metadata },
@@ -581,6 +588,54 @@ test("stored world recovers before the compatibility document is read or present
   ]);
   assert.equal(manager.configs[0]?.generationOptionsJson, storage.metadata.generationIdentity?.generationOptionsJson);
   assert.equal(manager.configs[0]?.generatorHash, storage.metadata.generationIdentity?.generatorHash);
+});
+
+test("direct catalog load presents the post-hydration mirror instead of its stale caller snapshot", async () => {
+  const storage = new FakeStorage();
+  const manager = new FakeManager(storage.events);
+  const engine = engineHarness(storage, manager);
+  const staleSave = {
+    seed: storage.metadata.seed,
+    mode: "survival",
+    generatorVersion: 18,
+    generatorProfile: "world-below-v15",
+    player: { x: 1, y: 48, z: 1 },
+  } as WorldSave;
+  const recoveredSave = {
+    ...staleSave,
+    mode: "builder",
+    player: { x: 19, y: 52, z: -7 },
+  } as WorldSave;
+  storage.loadWorld = (id: string) => {
+    storage.documentReads += 1;
+    storage.events.push(`mirror-read:${id}`);
+    return { ok: true as const, value: {
+      version: 2 as const,
+      metadata: { ...storage.metadata, mode: "builder" as const },
+      options: { difficulty: "hard" as const },
+      save: recoveredSave,
+    } };
+  };
+  const presented: Array<Readonly<{ save: WorldSave; options: unknown; id: string }>> = [];
+  (engine as unknown as { loadWorld(save: WorldSave, options: unknown, id: string): void }).loadWorld = (save, options, id) => {
+    presented.push({ save, options, id });
+    engine.activeWorldId = id;
+  };
+
+  await engine.loadWorldWithRustRuntime(staleSave, { difficulty: "easy" }, storage.metadata.id);
+
+  assert.equal(storage.documentReads, 1);
+  assert.equal(presented.length, 1);
+  assert.equal(presented[0]?.save, recoveredSave);
+  assert.equal((presented[0]?.options as { difficulty: string }).difficulty, "hard");
+  assert.equal(presented[0]?.id, storage.metadata.id);
+  assert.deepEqual(storage.events.slice(0, 6), [
+    "session-drain",
+    `activate:${storage.metadata.id}`,
+    `bind:${storage.metadata.id}`,
+    `hydrate:${storage.metadata.id}`,
+    `mirror-read:${storage.metadata.id}`,
+  ]);
 });
 
 test("stored world without an exact catalog terrain identity stays protected before activation or document read", async () => {

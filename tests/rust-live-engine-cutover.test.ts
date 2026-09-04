@@ -179,6 +179,11 @@ function harness(manager: FakeManager, hydrate: RustWorldHydrationHookV1 = async
       activeWorldId: null,
       setActiveWorld: () => ({ ok: true as const, value: null }),
       deleteWorld: (id: string) => ({ ok: true as const, value: { id } }),
+      loadWorld: (id: string) => ({ ok: false as const, error: {
+        code: "not-found" as const,
+        message: "That world does not exist on this device.",
+        key: id,
+      } }),
     },
     events: { onSave: () => undefined, onToast: () => undefined },
   });
