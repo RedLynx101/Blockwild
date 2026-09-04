@@ -638,6 +638,34 @@ test("direct catalog load presents the post-hydration mirror instead of its stal
   ]);
 });
 
+test("direct catalog load rejects a post-hydration mirror that crosses its native target", async () => {
+  const storage = new FakeStorage();
+  const manager = new FakeManager(storage.events);
+  const engine = engineHarness(storage, manager);
+  const requestedSave = {
+    seed: storage.metadata.seed,
+    mode: "survival",
+    generatorVersion: 18,
+    generatorProfile: "world-below-v15",
+  } as WorldSave;
+  storage.loadWorld = () => ({ ok: true as const, value: {
+    version: 2 as const,
+    metadata: { ...storage.metadata, seed: "CROSSED-SEED" },
+    options: {},
+    save: { ...requestedSave, seed: "CROSSED-SEED" },
+  } });
+  let presented = false;
+  (engine as unknown as { loadWorld(): void }).loadWorld = () => { presented = true; };
+
+  await assert.rejects(
+    engine.loadWorldWithRustRuntime(requestedSave, {}, storage.metadata.id),
+    /across its immutable seed or generation target/u,
+  );
+  assert.equal(presented, false);
+  assert.equal(manager.shutdowns, 1);
+  assert.equal(engine.getRustRuntimeDiagnostics().operationsBlocked, true);
+});
+
 test("stored world without an exact catalog terrain identity stays protected before activation or document read", async () => {
   const storage = new FakeStorage("catalog-legacy", { generationIdentity: null });
   const manager = new FakeManager(storage.events);
