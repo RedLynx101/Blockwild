@@ -11,6 +11,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { brotliCompressSync, gzipSync } from "node:zlib";
 import {
   RUST_ENGINE_ARTIFACT_SCHEMA,
@@ -114,6 +115,25 @@ function replaceJsonAtomically(filePath, value) {
   } finally {
     if (existsSync(temporary)) unlinkSync(temporary);
   }
+}
+
+function preserveTimestampForUnchangedIdentity(nextValue, existingValue, field) {
+  if (!existingValue || typeof existingValue !== "object" || Array.isArray(existingValue)) return nextValue;
+  const nextIdentity = { ...nextValue };
+  delete nextIdentity[field];
+  const { [field]: existingTimestamp, ...existingIdentity } = existingValue;
+  if (typeof existingTimestamp !== "string" || !isDeepStrictEqual(existingIdentity, nextIdentity)) return nextValue;
+  return { ...nextValue, [field]: existingTimestamp };
+}
+
+/** Keep an immutable artifact's publication time stable across exact rebuilds. */
+export function stabilizeArtifactManifestTimestamp(nextManifest, existingManifest = null) {
+  return preserveTimestampForUnchangedIdentity(nextManifest, existingManifest, "createdAt");
+}
+
+/** Keep the selector's publication time stable while its complete identity is unchanged. */
+export function stabilizeArtifactIndexTimestamp(nextIndex, existingIndex = null) {
+  return preserveTimestampForUnchangedIdentity(nextIndex, existingIndex, "generatedAt");
 }
 
 function artifactFileMap(files, label) {
@@ -359,7 +379,7 @@ export function buildRustEngine(argv = process.argv) {
     const artifactHash = contentAddressForFiles(files);
     assertExpectedArtifactHashBeforePublication(artifactHash, expectedArtifactHash);
     const totals = compressedTotals(packageDirectory, files);
-    const artifactManifest = {
+    let artifactManifest = {
       schema: RUST_ENGINE_ARTIFACT_SCHEMA,
       artifactHash,
       variant: options.variant,
@@ -398,14 +418,15 @@ export function buildRustEngine(argv = process.argv) {
       "Published artifact directory",
     );
     if (existsSync(destination)) {
-      validateExistingArtifactDestination(destination, { artifactHash, files });
+      const existingArtifact = validateExistingArtifactDestination(destination, { artifactHash, files });
+      artifactManifest = stabilizeArtifactManifestTimestamp(artifactManifest, existingArtifact.manifest);
       replaceJsonAtomically(path.join(destination, "manifest.json"), artifactManifest);
       safeRemoveTree(stagingRoot, packageDirectory);
     } else {
       renameSync(packageDirectory, destination);
     }
 
-    const nextIndex = {
+    let nextIndex = {
       schema: RUST_ENGINE_INDEX_SCHEMA,
       generatedAt: new Date().toISOString(),
       defaultVariant: existingIndex?.defaultVariant ?? options.variant,
@@ -419,6 +440,7 @@ export function buildRustEngine(argv = process.argv) {
       },
     };
     if (!nextIndex.artifacts[nextIndex.defaultVariant]) nextIndex.defaultVariant = options.variant;
+    nextIndex = stabilizeArtifactIndexTimestamp(nextIndex, existingIndex);
     publishIndex(publicEngineDirectory, nextIndex);
     pruneUnreferencedArtifacts(publicEngineDirectory, nextIndex);
     result = {

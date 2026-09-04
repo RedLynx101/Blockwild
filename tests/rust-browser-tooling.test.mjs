@@ -29,6 +29,8 @@ import {
   acquireRustEngineBuildLock,
   assertExpectedArtifactHashBeforePublication,
   releaseRustEngineBuildLock,
+  stabilizeArtifactIndexTimestamp,
+  stabilizeArtifactManifestTimestamp,
   validateExistingArtifactDestination,
 } from "../scripts/build-rust-engine.mjs";
 import {
@@ -234,6 +236,67 @@ test("expected artifact mismatch is rejected by the pure pre-publication guard",
     assertExpectedArtifactHashBeforePublication("a".repeat(64), "a".repeat(64)),
     "a".repeat(64),
   );
+});
+
+test("unchanged artifact and index identities preserve their publication timestamps", () => {
+  const existingManifest = {
+    schema: 1,
+    artifactHash: "a".repeat(64),
+    variant: "renderer-lab",
+    cargoFeatures: ["renderer"],
+    sourceSnapshot: { schema: 1, digest: "b".repeat(64), fileCount: 230 },
+    files: [{ path: "engine_bg.wasm", bytes: 8, sha256: "c".repeat(64) }],
+    createdAt: "2026-09-01T00:00:00.000Z",
+  };
+  const nextManifest = { ...structuredClone(existingManifest), createdAt: "2026-09-04T00:00:00.000Z" };
+  assert.equal(stabilizeArtifactManifestTimestamp(nextManifest, existingManifest).createdAt, existingManifest.createdAt);
+
+  const artifact = {
+    hash: existingManifest.artifactHash,
+    directory: existingManifest.artifactHash,
+    manifest: `${existingManifest.artifactHash}/manifest.json`,
+  };
+  const existingIndex = {
+    schema: 1,
+    generatedAt: "2026-09-01T00:00:01.000Z",
+    defaultVariant: "compatibility",
+    artifacts: { compatibility: artifact, "renderer-lab": artifact },
+  };
+  const nextIndex = { ...structuredClone(existingIndex), generatedAt: "2026-09-04T00:00:01.000Z" };
+  assert.equal(stabilizeArtifactIndexTimestamp(nextIndex, existingIndex).generatedAt, existingIndex.generatedAt);
+});
+
+test("changed artifact or index identities retain their new publication timestamps", () => {
+  const oldCreatedAt = "2026-09-01T00:00:00.000Z";
+  const newCreatedAt = "2026-09-04T00:00:00.000Z";
+  const existingManifest = {
+    schema: 1,
+    artifactHash: "a".repeat(64),
+    variant: "renderer-lab",
+    sourceSnapshot: { schema: 1, digest: "b".repeat(64), fileCount: 229 },
+    createdAt: oldCreatedAt,
+  };
+  const nextManifest = {
+    ...structuredClone(existingManifest),
+    sourceSnapshot: { ...existingManifest.sourceSnapshot, fileCount: 230 },
+    createdAt: newCreatedAt,
+  };
+  assert.equal(stabilizeArtifactManifestTimestamp(nextManifest, existingManifest).createdAt, newCreatedAt);
+
+  const oldGeneratedAt = "2026-09-01T00:00:01.000Z";
+  const newGeneratedAt = "2026-09-04T00:00:01.000Z";
+  const existingIndex = {
+    schema: 1,
+    generatedAt: oldGeneratedAt,
+    defaultVariant: "compatibility",
+    artifacts: { compatibility: { hash: "a".repeat(64) } },
+  };
+  const nextIndex = {
+    ...structuredClone(existingIndex),
+    generatedAt: newGeneratedAt,
+    artifacts: { compatibility: { hash: "d".repeat(64) } },
+  };
+  assert.equal(stabilizeArtifactIndexTimestamp(nextIndex, existingIndex).generatedAt, newGeneratedAt);
 });
 
 test("browser benchmark inputs and summaries are deterministic", () => {
