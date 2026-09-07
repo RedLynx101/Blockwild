@@ -47,7 +47,7 @@ jobs:
         with:
           node-version: ${{ env.BLOCKWILD_NODE_VERSION }}
       - name: Restore TypeScript npm cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: blockwild-typescript-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-${{ hashFiles('package-lock.json') }}
@@ -81,7 +81,7 @@ jobs:
         with:
           node-version: ${{ env.BLOCKWILD_NODE_VERSION }}
       - name: Restore TypeScript npm cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: blockwild-typescript-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-${{ hashFiles('package-lock.json') }}
@@ -105,7 +105,7 @@ jobs:
         with:
           node-version: ${{ env.BLOCKWILD_NODE_VERSION }}
       - name: Restore TypeScript npm cache
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.npm
           key: blockwild-typescript-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-${{ hashFiles('package-lock.json') }}
