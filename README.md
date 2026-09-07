@@ -1,5 +1,14 @@
 # Blockwild
 
+This branch is the independently maintained **Rust/Wasm conversion edition**. It is unfinished at 9/32 formal migration criteria accepted and is not the GitHub default or a production release source. The last preserved integrated verifier result was 139/143; its four inherited failures remain visible in [the paused-work handoff](docs/PAUSED_WORK_HANDOFF_2026-09-07.md).
+
+- **This edition:** [`edition/rust`](https://github.com/RedLynx101/blockwild/tree/edition/rust)
+- **Intended default and future release edition:** [`edition/typescript`](https://github.com/RedLynx101/blockwild/tree/edition/typescript)
+- **Untouched historical TypeScript baseline:** [`baseline/typescript-pre-conversion-2026-08-11`](https://github.com/RedLynx101/blockwild/tree/baseline/typescript-pre-conversion-2026-08-11)
+- **Preserved Rust source checkpoint:** [`codex/checkpoint-2026-09-07`](https://github.com/RedLynx101/blockwild/tree/codex/checkpoint-2026-09-07) — source parent `a40e62c33b60b973ca75e87990503948ed7f2a65`
+- **Maintenance and CI contract:** [docs/EDITION_MAINTENANCE.md](docs/EDITION_MAINTENANCE.md)
+- **Behavioral parity matrix:** [docs/EDITION_PARITY.md](docs/EDITION_PARITY.md)
+
 <p align="center">
   <img src="docs/assets/screenshots/2026-08-01-field-archive/2026-08-01-title-screen.png" alt="Blockwild v1.12.0 title screen over a live streamed wilderness" width="920" />
 </p>
@@ -13,7 +22,7 @@
 
 Blockwild is an open-source, systems-dense browser voxel survival RPG built with TypeScript, React, Three.js, and deterministic procedural generation. It is a playable world rather than a static technical demo: streamed terrain, ecology, combat, building, farming, settlements, dungeons, creature research and capture, host-authoritative multiplayer, magic, dragons, and Cardforge all operate on a persistent simulation.
 
-The current release is **v1.12.0 Field Archive**.
+The public TypeScript release is **v1.12.0 Field Archive**. The links below describe that deployed TypeScript lineage, not this Rust branch.
 
 - **Play:** [blockwild.app](https://blockwild.app)
 - **Browse the living wiki:** [blockwild.app/wiki](https://blockwild.app/wiki)
@@ -93,12 +102,15 @@ The source registry is [`app/game/wiki-content.ts`](app/game/wiki-content.ts). `
 Requirements:
 
 - Node.js 22.13 or newer
+- Rust 1.91.1 with `rustfmt`, `clippy`, and `wasm32-unknown-unknown`
+- A `wasm-bindgen-cli` version matching `engine/Cargo.lock`
 - A current hardware-accelerated WebGL browser
 - Bash/WSL for the exact production build and full validation path
 
 ```bash
 git clone https://github.com/RedLynx101/blockwild.git
 cd blockwild
+git switch edition/rust
 npm ci
 npm run dev
 ```
@@ -120,6 +132,13 @@ npm test
 | `npm run build` | Generate wiki data, build the Sites Worker artifact, and validate it |
 | `npm run lint` | Run ESLint outside generated and work directories |
 | `npm test` | Build, validate, and run the full deterministic test suite |
+| `npm run test:edition-maintenance` | Verify Rust branch identity, CI/dependency routing, parity docs, and deployment suppression |
+| `npm run test:rust-engine` | Run the Rust fixture, protocol, artifact, preservation, and migration contract tests |
+| `npm run build:rust-engine` | Rebuild the compatibility Wasm candidate; this is not migration acceptance or publication |
+| `npm run build:rust-renderer-lab` | Rebuild the experimental renderer-lab candidate |
+| `npm run check:rust-engine` | Validate checked-in Rust engine artifact bytes and manifests |
+| `npm run verify:rust-schema-convergence` | Require complete generated schema convergence; currently part of the unfinished gate set |
+| `npm run audit:rust-migration` | Run the strict 32-criterion audit; intentionally fails while acceptance remains 9/32 |
 | `npm run test:wiki` | Check wiki coverage, links, shards, and UI boundaries |
 | `npm run test:cardforge` | Check the catalog, art, layouts, economy, and matches |
 | `npm run models:render -- --creatures --portraits outputs/model-portraits --portrait-only` | Render canonical creature review portraits |
@@ -168,7 +187,7 @@ See the [engineering overview](docs/ENGINEERING_OVERVIEW.md) for a guided codeba
 
 ## Saves and privacy
 
-Worlds and character profiles live in `localStorage` for the current browser and origin. Saves contain the seed, edits, player state, persistent creatures, machines, structures, world knowledge, and compatibility versions rather than copies of untouched generated terrain.
+The Rust edition's authoritative persistence lives in IndexedDB `blockwild-rust-persistence-v1`; TypeScript adapters and browser-local compatibility data remain separately namespaced. Normal startup must not import, normalize, or delete TypeScript-edition records. Automatic cross-edition save conversion is not supported. The TypeScript edition's raw previous-localStorage download is not a whole Rust database backup, and the current Rust export path must not be described as usable until its own UI and byte-preservation gates pass.
 
 - Clearing site data, changing origin, using a temporary profile, or exceeding browser storage can remove or block local saves.
 - Saves do not automatically follow a player to another device.
@@ -178,13 +197,16 @@ Worlds and character profiles live in `localStorage` for the current browser and
 
 ## Deployment
 
-`main` is the release branch. GitHub is the source of truth for Vercel's [blockwild.app](https://blockwild.app) deployment. The same exact commit is built through Vinext for the Sites mirror. Release validation must identify the deployed Git SHA; a passing local build is not proof that either public target is current.
+`edition/rust` is not a release branch. Repository-level Vercel Git deployment is disabled, and the public [blockwild.app](https://blockwild.app) and Sites endpoints remain evidence of the TypeScript lineage only. No Rust build, artifact, 9/32 audit state, or source-config change authorizes migration promotion or deployment.
 
 The application does not currently require D1, R2, or a server database. The empty Drizzle scaffold is reserved and should not acquire game persistence without an explicit ownership and migration design.
 
 ## Project documentation
 
 - [Engineering overview](docs/ENGINEERING_OVERVIEW.md) — a concise tour of the simulation, content, persistence, multiplayer, validation, and release architecture
+- [Edition maintenance contract](docs/EDITION_MAINTENANCE.md) — branch ownership, switching, CI routing, caches, artifacts, and deployment safeguards
+- [Edition parity matrix](docs/EDITION_PARITY.md) — versioned behavior, compatibility boundaries, evidence, and deliberate porting procedure
+- [Paused Rust work handoff](docs/PAUSED_WORK_HANDOFF_2026-09-07.md) — inherited failures and the preserved 9/32 boundary
 - [Building Blockwild with Agentic Autoresearch](BLOCKWILD_AGENTIC_AUTORESEARCH_CASE_STUDY.md) — the human-directed agent workflow, telemetry loop, and optimization case study
 - [Performance comparison log](docs/PERFORMANCE_COMPARISON_LOG.md) — measured browser and deterministic benchmark history
 - [Living Bestiary release contract](docs/LIVING_BESTIARY_RELEASE.md)
@@ -200,7 +222,7 @@ Blockwild is open source under the [MIT License](LICENSE). Original third-party 
 
 ## Development workspace and cache policy
 
-The canonical development checkout is `C:\Users\NoahH\Desktop\CMU\Random\blockwild` on `main`. Bounded workers use that same checkout and branch with explicit, non-overlapping ownership; the parent owns Git/index operations, source integration, commits, and final verification. Workers use fresh minimal-context briefs by default and do not create worktrees, nested clones, branch switches, full-history forks, or competing installs/builds.
+The canonical development checkout is `C:\Users\NoahH\Desktop\CMU\Random\blockwild`; this edition uses `edition/rust`. Bounded workers use that same checkout and branch with explicit, non-overlapping ownership; the parent owns Git/index operations, source integration, commits, and final verification. Workers use fresh minimal-context briefs by default and do not create worktrees, nested clones, branch switches, full-history forks, or competing installs/builds. Follow the safe edition-switch procedure in [the maintenance contract](docs/EDITION_MAINTENANCE.md).
 
 Builds that share outputs are serialized. Prefer one `engine/target`; Cargo's normal target/profile/feature subdirectories may coexist, but output identity must be checked before consumption. At most one explicitly approved incompatible toolchain/configuration alternate target is allowed. Review combined target/cache storage at 20 GiB and stale material after 14 days; target output and ordinary caches are disposable, while published artifacts and verification reports remain separate retained evidence. Cleanup is path-safe and preservation-accounted, never automatic broad deletion.
 

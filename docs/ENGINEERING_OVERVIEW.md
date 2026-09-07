@@ -87,7 +87,7 @@ The repository has 128 test files and more than 1,000 automated checks across fo
 6. generated-content drift detection;
 7. CodeQL and pull-request dependency review.
 
-`main` is deployed to [blockwild.app](https://blockwild.app) through Vercel. The same Git SHA is independently built for the [Sites mirror](https://blockwild.noahhicks.chatgpt.site). Release reports identify the exact commit and verify both public targets rather than treating a successful local build as deployment proof.
+This `edition/rust` branch is maintained but unfinished at 9/32 formal acceptance. Automatic Vercel Git deployment is disabled, and [blockwild.app](https://blockwild.app) plus the [Sites mirror](https://blockwild.noahhicks.chatgpt.site) remain TypeScript-lineage endpoints. Rust builds and artifacts are migration evidence only; a future release needs separate authority and exact-SHA verification.
 
 ## A fast reviewer route
 

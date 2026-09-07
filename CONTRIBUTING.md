@@ -6,6 +6,13 @@ By contributing, you agree that your contribution may be distributed under the r
 
 ## Before opening a change
 
+Target exactly one maintained branch:
+
+- `edition/typescript` owns the TypeScript simulation and Three.js renderer and is the intended GitHub default.
+- `edition/rust` owns the unfinished Rust/Wasm conversion and developing `wgpu` path. It remains at 9/32 formal acceptance and is not release-ready.
+
+After cloning, run `git switch edition/typescript` or `git switch edition/rust`, then read that branch's `AGENTS.md` and [edition maintenance contract](docs/EDITION_MAINTENANCE.md). Open the pull request against the same edition branch. Do not routinely merge one edition into the other; port shared behavior through [the versioned parity specification](docs/EDITION_PARITY.md) or a reviewed selective commit.
+
 1. Search existing issues, the [roadmap](ROADMAP.md), and the relevant design contract under `docs/`.
 2. Keep a change focused. Separate generated assets, mechanics, and unrelated cleanup when that makes review safer.
 3. Do not include API keys, world exports, player/session data, `.blockwild-agent/`, ignored work artifacts, or third-party assets without documented redistribution rights.
@@ -22,6 +29,8 @@ npm test
 ```
 
 Focused suites are listed in the root README. Visual work must also be exercised in the running game at representative desktop and narrow/mobile sizes. Inspect the actual output; snapshots and type checks do not establish visual quality.
+
+On this Rust branch, run `npm run test:edition-maintenance` for branch identity, CI routing, cache/artifact identity, and deployment-trigger safety changes. The broader Rust gates stay enabled without `continue-on-error`; the known 139/143 integrated result and 9/32 formal acceptance are not waived by maintenance-only work.
 
 ## Engineering contracts
 

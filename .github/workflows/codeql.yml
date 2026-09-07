@@ -1,10 +1,10 @@
-name: CodeQL
+name: Rust edition adapter CodeQL
 
 on:
   push:
-    branches: [main]
+    branches: [edition/rust]
   pull_request:
-    branches: [main]
+    branches: [edition/rust]
   schedule:
     - cron: "23 8 * * 1"
   workflow_dispatch:

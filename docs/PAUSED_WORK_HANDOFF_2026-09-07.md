@@ -4,9 +4,9 @@ This dated GitHub checkpoint preserves unfinished source and assets. It is not a
 
 ## Preserved work
 
-Recent Rust/Wasm historical-save handling, runtime-wire and persistence work; TypeScript browser-worker and world-storage integration; adversarial persistence tests; browser verifier changes; and immutable candidate Wasm assets are included. Consolidation integrated 79 custody files with exact-byte pre/postimages retained locally, plus two local evidence records. Source-checkout tests now remove their generated fixtures after retaining their reports. Root AGENTS.md and README define one shared main checkout, parent-owned Git operations, serialized builds and bounded caches.
+Recent Rust/Wasm historical-save handling, runtime-wire and persistence work; TypeScript browser-worker and world-storage integration; adversarial persistence tests; browser verifier changes; and immutable candidate Wasm assets are included. Consolidation integrated 79 custody files with exact-byte pre/postimages retained locally, plus two local evidence records. Source-checkout tests now remove their generated fixtures after retaining their reports. Root AGENTS.md and README define one shared canonical checkout, parent-owned Git operations, serialized builds and bounded caches. This preserved source now lives on the independently maintained `edition/rust` branch.
 
-Canonical checkout: `C:/Users/NoahH/Desktop/CMU/Random/blockwild`, branch `main`. Pre-checkpoint base: `c3ee8781c7ec60f931eae8b69099bf8654e449a2`. GitHub main was `c6c3c982c28b375e03d9293af38e6706dd6930a7`, an ancestor 74 commits behind that base. The checkpoint is published as `codex/checkpoint-2026-09-07`; GitHub main is deliberately not advanced because this backup must not deploy.
+Canonical checkout: `C:/Users/NoahH/Desktop/CMU/Random/blockwild`, branch `edition/rust`. Pre-checkpoint base: `c3ee8781c7ec60f931eae8b69099bf8654e449a2`. GitHub main was `c6c3c982c28b375e03d9293af38e6706dd6930a7`, an ancestor 74 commits behind that base. The source parent is published as `codex/checkpoint-2026-09-07` at `a40e62c33b60b973ca75e87990503948ed7f2a65`; the edition branch adds maintenance policy after that preserved source. GitHub main was deliberately not advanced because this backup must not deploy.
 
 ## Known limitations and next authorized repair work
 

@@ -4,7 +4,7 @@ Status: approved for full implementation; no runtime behavior, build dependency,
 
 Prepared: 2026-08-11
 
-Target branch: `main`
+Current implementation branch: `edition/rust` (original plan target: `main`)
 
 Live implementation evidence and authority status: [HYBRID_RUST_MIGRATION_IMPLEMENTATION_LOG.md](./HYBRID_RUST_MIGRATION_IMPLEMENTATION_LOG.md)
 

@@ -39,7 +39,8 @@
     "test:settlement-heartlands": "node --import tsx --test tests/settlement-heartlands.test.ts",
     "test:visual-theme": "node --import tsx --test tests/visual-theme.test.ts tests/wheat-mill-content.test.ts",
     "test:brand-icons": "node --import tsx --test tests/brand-icons.test.ts",
-    "test:repository": "node --test tests/repository-public-readiness.test.mjs",
+    "test:repository": "node --test tests/repository-public-readiness.test.mjs tests/edition-maintenance.test.mjs",
+    "test:edition-maintenance": "node --test tests/edition-maintenance.test.mjs",
     "test:wiki": "node --import tsx --test tests/wiki-content.test.ts",
     "test:infrastructure": "node --test --import tsx tests/chunk-cache.test.ts tests/item-presentation.test.ts tests/performance-autoresearch.test.mjs tests/terrain-buffer-pipeline.test.ts tests/terrain-generation-pipeline.test.ts tests/vercel-deployment.test.ts tests/voxel-lighting.test.ts",
     "test:rust-engine": "node --import tsx scripts/generate-rust-kernel-fixtures.ts --check && node scripts/run-rust-engine-tests.mjs",
@@ -112,5 +113,10 @@
     "wrangler": "4.92.0"
   },
   "type": "module",
-  "displayName": "Blockwild"
+  "displayName": "Blockwild Rust Edition",
+  "blockwildEdition": {
+    "id": "rust",
+    "branch": "edition/rust",
+    "runtime": "rust-wasm-wgpu"
+  }
 }

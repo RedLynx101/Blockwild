@@ -1,8 +1,8 @@
-name: Blockwild Rust Engine
+name: Rust edition engine
 
 on:
   push:
-    branches: [main]
+    branches: [edition/rust]
     paths:
       - "engine/**"
       - "app/game/rust-*.ts"
@@ -14,15 +14,24 @@ on:
       - "app/game/world-storage.ts"
       - "scripts/*rust*.mjs"
       - "scripts/*rust*.ts"
+      - "scripts/generate-integrated-runtime-domain-schema.mjs"
+      - "scripts/verify-integrated-runtime-schema-convergence.mjs"
       - "tests/rust-*.test.*"
       - "tests/renderer-*.test.*"
+      - "tests/helpers/**"
+      - "tests/fixtures/**"
+      - "tests/acceptance/**"
+      - "build/worldgen-build-profile.ts"
+      - "package.json"
+      - "package-lock.json"
+      - ".gitattributes"
       - "public/engine/**"
       - "public/renderer/**"
       - "docs/HYBRID_RUST_ENGINE_MIGRATION_MASTER_PLAN.md"
       - "docs/RUST_ENGINE_AUTHORITY_LEDGER.md"
       - ".github/workflows/rust-engine.yml"
   pull_request:
-    branches: [main]
+    branches: [edition/rust]
     paths:
       - "engine/**"
       - "app/game/rust-*.ts"
@@ -34,8 +43,17 @@ on:
       - "app/game/world-storage.ts"
       - "scripts/*rust*.mjs"
       - "scripts/*rust*.ts"
+      - "scripts/generate-integrated-runtime-domain-schema.mjs"
+      - "scripts/verify-integrated-runtime-schema-convergence.mjs"
       - "tests/rust-*.test.*"
       - "tests/renderer-*.test.*"
+      - "tests/helpers/**"
+      - "tests/fixtures/**"
+      - "tests/acceptance/**"
+      - "build/worldgen-build-profile.ts"
+      - "package.json"
+      - "package-lock.json"
+      - ".gitattributes"
       - "public/engine/**"
       - "public/renderer/**"
       - "docs/HYBRID_RUST_ENGINE_MIGRATION_MASTER_PLAN.md"
@@ -53,6 +71,9 @@ concurrency:
 env:
   CI: true
   CARGO_TERM_COLOR: always
+  BLOCKWILD_EDITION: rust
+  BLOCKWILD_NODE_VERSION: 22.13.1
+  BLOCKWILD_RUST_TOOLCHAIN: 1.91.1
 
 jobs:
   native-wasm-and-browser-contract:
@@ -74,7 +95,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             engine/target
-          key: rust-engine-${{ runner.os }}-${{ hashFiles('engine/Cargo.lock') }}
+          key: blockwild-rust-cargo-${{ runner.os }}-rustc-${{ env.BLOCKWILD_RUST_TOOLCHAIN }}-wasm32-release-compatibility-${{ hashFiles('engine/Cargo.lock', 'engine/Cargo.toml', 'engine/rust-toolchain.toml', 'engine/**/*.rs') }}
       - name: Format
         working-directory: engine
         run: cargo fmt --all --check
@@ -96,8 +117,12 @@ jobs:
       - name: Use Node.js 22.13.1
         uses: actions/setup-node@v7
         with:
-          node-version: 22.13.1
-          cache: npm
+          node-version: ${{ env.BLOCKWILD_NODE_VERSION }}
+      - name: Restore Rust-edition npm cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.npm
+          key: blockwild-rust-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-${{ hashFiles('package-lock.json') }}
       - name: Install browser dependencies
         run: npm ci --no-audit --no-fund
       - name: Verify TypeScript protocol and tooling
@@ -107,11 +132,11 @@ jobs:
       - name: Upload migration gate report
         uses: actions/upload-artifact@v6
         with:
-          name: rust-migration-gates-${{ github.sha }}
+          name: blockwild-rust-migration-gates-rustc-${{ env.BLOCKWILD_RUST_TOOLCHAIN }}-${{ github.sha }}
           path: work/hybrid-rust-migration/ci-audit.json
           if-no-files-found: error
       - name: Install matching wasm-bindgen CLI
-        run: cargo install wasm-bindgen-cli --version 0.2.127 --locked
+        run: cargo install wasm-bindgen-cli --version 0.2.122 --locked
       - name: Rebuild immutable browser artifact
         run: |
           npm run build:rust-engine
@@ -141,7 +166,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             engine/target
-          key: rust-engine-${{ runner.os }}-${{ hashFiles('engine/Cargo.lock') }}
+          key: blockwild-rust-cargo-${{ runner.os }}-rustc-${{ env.BLOCKWILD_RUST_TOOLCHAIN }}-wasm32-release-compatibility-${{ hashFiles('engine/Cargo.lock', 'engine/Cargo.toml', 'engine/rust-toolchain.toml', 'engine/**/*.rs') }}
       - name: Native and Wasm checks
         working-directory: engine
         run: |
@@ -151,8 +176,12 @@ jobs:
       - name: Use Node.js 22.13.1
         uses: actions/setup-node@v7
         with:
-          node-version: 22.13.1
-          cache: npm
+          node-version: ${{ env.BLOCKWILD_NODE_VERSION }}
+      - name: Restore Rust-edition npm cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.npm
+          key: blockwild-rust-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-${{ hashFiles('package-lock.json') }}
       - name: Install browser dependencies
         run: npm ci --no-audit --no-fund
       - name: Verify Windows protocol and renderer contracts
