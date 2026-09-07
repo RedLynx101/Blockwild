@@ -156,12 +156,12 @@ describe("agent platform contracts", () => {
 
   test("chat is sequence ordered, bounded, sanitized, and rate limited", () => {
     const ring = new AgentChatRing();
-    const first = ring.append({ authorId: "player_1", authorName: "Noah", peerKind: "human", channel: "local", text: "hello\u0000 world", sentAt: 10, position: { x: 1, y: 2, z: 3 } }, 10);
+    const first = ring.append({ authorId: "browser_alpha.character_beta", authorName: "Noah", peerKind: "human", channel: "local", text: "hello\u0000 world", sentAt: 10, position: { x: 1, y: 2, z: 3 } }, 10);
     assert.equal(first.ok, true);
     assert.equal(first.ok && first.message.text, "hello world");
     assert.equal(first.ok && validateAgentChatMessage(first.message), true);
-    for (let index = 0; index < 7; index += 1) assert.equal(ring.append({ authorId: "player_1", authorName: "Noah", peerKind: "human", channel: "global", text: `line ${index}`, sentAt: 11 + index }, 11 + index).ok, true);
-    assert.equal(ring.append({ authorId: "player_1", authorName: "Noah", peerKind: "human", channel: "global", text: "too fast", sentAt: 20 }, 20).ok, false);
+    for (let index = 0; index < 7; index += 1) assert.equal(ring.append({ authorId: "browser_alpha.character_beta", authorName: "Noah", peerKind: "human", channel: "global", text: `line ${index}`, sentAt: 11 + index }, 11 + index).ok, true);
+    assert.equal(ring.append({ authorId: "browser_alpha.character_beta", authorName: "Noah", peerKind: "human", channel: "global", text: "too fast", sentAt: 20 }, 20).ok, false);
     assert.deepEqual(ring.since(7).map((message) => message.sequence), [8]);
     const relayed = new AgentChatRing().append({ authorId: "agent_1", authorName: "Mica", peerKind: "agent", channel: "local", text: "Caption", sentAt: 30 }, 30, "chat_local_agent_1");
     assert.equal(relayed.ok && relayed.message.id, "chat_local_agent_1");

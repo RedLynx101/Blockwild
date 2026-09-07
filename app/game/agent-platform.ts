@@ -332,7 +332,7 @@ const CAPABILITY_SET = new Set<string>(AGENT_CAPABILITIES);
 const TERMINAL_STATUSES = new Set<AgentCommandStatus>(["blocked", "completed", "cancelled", "failed"]);
 const CHAT_CHANNEL_SET = new Set<AgentChatChannel>(["local", "party", "global", "system"]);
 const VOICE_MIME_SET = new Set(["audio/mpeg", "audio/ogg", "audio/wav"]);
-const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:_-]{0,127}$/u;
+const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/u;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
