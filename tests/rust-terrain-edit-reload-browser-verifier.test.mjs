@@ -13,14 +13,17 @@ import {
   TERRAIN_EDIT_ENGINE_DIRECTORIES,
   REQUIRED_TERRAIN_EDIT_WASM_BYTES,
   REQUIRED_TERRAIN_EDIT_WASM_SHA256,
+  R7_SCHEMA_CANDIDATE_ARTIFACT_HASH,
+  R11_LOCATOR_CANDIDATE_ARTIFACT_HASH,
+  R13_BROWSER_CANDIDATE_ARTIFACT_HASH,
   acquireTerrainEditBrowserMutex,
   assertTerrainEditBrowserErrorStreams,
   assertTerrainEditCleanupEvidence,
-  assertTerrainEditCandidateUnchanged,
   assertTerrainEditEngineIndex,
   assertTerrainEditPersistenceEvidence,
   assertTerrainEditReloadTitleVisualReadiness,
   canonicalSavedEdits,
+  createTerrainEditProfileRoot,
   proveReloadedTerrainRay,
   parseTerrainEditBrowserOptions,
   rustTerrainGenerationIsReadyAndAuthoritative,
@@ -557,6 +560,15 @@ test("owned directory cleanup refuses siblings and removes only a direct prefixe
   safeRemoveTerrainEditOwnedDirectory(os.tmpdir(), parent, "blockwild-terrain-edit-test-");
 });
 
+test("browser profiles use a short owned temporary root instead of the evidence output path", () => {
+  const parent = mkdtempSync(path.join(os.tmpdir(), "blockwild-profile-root-test-"));
+  const profileRoot = createTerrainEditProfileRoot(parent);
+  assert.equal(path.dirname(profileRoot), parent);
+  assert.match(path.basename(profileRoot), /^bw-terrain-/u);
+  assert.equal(safeRemoveTerrainEditOwnedDirectory(parent, profileRoot, "bw-terrain-"), true);
+  safeRemoveTerrainEditOwnedDirectory(os.tmpdir(), parent, "blockwild-profile-root-test-");
+});
+
 test("verifier source uses real UI and trusted player input without a mutation hook", () => {
   const source = readFileSync(new URL("../scripts/verify-rust-terrain-edit-reload-browser.mjs", import.meta.url), "utf8");
   assert.match(source, /page\.mouse\.down\(\{ button: "left" \}\)/u);
@@ -583,21 +595,43 @@ test("verifier source uses real UI and trusted player input without a mutation h
   assert.match(usage(), /--engine-dir public\/engine /u);
 });
 
-test("terrain edit options allow only the explicit canonical or locator roots and exact current pin", () => {
+test("terrain edit options allow only approved roots and their directory-specific immutable pins", () => {
   const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
   const options = (directory, hash = REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH) => parseTerrainEditBrowserOptions([
     "node", "verifier", "--engine-dir", directory, "--expected-artifact-hash", hash,
     "--output", "work/hybrid-rust-migration/terrain-edit-options-test",
   ], { cwd: repositoryRoot });
-  assert.deepEqual(TERRAIN_EDIT_ENGINE_DIRECTORIES, ["public/engine", "public/engine-locator-candidate"]);
-  for (const directory of TERRAIN_EDIT_ENGINE_DIRECTORIES) {
-    assert.equal(options(directory).engineDirectory, path.resolve(repositoryRoot, directory));
-    assert.equal(options(directory).expectedArtifactHash, REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH);
+  assert.deepEqual(TERRAIN_EDIT_ENGINE_DIRECTORIES, [
+    "public/engine", "public/engine-locator-candidate", "public/engine-schema-candidate",
+    "public/engine-r11-browser-candidate",
+  ]);
+  for (const directory of ["public/engine", "public/engine-locator-candidate", "public/engine-r11-browser-candidate"]) {
+    const selected = directory === "public/engine-locator-candidate"
+      ? options(directory, R11_LOCATOR_CANDIDATE_ARTIFACT_HASH)
+      : directory === "public/engine-r11-browser-candidate"
+        ? options(directory, R13_BROWSER_CANDIDATE_ARTIFACT_HASH)
+        : options(directory);
+    assert.equal(selected.engineDirectory, path.resolve(repositoryRoot, directory));
+    assert.equal(selected.expectedArtifactHash,
+      directory === "public/engine-locator-candidate" ? R11_LOCATOR_CANDIDATE_ARTIFACT_HASH
+        : directory === "public/engine-r11-browser-candidate" ? R13_BROWSER_CANDIDATE_ARTIFACT_HASH
+          : REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH);
   }
-  for (const directory of ["public", "public/engine-other", "public/engine-schema-candidate", `public/engine/${REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH}`, "../engine"]) {
-    assert.throws(() => options(directory), /must resolve exactly/u, directory);
+  const schemaCandidate = options("public/engine-schema-candidate", R7_SCHEMA_CANDIDATE_ARTIFACT_HASH);
+  assert.equal(schemaCandidate.engineDirectory, path.resolve(repositoryRoot, "public/engine-schema-candidate"));
+  assert.equal(schemaCandidate.expectedArtifactHash, R7_SCHEMA_CANDIDATE_ARTIFACT_HASH);
+  for (const directory of [
+    "public", "public/engine-other", `public/engine/${REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH}`,
+    "../engine", "public/engine-r11-browser-candidate-other",
+  ]) {
+    assert.throws(() => options(directory), directory.includes("..")
+      ? /traversal segments/u : /must resolve exactly/u, directory);
   }
+  assert.throws(() => options("public/engine-r11-browser-candidate/../engine"), /traversal segments/u);
   assert.throws(() => options("public/engine", "f06f7d1349a7e74daac130e381b2c9d19762963b44e9b7dc546b534bb50c2139"), /requires exact artifact/u);
+  assert.throws(() => options("public/engine-locator-candidate", REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH), /requires exact artifact/u);
+  assert.throws(() => options("public/engine-schema-candidate", REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH), /requires exact artifact/u);
+  assert.throws(() => options("public/engine-r11-browser-candidate", REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH), /requires exact artifact/u);
   assert.throws(() => parseTerrainEditBrowserOptions([
     "node", "verifier", "--expected-artifact-hash", REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH,
   ], { cwd: repositoryRoot }), /--engine-dir is required/u);
@@ -609,6 +643,8 @@ test("canonical index permits only retained renderer-lab while isolated index st
   assert.equal(assertTerrainEditEngineIndex(single, "public/engine"), true);
   assert.equal(assertTerrainEditEngineIndex(published, "public/engine"), true);
   assert.equal(assertTerrainEditEngineIndex(single, "public/engine-locator-candidate"), true);
+  assert.equal(assertTerrainEditEngineIndex(single, "public/engine-schema-candidate"), true);
+  assert.equal(assertTerrainEditEngineIndex(single, "public/engine-r11-browser-candidate"), true);
   assert.throws(() => assertTerrainEditEngineIndex(published, "public/engine-locator-candidate"), /only the default compatibility/u);
   assert.throws(() => assertTerrainEditEngineIndex({ ...published, defaultVariant: "renderer-lab" }, "public/engine"), /default to compatibility/u);
   assert.throws(() => assertTerrainEditEngineIndex({ defaultVariant: "compatibility", artifacts: { compatibility: {}, unknown: {} } }, "public/engine"), /may only also contain renderer-lab/u);
@@ -616,24 +652,18 @@ test("canonical index permits only retained renderer-lab while isolated index st
   assert.throws(() => assertTerrainEditEngineIndex(single, "public/engine-other"), /Unknown terrain-edit engine root/u);
 });
 
-test("canonical terrain package preflight verifies real files, exact current source and immutable root without a browser", () => {
+test("canonical terrain package retains its immutable pin and fails closed when the R7 source differs", () => {
   const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
-  const selection = selectTerrainEditCandidate(repositoryRoot, "public/engine", REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH);
-  assert.equal(selection.packageKind, "canonical");
-  assert.equal(selection.relativeDirectory, "public/engine");
-  assert.equal(selection.hash, REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH);
-  assert.equal(selection.sourceSnapshot.digest, REQUIRED_TERRAIN_EDIT_SOURCE_DIGEST);
-  assert.equal(selection.sourceSnapshot.fileCount, REQUIRED_TERRAIN_EDIT_SOURCE_FILE_COUNT);
-  assert.equal(selection.wasm.sha256, REQUIRED_TERRAIN_EDIT_WASM_SHA256);
-  assert.equal(selection.wasm.bytes, REQUIRED_TERRAIN_EDIT_WASM_BYTES);
-  assert.ok(selection.routes.has("/engine/manifest.json"));
-  assert.ok(selection.routes.has(`/engine/${REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH}/engine_bg.wasm`));
-  for (const route of selection.routes.keys()) {
-    assert.ok(route === "/engine/manifest.json" || route.startsWith(`/engine/${REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH}/`), route);
-  }
-  assert.ok(assertTerrainEditCandidateUnchanged(selection));
-  assert.throws(() => assertTerrainEditCandidateUnchanged({ ...selection, treeSnapshot: { ...selection.treeSnapshot, digest: "0".repeat(64) } }), /engine tree changed/u);
-  assert.throws(() => assertTerrainEditCandidateUnchanged({ ...selection, sourceSnapshot: { ...selection.sourceSnapshot, digest: "0".repeat(64) } }), /Rust engine source changed/u);
+  assert.throws(() => selectTerrainEditCandidate(repositoryRoot, "public/engine", REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH),
+    /Selected artifact is not current-source/u);
   assert.throws(() => selectTerrainEditCandidate(repositoryRoot, "public/engine-other", REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH), /must resolve exactly/u);
   assert.throws(() => selectTerrainEditCandidate(repositoryRoot, "public/engine", "0".repeat(64)), /requires exact artifact/u);
+});
+
+test("schema candidate retains its immutable r7 pin and fails closed when source is stale", () => {
+  const repositoryRoot = fileURLToPath(new URL("../", import.meta.url));
+  assert.throws(() => selectTerrainEditCandidate(repositoryRoot, "public/engine-schema-candidate", R7_SCHEMA_CANDIDATE_ARTIFACT_HASH),
+    /Selected artifact is not current-source/u);
+  assert.throws(() => selectTerrainEditCandidate(repositoryRoot, "public/engine-schema-candidate", REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH), /requires exact artifact/u);
+  assert.throws(() => selectTerrainEditCandidate(repositoryRoot, "public/engine-schema-candidate-other", R7_SCHEMA_CANDIDATE_ARTIFACT_HASH), /must resolve exactly/u);
 });

@@ -27,6 +27,10 @@ export const RUST_INTEGRATED_RUNTIME_BULK_SAVE_CHUNK_BYTES_V1 = 4 * 1024 * 1024;
 export const RUST_INTEGRATED_RUNTIME_BULK_MAX_SAVE_CHUNKS_V1 = 64;
 export const RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1 = 4 * 1024;
 export const RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1 = 32 * 1024 * 1024;
+export const RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_MAX_BYTES_V2 = 1024 * 1024;
+export const RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PRIOR_CHECKPOINT_MAX_BYTES_V2 = 1024 * 1024;
+export const RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_MAX_BYTES_V2 = 64 * 1024;
+export const RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_MAX_BYTES_V2 = 4 * 1024 * 1024;
 
 export const RUST_INTEGRATED_PERSISTENCE_REQUEST_TYPE_V1 = "blockwild.persistence.browser-request.r8.v1";
 export const RUST_INTEGRATED_PERSISTENCE_RESPONSE_TYPE_V1 = "blockwild.persistence.browser-response.r8.v1";
@@ -35,9 +39,20 @@ export const RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1 =
 export const RUST_INTEGRATED_PERSISTENCE_STATUS_TYPE_V1 = "blockwild.persistence.status.r8.v1";
 export const RUST_INTEGRATED_PERSISTENCE_STATUS_RECEIPT_TYPE_V1 = "blockwild.persistence.status-receipt.r8.v1";
 export const RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1 = "blockwild.runtime.legacy-world-projection.r8.v1";
+export const RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2 =
+  "blockwild.persistence.historical-external-proposal.r8.v2";
+export const RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2 =
+  "blockwild.persistence.historical-external-receipt.r8.v2";
+export const RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_TYPE_V2 =
+  "blockwild.persistence.historical-fallback-observation.r8.v2";
 
 const REQUEST_MAGIC = Uint8Array.of(0x42, 0x57, 0x52, 0x42); // BWRB
 const RESPONSE_MAGIC = Uint8Array.of(0x42, 0x57, 0x52, 0x43); // BWRC
+const HISTORICAL_EXTERNAL_RECEIPT_MAGIC_V2 = Uint8Array.of(0x42, 0x57, 0x48, 0x52); // BWHR
+const HISTORICAL_EXTERNAL_RECEIPT_SCHEMA_V2 = 2;
+const HISTORICAL_EXTERNAL_PROFILE_TAG_V2 = 1;
+const HISTORICAL_EXTERNAL_NATIVE_ADOPTION_FLAGS_V2 = 0;
+const HISTORICAL_EXTERNAL_KNOWN_STATE_FLAGS_V2 = 0x007f;
 const EMPTY_HASH = rustIntegratedRuntimeWireChecksumV1(new Uint8Array());
 const TYPE_ID_PATTERN = /^[a-z0-9][a-z0-9.-]{0,159}$/u;
 const HASH_PATTERN = /^[0-9a-f]{32}$/u;
@@ -139,6 +154,50 @@ export type RustIntegratedRuntimeBulkRequestV1 =
     sourceFormat: string;
     typeId: typeof RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1;
     worldProjection: Uint8Array;
+  }>
+  | Readonly<{
+    /** Op 11: adopts BWAS into R4 while every richer property remains in the staged opaque document. */
+    type: "runtime-bulk-migrate-historical-external-v2";
+    requestId: number;
+    clientEpoch: number;
+    expected: RustIntegratedRuntimeBulkStateV1;
+    stageId: string;
+    createdAt: number;
+    proposalTypeId: typeof RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2;
+    proposal: Uint8Array;
+    worldProjectionTypeId: typeof RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1;
+    worldProjection: Uint8Array;
+  }>
+  | Readonly<{
+    /** Op 12: CAS-advances an existing external document and its descriptor beside current R4. */
+    type: "runtime-bulk-finalize-historical-external-save-v2";
+    requestId: number;
+    clientEpoch: number;
+    expected: RustIntegratedRuntimeBulkStateV1;
+    stageId: string;
+    createdAt: number;
+    proposalTypeId: typeof RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2;
+    proposal: Uint8Array;
+    expectedPriorCheckpointBytes: Uint8Array;
+  }>
+  | Readonly<{
+    /** Op 13: hydrates and attests an exact native-R4/external-document recovery pair. */
+    type: "runtime-bulk-hydrate-historical-external-v2";
+    requestId: number;
+    clientEpoch: number;
+    expected: RustIntegratedRuntimeBulkStateV1;
+    recoveryId: string;
+  }>
+  | Readonly<{
+    /** Op 14: atomically reconciles a physically corrupt latest head from its verified direct parent. */
+    type: "runtime-bulk-reconcile-historical-external-fallback-v2";
+    requestId: number;
+    clientEpoch: number;
+    expected: RustIntegratedRuntimeBulkStateV1;
+    fallbackRecoveryId: string;
+    createdAt: number;
+    observationTypeId: typeof RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_TYPE_V2;
+    observation: Uint8Array;
   }>;
 
 export type RustIntegratedRuntimeBulkSaveStageStateV1 = "staged" | "finalized" | "cancelled";
@@ -171,6 +230,48 @@ export type RustIntegratedRuntimeLegacyMigrationAttestationV1 = Readonly<{
   descriptorHash: string;
   saveSetHash: string;
   manifestHash: string;
+}>;
+
+export type RustIntegratedRuntimeHistoricalExternalReconciliationV2 = Readonly<{
+  observationHash: string;
+  expectedStorageRevision: number;
+  observedLatestCheckpointId: string;
+  observedLatestCheckpointHash: string;
+  observedLatestJournalSequence: number;
+  fallbackCheckpointId: string;
+  fallbackCheckpointHash: string;
+  fallbackJournalSequence: number;
+  targetCheckpointId: string;
+  targetCheckpointHash: string;
+  targetJournalSequence: number;
+  planHash: string;
+}>;
+
+export type RustIntegratedRuntimeHistoricalExternalReceiptV2 = Readonly<{
+  operation: "initial-migration" | "external-save" | "recovery" | "reconciliation";
+  stageId: string | null;
+  recoveryId: string | null;
+  createdAt: number;
+  authorityProfile: "typescript-historical-save-compatibility-v1";
+  nativePlayer: "off";
+  nativeRichState: "not-adopted";
+  externalStateFlags: number;
+  descriptorHash: string;
+  externalDocumentHash: string;
+  externalDocumentByteLength: number;
+  externalDocumentRevision: number;
+  externalChunkCount: number;
+  externalChunkSetHash: string;
+  projectionHash: string;
+  projectionByteLength: number;
+  nativeWorldSemanticHash: string;
+  nativeWorldEditCount: number;
+  nativeWorldFacingCount: number;
+  saveSetHash: string;
+  manifestHash: string;
+  dispatcherRequestId: number;
+  remainingDirtyRecords: number;
+  reconciliation: RustIntegratedRuntimeHistoricalExternalReconciliationV2 | null;
 }>;
 
 export type RustIntegratedRuntimeBulkResponseV1 =
@@ -236,7 +337,9 @@ export type RustIntegratedRuntimeBulkResponseV1 =
     workerEpoch: number;
     current: RustIntegratedRuntimeBulkStateV1;
     transferToken: number;
-    typeId: typeof RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1;
+    typeId:
+      | typeof RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1
+      | typeof RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2;
     chunkIndex: number;
     chunkCount: number;
     payload: Uint8Array;
@@ -339,6 +442,7 @@ class Writer {
   private readonly parts: Uint8Array[] = [];
   private length = 0;
   private add(bytes: Uint8Array) { this.parts.push(bytes); this.length += bytes.byteLength; }
+  raw(bytes: Uint8Array) { this.add(bytes); }
   u8(value: number) { this.add(Uint8Array.of(integer(value, 0, 0xff, "u8"))); }
   u16(value: number) { const bytes = new Uint8Array(2); new DataView(bytes.buffer).setUint16(0, integer(value, 0, 0xffff, "u16"), true); this.add(bytes); }
   u32(value: number) { const bytes = new Uint8Array(4); new DataView(bytes.buffer).setUint32(0, integer(value, 0, 0xffff_ffff, "u32"), true); this.add(bytes); }
@@ -411,6 +515,206 @@ class Reader {
     });
   }
   finish() { if (this.offset !== this.bytes.byteLength) throw new RustIntegratedRuntimeBulkCodecError("trailing", "bulk control body contains trailing bytes"); }
+}
+
+export function encodeRustIntegratedRuntimeHistoricalExternalReceiptV2(
+  receipt: RustIntegratedRuntimeHistoricalExternalReceiptV2,
+) {
+  const body = new Writer();
+  body.raw(HISTORICAL_EXTERNAL_RECEIPT_MAGIC_V2);
+  body.u16(HISTORICAL_EXTERNAL_RECEIPT_SCHEMA_V2);
+  const operationTag = receipt.operation === "initial-migration"
+    ? 1
+    : receipt.operation === "external-save"
+      ? 2
+      : receipt.operation === "recovery" ? 3 : 4;
+  body.u8(operationTag);
+  body.u8(HISTORICAL_EXTERNAL_PROFILE_TAG_V2);
+  body.u8(HISTORICAL_EXTERNAL_NATIVE_ADOPTION_FLAGS_V2);
+  body.u8(0);
+  body.u16(integer(
+    receipt.externalStateFlags,
+    1,
+    HISTORICAL_EXTERNAL_KNOWN_STATE_FLAGS_V2,
+    "historical external state flags",
+  ));
+  const recoveryOperation = operationTag === 3 || operationTag === 4;
+  const operationId = recoveryOperation ? receipt.recoveryId : receipt.stageId;
+  if (!operationId
+    || (recoveryOperation ? receipt.stageId !== null : receipt.recoveryId !== null)) {
+    throw new RustIntegratedRuntimeBulkCodecError(
+      "historical-external-operation-id",
+      "historical external receipt operation identity is missing or ambiguous",
+    );
+  }
+  body.string(operationId, "historical external operation id", recoveryOperation ? 256 : 180);
+  body.u64(receipt.createdAt);
+  body.hash(receipt.descriptorHash, "historical external descriptor hash");
+  body.hash(receipt.externalDocumentHash, "historical external document hash");
+  body.u64(receipt.externalDocumentByteLength);
+  body.u64(receipt.externalDocumentRevision);
+  body.u32(receipt.externalChunkCount);
+  body.hash(receipt.externalChunkSetHash, "historical external chunk set hash");
+  body.hash(receipt.projectionHash, "historical external projection hash");
+  body.u32(receipt.projectionByteLength);
+  body.hash(receipt.nativeWorldSemanticHash, "historical external native world semantic hash");
+  body.u64(receipt.nativeWorldEditCount);
+  body.u64(receipt.nativeWorldFacingCount);
+  body.hash(receipt.saveSetHash, "historical external save set hash");
+  body.hash(receipt.manifestHash, "historical external manifest hash");
+  body.u64(receipt.dispatcherRequestId);
+  body.u32(receipt.remainingDirtyRecords);
+  const reconciliation = receipt.reconciliation;
+  body.u8(reconciliation === null ? 0 : 1);
+  if (reconciliation !== null) {
+    body.hash(reconciliation.observationHash, "historical reconciliation observation hash");
+    body.u64(reconciliation.expectedStorageRevision);
+    body.string(reconciliation.observedLatestCheckpointId, "historical observed latest checkpoint id", 180);
+    body.hash(reconciliation.observedLatestCheckpointHash, "historical observed latest checkpoint hash");
+    body.u64(reconciliation.observedLatestJournalSequence);
+    body.string(reconciliation.fallbackCheckpointId, "historical fallback checkpoint id", 180);
+    body.hash(reconciliation.fallbackCheckpointHash, "historical fallback checkpoint hash");
+    body.u64(reconciliation.fallbackJournalSequence);
+    body.string(reconciliation.targetCheckpointId, "historical reconciliation target checkpoint id", 180);
+    body.hash(reconciliation.targetCheckpointHash, "historical reconciliation target checkpoint hash");
+    body.u64(reconciliation.targetJournalSequence);
+    body.hash(reconciliation.planHash, "historical reconciliation plan hash");
+  }
+  if (receipt.authorityProfile !== "typescript-historical-save-compatibility-v1"
+    || receipt.nativePlayer !== "off"
+    || receipt.nativeRichState !== "not-adopted"
+    || (receipt.externalStateFlags & ~HISTORICAL_EXTERNAL_KNOWN_STATE_FLAGS_V2) !== 0
+    || (receipt.operation === "reconciliation") !== (reconciliation !== null)
+    || reconciliation !== null && (
+      reconciliation.observedLatestJournalSequence !== reconciliation.fallbackJournalSequence + 1
+      || reconciliation.targetJournalSequence !== reconciliation.observedLatestJournalSequence + 1
+    )) {
+    throw new RustIntegratedRuntimeBulkCodecError(
+      "historical-external-authority",
+      "historical external receipt attempted to claim unsupported native authority",
+    );
+  }
+  return body.finish();
+}
+
+export function decodeRustIntegratedRuntimeHistoricalExternalReceiptV2(
+  value: Uint8Array | ArrayBuffer,
+): RustIntegratedRuntimeHistoricalExternalReceiptV2 {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  const body = new Reader(bytes);
+  const magic = body.take(4);
+  if (!HISTORICAL_EXTERNAL_RECEIPT_MAGIC_V2.every((byte, index) => magic[index] === byte)) {
+    throw new RustIntegratedRuntimeBulkCodecError("magic", "historical external receipt magic is invalid");
+  }
+  if (body.u16() !== HISTORICAL_EXTERNAL_RECEIPT_SCHEMA_V2) {
+    throw new RustIntegratedRuntimeBulkCodecError("version", "historical external receipt schema is unsupported");
+  }
+  const operationTag = body.u8();
+  const operation = operationTag === 1
+    ? "initial-migration" as const
+    : operationTag === 2
+      ? "external-save" as const
+      : operationTag === 3
+        ? "recovery" as const
+        : operationTag === 4
+          ? "reconciliation" as const
+        : (() => { throw new RustIntegratedRuntimeBulkCodecError("operation", "historical external receipt operation is unknown"); })();
+  const profileTag = body.u8();
+  const nativeAdoptionFlags = body.u8();
+  if (profileTag !== HISTORICAL_EXTERNAL_PROFILE_TAG_V2
+    || nativeAdoptionFlags !== HISTORICAL_EXTERNAL_NATIVE_ADOPTION_FLAGS_V2
+    || body.u8() !== 0) {
+    throw new RustIntegratedRuntimeBulkCodecError(
+      "historical-external-authority",
+      "historical external receipt claimed an unsupported profile or native authority",
+    );
+  }
+  const externalStateFlags = body.u16();
+  if (externalStateFlags === 0 || (externalStateFlags & ~HISTORICAL_EXTERNAL_KNOWN_STATE_FLAGS_V2) !== 0) {
+    throw new RustIntegratedRuntimeBulkCodecError(
+      "historical-external-flags",
+      "historical external receipt state flags are empty or unknown",
+    );
+  }
+  const recoveryOperation = operation === "recovery" || operation === "reconciliation";
+  const operationId = body.string("historical external operation id", recoveryOperation ? 256 : 180);
+  const partial = {
+    operation,
+    stageId: recoveryOperation ? null : operationId,
+    recoveryId: recoveryOperation ? operationId : null,
+    createdAt: body.u64(),
+    authorityProfile: "typescript-historical-save-compatibility-v1" as const,
+    nativePlayer: "off" as const,
+    nativeRichState: "not-adopted" as const,
+    externalStateFlags,
+    descriptorHash: body.hash(),
+    externalDocumentHash: body.hash(),
+    externalDocumentByteLength: body.u64(),
+    externalDocumentRevision: body.u64(),
+    externalChunkCount: body.u32(),
+    externalChunkSetHash: body.hash(),
+    projectionHash: body.hash(),
+    projectionByteLength: body.u32(),
+    nativeWorldSemanticHash: body.hash(),
+    nativeWorldEditCount: body.u64(),
+    nativeWorldFacingCount: body.u64(),
+    saveSetHash: body.hash(),
+    manifestHash: body.hash(),
+    dispatcherRequestId: body.u64(),
+    remainingDirtyRecords: body.u32(),
+  };
+  const reconciliationFlag = body.u8();
+  if (reconciliationFlag !== 0 && reconciliationFlag !== 1) {
+    throw new RustIntegratedRuntimeBulkCodecError("historical-external-reconciliation", "historical reconciliation flag is invalid");
+  }
+  const reconciliation = reconciliationFlag === 0 ? null : Object.freeze({
+    observationHash: body.hash(),
+    expectedStorageRevision: body.u64(),
+    observedLatestCheckpointId: body.string("historical observed latest checkpoint id", 180),
+    observedLatestCheckpointHash: body.hash(),
+    observedLatestJournalSequence: body.u64(),
+    fallbackCheckpointId: body.string("historical fallback checkpoint id", 180),
+    fallbackCheckpointHash: body.hash(),
+    fallbackJournalSequence: body.u64(),
+    targetCheckpointId: body.string("historical reconciliation target checkpoint id", 180),
+    targetCheckpointHash: body.hash(),
+    targetJournalSequence: body.u64(),
+    planHash: body.hash(),
+  });
+  const receipt = Object.freeze({ ...partial, reconciliation });
+  body.finish();
+  if (receipt.externalDocumentByteLength < 1
+    || receipt.externalDocumentRevision < 1
+    || receipt.externalChunkCount < 1
+    || receipt.externalChunkCount > RUST_INTEGRATED_RUNTIME_BULK_MAX_SAVE_CHUNKS_V1
+    || receipt.projectionByteLength < 1
+    || receipt.projectionByteLength > RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1) {
+    throw new RustIntegratedRuntimeBulkCodecError(
+      "historical-external-receipt",
+      "historical external receipt dimensions are outside their bounds",
+    );
+  }
+  if (receipt.operation === "recovery"
+    ? receipt.dispatcherRequestId !== 0 || receipt.remainingDirtyRecords !== 0
+      : receipt.operation === "reconciliation"
+        ? receipt.dispatcherRequestId < 1 || receipt.remainingDirtyRecords !== 0
+        : receipt.dispatcherRequestId < 1 || receipt.remainingDirtyRecords < 1) {
+    throw new RustIntegratedRuntimeBulkCodecError(
+      "historical-external-persistence",
+      "historical external receipt has invalid pending-commit custody for its operation",
+    );
+  }
+  if ((receipt.operation === "reconciliation") !== (receipt.reconciliation !== null)
+    || receipt.reconciliation !== null && (
+      receipt.reconciliation.observedLatestJournalSequence !== receipt.reconciliation.fallbackJournalSequence + 1
+      || receipt.reconciliation.targetJournalSequence !== receipt.reconciliation.observedLatestJournalSequence + 1
+    )) {
+    throw new RustIntegratedRuntimeBulkCodecError(
+      "historical-external-reconciliation",
+      "historical external reconciliation attestation has invalid checkpoint lineage",
+    );
+  }
+  return receipt;
 }
 
 function ownedAttachment(payload?: Uint8Array) {
@@ -493,6 +797,7 @@ export function encodeRustIntegratedRuntimeBulkRequestV1(request: RustIntegrated
   body.state(request.expected);
   let operation: number;
   let payload: Uint8Array | undefined;
+  let copiedAttachmentInputBytes = 0;
   switch (request.type) {
     case "runtime-bulk-poll-v1":
       operation = 1;
@@ -571,8 +876,121 @@ export function encodeRustIntegratedRuntimeBulkRequestV1(request: RustIntegrated
       }
       payload = request.worldProjection;
       break;
+    case "runtime-bulk-migrate-historical-external-v2": {
+      operation = 11;
+      body.string(request.stageId, "bulk historical external migration stage id", 180);
+      body.u64(integer(request.createdAt, 0, U64_MAX_SAFE, "bulk historical external migration creation time"));
+      body.string(
+        typeId(
+          request.proposalTypeId,
+          RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+        ),
+        "bulk historical external proposal type",
+        160,
+      );
+      body.string(
+        typeId(
+          request.worldProjectionTypeId,
+          RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
+        ),
+        "bulk historical external world projection type",
+        160,
+      );
+      if (!(request.proposal instanceof Uint8Array)
+        || request.proposal.byteLength < 1
+        || request.proposal.byteLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_MAX_BYTES_V2) {
+        throw new RustIntegratedRuntimeBulkCodecError(
+          "historical-external-proposal",
+          "bulk historical external proposal is outside its 1 MiB byte budget",
+        );
+      }
+      if (!(request.worldProjection instanceof Uint8Array)
+        || request.worldProjection.byteLength < 1
+        || request.worldProjection.byteLength > RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1) {
+        throw new RustIntegratedRuntimeBulkCodecError(
+          "legacy-world-projection",
+          "bulk historical external world projection is outside its 32 MiB byte budget",
+        );
+      }
+      body.u32(request.proposal.byteLength);
+      const joined = new Uint8Array(request.proposal.byteLength + request.worldProjection.byteLength);
+      joined.set(request.proposal);
+      joined.set(request.worldProjection, request.proposal.byteLength);
+      payload = joined;
+      copiedAttachmentInputBytes = joined.byteLength;
+      break;
+    }
+    case "runtime-bulk-finalize-historical-external-save-v2": {
+      operation = 12;
+      body.string(request.stageId, "bulk historical external save stage id", 180);
+      body.u64(integer(request.createdAt, 0, U64_MAX_SAFE, "bulk historical external save creation time"));
+      body.string(
+        typeId(
+          request.proposalTypeId,
+          RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+        ),
+        "bulk historical external proposal type",
+        160,
+      );
+      if (!(request.proposal instanceof Uint8Array)
+        || request.proposal.byteLength < 1
+        || request.proposal.byteLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_MAX_BYTES_V2) {
+        throw new RustIntegratedRuntimeBulkCodecError(
+          "historical-external-proposal",
+          "bulk historical external proposal is outside its 1 MiB byte budget",
+        );
+      }
+      if (!(request.expectedPriorCheckpointBytes instanceof Uint8Array)
+        || request.expectedPriorCheckpointBytes.byteLength < 1
+        || request.expectedPriorCheckpointBytes.byteLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PRIOR_CHECKPOINT_MAX_BYTES_V2) {
+        throw new RustIntegratedRuntimeBulkCodecError(
+          "historical-external-prior-checkpoint",
+          "bulk historical external prior checkpoint proof is outside its 1 MiB byte budget",
+        );
+      }
+      const attachmentLength = request.proposal.byteLength + request.expectedPriorCheckpointBytes.byteLength;
+      if (attachmentLength > RUST_INTEGRATED_RUNTIME_BULK_MAX_ATTACHMENT_BYTES_V1) {
+        throw new RustIntegratedRuntimeBulkCodecError("attachment-capacity", "bulk historical external save attachment exceeds 256 MiB");
+      }
+      body.u32(request.proposal.byteLength);
+      const joined = new Uint8Array(attachmentLength);
+      joined.set(request.proposal);
+      joined.set(request.expectedPriorCheckpointBytes, request.proposal.byteLength);
+      payload = joined;
+      copiedAttachmentInputBytes = joined.byteLength;
+      break;
+    }
+    case "runtime-bulk-hydrate-historical-external-v2":
+      operation = 13;
+      body.string(request.recoveryId, "bulk historical external recovery id", 256);
+      break;
+    case "runtime-bulk-reconcile-historical-external-fallback-v2":
+      operation = 14;
+      body.string(request.fallbackRecoveryId, "bulk historical fallback recovery id", 256);
+      body.u64(integer(request.createdAt, 0, U64_MAX_SAFE, "bulk historical reconciliation creation time"));
+      body.string(
+        typeId(
+          request.observationTypeId,
+          RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_TYPE_V2,
+        ),
+        "bulk historical fallback observation type",
+        160,
+      );
+      if (!(request.observation instanceof Uint8Array)
+        || request.observation.byteLength < 1
+        || request.observation.byteLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_MAX_BYTES_V2) {
+        throw new RustIntegratedRuntimeBulkCodecError(
+          "historical-fallback-observation",
+          "bulk historical fallback observation is outside its 4 MiB byte budget",
+        );
+      }
+      payload = request.observation;
+      break;
   }
-  return encodeControl(REQUEST_MAGIC, operation, 0, request.requestId, request.clientEpoch, 0, body.finish(), payload);
+  const encoded = encodeControl(REQUEST_MAGIC, operation, 0, request.requestId, request.clientEpoch, 0, body.finish(), payload);
+  return copiedAttachmentInputBytes === 0
+    ? encoded
+    : Object.freeze({ ...encoded, copiedInputBytes: encoded.copiedInputBytes + copiedAttachmentInputBytes });
 }
 
 export function decodeRustIntegratedRuntimeBulkRequestV1(control: Uint8Array | ArrayBuffer, attachment?: Uint8Array | ArrayBuffer): RustIntegratedRuntimeBulkRequestV1 {
@@ -656,6 +1074,108 @@ export function decodeRustIntegratedRuntimeBulkRequestV1(control: Uint8Array | A
       typeId: decodedType as typeof RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
       worldProjection: envelope.attachment,
     });
+  } else if (envelope.operation === 11) {
+    const stageId = body.string("bulk historical external migration stage id", 180);
+    const createdAt = body.u64();
+    const proposalTypeId = typeId(
+      body.string("bulk historical external proposal type", 160),
+      RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+    );
+    const worldProjectionTypeId = typeId(
+      body.string("bulk historical external world projection type", 160),
+      RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
+    );
+    const proposalLength = body.u32();
+    const projectionLength = envelope.attachment.byteLength - proposalLength;
+    if (proposalLength < 1
+      || proposalLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_MAX_BYTES_V2
+      || projectionLength < 1
+      || projectionLength > RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1) {
+      throw new RustIntegratedRuntimeBulkCodecError(
+        "historical-external-attachment",
+        "bulk historical external migration attachment dimensions are invalid",
+      );
+    }
+    request = Object.freeze({
+      type: "runtime-bulk-migrate-historical-external-v2",
+      requestId: envelope.requestId,
+      clientEpoch: envelope.clientEpoch,
+      expected,
+      stageId,
+      createdAt,
+      proposalTypeId: proposalTypeId as typeof RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+      proposal: envelope.attachment.subarray(0, proposalLength),
+      worldProjectionTypeId: worldProjectionTypeId as typeof RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
+      worldProjection: envelope.attachment.subarray(proposalLength),
+    });
+  } else if (envelope.operation === 12) {
+    const stageId = body.string("bulk historical external save stage id", 180);
+    const createdAt = body.u64();
+    const proposalTypeId = typeId(
+      body.string("bulk historical external proposal type", 160),
+      RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+    );
+    const proposalLength = body.u32();
+    const priorCheckpointLength = envelope.attachment.byteLength - proposalLength;
+    if (proposalLength < 1
+      || proposalLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_MAX_BYTES_V2
+      || priorCheckpointLength < 1
+      || priorCheckpointLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PRIOR_CHECKPOINT_MAX_BYTES_V2
+      || envelope.attachment.byteLength !== proposalLength + priorCheckpointLength) {
+      throw new RustIntegratedRuntimeBulkCodecError(
+        "historical-external-proposal",
+        "bulk historical external proposal/prior-checkpoint attachment is malformed",
+      );
+    }
+    request = Object.freeze({
+      type: "runtime-bulk-finalize-historical-external-save-v2",
+      requestId: envelope.requestId,
+      clientEpoch: envelope.clientEpoch,
+      expected,
+      stageId,
+      createdAt,
+      proposalTypeId: proposalTypeId as typeof RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+      proposal: envelope.attachment.subarray(0, proposalLength),
+      expectedPriorCheckpointBytes: envelope.attachment.subarray(proposalLength),
+    });
+  } else if (envelope.operation === 13) {
+    if (envelope.attachment.byteLength !== 0) {
+      throw new RustIntegratedRuntimeBulkCodecError(
+        "attachment",
+        "bulk historical external recovery cannot carry an attachment",
+      );
+    }
+    request = Object.freeze({
+      type: "runtime-bulk-hydrate-historical-external-v2",
+      requestId: envelope.requestId,
+      clientEpoch: envelope.clientEpoch,
+      expected,
+      recoveryId: body.string("bulk historical external recovery id", 256),
+    });
+  } else if (envelope.operation === 14) {
+    const fallbackRecoveryId = body.string("bulk historical fallback recovery id", 256);
+    const createdAt = body.u64();
+    const observationTypeId = typeId(
+      body.string("bulk historical fallback observation type", 160),
+      RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_TYPE_V2,
+    );
+    if (envelope.attachment.byteLength < 1
+      || envelope.attachment.byteLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_MAX_BYTES_V2) {
+      throw new RustIntegratedRuntimeBulkCodecError(
+        "historical-fallback-observation",
+        "bulk historical fallback observation is outside its 4 MiB byte budget",
+      );
+    }
+    request = Object.freeze({
+      type: "runtime-bulk-reconcile-historical-external-fallback-v2",
+      requestId: envelope.requestId,
+      clientEpoch: envelope.clientEpoch,
+      expected,
+      fallbackRecoveryId,
+      createdAt,
+      observationTypeId: observationTypeId as typeof RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_TYPE_V2,
+      observation: envelope.attachment,
+    });
   } else throw new RustIntegratedRuntimeBulkCodecError("operation", "bulk request operation is unknown");
   body.finish();
   return request;
@@ -728,11 +1248,23 @@ export function encodeRustIntegratedRuntimeBulkResponseV1(response: RustIntegrat
     operation = 6;
     body.state(response.current);
     body.u64(integer(response.transferToken, 1, U64_MAX_SAFE, "bulk data transfer token"));
-    body.string(typeId(response.typeId, RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1), "bulk hydration chunk type", 160);
+    const expectedType = response.typeId === RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2
+      ? RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2
+      : RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1;
+    body.string(typeId(response.typeId, expectedType), "bulk data type", 160);
     body.u32(integer(response.chunkIndex, 0, RUST_INTEGRATED_RUNTIME_BULK_MAX_SAVE_CHUNKS_V1 - 1, "bulk hydration chunk index"));
     body.u32(integer(response.chunkCount, 1, RUST_INTEGRATED_RUNTIME_BULK_MAX_SAVE_CHUNKS_V1, "bulk hydration chunk count"));
-    if (response.chunkIndex >= response.chunkCount || response.payload.byteLength > RUST_INTEGRATED_RUNTIME_BULK_SAVE_CHUNK_BYTES_V1) {
+    const maximumPayloadBytes = expectedType === RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2
+      ? RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_MAX_BYTES_V2
+      : RUST_INTEGRATED_RUNTIME_BULK_SAVE_CHUNK_BYTES_V1;
+    if (response.chunkIndex >= response.chunkCount
+      || response.payload.byteLength > maximumPayloadBytes
+      || (expectedType === RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2
+        && (response.chunkIndex !== 0 || response.chunkCount !== 1 || response.payload.byteLength === 0))) {
       throw new RustIntegratedRuntimeBulkCodecError("hydration-data", "bulk hydration chunk metadata is invalid");
+    }
+    if (expectedType === RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2) {
+      decodeRustIntegratedRuntimeHistoricalExternalReceiptV2(response.payload);
     }
     payload = response.payload;
   } else if (response.type === "runtime-bulk-persistence-status-v1") {
@@ -836,14 +1368,37 @@ export function decodeRustIntegratedRuntimeBulkResponseV1(control: Uint8Array | 
   } else if (envelope.operation === 6) {
     const current = body.state();
     const transferToken = body.u64();
-    const decodedType = typeId(body.string("bulk hydration chunk type", 160), RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1);
+    const rawType = body.string("bulk data type", 160);
+    const expectedType = rawType === RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2
+      ? RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2
+      : RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1;
+    const decodedType = typeId(rawType, expectedType);
     const chunkIndex = body.u32();
     const chunkCount = body.u32();
+    const maximumPayloadBytes = expectedType === RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2
+      ? RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_MAX_BYTES_V2
+      : RUST_INTEGRATED_RUNTIME_BULK_SAVE_CHUNK_BYTES_V1;
     if (transferToken < 1 || chunkCount < 1 || chunkCount > RUST_INTEGRATED_RUNTIME_BULK_MAX_SAVE_CHUNKS_V1
-      || chunkIndex >= chunkCount || envelope.attachment.byteLength > RUST_INTEGRATED_RUNTIME_BULK_SAVE_CHUNK_BYTES_V1) {
+      || chunkIndex >= chunkCount || envelope.attachment.byteLength > maximumPayloadBytes
+      || (expectedType === RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2
+        && (chunkIndex !== 0 || chunkCount !== 1 || envelope.attachment.byteLength === 0))) {
       throw new RustIntegratedRuntimeBulkCodecError("hydration-data", "bulk hydration chunk metadata is invalid");
     }
-    response = Object.freeze({ ...base, type: "runtime-bulk-data-v1", current, transferToken, typeId: decodedType as typeof RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1, chunkIndex, chunkCount, payload: envelope.attachment });
+    if (expectedType === RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2) {
+      decodeRustIntegratedRuntimeHistoricalExternalReceiptV2(envelope.attachment);
+    }
+    response = Object.freeze({
+      ...base,
+      type: "runtime-bulk-data-v1",
+      current,
+      transferToken,
+      typeId: decodedType as
+        | typeof RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1
+        | typeof RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2,
+      chunkIndex,
+      chunkCount,
+      payload: envelope.attachment,
+    });
   } else if (envelope.operation === 7) {
     if (envelope.attachment.byteLength !== 0) throw new RustIntegratedRuntimeBulkCodecError("attachment", "bulk persistence status response cannot carry an attachment");
     const current = body.state();
@@ -893,11 +1448,23 @@ export function inspectRustIntegratedRuntimeBulkResponseAttachmentV1(controlValu
   if (operation === 2) {
     typeId(body.string("bulk request type", 160), RUST_INTEGRATED_PERSISTENCE_REQUEST_TYPE_V1);
   } else {
-    typeId(body.string("bulk hydration chunk type", 160), RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1);
+    const decodedType = body.string("bulk data type", 160);
+    if (decodedType !== RUST_INTEGRATED_PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1
+      && decodedType !== RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2) {
+      throw new RustIntegratedRuntimeBulkCodecError("type-id", "bulk data response has an unsupported detached attachment type");
+    }
     const chunkIndex = body.u32();
     const chunkCount = body.u32();
     if (chunkCount < 1 || chunkCount > RUST_INTEGRATED_RUNTIME_BULK_MAX_SAVE_CHUNKS_V1 || chunkIndex >= chunkCount) {
       throw new RustIntegratedRuntimeBulkCodecError("hydration-data", "bulk hydration chunk metadata is invalid");
+    }
+    if (decodedType === RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2
+      && (chunkIndex !== 0 || chunkCount !== 1
+        || attachmentLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_MAX_BYTES_V2)) {
+      throw new RustIntegratedRuntimeBulkCodecError(
+        "historical-external-receipt",
+        "historical external receipt attachment metadata is invalid",
+      );
     }
   }
   body.finish();

@@ -67,17 +67,26 @@ use blockwild_network::{
 };
 use blockwild_persistence::{
     COMPATIBILITY_RECORD_PREFIX_V1, CanonicalWorldSaveSetV1, Checkpoint, DEFAULT_DISPATCH_MAX_BYTES_V1,
-    DEFAULT_DISPATCH_MAX_PACKET_BYTES_V1, JournalCommitReceipt, JournalState, LEGACY_MIGRATION_DESCRIPTOR_SCHEMA_V1,
-    LegacyMigrationDescriptorV1, LegacyMigrationNativeRecordFingerprintV1, MAX_RECORD_BYTES_V1,
-    NormalizedStateRecordV1, PagedRecoveryAssemblerV1, PagedRecoveryCompleteV1, PersistenceAuthorityV1,
-    PersistenceBrowserRequestV1, PersistenceDispatchOutcomeV1, PersistenceDispatchPacketV1,
+    DEFAULT_DISPATCH_MAX_PACKET_BYTES_V1, HISTORICAL_EXTERNAL_AUTHORITY_CLAIM_V2,
+    HISTORICAL_EXTERNAL_DESCRIPTOR_RECORD_ID_V2, HISTORICAL_EXTERNAL_DOCUMENT_RECORD_PREFIX_V2,
+    HISTORICAL_EXTERNAL_NATIVE_EXECUTION_SCOPE_V2, HISTORICAL_EXTERNAL_NATIVE_RECORD_TEMPLATES_V2,
+    HISTORICAL_EXTERNAL_PROFILE_V2, HISTORICAL_FALLBACK_RECONCILIATION_SCHEMA_V2,
+    HistoricalExternalDescriptorProposalV2, HistoricalExternalDescriptorV2, HistoricalExternalFieldsV2,
+    HistoricalExternalImmutableV2, HistoricalExternalNativeRecordFingerprintV2, HistoricalFallbackCopyRecordV2,
+    HistoricalFallbackInlineRecordV2, HistoricalFallbackReconciliationPlanV2, JournalCommitReceipt, JournalState,
+    LEGACY_MIGRATION_DESCRIPTOR_SCHEMA_V1, LegacyMigrationDescriptorV1, LegacyMigrationNativeRecordFingerprintV1,
+    MAX_RECORD_BYTES_V1, NormalizedStateRecordV1, PagedRecoveryAssemblerV1, PagedRecoveryCompleteV1,
+    PersistenceAuthorityV1, PersistenceBrowserRequestV1, PersistenceDispatchOutcomeV1, PersistenceDispatchPacketV1,
     PersistenceDispatchStatusV1, PersistenceDispatcherLimitsV1, PersistenceDispatcherV1,
     PersistencePlatformOperationV1, PersistenceWireRecord, PreparedAuthorityCommitV1, RecordAddress, RecordDescriptor,
     RecordKind, Transaction, WORLD_SAVE_MANIFEST_RECORD_ID_V1, attest_world_save_set_records_v1,
-    decode_legacy_migration_descriptor_v1, decode_paged_recovery_head_v1, decode_paged_recovery_page_v1,
-    decode_persistence_browser_request_v1, decode_record, decode_world_save_manifest_v1, encode_checkpoint,
-    encode_legacy_migration_descriptor_v1, legacy_generation_options_hash_v1, legacy_migration_descriptor_address_v1,
-    persistence_payload_hash_v1,
+    decode_historical_external_descriptor_proposal_v2, decode_historical_external_descriptor_v2,
+    decode_historical_fallback_observation_v2, decode_legacy_migration_descriptor_v1, decode_paged_recovery_head_v1,
+    decode_paged_recovery_page_v1, decode_persistence_browser_request_v1, decode_record, decode_world_save_manifest_v1,
+    encode_checkpoint, encode_historical_external_descriptor_v2, encode_legacy_migration_descriptor_v1,
+    historical_external_descriptor_address_v2, historical_external_document_chunk_address_v2,
+    historical_fallback_observation_payload_hash_v2, legacy_generation_options_hash_v1,
+    legacy_migration_descriptor_address_v1, persistence_payload_hash_v1,
 };
 use blockwild_runtime_wire::{
     MAX_CONTEXT_COMMANDS_V2, MAX_INPUT_FRAMES, MAX_SAFE_U64, MAX_WIRE_BYTES, RUNTIME_BULK_MAX_ATTACHMENT_BYTES_V1,
@@ -86,12 +95,14 @@ use blockwild_runtime_wire::{
     RUNTIME_INPUT_BUTTON_DROP_V1, RUNTIME_INPUT_BUTTON_INTERACT_V1, RUNTIME_INPUT_BUTTON_JUMP_V1,
     RUNTIME_INPUT_BUTTON_MASK_V1, RUNTIME_INPUT_BUTTON_MOUNT_TOGGLE_V1, RUNTIME_INPUT_BUTTON_PRIMARY_ATTACK_V1,
     RUNTIME_INPUT_BUTTON_SECONDARY_USE_V1, RUNTIME_INPUT_BUTTON_SPRINT_V1, RUNTIME_INPUT_FLAG_CREATIVE_V1,
-    RUNTIME_INPUT_FLAG_FLYING_V1, RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_INPUT_FLAG_MOUNTED_V1, RuntimeCommandReceiptV1,
-    RuntimeContainerKeyV2, RuntimeContainerKindV2, RuntimeContextCommandActionV2, RuntimeContextCommandV2,
-    RuntimeInputActionKindV1, RuntimeInputActionOutcomeV1, RuntimeInputActionReceiptV1, RuntimeInputFrameV1,
+    RUNTIME_INPUT_FLAG_FLYING_V1, RUNTIME_INPUT_FLAG_MASK_V1, RUNTIME_INPUT_FLAG_MOUNTED_V1, RuntimeCommandBatchV1,
+    RuntimeCommandReceiptV1, RuntimeContainerKeyV2, RuntimeContainerKindV2, RuntimeContextCommandActionV2,
+    RuntimeContextCommandV2, RuntimeDomainOperationV1, RuntimeDomainV1, RuntimeIdentityV1, RuntimeInputActionKindV1,
+    RuntimeInputActionOutcomeV1, RuntimeInputActionReceiptV1, RuntimeInputFrameV1, RuntimeRevisionV1,
     RuntimeSemanticActionOutcomeV2, RuntimeSemanticActionReasonV2, RuntimeSemanticActionReceiptV2,
-    RuntimeSemanticActionResolutionV2, WireHash, context_command_hash_v2, decode_command_receipt_v1,
-    encode_command_receipt_v1, validate_command_receipt_hash_v1,
+    RuntimeSemanticActionResolutionV2, WireHash, command_receipt_hash_v1, context_command_hash_v2,
+    decode_command_receipt_v1, encode_command_receipt_v1, seal_runtime_command_batch_v1,
+    validate_command_receipt_hash_v1,
 };
 use blockwild_simulation::{
     AabbV1, ActionRayEntityTargetV1, ActionRayTargetV1, AirZoneTopologyJobV1, AirZoneTopologyResultV1,
@@ -195,6 +206,10 @@ const NATIVE_RUNTIME_CORE_SCHEMA_V14: u16 = 14;
 const NATIVE_RUNTIME_CORE_SCHEMA_V15: u16 = 15;
 const NATIVE_RUNTIME_CORE_SCHEMA_V16: u16 = 16;
 const NATIVE_RUNTIME_CORE_SCHEMA_V17: u16 = 17;
+// R13 persists the only migration-eligible reliability-cache provenance.  Older
+// checkpoints remain readable, but their receipts deliberately carry no
+// provenance and therefore cannot satisfy the historical migration exception.
+const NATIVE_RUNTIME_CORE_SCHEMA_V18: u16 = 18;
 const DURABLE_SESSION_NEUTRAL_ID_V1: &str = "blockwild-durable-session-neutral-v1";
 const DEFAULT_TERRAIN_CONTENT_HASH_V2: CanonicalHash = CanonicalHash([
     0xcc, 0x59, 0x90, 0x3b, 0xe7, 0x7d, 0xfe, 0x30, 0x10, 0x9d, 0x15, 0xbf, 0xaf, 0x0e, 0x30, 0x22,
@@ -2538,6 +2553,13 @@ pub const LEGACY_STATE_MACHINES_V1: u16 = 1 << 4;
 pub const LEGACY_STATE_MAP_V1: u16 = 1 << 5;
 pub const LEGACY_STATE_NETWORK_V1: u16 = 1 << 6;
 pub const LEGACY_STATE_UNKNOWN_V1: u16 = 1 << 15;
+pub const HISTORICAL_EXTERNAL_KNOWN_STATE_FLAGS_V2: u16 = LEGACY_STATE_ENTITIES_V1
+    | LEGACY_STATE_PLAYER_V1
+    | LEGACY_STATE_RUNTIME_CLOCKS_V1
+    | LEGACY_STATE_GAMEPLAY_V1
+    | LEGACY_STATE_MACHINES_V1
+    | LEGACY_STATE_MAP_V1
+    | LEGACY_STATE_NETWORK_V1;
 
 /// Deliberately narrow one-time bridge for legacy worlds that contain only an
 /// R4-compatible edited-world projection. Any declared richer state blocks
@@ -2595,6 +2617,72 @@ pub struct IntegratedRuntimeLegacyMigrationAttestationV1 {
     pub manifest_hash: CanonicalHash,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+pub enum IntegratedRuntimeHistoricalExternalOperationV2 {
+    InitialMigration = 1,
+    ExternalSave = 2,
+    Recovery = 3,
+    Reconciliation = 4,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegratedRuntimeHistoricalExternalReconciliationV2 {
+    pub observation_hash: CanonicalHash,
+    pub expected_storage_revision: u64,
+    pub observed_latest_checkpoint_id: String,
+    pub observed_latest_checkpoint_hash: CanonicalHash,
+    pub observed_latest_journal_sequence: u64,
+    pub fallback_checkpoint_id: String,
+    pub fallback_checkpoint_hash: CanonicalHash,
+    pub fallback_journal_sequence: u64,
+    pub target_checkpoint_id: String,
+    pub target_checkpoint_hash: CanonicalHash,
+    pub target_journal_sequence: u64,
+    pub plan_hash: CanonicalHash,
+}
+
+/// Rust-issued proof that one opaque historical document head and one native
+/// R4 authority head were staged or recovered as an exact canonical pair.
+/// The fixed profile/authority strings are encoded by the Wasm BWHR contract;
+/// no caller-controlled authority claim is echoed here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IntegratedRuntimeHistoricalExternalReceiptV2 {
+    pub operation: IntegratedRuntimeHistoricalExternalOperationV2,
+    pub stage_id: Option<String>,
+    pub recovery_id: Option<String>,
+    pub created_at: u64,
+    pub external_state_flags: u16,
+    pub descriptor_hash: CanonicalHash,
+    pub external_document_hash: CanonicalHash,
+    pub external_document_byte_length: u64,
+    pub external_document_revision: u64,
+    pub external_chunk_count: u32,
+    pub external_chunk_set_hash: CanonicalHash,
+    pub projection_hash: CanonicalHash,
+    pub projection_byte_length: u32,
+    pub native_world_semantic_hash: CanonicalHash,
+    pub native_world_edit_count: u64,
+    pub native_world_facing_count: u64,
+    pub save_set_hash: CanonicalHash,
+    pub manifest_hash: CanonicalHash,
+    pub dispatcher_request_id: Option<u64>,
+    pub remaining_dirty_records: u32,
+    pub reconciliation: Option<IntegratedRuntimeHistoricalExternalReconciliationV2>,
+}
+
+struct HistoricalExternalReceiptInputV2<'a> {
+    operation: IntegratedRuntimeHistoricalExternalOperationV2,
+    operation_id: &'a str,
+    created_at: u64,
+    descriptor: &'a HistoricalExternalDescriptorV2,
+    save_set_hash: CanonicalHash,
+    manifest_hash: CanonicalHash,
+    dispatcher_request_id: Option<u64>,
+    remaining_dirty_records: u32,
+    reconciliation: Option<IntegratedRuntimeHistoricalExternalReconciliationV2>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IntegratedRuntimeHydrationChunkV1 {
     pub transfer_token: u64,
@@ -2617,6 +2705,7 @@ struct IntegratedRuntimeHydratedExportV1 {
     chunks: Vec<Vec<u8>>,
     total_bytes: u64,
     compatibility_hash: CanonicalHash,
+    checkpoint: Checkpoint,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2706,6 +2795,18 @@ struct IntegratedRuntimeCommandReceiptCacheEntryV1 {
     command_hash: WireHash,
     receipt: RuntimeCommandReceiptV1,
     encoded_receipt: Vec<u8>,
+    content_installer_provenance: Option<ContentInstallerCacheProvenanceV1>,
+}
+
+/// Durable evidence that one accepted cache entry came from the normal
+/// runtime-content-installer command path.  The receipt supplies the exact
+/// before/after identities; this record supplies the otherwise-unrecoverable
+/// command id and canonical content-page request bytes used to reconstruct and
+/// replay the sealed command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ContentInstallerCacheProvenanceV1 {
+    command_id: String,
+    page_bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4703,6 +4804,13 @@ impl IntegratedRuntimeV2 {
     }
 
     fn build_native_bundle_unchecked(&self) -> Result<IntegratedRuntimeNativeBundleV1, IntegratedRuntimeError> {
+        self.build_native_bundle_unchecked_with_persistence_revision_v2(None)
+    }
+
+    fn build_native_bundle_unchecked_with_persistence_revision_v2(
+        &self,
+        persistence_revision: Option<u64>,
+    ) -> Result<IntegratedRuntimeNativeBundleV1, IntegratedRuntimeError> {
         let mut bodies = BTreeMap::new();
         bodies.insert(
             IntegratedRuntimeNativeRecordKindV1::World,
@@ -4720,10 +4828,17 @@ impl IntegratedRuntimeV2 {
                 .encode_snapshot(&self.native_gameplay_extension_bytes)
                 .map_err(|error| IntegratedRuntimeError::new("native-gameplay", error.to_string()))?,
         );
-        bodies.insert(
-            IntegratedRuntimeNativeRecordKindV1::Runtime,
-            encode_runtime_core_snapshot_v1(self)?,
-        );
+        let runtime_body = if let Some(persistence_revision) = persistence_revision {
+            let mut core = runtime_core_snapshot_from_runtime_v1(self);
+            core.expected_revision.persistence = persistence_revision;
+            core.durable_network_drained_proof = self.durable_network_save_boundary_proof().ok();
+            core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&core)?);
+            core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&core));
+            encode_runtime_core_snapshot_body_v1(&core, core.schema)?
+        } else {
+            encode_runtime_core_snapshot_v1(self)?
+        };
+        bodies.insert(IntegratedRuntimeNativeRecordKindV1::Runtime, runtime_body);
         bodies.insert(
             IntegratedRuntimeNativeRecordKindV1::Content,
             encode_runtime_content_snapshot_v1(self)?,
@@ -4768,6 +4883,33 @@ impl IntegratedRuntimeV2 {
     fn build_primary_native_state_records(&self) -> Result<Vec<NormalizedStateRecordV1>, IntegratedRuntimeError> {
         self.durable_network_save_boundary_proof()?;
         let bundle = self.build_native_bundle()?;
+        self.primary_native_state_records_from_bundle_v2(bundle)
+    }
+
+    fn build_primary_native_state_records_for_prior_checkpoint_v2(
+        &self,
+        persistence_revision: u64,
+        native_session_id: &str,
+    ) -> Result<Vec<NormalizedStateRecordV1>, IntegratedRuntimeError> {
+        if !self.native_save_prerequisites_ready() || !self.queued_context_commands.is_empty() {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume-native",
+                "successor native records cannot be reconstructed from an incomplete or busy recovered runtime",
+            ));
+        }
+        let mut builder = self.clone();
+        builder.config.session_id = native_session_id.to_owned();
+        builder.network = NetworkBrowserAuthorityRuntimeV1::new(native_session_id.to_owned())
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume-native", error))?;
+        builder.durable_network_save_boundary_proof()?;
+        let bundle = builder.build_native_bundle_unchecked_with_persistence_revision_v2(Some(persistence_revision))?;
+        builder.primary_native_state_records_from_bundle_v2(bundle)
+    }
+
+    fn primary_native_state_records_from_bundle_v2(
+        &self,
+        bundle: IntegratedRuntimeNativeBundleV1,
+    ) -> Result<Vec<NormalizedStateRecordV1>, IntegratedRuntimeError> {
         let mut records = Vec::with_capacity(bundle.envelopes.len());
         for kind in IntegratedRuntimeNativeRecordKindV1::ALL {
             let (record_kind, record_id) = kind.address();
@@ -4828,6 +4970,466 @@ impl IntegratedRuntimeV2 {
             ));
         }
         Ok(())
+    }
+
+    fn validate_historical_external_target_v2(
+        &self,
+        immutable: &HistoricalExternalImmutableV2,
+    ) -> Result<(), IntegratedRuntimeError> {
+        let target = &immutable.target;
+        let generation = &target.generation_identity;
+        let unknown_flags = immutable.external_state_flags & !HISTORICAL_EXTERNAL_KNOWN_STATE_FLAGS_V2;
+        if unknown_flags != 0 {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-flags",
+                format!("historical external save declares unsupported state flags 0x{unknown_flags:04x}"),
+            ));
+        }
+        if immutable.external_state_flags == 0
+            || immutable.authority.claim != HISTORICAL_EXTERNAL_AUTHORITY_CLAIM_V2
+            || immutable.authority.native_player != "off"
+            || immutable.authority.native_rich_state != "not-adopted"
+            || immutable.profile != HISTORICAL_EXTERNAL_PROFILE_V2
+            || immutable.native_execution_scope != HISTORICAL_EXTERNAL_NATIVE_EXECUTION_SCOPE_V2
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-authority",
+                "historical external save requests an unsupported profile, R5/player, or rich native authority",
+            ));
+        }
+        let generation_options = self.config.generation_options_json.as_bytes();
+        if target.universe_id != self.config.universe_id
+            || target.location_id != self.config.location_id
+            || target.world_seed != self.config.world_seed
+            || target.content_hash != self.config.content_hash
+            || generation.generator_hash != self.config.generator_hash
+            || generation.terrain_content_hash != self.config.terrain_content_hash
+            || generation.generation_options_json != self.config.generation_options_json
+            || generation.generation_options_byte_length != generation_options.len() as u64
+            || generation.generation_options_hash != persistence_payload_hash_v1(generation_options)
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-target",
+                "historical external save belongs to a different seed, R4 target, generator, content, or options profile",
+            ));
+        }
+        Ok(())
+    }
+
+    fn has_historical_external_state_v2(&self) -> bool {
+        self.persistence_authority.records().keys().any(|address| {
+            address.record_id == HISTORICAL_EXTERNAL_DESCRIPTOR_RECORD_ID_V2
+                || address
+                    .record_id
+                    .starts_with(HISTORICAL_EXTERNAL_DOCUMENT_RECORD_PREFIX_V2)
+        })
+    }
+
+    fn historical_external_records_from_stage_v2(
+        &self,
+        stage: &IntegratedRuntimeSaveStageV1,
+        external: &HistoricalExternalFieldsV2,
+    ) -> Result<Vec<NormalizedStateRecordV1>, IntegratedRuntimeError> {
+        if stage.chunks.len() != stage.chunk_count as usize
+            || stage.chunks.values().map(Vec::len).sum::<usize>() as u64 != stage.total_bytes
+            || stage.chunk_count as usize != external.chunks.len()
+            || stage.total_bytes != external.current_document.identity.byte_length
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-stage",
+                "historical external save requires one complete staged document matching its proposal",
+            ));
+        }
+        let document_capacity = usize::try_from(external.current_document.identity.byte_length).map_err(|_| {
+            IntegratedRuntimeError::new(
+                "historical-external-capacity",
+                "historical external document byte length exceeds this runtime",
+            )
+        })?;
+        let mut document = Vec::with_capacity(document_capacity);
+        let mut records = Vec::with_capacity(external.chunks.len());
+        for fingerprint in &external.chunks {
+            let payload = stage.chunks.get(&fingerprint.index).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-stage",
+                    "historical external stage is missing a descriptor-bound document chunk",
+                )
+            })?;
+            if payload.len() != fingerprint.byte_length as usize
+                || persistence_payload_hash_v1(payload) != fingerprint.payload_hash
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-chunk",
+                    "staged historical document chunk differs from its exact proposal fingerprint",
+                ));
+            }
+            document.extend_from_slice(payload);
+            records.push(NormalizedStateRecordV1 {
+                address: historical_external_document_chunk_address_v2(
+                    &self.config.universe_id,
+                    &self.config.location_id,
+                    fingerprint.index,
+                )
+                .map_err(|error| IntegratedRuntimeError::domain("historical-external-chunk", error))?,
+                payload: payload.clone(),
+            });
+        }
+        if document.len() as u64 != external.current_document.identity.byte_length
+            || persistence_payload_hash_v1(&document) != external.current_document.identity.hash
+            || sha256_bytes_v1(&document) != external.current_document.identity.sha256
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-document",
+                "staged historical document differs from its exact 128-bit or SHA-256 identity",
+            ));
+        }
+        Ok(records)
+    }
+
+    fn historical_external_native_fingerprints_v2(
+        &self,
+        native_records: &[NormalizedStateRecordV1],
+    ) -> Result<Vec<HistoricalExternalNativeRecordFingerprintV2>, IntegratedRuntimeError> {
+        if native_records.len() != HISTORICAL_EXTERNAL_NATIVE_RECORD_TEMPLATES_V2.len() {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-native-records",
+                "historical external save did not build exactly six primary native records",
+            ));
+        }
+        HISTORICAL_EXTERNAL_NATIVE_RECORD_TEMPLATES_V2
+            .iter()
+            .map(|(kind, record_id)| {
+                let address = RecordAddress::new(&self.config.universe_id, &self.config.location_id, *kind, *record_id)
+                    .map_err(|error| IntegratedRuntimeError::domain("historical-external-native-records", error))?;
+                let record = native_records
+                    .iter()
+                    .find(|record| record.address == address)
+                    .ok_or_else(|| {
+                        IntegratedRuntimeError::new(
+                            "historical-external-native-records",
+                            "historical external save is missing an exact primary native record",
+                        )
+                    })?;
+                let revision = match self.persistence_authority.records().get(&address) {
+                    Some(current) if current.payload == record.payload => current.revision,
+                    Some(current) => current.revision.checked_add(1).ok_or_else(|| {
+                        IntegratedRuntimeError::new(
+                            "historical-external-native-revision",
+                            "historical external native record revision is exhausted",
+                        )
+                    })?,
+                    None => 1,
+                };
+                Ok(HistoricalExternalNativeRecordFingerprintV2 {
+                    address,
+                    revision,
+                    byte_length: u32::try_from(record.payload.len()).map_err(|_| {
+                        IntegratedRuntimeError::new(
+                            "historical-external-capacity",
+                            "historical external native record byte length exceeds u32",
+                        )
+                    })?,
+                    payload_hash: persistence_payload_hash_v1(&record.payload),
+                })
+            })
+            .collect()
+    }
+
+    fn build_historical_external_state_records_v2(
+        &self,
+        mut native_records: Vec<NormalizedStateRecordV1>,
+        mut external_records: Vec<NormalizedStateRecordV1>,
+        descriptor: &HistoricalExternalDescriptorV2,
+    ) -> Result<Vec<NormalizedStateRecordV1>, IntegratedRuntimeError> {
+        let native_addresses = native_records
+            .iter()
+            .map(|record| record.address.clone())
+            .collect::<BTreeSet<_>>();
+        let descriptor_address =
+            historical_external_descriptor_address_v2(&self.config.universe_id, &self.config.location_id)
+                .map_err(|error| IntegratedRuntimeError::domain("historical-external-descriptor", error))?;
+        let legacy_descriptor_address =
+            legacy_migration_descriptor_address_v1(&self.config.universe_id, &self.config.location_id)
+                .map_err(|error| IntegratedRuntimeError::domain("historical-external-descriptor", error))?;
+        let mut records = Vec::with_capacity(
+            native_records.len() + external_records.len() + self.persistence_authority.records().len() + 1,
+        );
+        for (address, current) in self.persistence_authority.records() {
+            let manifest =
+                address.kind == RecordKind::LocationManifest && address.record_id == WORLD_SAVE_MANIFEST_RECORD_ID_V1;
+            let compatibility = address.kind == RecordKind::SettingsReference
+                && address.record_id.starts_with(COMPATIBILITY_RECORD_PREFIX_V1);
+            let historical_descriptor = address.record_id == HISTORICAL_EXTERNAL_DESCRIPTOR_RECORD_ID_V2;
+            let historical_chunk = address
+                .record_id
+                .starts_with(HISTORICAL_EXTERNAL_DOCUMENT_RECORD_PREFIX_V2);
+            if compatibility || address == &legacy_descriptor_address {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-profile-conflict",
+                    "historical external custody cannot coexist with legacy compatibility or migration records",
+                ));
+            }
+            if !manifest && !historical_descriptor && !historical_chunk && !native_addresses.contains(address) {
+                records.push(NormalizedStateRecordV1 {
+                    address: address.clone(),
+                    payload: current.payload.clone(),
+                });
+            }
+        }
+        records.append(&mut native_records);
+        records.append(&mut external_records);
+        records.push(NormalizedStateRecordV1 {
+            address: descriptor_address,
+            payload: encode_historical_external_descriptor_v2(descriptor)
+                .map_err(|error| IntegratedRuntimeError::domain("historical-external-descriptor", error))?,
+        });
+        records.sort_by(|left, right| left.address.cmp(&right.address));
+        Ok(records)
+    }
+
+    fn historical_external_descriptor_from_authority_v2(
+        &self,
+    ) -> Result<Option<HistoricalExternalDescriptorV2>, IntegratedRuntimeError> {
+        let records = self.persistence_authority.records();
+        let descriptor_address =
+            historical_external_descriptor_address_v2(&self.config.universe_id, &self.config.location_id)
+                .map_err(|error| IntegratedRuntimeError::domain("historical-external-descriptor", error))?;
+        let mut historical_chunk_count = 0_usize;
+        for address in records.keys() {
+            if address.record_id == HISTORICAL_EXTERNAL_DESCRIPTOR_RECORD_ID_V2 && address != &descriptor_address {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-descriptor",
+                    "historical external descriptor is stored at an unexpected address",
+                ));
+            }
+            if address
+                .record_id
+                .starts_with(HISTORICAL_EXTERNAL_DOCUMENT_RECORD_PREFIX_V2)
+            {
+                historical_chunk_count = historical_chunk_count.saturating_add(1);
+                if address.universe_id != self.config.universe_id
+                    || address.location_id != self.config.location_id
+                    || address.kind != RecordKind::SettingsReference
+                {
+                    return Err(IntegratedRuntimeError::new(
+                        "historical-external-chunk",
+                        "historical external document chunk is stored at an unexpected address",
+                    ));
+                }
+            }
+        }
+        let Some(descriptor_record) = records.get(&descriptor_address) else {
+            if historical_chunk_count != 0 {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-descriptor",
+                    "historical external document chunks exist without their descriptor",
+                ));
+            }
+            return Ok(None);
+        };
+        let descriptor = decode_historical_external_descriptor_v2(&descriptor_record.payload)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-descriptor", error))?;
+        self.validate_historical_external_target_v2(&descriptor.immutable)?;
+        if records.keys().any(|address| {
+            (address.kind == RecordKind::SettingsReference
+                && address.record_id.starts_with(COMPATIBILITY_RECORD_PREFIX_V1))
+                || address.record_id == blockwild_persistence::LEGACY_MIGRATION_DESCRIPTOR_RECORD_ID_V1
+        }) {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-profile-conflict",
+                "historical external custody is mixed with a legacy compatibility profile",
+            ));
+        }
+        if historical_chunk_count != descriptor.mutable.external.chunks.len() {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-chunk",
+                "durable historical external document has missing or unexpected chunks",
+            ));
+        }
+        let document_capacity = usize::try_from(descriptor.mutable.external.current_document.identity.byte_length)
+            .map_err(|_| {
+                IntegratedRuntimeError::new(
+                    "historical-external-capacity",
+                    "durable historical external document byte length exceeds this runtime",
+                )
+            })?;
+        let mut document = Vec::with_capacity(document_capacity);
+        for fingerprint in &descriptor.mutable.external.chunks {
+            let address = historical_external_document_chunk_address_v2(
+                &self.config.universe_id,
+                &self.config.location_id,
+                fingerprint.index,
+            )
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-chunk", error))?;
+            let record = records.get(&address).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-chunk",
+                    "descriptor-bound historical external document chunk is missing",
+                )
+            })?;
+            if record.payload.len() != fingerprint.byte_length as usize
+                || record.payload_hash != fingerprint.payload_hash
+                || persistence_payload_hash_v1(&record.payload) != fingerprint.payload_hash
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-chunk",
+                    "durable historical external document chunk differs from its descriptor fingerprint",
+                ));
+            }
+            document.extend_from_slice(&record.payload);
+        }
+        let current = &descriptor.mutable.external.current_document.identity;
+        if document.len() as u64 != current.byte_length
+            || persistence_payload_hash_v1(&document) != current.hash
+            || sha256_bytes_v1(&document) != current.sha256
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-document",
+                "durable historical external document differs from its exact identity",
+            ));
+        }
+        for fingerprint in &descriptor.mutable.native_records {
+            let record = records.get(&fingerprint.address).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-native-records",
+                    "descriptor-bound native authority record is missing",
+                )
+            })?;
+            if record.revision != fingerprint.revision
+                || record.payload.len() != fingerprint.byte_length as usize
+                || record.payload_hash != fingerprint.payload_hash
+                || persistence_payload_hash_v1(&record.payload) != fingerprint.payload_hash
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-native-records",
+                    "descriptor-bound native authority record differs from its exact revision or payload fingerprint",
+                ));
+            }
+        }
+        Ok(Some(descriptor))
+    }
+
+    /// A successor crash may be resumed only after the recovered child has
+    /// durably committed the exact new BWHE. The caller-supplied prior
+    /// checkpoint proof separately anchors which old native bundle may be
+    /// deterministically rebuilt for the remaining canonical prefix.
+    fn historical_external_successor_resume_descriptor_v2(
+        &self,
+        proposal: &HistoricalExternalDescriptorProposalV2,
+    ) -> Result<HistoricalExternalDescriptorV2, IntegratedRuntimeError> {
+        let records = self.persistence_authority.records();
+        let descriptor_address =
+            historical_external_descriptor_address_v2(&self.config.universe_id, &self.config.location_id)
+                .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume", error))?;
+        for address in records.keys() {
+            if address.record_id == HISTORICAL_EXTERNAL_DESCRIPTOR_RECORD_ID_V2 && address != &descriptor_address {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-resume",
+                    "partial successor contains BWHE at an unexpected address",
+                ));
+            }
+            if address
+                .record_id
+                .starts_with(HISTORICAL_EXTERNAL_DOCUMENT_RECORD_PREFIX_V2)
+                && (address.universe_id != self.config.universe_id
+                    || address.location_id != self.config.location_id
+                    || address.kind != RecordKind::SettingsReference)
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-resume",
+                    "partial successor contains an external document chunk at an unexpected address",
+                ));
+            }
+            if (address.kind == RecordKind::SettingsReference
+                && address.record_id.starts_with(COMPATIBILITY_RECORD_PREFIX_V1))
+                || address.record_id == blockwild_persistence::LEGACY_MIGRATION_DESCRIPTOR_RECORD_ID_V1
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-profile-conflict",
+                    "partial historical successor is mixed with a legacy compatibility profile",
+                ));
+            }
+        }
+        let descriptor_record = records.get(&descriptor_address).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-external-resume-native",
+                "partial successor has not durably committed the new BWHE descriptor",
+            )
+        })?;
+        let descriptor = decode_historical_external_descriptor_v2(&descriptor_record.payload)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume", error))?;
+        self.validate_historical_external_target_v2(&descriptor.immutable)?;
+        let expected = proposal
+            .clone()
+            .bind_native_records(descriptor.mutable.native_records.clone())
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume", error))?;
+        if descriptor != expected {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "partial successor BWHE differs from the identical BWHP retry",
+            ));
+        }
+        Ok(descriptor)
+    }
+
+    fn historical_external_receipt_v2(
+        &self,
+        input: HistoricalExternalReceiptInputV2<'_>,
+    ) -> Result<IntegratedRuntimeHistoricalExternalReceiptV2, IntegratedRuntimeError> {
+        let HistoricalExternalReceiptInputV2 {
+            operation,
+            operation_id,
+            created_at,
+            descriptor,
+            save_set_hash,
+            manifest_hash,
+            dispatcher_request_id,
+            remaining_dirty_records,
+            reconciliation,
+        } = input;
+        let (native_world_semantic_hash, native_world_edit_count, native_world_facing_count) =
+            self.native_world_semantic_identity_v1()?;
+        let projection_byte_length = u32::try_from(descriptor.immutable.bwas.projection_byte_length).map_err(|_| {
+            IntegratedRuntimeError::new(
+                "historical-external-capacity",
+                "historical BWAS projection byte length exceeds u32",
+            )
+        })?;
+        let external_chunk_count = u32::try_from(descriptor.mutable.external.chunks.len()).map_err(|_| {
+            IntegratedRuntimeError::new(
+                "historical-external-capacity",
+                "historical external document chunk count exceeds u32",
+            )
+        })?;
+        let (stage_id, recovery_id) = match operation {
+            IntegratedRuntimeHistoricalExternalOperationV2::InitialMigration
+            | IntegratedRuntimeHistoricalExternalOperationV2::ExternalSave => (Some(operation_id.to_owned()), None),
+            IntegratedRuntimeHistoricalExternalOperationV2::Recovery => (None, Some(operation_id.to_owned())),
+            IntegratedRuntimeHistoricalExternalOperationV2::Reconciliation => (None, Some(operation_id.to_owned())),
+        };
+        Ok(IntegratedRuntimeHistoricalExternalReceiptV2 {
+            operation,
+            stage_id,
+            recovery_id,
+            created_at,
+            external_state_flags: descriptor.immutable.external_state_flags,
+            descriptor_hash: descriptor.descriptor_hash,
+            external_document_hash: descriptor.mutable.external.current_document.identity.hash,
+            external_document_byte_length: descriptor.mutable.external.current_document.identity.byte_length,
+            external_document_revision: descriptor.mutable.external.current_document.revision,
+            external_chunk_count,
+            external_chunk_set_hash: descriptor.mutable.external.chunk_set_hash,
+            projection_hash: descriptor.immutable.bwas.projection_hash,
+            projection_byte_length,
+            native_world_semantic_hash,
+            native_world_edit_count,
+            native_world_facing_count,
+            save_set_hash,
+            manifest_hash,
+            dispatcher_request_id,
+            remaining_dirty_records,
+            reconciliation,
+        })
     }
 
     fn build_native_state_records(&self) -> Result<Vec<NormalizedStateRecordV1>, IntegratedRuntimeError> {
@@ -6201,6 +6803,12 @@ impl IntegratedRuntimeV2 {
         created_at: u64,
     ) -> Result<IntegratedRuntimeSaveProgressV1, IntegratedRuntimeError> {
         self.ensure_running()?;
+        if self.has_historical_external_state_v2() {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-save-required",
+                "historical external custody must advance through its exact descriptor-CAS save operation",
+            ));
+        }
         let stage = self.save_stages.get(stage_id).cloned().ok_or_else(|| {
             IntegratedRuntimeError::new("save-stage-stale", "save stage is unknown or already finalized")
         })?;
@@ -6260,6 +6868,12 @@ impl IntegratedRuntimeV2 {
     ) -> Result<IntegratedRuntimeSaveProgressV1, IntegratedRuntimeError> {
         self.ensure_running()?;
         validate_label(save_id, "save_id")?;
+        if self.has_historical_external_state_v2() {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-save-required",
+                "historical external custody must advance through its exact descriptor-CAS save operation",
+            ));
+        }
         if !self.save_stages.is_empty() {
             return Err(IntegratedRuntimeError::new(
                 "native-save-stage-active",
@@ -6552,6 +7166,256 @@ impl IntegratedRuntimeV2 {
             .map_err(|error| IntegratedRuntimeError::domain("legacy-migration-resume", error))
     }
 
+    fn recover_partial_historical_external_migration_v2(
+        &self,
+        complete: &PagedRecoveryCompleteV1,
+        descriptor: &HistoricalExternalDescriptorV2,
+        save: &CanonicalWorldSaveSetV1,
+        created_at: u64,
+    ) -> Result<PersistenceAuthorityV1, IntegratedRuntimeError> {
+        let checkpoint = &complete.checkpoint;
+        if !complete.missing_record_keys.is_empty()
+            || checkpoint.world_id != self.persistence_authority.world_id()
+            || checkpoint.generator_hash != self.config.generator_hash
+            || checkpoint.content_hash != self.config.content_hash
+            || checkpoint.created_at != created_at
+            || checkpoint.records.is_empty()
+            || checkpoint.records.len() >= save.records.len()
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "recovered checkpoint is not a complete-payload strict prefix of the intended initial historical save",
+            ));
+        }
+        for (actual, (expected_address, expected_payload)) in checkpoint.records.iter().zip(save.records.iter()) {
+            let payload = complete.payloads.get(&actual.address).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-resume",
+                    "partial historical migration record payload is missing",
+                )
+            })?;
+            if &actual.address != expected_address
+                || actual.revision != 1
+                || actual.byte_length as usize != expected_payload.len()
+                || actual.payload_hash != persistence_payload_hash_v1(expected_payload)
+                || payload != expected_payload
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-resume",
+                    "recovered checkpoint is not the exact canonical prefix of the intended initial historical save",
+                ));
+            }
+        }
+        let descriptor_address =
+            historical_external_descriptor_address_v2(&self.config.universe_id, &self.config.location_id)
+                .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume", error))?;
+        let durable_descriptor = complete.payloads.get(&descriptor_address).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "partial historical migration checkpoint has no durable BWHE descriptor",
+            )
+        })?;
+        if decode_historical_external_descriptor_v2(durable_descriptor)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume", error))?
+            != *descriptor
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "durable BWHE descriptor differs from the identical initial migration proposal",
+            ));
+        }
+        PersistenceAuthorityV1::recover(checkpoint.clone(), complete.payloads.clone())
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume", error))
+    }
+
+    fn command_receipt_cache_is_exact_attested_content_installer_prefix_v1(
+        &self,
+        replay_stage: Option<&IntegratedRuntimeSaveStageV1>,
+    ) -> Result<bool, IntegratedRuntimeError> {
+        if self.command_receipts.is_empty() {
+            return Ok(self.command_receipt_order.is_empty() && self.command_receipt_bytes == 0);
+        }
+        validate_runtime_command_receipt_cache_v1(
+            &self.command_receipts,
+            &self.command_receipt_order,
+            self.command_receipt_bytes,
+        )?;
+        let Some(attestation) = &self.content_attestation else {
+            return Ok(false);
+        };
+        if attestation.install_id.is_empty()
+            || attestation.source_revision.is_empty()
+            || attestation.manifest_hash != self.config.content_hash
+            || attestation.page_hashes.is_empty()
+            || self.command_receipt_order.len() != attestation.page_hashes.len()
+        {
+            return Ok(false);
+        }
+        let Some(stage) = replay_stage else {
+            return Ok(false);
+        };
+        if !exact_save_stage_is_replayable_v1(stage) {
+            return Ok(false);
+        }
+        let mut replay = IntegratedRuntimeV2::new(self.config.clone())?;
+        for (expected_index, key) in self.command_receipt_order.iter().enumerate() {
+            let Some(entry) = self.command_receipts.get(key) else {
+                return Ok(false);
+            };
+            let Some(provenance) = &entry.content_installer_provenance else {
+                return Ok(false);
+            };
+            let RuntimeCommandReceiptV1::Accepted {
+                command_id,
+                idempotency_key,
+                command_hash,
+                before,
+                after,
+                domain_receipts,
+                ..
+            } = &entry.receipt
+            else {
+                return Ok(false);
+            };
+            let page = match crate::decode_content_install_page_v1(&provenance.page_bytes) {
+                Ok(page) => page,
+                Err(_) => return Ok(false),
+            };
+            let index = expected_index as u32;
+            if key.0 != "runtime-content-installer"
+                || key.1 != format!("{}:{index}", attestation.install_id)
+                || provenance.command_id != *command_id
+                || idempotency_key != &key.1
+                || command_hash != &entry.command_hash
+                || page.install_id != attestation.install_id
+                || page.source_revision != attestation.source_revision
+                || page.manifest_hash != attestation.manifest_hash
+                || page.domains != attestation.domains
+                || page.page_index != index
+                || page.page_count != attestation.page_hashes.len() as u32
+                || CanonicalHash(blockwild_runtime_wire::wire_checksum_v1(&provenance.page_bytes))
+                    != attestation.page_hashes[expected_index]
+                || domain_receipts.len() != 1
+            {
+                return Ok(false);
+            }
+            let page_operation = RuntimeDomainOperationV1 {
+                domain: RuntimeDomainV1::Gameplay,
+                type_id: crate::CONTENT_INSTALL_PAGE_TYPE_V1.into(),
+                schema: 1,
+                payload_hash: WireHash(blockwild_runtime_wire::wire_checksum_v1(&provenance.page_bytes)),
+                payload: provenance.page_bytes.clone(),
+            };
+            let reconstructed = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+                command_id: provenance.command_id.clone(),
+                idempotency_key: key.1.clone(),
+                actor_id: key.0.clone(),
+                expected: runtime_wire_identity_v1(&replay.identity()),
+                operations: vec![page_operation],
+                command_hash: WireHash::default(),
+            })
+            .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+            if reconstructed.command_hash != entry.command_hash
+                || before != &reconstructed.expected
+                || *command_hash != reconstructed.command_hash
+            {
+                return Ok(false);
+            }
+            let receipt = match replay.install_content_page(
+                page,
+                CanonicalHash(blockwild_runtime_wire::wire_checksum_v1(&provenance.page_bytes)),
+            ) {
+                Ok(receipt) => receipt,
+                Err(_) => return Ok(false),
+            };
+            let expected_payload = crate::encode_content_install_receipt_v1(&receipt)
+                .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+            let expected_domain = RuntimeDomainOperationV1 {
+                domain: RuntimeDomainV1::Gameplay,
+                type_id: crate::CONTENT_INSTALL_RECEIPT_TYPE_V1.into(),
+                schema: 1,
+                payload_hash: WireHash(blockwild_runtime_wire::wire_checksum_v1(&expected_payload)),
+                payload: expected_payload,
+            };
+            if domain_receipts[0] != expected_domain || after != &runtime_wire_identity_v1(&replay.identity()) {
+                return Ok(false);
+            }
+        }
+        for index in 0..stage.chunk_count {
+            let Some(chunk) = stage.chunks.get(&index) else {
+                return Ok(false);
+            };
+            if replay
+                .stage_compatibility_save_chunk(&stage.stage_id, index, stage.chunk_count, stage.total_bytes, chunk)
+                .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(replay.identity() == self.identity() && replay.content_attestation == self.content_attestation)
+    }
+
+    /// A legacy bridge may infer ownership only into the exact state produced
+    /// by `IntegratedRuntimeV2::new`. Keep this predicate shared by every
+    /// migration profile so a newer compatibility lane cannot accidentally
+    /// weaken or omit one of the original world-only guards.
+    fn ensure_pristine_legacy_migration_target_v1(
+        &self,
+        replay_stage: Option<&IntegratedRuntimeSaveStageV1>,
+    ) -> Result<(), IntegratedRuntimeError> {
+        let mut empty_gameplay = GameplayAuthority::new(GameplayState::new(
+            WorldKey::new(&self.config.universe_id, &self.config.location_id),
+            1,
+        ));
+        empty_gameplay
+            .grant_actor(GAMEPLAY_SCHEDULER_ACTOR_ID_V1, ActorGrant::system())
+            .map_err(|error| IntegratedRuntimeError::new("legacy-migration-gameplay", error.message))?;
+        install_content_item_definitions(
+            &mut empty_gameplay,
+            &item_definitions_from_runtime_registry(&self.gameplay_content_runtime)?,
+        )?;
+        let installed_content_revision = self
+            .content_attestation
+            .as_ref()
+            .map_or(0, |attestation| attestation.page_hashes.len() as u64);
+        let empty_network = NetworkBrowserAuthorityRuntimeV1::new(self.config.session_id.clone())
+            .map_err(|error| IntegratedRuntimeError::domain("legacy-migration-network", error))?;
+        if !self.entities.is_empty()
+            || self.player.is_some()
+            || self.exact_player.is_some()
+            || self.tick != 0
+            || self.accumulator_us != 0
+            || self.simulation_revision != 0
+            || self.gameplay_authority_revision != installed_content_revision
+            || self.entity_command_sequence != 0
+            || self.gameplay.state.state_hash() != empty_gameplay.state.state_hash()
+            || !self.effect_events.is_empty()
+            || !self.queued_inputs.is_empty()
+            || self.last_input_sequence.is_some()
+            || self.last_applied_input.is_some()
+            || self.next_action_sequence != 1
+            || !self.queued_context_commands.is_empty()
+            || self.next_context_command_sequence != Some(1)
+            || !self.replay.is_empty()
+            || !self.command_receipt_cache_is_exact_attested_content_installer_prefix_v1(replay_stage)?
+            || !self.persistence_authority.records().is_empty()
+            || self.persistence_authority.checkpoint().is_some()
+            || !self.persistence_authority.dirty_records().is_empty()
+            || !self.persistence_dispatcher.is_idle()
+            || !self.prepared_persistence_commits.is_empty()
+            || self.network.authority_fingerprint() != empty_network.authority_fingerprint()
+            || !self.replication_record_hashes.is_empty()
+            || self.world.revision().mutation != 0
+            || !self.world.edit_journal().is_empty()
+        {
+            return Err(IntegratedRuntimeError::new(
+                "legacy-migration-not-pristine",
+                "target runtime already owns non-default state and cannot safely infer a legacy migration",
+            ));
+        }
+        Ok(())
+    }
+
     /// One-time fail-closed migration for a provably world-only legacy save.
     ///
     /// The exact legacy source must already be staged through the bounded save
@@ -6610,47 +7474,7 @@ impl IntegratedRuntimeV2 {
                 "legacy migration requires one complete, bounded source-backup stage",
             ));
         }
-        let empty_gameplay = GameplayAuthority::new(GameplayState::new(
-            WorldKey::new(&self.config.universe_id, &self.config.location_id),
-            1,
-        ));
-        let empty_network = NetworkBrowserAuthorityRuntimeV1::new(self.config.session_id.clone())
-            .map_err(|error| IntegratedRuntimeError::domain("legacy-migration-network", error))?;
-        if !self.entities.is_empty()
-            || self.player.is_some()
-            || self.exact_player.is_some()
-            || self.tick != 0
-            || self.accumulator_us != 0
-            || self.simulation_revision != 0
-            || self.gameplay_authority_revision != 0
-            || self.entity_command_sequence != 0
-            || self.gameplay.state.state_hash() != empty_gameplay.state.state_hash()
-            || !self.effect_events.is_empty()
-            || !self.queued_inputs.is_empty()
-            || self.last_input_sequence.is_some()
-            || self.last_applied_input.is_some()
-            || self.next_action_sequence != 1
-            || !self.queued_context_commands.is_empty()
-            || self.next_context_command_sequence != Some(1)
-            || !self.replay.is_empty()
-            || !self.command_receipts.is_empty()
-            || !self.command_receipt_order.is_empty()
-            || self.command_receipt_bytes != 0
-            || !self.persistence_authority.records().is_empty()
-            || self.persistence_authority.checkpoint().is_some()
-            || !self.persistence_authority.dirty_records().is_empty()
-            || !self.persistence_dispatcher.is_idle()
-            || !self.prepared_persistence_commits.is_empty()
-            || self.network.authority_fingerprint() != empty_network.authority_fingerprint()
-            || !self.replication_record_hashes.is_empty()
-            || self.world.revision().mutation != 0
-            || !self.world.edit_journal().is_empty()
-        {
-            return Err(IntegratedRuntimeError::new(
-                "legacy-migration-not-pristine",
-                "target runtime already owns non-default state and cannot safely infer a legacy migration",
-            ));
-        }
+        self.ensure_pristine_legacy_migration_target_v1(Some(&stage))?;
 
         let projection = decode_compatibility_save_binary_v1(&migration.world_projection)
             .map_err(|error| IntegratedRuntimeError::domain("legacy-migration-world", error))?;
@@ -6728,6 +7552,695 @@ impl IntegratedRuntimeV2 {
         Ok(progress)
     }
 
+    /// Imports only the proposal-bound BWAS world projection into R4 while
+    /// keeping every richer historical property in exact opaque BWHE chunks.
+    /// The browser proposal cannot claim the six native record fingerprints;
+    /// Rust derives their eventual durable revisions and binds them here.
+    pub fn migrate_historical_external_v2(
+        &mut self,
+        stage_id: &str,
+        created_at: u64,
+        proposal_bytes: &[u8],
+        world_projection: &[u8],
+    ) -> Result<IntegratedRuntimeHistoricalExternalReceiptV2, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        validate_label(stage_id, "stage_id")?;
+        let proposal = decode_historical_external_descriptor_proposal_v2(proposal_bytes)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-proposal", error))?;
+        self.validate_historical_external_target_v2(&proposal.immutable)?;
+        let stage = self.save_stages.get(stage_id).cloned().ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-external-stage",
+                "exact historical external document is not staged",
+            )
+        })?;
+        if self.save_stages.len() != 1 {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-stage",
+                "historical external migration requires exactly one document stage",
+            ));
+        }
+        self.historical_external_records_from_stage_v2(&stage, &proposal.external)?;
+        self.ensure_pristine_legacy_migration_target_v1(Some(&stage))?;
+        if !self.recovery_assemblers.is_empty() || self.recovered_save_sets.len() > 1 {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-recovery-active",
+                "historical external migration resume requires at most one complete recovery and no partial assemblers",
+            ));
+        }
+        if world_projection.len() as u64 != proposal.immutable.bwas.projection_byte_length
+            || persistence_payload_hash_v1(world_projection) != proposal.immutable.bwas.projection_hash
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-bwas",
+                "BWAS projection differs from the proposal-bound byte identity",
+            ));
+        }
+        let projection = decode_compatibility_save_binary_v1(world_projection)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-bwas", error))?;
+        let expected_address = AuthorityWorldAddressV1::new(&self.config.universe_id, &self.config.location_id)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-bwas", error))?;
+        let edit_count = projection.edits.iter().try_fold(0_u64, |total, chunk| {
+            total.checked_add(chunk.entries.len() as u64).ok_or_else(|| {
+                IntegratedRuntimeError::new("historical-external-capacity", "BWAS edit count exceeds u64")
+            })
+        })?;
+        if projection.address != expected_address
+            || projection.compatibility_checksum != proposal.immutable.bwas.compatibility_checksum.to_hex()
+            || projection.extension_checksum != proposal.immutable.bwas.extension_checksum.to_hex()
+            || edit_count != proposal.immutable.bwas.edit_count
+            || projection.facings.len() as u64 != proposal.immutable.bwas.facing_count
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-bwas",
+                "BWAS projection differs from the proposal-bound R4 address, checksum, edits, or facings",
+            ));
+        }
+        let external_records = self.historical_external_records_from_stage_v2(&stage, &proposal.external)?;
+        let mut migrated_world = WorldAuthorityStoreR4V1::new(expected_address, self.config.block_catalog.clone())
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-bwas", error))?;
+        migrated_world
+            .import_compatibility_save(&projection, true)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-bwas", error))?;
+        let semantic_projection = encode_compatibility_save_binary_v1(&migrated_world.export_compatibility_save())
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-bwas-readback", error))?;
+        if semantic_projection != world_projection {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-bwas-readback",
+                "native R4 readback does not reproduce the exact admitted BWAS projection",
+            ));
+        }
+
+        let mut candidate = self.clone();
+        candidate.world = migrated_world;
+        candidate.native_world_extension_bytes.clear();
+        // A crash can leave only the BWHE at the head of the canonical prefix,
+        // before the runtime-core payload exists. Derive the migration's
+        // durable session identity from BWHP so an identical retry in a fresh
+        // Worker reproduces every future native byte exactly.
+        let native_session_id = format!("historical-external:{}", proposal.proposal_hash.to_hex());
+        candidate.config.session_id.clone_from(&native_session_id);
+        candidate.network = NetworkBrowserAuthorityRuntimeV1::new(native_session_id)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-network", error))?;
+        let native_records = candidate.build_primary_native_state_records()?;
+        let native_fingerprints = candidate.historical_external_native_fingerprints_v2(&native_records)?;
+        let descriptor = proposal
+            .bind_native_records(native_fingerprints)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-descriptor", error))?;
+        let state_records =
+            candidate.build_historical_external_state_records_v2(native_records, external_records, &descriptor)?;
+        let save = CanonicalWorldSaveSetV1::build(
+            candidate.persistence_authority.world_id(),
+            &candidate.config.universe_id,
+            &candidate.config.location_id,
+            candidate.config.generator_hash,
+            candidate.config.content_hash,
+            Vec::<Vec<u8>>::new(),
+            state_records,
+        )
+        .map_err(|error| IntegratedRuntimeError::domain("historical-external-save", error))?;
+        if let Some((recovery_id, complete)) = self.recovered_save_sets.iter().next() {
+            candidate.persistence_authority =
+                self.recover_partial_historical_external_migration_v2(complete, &descriptor, &save, created_at)?;
+            candidate.recovered_save_sets.remove(recovery_id);
+        }
+        candidate
+            .persistence_authority
+            .stage_complete_save_set(&save)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-save", error))?;
+        candidate.latest_commit_created_at = candidate.latest_commit_created_at.max(created_at);
+        let dispatcher_request_id = candidate.prepare_next_authority_commit()?;
+        candidate.save_stages.remove(stage_id);
+        candidate.invalidate_state_hash();
+        let remaining_dirty_records =
+            u32::try_from(candidate.persistence_authority.dirty_records().len()).map_err(|_| {
+                IntegratedRuntimeError::new(
+                    "historical-external-capacity",
+                    "historical external dirty record count exceeds u32",
+                )
+            })?;
+        if dispatcher_request_id.is_none() || remaining_dirty_records == 0 {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-dispatch",
+                "historical external migration did not produce an exact pending canonical commit",
+            ));
+        }
+        let receipt = candidate.historical_external_receipt_v2(HistoricalExternalReceiptInputV2 {
+            operation: IntegratedRuntimeHistoricalExternalOperationV2::InitialMigration,
+            operation_id: stage_id,
+            created_at,
+            descriptor: &descriptor,
+            save_set_hash: save.set_hash,
+            manifest_hash: save.manifest.manifest_hash,
+            dispatcher_request_id,
+            remaining_dirty_records,
+            reconciliation: None,
+        })?;
+        *self = candidate;
+        Ok(receipt)
+    }
+
+    /// Atomically CAS-advances an existing opaque document head, reserializes
+    /// the current R4/native bundle, and binds the resulting record revisions
+    /// into one new descriptor and CanonicalWorldSaveSetV1.
+    pub fn finalize_historical_external_save_v2(
+        &mut self,
+        stage_id: &str,
+        created_at: u64,
+        proposal_bytes: &[u8],
+        prior_checkpoint_bytes: &[u8],
+    ) -> Result<IntegratedRuntimeHistoricalExternalReceiptV2, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        validate_label(stage_id, "stage_id")?;
+        if !self.persistence_authority.dirty_records().is_empty()
+            || !self.persistence_dispatcher.is_idle()
+            || !self.prepared_persistence_commits.is_empty()
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-save-pending",
+                "historical external CAS requires a terminal durable authority head",
+            ));
+        }
+        let proposal = decode_historical_external_descriptor_proposal_v2(proposal_bytes)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-proposal", error))?;
+        self.validate_historical_external_target_v2(&proposal.immutable)?;
+        let prior_checkpoint = self.decode_historical_external_prior_checkpoint_v2(prior_checkpoint_bytes)?;
+        if !self.recovery_assemblers.is_empty() {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-save-pending",
+                "historical external CAS cannot run while a checkpoint recovery is still assembling",
+            ));
+        }
+        if !self.recovered_save_sets.is_empty() {
+            if self.persistence_authority.checkpoint() != Some(&prior_checkpoint) {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-cas",
+                    "historical external resume prior checkpoint proof does not equal the current durable authority head",
+                ));
+            }
+            return self.resume_historical_external_successor_v2(stage_id, created_at, &proposal, &prior_checkpoint);
+        }
+        if self.persistence_authority.checkpoint() != Some(&prior_checkpoint) {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-cas",
+                "historical external CAS prior checkpoint proof does not equal the current authority head",
+            ));
+        }
+        let current = self
+            .historical_external_descriptor_from_authority_v2()?
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-descriptor",
+                    "historical external CAS has no durable BWHE head",
+                )
+            })?;
+        proposal
+            .verify_successor_of(&current)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-cas", error))?;
+        let stage = self.save_stages.get(stage_id).cloned().ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-external-stage",
+                "exact successor historical external document is not staged",
+            )
+        })?;
+        if self.save_stages.len() != 1 {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-stage",
+                "historical external CAS requires exactly one successor document stage",
+            ));
+        }
+        let external_records = self.historical_external_records_from_stage_v2(&stage, &proposal.external)?;
+        let native_session_id = self.historical_external_authority_native_session_id_v2()?;
+        let native_records = self.build_primary_native_state_records_for_prior_checkpoint_v2(
+            self.revision().persistence,
+            &native_session_id,
+        )?;
+        let native_fingerprints = self.historical_external_native_fingerprints_v2(&native_records)?;
+        let descriptor = proposal
+            .bind_native_records(native_fingerprints)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-descriptor", error))?;
+        let state_records =
+            self.build_historical_external_state_records_v2(native_records, external_records, &descriptor)?;
+        let save = CanonicalWorldSaveSetV1::build(
+            self.persistence_authority.world_id(),
+            &self.config.universe_id,
+            &self.config.location_id,
+            self.config.generator_hash,
+            self.config.content_hash,
+            Vec::<Vec<u8>>::new(),
+            state_records,
+        )
+        .map_err(|error| IntegratedRuntimeError::domain("historical-external-save", error))?;
+        let mut candidate = self.clone();
+        candidate
+            .persistence_authority
+            .stage_complete_save_set(&save)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-save", error))?;
+        candidate.latest_commit_created_at = candidate.latest_commit_created_at.max(created_at);
+        let dispatcher_request_id = candidate.prepare_next_authority_commit()?;
+        candidate.save_stages.remove(stage_id);
+        candidate.invalidate_state_hash();
+        let remaining_dirty_records =
+            u32::try_from(candidate.persistence_authority.dirty_records().len()).map_err(|_| {
+                IntegratedRuntimeError::new(
+                    "historical-external-capacity",
+                    "historical external dirty record count exceeds u32",
+                )
+            })?;
+        if dispatcher_request_id.is_none() || remaining_dirty_records == 0 {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-dispatch",
+                "historical external CAS did not produce an exact pending canonical commit",
+            ));
+        }
+        let receipt = candidate.historical_external_receipt_v2(HistoricalExternalReceiptInputV2 {
+            operation: IntegratedRuntimeHistoricalExternalOperationV2::ExternalSave,
+            operation_id: stage_id,
+            created_at,
+            descriptor: &descriptor,
+            save_set_hash: save.set_hash,
+            manifest_hash: save.manifest.manifest_hash,
+            dispatcher_request_id,
+            remaining_dirty_records,
+            reconciliation: None,
+        })?;
+        *self = candidate;
+        Ok(receipt)
+    }
+
+    fn decode_historical_external_prior_checkpoint_v2(
+        &self,
+        prior_checkpoint_bytes: &[u8],
+    ) -> Result<Checkpoint, IntegratedRuntimeError> {
+        if prior_checkpoint_bytes.is_empty() {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-prior-checkpoint",
+                "historical external CAS requires an exact prior checkpoint proof",
+            ));
+        }
+        let PersistenceWireRecord::Checkpoint(checkpoint) = decode_record(prior_checkpoint_bytes)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-prior-checkpoint", error))?
+        else {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-prior-checkpoint",
+                "historical external CAS prior proof is not a persistence checkpoint record",
+            ));
+        };
+        checkpoint
+            .verify()
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-prior-checkpoint", error))?;
+        if encode_checkpoint(&checkpoint) != prior_checkpoint_bytes {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-prior-checkpoint",
+                "historical external CAS prior checkpoint proof is not canonically encoded",
+            ));
+        }
+        if checkpoint.world_id != self.persistence_authority.world_id()
+            || checkpoint.generator_hash != self.config.generator_hash
+            || checkpoint.content_hash != self.config.content_hash
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-prior-checkpoint",
+                "historical external CAS prior checkpoint belongs to a different world, generator, or content binding",
+            ));
+        }
+        Ok(checkpoint)
+    }
+
+    fn validate_historical_external_successor_recovery_v2(
+        &self,
+        complete: &PagedRecoveryCompleteV1,
+        prior_checkpoint: &Checkpoint,
+    ) -> Result<(), IntegratedRuntimeError> {
+        complete
+            .checkpoint
+            .verify()
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume", error))?;
+        let checkpoint = &complete.checkpoint;
+        let expected_child_sequence = prior_checkpoint.journal_sequence.checked_add(1).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "prior historical checkpoint journal sequence is exhausted",
+            )
+        })?;
+        if checkpoint.parent_checkpoint_id.as_deref() != Some(prior_checkpoint.checkpoint_id.as_str())
+            || checkpoint.journal_sequence != expected_child_sequence
+            || checkpoint.world_id != prior_checkpoint.world_id
+            || checkpoint.generator_hash != prior_checkpoint.generator_hash
+            || checkpoint.content_hash != prior_checkpoint.content_hash
+            || checkpoint.world_id != self.persistence_authority.world_id()
+            || checkpoint.generator_hash != self.config.generator_hash
+            || checkpoint.content_hash != self.config.content_hash
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "successor recovery is not the exact next child of the supplied prior checkpoint and runtime binding",
+            ));
+        }
+        if !complete.missing_record_keys.is_empty() || complete.payloads.len() != checkpoint.records.len() {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "successor recovery payload set differs from its checkpoint record set",
+            ));
+        }
+        for record in &checkpoint.records {
+            let payload = complete.payloads.get(&record.address).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-resume",
+                    "successor recovery is missing a checkpoint-bound payload",
+                )
+            })?;
+            if payload.len() != record.byte_length as usize
+                || persistence_payload_hash_v1(payload) != record.payload_hash
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-resume",
+                    "successor recovery payload differs from its checkpoint fingerprint",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_historical_external_successor_prefix_v2(
+        &self,
+        complete: &PagedRecoveryCompleteV1,
+        prior_checkpoint: &Checkpoint,
+        final_save: &CanonicalWorldSaveSetV1,
+    ) -> Result<(), IntegratedRuntimeError> {
+        let prior_records = prior_checkpoint
+            .records
+            .iter()
+            .cloned()
+            .map(|record| (record.address.clone(), record))
+            .collect::<BTreeMap<_, _>>();
+        let mut final_records = BTreeMap::new();
+        for (address, payload) in &final_save.records {
+            let byte_length = u32::try_from(payload.len()).map_err(|_| {
+                IntegratedRuntimeError::new(
+                    "historical-external-resume",
+                    "successor final record exceeds the checkpoint byte-length domain",
+                )
+            })?;
+            let payload_hash = persistence_payload_hash_v1(payload);
+            let revision = match prior_records.get(address) {
+                Some(prior) if prior.byte_length == byte_length && prior.payload_hash == payload_hash => prior.revision,
+                Some(prior) => prior.revision.checked_add(1).ok_or_else(|| {
+                    IntegratedRuntimeError::new("historical-external-resume", "successor record revision is exhausted")
+                })?,
+                None => 1,
+            };
+            final_records.insert(
+                address.clone(),
+                RecordDescriptor {
+                    address: address.clone(),
+                    revision,
+                    byte_length,
+                    payload_hash,
+                },
+            );
+        }
+
+        let dirty_addresses = prior_records
+            .keys()
+            .chain(final_records.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|address| prior_records.get(address) != final_records.get(address))
+            .collect::<Vec<_>>();
+        if dirty_addresses.is_empty() {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "successor retry has no record changes relative to the exact prior checkpoint",
+            ));
+        }
+
+        let mut expected_records = prior_records.clone();
+        let mut applied_prefix_len = None;
+        for (index, address) in dirty_addresses.iter().enumerate() {
+            if let Some(record) = final_records.get(address) {
+                expected_records.insert(address.clone(), record.clone());
+            } else {
+                expected_records.remove(address);
+            }
+            if expected_records.values().eq(complete.checkpoint.records.iter()) {
+                applied_prefix_len = Some(index + 1);
+                break;
+            }
+        }
+        let applied_prefix_len = applied_prefix_len.ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-external-resume",
+                format!(
+                    "recovered successor is not an exact canonical dirty-key prefix of the prior and final checkpoints; dirty={:?}; recovered={:?}",
+                    dirty_addresses
+                        .iter()
+                        .map(RecordAddress::canonical_key)
+                        .collect::<Vec<_>>(),
+                    complete
+                        .checkpoint
+                        .records
+                        .iter()
+                        .map(|record| record.address.canonical_key())
+                        .collect::<Vec<_>>(),
+                ),
+            )
+        })?;
+        let applied_addresses = dirty_addresses[..applied_prefix_len]
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        for (address, payload) in &complete.payloads {
+            if applied_addresses.contains(address) {
+                let expected_payload = final_save.records.get(address).ok_or_else(|| {
+                    IntegratedRuntimeError::new(
+                        "historical-external-resume",
+                        "recovered successor retained a record deleted by its canonical prefix",
+                    )
+                })?;
+                if payload != expected_payload {
+                    return Err(IntegratedRuntimeError::new(
+                        "historical-external-resume",
+                        "recovered successor record payload is not the exact final payload",
+                    ));
+                }
+            } else if !prior_records.contains_key(address) {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-resume",
+                    "recovered successor contains a record that is neither exact prior nor exact final",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn historical_external_authority_native_session_id_v2(&self) -> Result<String, IntegratedRuntimeError> {
+        let (kind, record_id) = IntegratedRuntimeNativeRecordKindV1::Runtime.address();
+        let address = RecordAddress::new(&self.config.universe_id, &self.config.location_id, kind, record_id)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-save-native", error))?;
+        let payload = &self
+            .persistence_authority
+            .records()
+            .get(&address)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-save-native",
+                    "current durable historical authority has no native runtime record",
+                )
+            })?
+            .payload;
+        let envelope = decode_native_record_envelope_v1(payload)?;
+        if envelope.kind != IntegratedRuntimeNativeRecordKindV1::Runtime {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-save-native",
+                "current durable historical runtime payload has the wrong native kind",
+            ));
+        }
+        Ok(decode_runtime_core_snapshot_v1(&envelope.body)?.config.session_id)
+    }
+
+    fn historical_external_prior_native_identity_v2(
+        &self,
+        complete: &PagedRecoveryCompleteV1,
+        prior_checkpoint: &Checkpoint,
+    ) -> Result<(String, u64), IntegratedRuntimeError> {
+        let (kind, record_id) = IntegratedRuntimeNativeRecordKindV1::Runtime.address();
+        let address = RecordAddress::new(&self.config.universe_id, &self.config.location_id, kind, record_id)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume-native", error))?;
+        let prior_record = prior_checkpoint
+            .records
+            .iter()
+            .find(|record| record.address == address)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-resume-native",
+                    "exact prior checkpoint has no native runtime record",
+                )
+            })?;
+        let recovered_record = complete
+            .checkpoint
+            .records
+            .iter()
+            .find(|record| record.address == address)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-resume-native",
+                    "successor prefix has no prior native runtime record",
+                )
+            })?;
+        if recovered_record != prior_record {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume-native",
+                "successor prefix advanced the native runtime record before an exact rebuild was possible",
+            ));
+        }
+        let payload = complete.payloads.get(&address).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-external-resume-native",
+                "successor prefix is missing the prior native runtime payload",
+            )
+        })?;
+        let envelope = decode_native_record_envelope_v1(payload)?;
+        if envelope.kind != IntegratedRuntimeNativeRecordKindV1::Runtime {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume-native",
+                "successor prefix runtime payload has the wrong native kind",
+            ));
+        }
+        let core = decode_runtime_core_snapshot_v1(&envelope.body)?;
+        let successor_persistence_revision = if prior_checkpoint.checkpoint_id.starts_with("historical-reconcile:") {
+            // Op14 copies the fallback-native bytes into a higher-sequence
+            // repaired checkpoint, then records one accepted platform repair.
+            // That accepted dispatcher revision is the only live contribution
+            // absent after a fresh hydration of the authenticated repair head.
+            self.revision().persistence.checked_add(1)
+        } else {
+            // An ordinary authority commit advances dispatcher and authority
+            // once after the native bundle captures its pre-commit revision.
+            core.expected_revision.persistence.checked_add(2)
+        }
+        .ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-external-resume-native",
+                "exact prior native persistence revision is exhausted",
+            )
+        })?;
+        Ok((core.config.session_id, successor_persistence_revision))
+    }
+
+    fn resume_historical_external_successor_v2(
+        &mut self,
+        stage_id: &str,
+        created_at: u64,
+        proposal: &HistoricalExternalDescriptorProposalV2,
+        prior_checkpoint: &Checkpoint,
+    ) -> Result<IntegratedRuntimeHistoricalExternalReceiptV2, IntegratedRuntimeError> {
+        if self.persistence_authority.checkpoint() != Some(prior_checkpoint) {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-cas",
+                "historical external resume is not anchored to the current durable authority head",
+            ));
+        }
+        if !self.recovery_assemblers.is_empty() || self.recovered_save_sets.len() != 1 {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "successor resume requires exactly one complete recovery and no partial assemblers",
+            ));
+        }
+        let (recovery_id, complete) = self
+            .recovered_save_sets
+            .iter()
+            .next()
+            .expect("exactly one successor recovery was required");
+        if complete.checkpoint.created_at != created_at {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "successor retry timestamp differs from the recovered partial checkpoint",
+            ));
+        }
+        self.validate_historical_external_successor_recovery_v2(complete, prior_checkpoint)?;
+        let (native_session_id, successor_persistence_revision) =
+            self.historical_external_prior_native_identity_v2(complete, prior_checkpoint)?;
+        let complete = complete.clone();
+        let recovery_id = recovery_id.clone();
+        let mut candidate = self.clone();
+        candidate.hydrate_recovery_with_historical_policy_v2(&recovery_id, true)?;
+        let descriptor = candidate.historical_external_successor_resume_descriptor_v2(proposal)?;
+        let stage = candidate.save_stages.get(stage_id).cloned().ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-external-stage",
+                "exact successor historical external document is not staged",
+            )
+        })?;
+        if candidate.save_stages.len() != 1 {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-stage",
+                "historical external successor resume requires exactly one document stage",
+            ));
+        }
+        let external_records = candidate.historical_external_records_from_stage_v2(&stage, &proposal.external)?;
+        let native_records = candidate.build_primary_native_state_records_for_prior_checkpoint_v2(
+            successor_persistence_revision,
+            &native_session_id,
+        )?;
+        if candidate.historical_external_native_fingerprints_v2(&native_records)? != descriptor.mutable.native_records {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume-native",
+                format!(
+                    "authenticated prior native revision {successor_persistence_revision} does not reconstruct the exact BWHE-bound successor records"
+                ),
+            ));
+        }
+        let state_records =
+            candidate.build_historical_external_state_records_v2(native_records, external_records, &descriptor)?;
+        let save = CanonicalWorldSaveSetV1::build(
+            candidate.persistence_authority.world_id(),
+            &candidate.config.universe_id,
+            &candidate.config.location_id,
+            candidate.config.generator_hash,
+            candidate.config.content_hash,
+            Vec::<Vec<u8>>::new(),
+            state_records,
+        )
+        .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume", error))?;
+        candidate.validate_historical_external_successor_prefix_v2(&complete, prior_checkpoint, &save)?;
+        candidate
+            .persistence_authority
+            .stage_complete_save_set(&save)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-resume", error))?;
+        candidate.latest_commit_created_at = candidate.latest_commit_created_at.max(created_at);
+        let dispatcher_request_id = candidate.prepare_next_authority_commit()?;
+        candidate.save_stages.remove(stage_id);
+        candidate.invalidate_state_hash();
+        let remaining_dirty_records =
+            u32::try_from(candidate.persistence_authority.dirty_records().len()).map_err(|_| {
+                IntegratedRuntimeError::new(
+                    "historical-external-capacity",
+                    "historical successor dirty record count exceeds u32",
+                )
+            })?;
+        if dispatcher_request_id.is_none() || remaining_dirty_records == 0 {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-resume",
+                "partial successor was already terminal or produced no exact remaining commit",
+            ));
+        }
+        let receipt = candidate.historical_external_receipt_v2(HistoricalExternalReceiptInputV2 {
+            operation: IntegratedRuntimeHistoricalExternalOperationV2::ExternalSave,
+            operation_id: stage_id,
+            created_at,
+            descriptor: &descriptor,
+            save_set_hash: save.set_hash,
+            manifest_hash: save.manifest.manifest_hash,
+            dispatcher_request_id,
+            remaining_dirty_records,
+            reconciliation: None,
+        })?;
+        *self = candidate;
+        Ok(receipt)
+    }
+
     pub fn cancel_compatibility_save_stage(
         &mut self,
         stage_id: &str,
@@ -6747,6 +8260,14 @@ impl IntegratedRuntimeV2 {
     pub fn hydrate_recovery(
         &mut self,
         recovery_id: &str,
+    ) -> Result<IntegratedRuntimeHydrationSummaryV1, IntegratedRuntimeError> {
+        self.hydrate_recovery_with_historical_policy_v2(recovery_id, false)
+    }
+
+    fn hydrate_recovery_with_historical_policy_v2(
+        &mut self,
+        recovery_id: &str,
+        allow_incomplete_historical_successor: bool,
     ) -> Result<IntegratedRuntimeHydrationSummaryV1, IntegratedRuntimeError> {
         self.ensure_running()?;
         let complete = self.recovered_save_sets.get(recovery_id).cloned().ok_or_else(|| {
@@ -7013,6 +8534,12 @@ impl IntegratedRuntimeV2 {
         candidate.persistence_authority =
             PersistenceAuthorityV1::recover(complete.checkpoint.clone(), complete.payloads.clone())
                 .map_err(|error| IntegratedRuntimeError::domain("recovery-authority", error))?;
+        // Generic hydration remains compatible with every existing save lane,
+        // but any presence of BWHE/BWHP-reserved records activates the full
+        // historical descriptor, chunk, and native-fingerprint validation.
+        if !allow_incomplete_historical_successor {
+            let _ = candidate.historical_external_descriptor_from_authority_v2()?;
+        }
         let legacy_migration = if let Some(descriptor) = legacy_descriptor {
             let (semantic_hash, edit_count, facing_count) = candidate.native_world_semantic_identity_v1()?;
             if semantic_hash != descriptor.native_world_semantic_hash
@@ -7071,6 +8598,7 @@ impl IntegratedRuntimeV2 {
                 chunks,
                 total_bytes,
                 compatibility_hash,
+                checkpoint: complete.checkpoint.clone(),
             },
         );
         candidate.recovered_save_sets.remove(recovery_id);
@@ -7085,6 +8613,379 @@ impl IntegratedRuntimeV2 {
         };
         *self = candidate;
         Ok(summary)
+    }
+
+    /// Hydrates only a descriptor-bound historical save and returns the exact
+    /// external/native readback required by a restarted browser session.
+    pub fn hydrate_historical_external_recovery_v2(
+        &mut self,
+        recovery_id: &str,
+    ) -> Result<IntegratedRuntimeHistoricalExternalReceiptV2, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        validate_label(recovery_id, "recovery_id")?;
+        if !self.recovery_assemblers.is_empty()
+            || self.recovered_save_sets.len() != 1
+            || !self.recovered_save_sets.contains_key(recovery_id)
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-recovery",
+                "historical external hydration requires exactly one complete recovery and no partial recovery state",
+            ));
+        }
+        let mut candidate = self.clone();
+        candidate.hydrate_recovery(recovery_id)?;
+        let descriptor = candidate
+            .historical_external_descriptor_from_authority_v2()?
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-descriptor",
+                    "recovered save has no exact historical external descriptor",
+                )
+            })?;
+        let attestation = attest_world_save_set_records_v1(candidate.persistence_authority.records())
+            .map_err(|error| IntegratedRuntimeError::domain("historical-external-save-attestation", error))?;
+        let created_at = candidate
+            .persistence_authority
+            .checkpoint()
+            .map(|checkpoint| checkpoint.created_at)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-external-recovery",
+                    "recovered historical external authority has no checkpoint",
+                )
+            })?;
+        if !candidate.persistence_authority.dirty_records().is_empty()
+            || !candidate.persistence_dispatcher.is_idle()
+            || !candidate.prepared_persistence_commits.is_empty()
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-external-recovery",
+                "recovered historical external authority is not terminal and clean",
+            ));
+        }
+        let receipt = candidate.historical_external_receipt_v2(HistoricalExternalReceiptInputV2 {
+            operation: IntegratedRuntimeHistoricalExternalOperationV2::Recovery,
+            operation_id: recovery_id,
+            created_at,
+            descriptor: &descriptor,
+            save_set_hash: attestation.set_hash,
+            manifest_hash: attestation.manifest_hash,
+            dispatcher_request_id: None,
+            remaining_dirty_records: 0,
+            reconciliation: None,
+        })?;
+        *self = candidate;
+        Ok(receipt)
+    }
+
+    /// Atomically promotes an already verified direct-parent historical head
+    /// without pretending that browser storage is Rust authority. The browser
+    /// supplies one complete BWHO snapshot; Rust binds the exact fallback
+    /// semantics into a clean latest+1 checkpoint and queues a dedicated BWFP
+    /// platform repair. The in-memory authority remains the read-only fallback
+    /// until the browser commits BWFP and a fresh op13 re-hydrates the target.
+    pub fn reconcile_historical_external_fallback_v2(
+        &mut self,
+        fallback_recovery_id: &str,
+        created_at: u64,
+        observation_bytes: &[u8],
+    ) -> Result<IntegratedRuntimeHistoricalExternalReceiptV2, IntegratedRuntimeError> {
+        self.ensure_running()?;
+        validate_label(fallback_recovery_id, "fallback_recovery_id")?;
+        if !self.persistence_authority.dirty_records().is_empty()
+            || !self.persistence_dispatcher.is_idle()
+            || !self.prepared_persistence_commits.is_empty()
+            || !self.save_stages.is_empty()
+            || !self.recovery_assemblers.is_empty()
+            || !self.recovered_save_sets.is_empty()
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-reconciliation-busy",
+                "historical fallback reconciliation requires one terminal, clean, read-only fallback authority",
+            ));
+        }
+        let hydrated_fallback = self.hydrated_exports.get(fallback_recovery_id).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-reconciliation-recovery",
+                "historical fallback reconciliation requires the exact prior hydrated recovery id",
+            )
+        })?;
+        let observation = decode_historical_fallback_observation_v2(observation_bytes)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-reconciliation-observation", error))?;
+        let fallback = self.persistence_authority.checkpoint().ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "historical-reconciliation-fallback",
+                "historical fallback reconciliation has no hydrated checkpoint authority",
+            )
+        })?;
+        if hydrated_fallback.checkpoint != *fallback
+            || observation.world_id != self.persistence_authority.world_id()
+            || observation.fallback_checkpoint != *fallback
+            || observation.latest_checkpoint.world_id != self.persistence_authority.world_id()
+            || observation.latest_checkpoint.generator_hash != self.config.generator_hash
+            || observation.latest_checkpoint.content_hash != self.config.content_hash
+            || created_at != observation.latest_checkpoint.created_at
+            || observation.actual_records.iter().any(|record| {
+                record.address.universe_id != self.config.universe_id
+                    || record.address.location_id != self.config.location_id
+            })
+        {
+            return Err(IntegratedRuntimeError::new(
+                "historical-reconciliation-fallback",
+                "BWHO does not bind the exact hydrated fallback, observed latest timestamp, and target world",
+            ));
+        }
+        let target_journal_sequence = observation
+            .latest_checkpoint
+            .journal_sequence
+            .checked_add(1)
+            .filter(|sequence| *sequence <= MAX_SAFE_U64)
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-reconciliation-revision",
+                    "historical reconciliation journal sequence is exhausted",
+                )
+            })?;
+        let actual_revisions = observation
+            .actual_records
+            .iter()
+            .map(|record| (record.address.clone(), record.revision))
+            .collect::<BTreeMap<_, _>>();
+        let target_revision = |address: &RecordAddress| -> Result<u64, IntegratedRuntimeError> {
+            let fallback_revision = self
+                .persistence_authority
+                .records()
+                .get(address)
+                .map_or(0, |record| record.revision);
+            actual_revisions
+                .get(address)
+                .copied()
+                .unwrap_or(0)
+                .max(fallback_revision)
+                .checked_add(1)
+                .filter(|revision| *revision <= MAX_SAFE_U64)
+                .ok_or_else(|| {
+                    IntegratedRuntimeError::new(
+                        "historical-reconciliation-revision",
+                        format!("target record revision is exhausted for {}", address.canonical_key()),
+                    )
+                })
+        };
+
+        let current_descriptor = self
+            .historical_external_descriptor_from_authority_v2()?
+            .ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-reconciliation-descriptor",
+                    "hydrated fallback has no exact historical external descriptor",
+                )
+            })?;
+        // Reconciliation restores the byte-exact verified fallback. A normal
+        // post-recovery serialization may legitimately rebind the live
+        // session id inside the native bundle, so it must not be substituted
+        // for the immutable fallback revisions copied by the browser repair.
+        let mut native_records = Vec::with_capacity(HISTORICAL_EXTERNAL_NATIVE_RECORD_TEMPLATES_V2.len());
+        let mut native_fingerprints = Vec::with_capacity(HISTORICAL_EXTERNAL_NATIVE_RECORD_TEMPLATES_V2.len());
+        for (kind, record_id) in HISTORICAL_EXTERNAL_NATIVE_RECORD_TEMPLATES_V2 {
+            let address = RecordAddress::new(&self.config.universe_id, &self.config.location_id, kind, record_id)
+                .map_err(|error| IntegratedRuntimeError::domain("historical-reconciliation-native", error))?;
+            let fallback_record = self.persistence_authority.records().get(&address).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-reconciliation-native",
+                    "hydrated fallback lost one descriptor-bound native record",
+                )
+            })?;
+            native_fingerprints.push(HistoricalExternalNativeRecordFingerprintV2 {
+                address: address.clone(),
+                revision: target_revision(&address)?,
+                byte_length: u32::try_from(fallback_record.payload.len()).map_err(|_| {
+                    IntegratedRuntimeError::new(
+                        "historical-reconciliation-capacity",
+                        "reconciliation native record byte length exceeds u32",
+                    )
+                })?,
+                payload_hash: persistence_payload_hash_v1(&fallback_record.payload),
+            });
+            native_records.push(NormalizedStateRecordV1 {
+                address,
+                payload: fallback_record.payload.clone(),
+            });
+        }
+        let target_descriptor = current_descriptor
+            .with_native_records(native_fingerprints)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-reconciliation-descriptor", error))?;
+        let external_records = target_descriptor
+            .mutable
+            .external
+            .chunks
+            .iter()
+            .map(|fingerprint| {
+                let address = historical_external_document_chunk_address_v2(
+                    &self.config.universe_id,
+                    &self.config.location_id,
+                    fingerprint.index,
+                )
+                .map_err(|error| IntegratedRuntimeError::domain("historical-reconciliation-chunk", error))?;
+                let record = self.persistence_authority.records().get(&address).ok_or_else(|| {
+                    IntegratedRuntimeError::new(
+                        "historical-reconciliation-chunk",
+                        "verified fallback external document chunk disappeared",
+                    )
+                })?;
+                Ok(NormalizedStateRecordV1 {
+                    address,
+                    payload: record.payload.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, IntegratedRuntimeError>>()?;
+        let state_records =
+            self.build_historical_external_state_records_v2(native_records, external_records, &target_descriptor)?;
+        let save = CanonicalWorldSaveSetV1::build(
+            self.persistence_authority.world_id(),
+            &self.config.universe_id,
+            &self.config.location_id,
+            self.config.generator_hash,
+            self.config.content_hash,
+            Vec::<Vec<u8>>::new(),
+            state_records,
+        )
+        .map_err(|error| IntegratedRuntimeError::domain("historical-reconciliation-save", error))?;
+        let target_descriptors = save
+            .records
+            .iter()
+            .map(|(address, payload)| {
+                Ok(RecordDescriptor {
+                    address: address.clone(),
+                    revision: target_revision(address)?,
+                    byte_length: u32::try_from(payload.len()).map_err(|_| {
+                        IntegratedRuntimeError::new(
+                            "historical-reconciliation-capacity",
+                            "reconciliation target record byte length exceeds u32",
+                        )
+                    })?,
+                    payload_hash: persistence_payload_hash_v1(payload),
+                })
+            })
+            .collect::<Result<Vec<_>, IntegratedRuntimeError>>()?;
+        let target_checkpoint_id = format!(
+            "historical-reconcile:{target_journal_sequence}:{}",
+            save.set_hash.to_hex()
+        );
+        let target_checkpoint = Checkpoint::new(
+            target_checkpoint_id,
+            Some(observation.latest_checkpoint.checkpoint_id.clone()),
+            observation.world_id.clone(),
+            target_journal_sequence,
+            self.config.generator_hash,
+            self.config.content_hash,
+            created_at,
+            target_descriptors,
+        )
+        .map_err(|error| IntegratedRuntimeError::domain("historical-reconciliation-checkpoint", error))?;
+        let descriptor_address =
+            historical_external_descriptor_address_v2(&self.config.universe_id, &self.config.location_id)
+                .map_err(|error| IntegratedRuntimeError::domain("historical-reconciliation-descriptor", error))?;
+        let target_by_address = target_checkpoint
+            .records
+            .iter()
+            .map(|record| (&record.address, record))
+            .collect::<BTreeMap<_, _>>();
+        let mut copy_records = Vec::with_capacity(save.records.len().saturating_sub(2));
+        let mut inline_records = Vec::with_capacity(2);
+        for (address, payload) in &save.records {
+            let target = target_by_address
+                .get(address)
+                .expect("target checkpoint exactly covers save records");
+            let is_manifest =
+                address.kind == RecordKind::LocationManifest && address.record_id == WORLD_SAVE_MANIFEST_RECORD_ID_V1;
+            if address == &descriptor_address || is_manifest {
+                inline_records.push(HistoricalFallbackInlineRecordV2 {
+                    address: address.clone(),
+                    target_revision: target.revision,
+                    payload: payload.clone(),
+                });
+                continue;
+            }
+            let source = self.persistence_authority.records().get(address).ok_or_else(|| {
+                IntegratedRuntimeError::new(
+                    "historical-reconciliation-source",
+                    format!("verified fallback source {} is missing", address.canonical_key()),
+                )
+            })?;
+            if source.payload != *payload || source.payload_hash != persistence_payload_hash_v1(payload) {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-reconciliation-source",
+                    format!(
+                        "target payload {} differs from the verified fallback",
+                        address.canonical_key()
+                    ),
+                ));
+            }
+            copy_records.push(HistoricalFallbackCopyRecordV2 {
+                address: address.clone(),
+                source_revision: source.revision,
+                target_revision: target.revision,
+                byte_length: target.byte_length,
+                payload_hash: target.payload_hash,
+            });
+        }
+        let target_addresses = save.records.keys().cloned().collect::<BTreeSet<_>>();
+        let delete_addresses = observation
+            .actual_records
+            .iter()
+            .map(|record| record.address.clone())
+            .filter(|address| !target_addresses.contains(address))
+            .collect::<Vec<_>>();
+        let observation_hash = historical_fallback_observation_payload_hash_v2(observation_bytes);
+        let plan = HistoricalFallbackReconciliationPlanV2 {
+            schema_version: HISTORICAL_FALLBACK_RECONCILIATION_SCHEMA_V2,
+            created_at,
+            observation: observation.clone(),
+            observation_hash,
+            target_checkpoint: target_checkpoint.clone(),
+            copy_records,
+            inline_records,
+            delete_addresses,
+            save_set_hash: save.set_hash,
+            manifest_hash: save.manifest.manifest_hash,
+            descriptor_hash: target_descriptor.descriptor_hash,
+            plan_hash: CanonicalHash::default(),
+        }
+        .with_calculated_hash()
+        .map_err(|error| IntegratedRuntimeError::domain("historical-reconciliation-plan", error))?;
+        let reconciliation = IntegratedRuntimeHistoricalExternalReconciliationV2 {
+            observation_hash,
+            expected_storage_revision: observation.storage_revision,
+            observed_latest_checkpoint_id: observation.latest_checkpoint.checkpoint_id.clone(),
+            observed_latest_checkpoint_hash: observation.latest_checkpoint.checkpoint_hash,
+            observed_latest_journal_sequence: observation.latest_checkpoint.journal_sequence,
+            fallback_checkpoint_id: observation.fallback_checkpoint.checkpoint_id.clone(),
+            fallback_checkpoint_hash: observation.fallback_checkpoint.checkpoint_hash,
+            fallback_journal_sequence: observation.fallback_checkpoint.journal_sequence,
+            target_checkpoint_id: target_checkpoint.checkpoint_id.clone(),
+            target_checkpoint_hash: target_checkpoint.checkpoint_hash,
+            target_journal_sequence,
+            plan_hash: plan.plan_hash,
+        };
+        let mut candidate = self.clone();
+        let dispatcher_request_id = candidate
+            .persistence_dispatcher
+            .reconcile_historical_fallback(&plan)
+            .map_err(|error| IntegratedRuntimeError::domain("historical-reconciliation-dispatch", error))?;
+        candidate.invalidate_state_hash();
+        let receipt = candidate.historical_external_receipt_v2(HistoricalExternalReceiptInputV2 {
+            operation: IntegratedRuntimeHistoricalExternalOperationV2::Reconciliation,
+            operation_id: fallback_recovery_id,
+            created_at,
+            descriptor: &target_descriptor,
+            save_set_hash: save.set_hash,
+            manifest_hash: save.manifest.manifest_hash,
+            dispatcher_request_id: Some(dispatcher_request_id),
+            remaining_dirty_records: 0,
+            reconciliation: Some(reconciliation),
+        })?;
+        *self = candidate;
+        Ok(receipt)
     }
 
     pub fn read_hydrated_compatibility_chunk(
@@ -8098,6 +9999,72 @@ impl IntegratedRuntimeV2 {
         command_hash: WireHash,
         receipt: RuntimeCommandReceiptV1,
     ) -> Result<(), IntegratedRuntimeError> {
+        self.cache_runtime_command_receipt_inner(actor_id, idempotency_key, command_hash, receipt, None)
+    }
+
+    /// Executes the one built-in content-installer command and atomically
+    /// caches its internally constructed receipt/provenance.  Callers supply
+    /// only the sealed command; they cannot mint an Accepted receipt or its
+    /// migration eligibility marker.
+    pub fn execute_runtime_content_installer_command(
+        &mut self,
+        batch: &RuntimeCommandBatchV1,
+    ) -> Result<RuntimeCommandReceiptV1, IntegratedRuntimeError> {
+        let page = content_installer_page_from_batch_v1(batch)?;
+        let before = runtime_wire_identity_v1(&self.identity());
+        if batch.expected != before {
+            return Err(IntegratedRuntimeError::new(
+                "stale-runtime",
+                "content installer command was authored against an obsolete authority identity",
+            ));
+        }
+        let mut candidate = self.clone();
+        let content_receipt = candidate.install_content_page(
+            page,
+            CanonicalHash(blockwild_runtime_wire::wire_checksum_v1(&batch.operations[0].payload)),
+        )?;
+        let content_payload = crate::encode_content_install_receipt_v1(&content_receipt)
+            .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+        let mut receipt = RuntimeCommandReceiptV1::Accepted {
+            command_id: batch.command_id.clone(),
+            idempotency_key: batch.idempotency_key.clone(),
+            command_hash: batch.command_hash,
+            before,
+            after: runtime_wire_identity_v1(&candidate.identity()),
+            domain_receipts: vec![RuntimeDomainOperationV1 {
+                domain: RuntimeDomainV1::Gameplay,
+                type_id: crate::CONTENT_INSTALL_RECEIPT_TYPE_V1.into(),
+                schema: 1,
+                payload_hash: WireHash(blockwild_runtime_wire::wire_checksum_v1(&content_payload)),
+                payload: content_payload,
+            }],
+            receipt_hash: WireHash::default(),
+        };
+        let receipt_hash = command_receipt_hash_v1(&receipt);
+        let RuntimeCommandReceiptV1::Accepted { receipt_hash: slot, .. } = &mut receipt else {
+            unreachable!();
+        };
+        *slot = receipt_hash;
+        let provenance = content_installer_provenance_from_batch_v1(batch, &receipt)?;
+        candidate.cache_runtime_command_receipt_inner(
+            &batch.actor_id,
+            &batch.idempotency_key,
+            batch.command_hash,
+            receipt.clone(),
+            Some(provenance),
+        )?;
+        *self = candidate;
+        Ok(receipt)
+    }
+
+    fn cache_runtime_command_receipt_inner(
+        &mut self,
+        actor_id: &str,
+        idempotency_key: &str,
+        command_hash: WireHash,
+        receipt: RuntimeCommandReceiptV1,
+        content_installer_provenance: Option<ContentInstallerCacheProvenanceV1>,
+    ) -> Result<(), IntegratedRuntimeError> {
         if actor_id.is_empty() || actor_id.len() > 160 || idempotency_key.is_empty() || idempotency_key.len() > 256 {
             return Err(IntegratedRuntimeError::new(
                 "idempotency-receipt-key",
@@ -8115,8 +10082,12 @@ impl IntegratedRuntimeV2 {
             .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
         let encoded_receipt = encode_command_receipt_v1(&receipt)
             .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
-        let entry_bytes =
-            runtime_command_receipt_cache_entry_bytes_v1(actor_id, idempotency_key, encoded_receipt.len());
+        let entry_bytes = runtime_command_receipt_cache_entry_bytes_v1(
+            actor_id,
+            idempotency_key,
+            encoded_receipt.len(),
+            content_installer_provenance.as_ref(),
+        );
         if encoded_receipt.len() > MAX_WIRE_BYTES || entry_bytes > INTEGRATED_RUNTIME_MAX_COMMAND_RECEIPT_CACHE_BYTES_V1
         {
             return Err(IntegratedRuntimeError::new(
@@ -8151,6 +10122,7 @@ impl IntegratedRuntimeV2 {
                             &expired.0,
                             &expired.1,
                             entry.encoded_receipt.len(),
+                            entry.content_installer_provenance.as_ref(),
                         ));
             }
         }
@@ -8162,6 +10134,7 @@ impl IntegratedRuntimeV2 {
                 command_hash,
                 receipt,
                 encoded_receipt,
+                content_installer_provenance,
             },
         );
         Ok(())
@@ -16646,6 +18619,42 @@ fn page_to_simulation_window(page: &WorldReadPageV1) -> Result<WorldReadWindowV1
     .seal())
 }
 
+fn exact_save_stage_is_replayable_v1(stage: &IntegratedRuntimeSaveStageV1) -> bool {
+    if stage.stage_id.is_empty()
+        || stage.chunk_count == 0
+        || stage.chunk_count > RUNTIME_BULK_MAX_SAVE_CHUNKS_V1
+        || stage.total_bytes == 0
+        || stage.total_bytes > RUNTIME_BULK_MAX_ATTACHMENT_BYTES_V1 as u64
+        || stage.chunks.len() != stage.chunk_count as usize
+        || stage.chunk_hashes.len() != stage.chunk_count as usize
+    {
+        return false;
+    }
+    let mut total = 0_u64;
+    for index in 0..stage.chunk_count {
+        let Some(chunk) = stage.chunks.get(&index) else {
+            return false;
+        };
+        let Some(expected_hash) = stage.chunk_hashes.get(&index) else {
+            return false;
+        };
+        if chunk.is_empty() || chunk.len() > RUNTIME_BULK_SAVE_CHUNK_BYTES_V1 {
+            return false;
+        }
+        let mut hasher = CanonicalHasher::new("blockwild-persistence-stage-chunk-v1");
+        hasher.write_u32(index);
+        hasher.write_bytes(chunk);
+        if hasher.finish() != *expected_hash {
+            return false;
+        }
+        total = match total.checked_add(chunk.len() as u64) {
+            Some(total) => total,
+            None => return false,
+        };
+    }
+    total == stage.total_bytes
+}
+
 fn save_stage_progress(stage: &IntegratedRuntimeSaveStageV1) -> IntegratedRuntimeSaveProgressV1 {
     IntegratedRuntimeSaveProgressV1 {
         stage_id: stage.stage_id.clone(),
@@ -16657,6 +18666,151 @@ fn save_stage_progress(stage: &IntegratedRuntimeSaveStageV1) -> IntegratedRuntim
         dispatcher_request_id: None,
         remaining_dirty_records: 0,
     }
+}
+
+fn sha256_bytes_v1(bytes: &[u8]) -> [u8; 32] {
+    const ROUND: [u32; 64] = [
+        0x428a_2f98,
+        0x7137_4491,
+        0xb5c0_fbcf,
+        0xe9b5_dba5,
+        0x3956_c25b,
+        0x59f1_11f1,
+        0x923f_82a4,
+        0xab1c_5ed5,
+        0xd807_aa98,
+        0x1283_5b01,
+        0x2431_85be,
+        0x550c_7dc3,
+        0x72be_5d74,
+        0x80de_b1fe,
+        0x9bdc_06a7,
+        0xc19b_f174,
+        0xe49b_69c1,
+        0xefbe_4786,
+        0x0fc1_9dc6,
+        0x240c_a1cc,
+        0x2de9_2c6f,
+        0x4a74_84aa,
+        0x5cb0_a9dc,
+        0x76f9_88da,
+        0x983e_5152,
+        0xa831_c66d,
+        0xb003_27c8,
+        0xbf59_7fc7,
+        0xc6e0_0bf3,
+        0xd5a7_9147,
+        0x06ca_6351,
+        0x1429_2967,
+        0x27b7_0a85,
+        0x2e1b_2138,
+        0x4d2c_6dfc,
+        0x5338_0d13,
+        0x650a_7354,
+        0x766a_0abb,
+        0x81c2_c92e,
+        0x9272_2c85,
+        0xa2bf_e8a1,
+        0xa81a_664b,
+        0xc24b_8b70,
+        0xc76c_51a3,
+        0xd192_e819,
+        0xd699_0624,
+        0xf40e_3585,
+        0x106a_a070,
+        0x19a4_c116,
+        0x1e37_6c08,
+        0x2748_774c,
+        0x34b0_bcb5,
+        0x391c_0cb3,
+        0x4ed8_aa4a,
+        0x5b9c_ca4f,
+        0x682e_6ff3,
+        0x748f_82ee,
+        0x78a5_636f,
+        0x84c8_7814,
+        0x8cc7_0208,
+        0x90be_fffa,
+        0xa450_6ceb,
+        0xbef9_a3f7,
+        0xc671_78f2,
+    ];
+    let mut state = [
+        0x6a09_e667,
+        0xbb67_ae85,
+        0x3c6e_f372,
+        0xa54f_f53a,
+        0x510e_527f,
+        0x9b05_688c,
+        0x1f83_d9ab,
+        0x5be0_cd19,
+    ];
+    let mut chunks = bytes.chunks_exact(64);
+    for chunk in &mut chunks {
+        sha256_compress_v1(&mut state, chunk, &ROUND);
+    }
+    let remainder = chunks.remainder();
+    let mut tail = [0_u8; 128];
+    tail[..remainder.len()].copy_from_slice(remainder);
+    tail[remainder.len()] = 0x80;
+    let tail_length = if remainder.len() <= 55 { 64 } else { 128 };
+    let bit_length = (bytes.len() as u64).wrapping_mul(8);
+    tail[tail_length - 8..tail_length].copy_from_slice(&bit_length.to_be_bytes());
+    for chunk in tail[..tail_length].chunks_exact(64) {
+        sha256_compress_v1(&mut state, chunk, &ROUND);
+    }
+    let mut output = [0_u8; 32];
+    for (index, word) in state.into_iter().enumerate() {
+        output[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    output
+}
+
+fn sha256_compress_v1(state: &mut [u32; 8], chunk: &[u8], round: &[u32; 64]) {
+    debug_assert_eq!(chunk.len(), 64);
+    let mut schedule = [0_u32; 64];
+    for (index, word) in chunk.chunks_exact(4).enumerate() {
+        schedule[index] = u32::from_be_bytes(word.try_into().expect("fixed SHA-256 word"));
+    }
+    for index in 16..64 {
+        let s0 =
+            schedule[index - 15].rotate_right(7) ^ schedule[index - 15].rotate_right(18) ^ (schedule[index - 15] >> 3);
+        let s1 =
+            schedule[index - 2].rotate_right(17) ^ schedule[index - 2].rotate_right(19) ^ (schedule[index - 2] >> 10);
+        schedule[index] = schedule[index - 16]
+            .wrapping_add(s0)
+            .wrapping_add(schedule[index - 7])
+            .wrapping_add(s1);
+    }
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+    for index in 0..64 {
+        let sum1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let choice = (e & f) ^ (!e & g);
+        let temp1 = h
+            .wrapping_add(sum1)
+            .wrapping_add(choice)
+            .wrapping_add(round[index])
+            .wrapping_add(schedule[index]);
+        let sum0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let majority = (a & b) ^ (a & c) ^ (b & c);
+        let temp2 = sum0.wrapping_add(majority);
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(temp1);
+        d = c;
+        c = b;
+        b = a;
+        a = temp1.wrapping_add(temp2);
+    }
+    state[0] = state[0].wrapping_add(a);
+    state[1] = state[1].wrapping_add(b);
+    state[2] = state[2].wrapping_add(c);
+    state[3] = state[3].wrapping_add(d);
+    state[4] = state[4].wrapping_add(e);
+    state[5] = state[5].wrapping_add(f);
+    state[6] = state[6].wrapping_add(g);
+    state[7] = state[7].wrapping_add(h);
 }
 
 fn generated_cell(block_id: u16) -> WorldCellV1 {
@@ -17959,7 +20113,118 @@ fn runtime_command_receipt_key_hash_v1(receipt: &RuntimeCommandReceiptV1) -> (&s
     }
 }
 
-fn runtime_command_receipt_cache_entry_bytes_v1(actor_id: &str, idempotency_key: &str, receipt_bytes: usize) -> usize {
+fn content_installer_page_from_batch_v1(
+    batch: &RuntimeCommandBatchV1,
+) -> Result<ContentInstallPageWireV1, IntegratedRuntimeError> {
+    let mut canonical = batch.clone();
+    canonical.command_hash = WireHash::default();
+    let canonical = seal_runtime_command_batch_v1(canonical)
+        .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+    if batch.actor_id != "runtime-content-installer"
+        || canonical.command_hash != batch.command_hash
+        || batch.operations.len() != 1
+    {
+        return Err(IntegratedRuntimeError::new(
+            "content-installer-provenance",
+            "content installer command is not an exact sealed single-operation batch",
+        ));
+    }
+    let operation = &batch.operations[0];
+    if operation.domain != RuntimeDomainV1::Gameplay
+        || operation.type_id != crate::CONTENT_INSTALL_PAGE_TYPE_V1
+        || operation.schema != 1
+        || operation.payload_hash != WireHash(blockwild_runtime_wire::wire_checksum_v1(&operation.payload))
+    {
+        return Err(IntegratedRuntimeError::new(
+            "content-installer-provenance",
+            "content installer command is not the exact built-in content page operation",
+        ));
+    }
+    let page = crate::decode_content_install_page_v1(&operation.payload)
+        .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+    if batch.idempotency_key != format!("{}:{}", page.install_id, page.page_index)
+        || page.page_count == 0
+        || page.page_index >= page.page_count
+    {
+        return Err(IntegratedRuntimeError::new(
+            "content-installer-provenance",
+            "content installer actor key does not bind the encoded page index",
+        ));
+    }
+    Ok(page)
+}
+
+fn content_installer_provenance_from_batch_v1(
+    batch: &RuntimeCommandBatchV1,
+    receipt: &RuntimeCommandReceiptV1,
+) -> Result<ContentInstallerCacheProvenanceV1, IntegratedRuntimeError> {
+    let RuntimeCommandReceiptV1::Accepted {
+        command_id,
+        idempotency_key,
+        command_hash,
+        before,
+        domain_receipts,
+        ..
+    } = receipt
+    else {
+        return Err(IntegratedRuntimeError::new(
+            "content-installer-receipt",
+            "content installer provenance requires an accepted receipt",
+        ));
+    };
+    let _page = content_installer_page_from_batch_v1(batch)?;
+    if batch.actor_id != "runtime-content-installer"
+        || batch.command_id != *command_id
+        || batch.idempotency_key != *idempotency_key
+        || batch.command_hash != *command_hash
+        || batch.expected != *before
+        || batch.operations.len() != 1
+        || domain_receipts.len() != 1
+    {
+        return Err(IntegratedRuntimeError::new(
+            "content-installer-provenance",
+            "content installer command and accepted receipt are not an exact single-operation binding",
+        ));
+    }
+    if domain_receipts[0].domain != RuntimeDomainV1::Gameplay
+        || domain_receipts[0].type_id != crate::CONTENT_INSTALL_RECEIPT_TYPE_V1
+        || domain_receipts[0].schema != 1
+    {
+        return Err(IntegratedRuntimeError::new(
+            "content-installer-provenance",
+            "content installer command is not the exact built-in content page operation",
+        ));
+    }
+    Ok(ContentInstallerCacheProvenanceV1 {
+        command_id: batch.command_id.clone(),
+        page_bytes: batch.operations[0].payload.clone(),
+    })
+}
+
+fn runtime_wire_identity_v1(identity: &IntegratedRuntimeIdentityV2) -> RuntimeIdentityV1 {
+    RuntimeIdentityV1 {
+        universe_id: identity.universe_id.clone(),
+        location_id: identity.location_id.clone(),
+        revision: RuntimeRevisionV1 {
+            epoch: identity.revision.epoch,
+            world: identity.revision.world,
+            entities: identity.revision.entities,
+            gameplay: identity.revision.gameplay,
+            persistence: identity.revision.persistence,
+            network: identity.revision.network,
+            simulation: identity.revision.simulation,
+        },
+        tick: identity.tick,
+        state_hash: WireHash(identity.state_hash.0),
+    }
+}
+
+fn runtime_command_receipt_cache_entry_bytes_v1(
+    actor_id: &str,
+    idempotency_key: &str,
+    receipt_bytes: usize,
+    provenance: Option<&ContentInstallerCacheProvenanceV1>,
+) -> usize {
     // Two u32 string lengths, the exact labels, the command hash, and one u32
     // receipt length are all included in the durable aggregate bound.
     4_usize
@@ -17969,6 +20234,14 @@ fn runtime_command_receipt_cache_entry_bytes_v1(actor_id: &str, idempotency_key:
         .saturating_add(16)
         .saturating_add(4)
         .saturating_add(receipt_bytes)
+        // one durable provenance-presence byte, then its bounded command/page fields
+        .saturating_add(1)
+        .saturating_add(provenance.map_or(0, |value| {
+            4_usize
+                .saturating_add(value.command_id.len())
+                .saturating_add(4)
+                .saturating_add(value.page_bytes.len())
+        }))
 }
 
 fn validate_runtime_command_receipt_cache_v1(
@@ -18015,10 +20288,14 @@ fn validate_runtime_command_receipt_cache_v1(
         }
         validate_command_receipt_hash_v1(&entry.receipt)
             .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+        if let Some(provenance) = &entry.content_installer_provenance {
+            validate_persisted_content_installer_provenance_v1(key, entry, provenance)?;
+        }
         total = total.saturating_add(runtime_command_receipt_cache_entry_bytes_v1(
             &key.0,
             &key.1,
             entry.encoded_receipt.len(),
+            entry.content_installer_provenance.as_ref(),
         ));
     }
     if total != expected_bytes || total > INTEGRATED_RUNTIME_MAX_COMMAND_RECEIPT_CACHE_BYTES_V1 {
@@ -18026,6 +20303,232 @@ fn validate_runtime_command_receipt_cache_v1(
             "native-command-receipt-capacity",
             "command receipt cache aggregate byte accounting is invalid",
         ));
+    }
+    Ok(())
+}
+
+fn validate_persisted_content_installer_provenance_v1(
+    key: &(String, String),
+    entry: &IntegratedRuntimeCommandReceiptCacheEntryV1,
+    provenance: &ContentInstallerCacheProvenanceV1,
+) -> Result<(), IntegratedRuntimeError> {
+    let RuntimeCommandReceiptV1::Accepted {
+        command_id,
+        before,
+        domain_receipts,
+        ..
+    } = &entry.receipt
+    else {
+        return Err(IntegratedRuntimeError::new(
+            "native-command-receipt-provenance",
+            "checkpoint content installer provenance requires an accepted receipt",
+        ));
+    };
+    let batch = RuntimeCommandBatchV1 {
+        command_id: provenance.command_id.clone(),
+        idempotency_key: key.1.clone(),
+        actor_id: key.0.clone(),
+        expected: before.clone(),
+        operations: vec![RuntimeDomainOperationV1 {
+            domain: RuntimeDomainV1::Gameplay,
+            type_id: crate::CONTENT_INSTALL_PAGE_TYPE_V1.into(),
+            schema: 1,
+            payload_hash: WireHash(blockwild_runtime_wire::wire_checksum_v1(&provenance.page_bytes)),
+            payload: provenance.page_bytes.clone(),
+        }],
+        command_hash: entry.command_hash,
+    };
+    content_installer_provenance_from_batch_v1(&batch, &entry.receipt).map_err(|_| {
+        IntegratedRuntimeError::new(
+            "native-command-receipt-provenance",
+            "checkpoint content installer provenance does not reconstruct its exact accepted command",
+        )
+    })?;
+    if provenance.command_id != *command_id || domain_receipts.len() != 1 {
+        return Err(IntegratedRuntimeError::new(
+            "native-command-receipt-provenance",
+            "checkpoint content installer provenance command id or receipt count is invalid",
+        ));
+    }
+    let page = crate::decode_content_install_page_v1(&provenance.page_bytes).map_err(|_| {
+        IntegratedRuntimeError::new(
+            "native-command-receipt-provenance",
+            "checkpoint content installer provenance page bytes are invalid",
+        )
+    })?;
+    let domain = &domain_receipts[0];
+    if domain.domain != RuntimeDomainV1::Gameplay
+        || domain.type_id != crate::CONTENT_INSTALL_RECEIPT_TYPE_V1
+        || domain.schema != 1
+        || domain.payload_hash != WireHash(blockwild_runtime_wire::wire_checksum_v1(&domain.payload))
+    {
+        return Err(IntegratedRuntimeError::new(
+            "native-command-receipt-provenance",
+            "checkpoint content installer provenance receipt operation is invalid",
+        ));
+    }
+    let receipt = crate::decode_content_install_receipt_v1(&domain.payload).map_err(|_| {
+        IntegratedRuntimeError::new(
+            "native-command-receipt-provenance",
+            "checkpoint content installer provenance receipt bytes are invalid",
+        )
+    })?;
+    let expected_pages = page.page_index.saturating_add(1);
+    let expected_status = if expected_pages == page.page_count {
+        ContentInstallReceiptStatusV1::Installed
+    } else {
+        ContentInstallReceiptStatusV1::Staged
+    };
+    if receipt.status != expected_status
+        || receipt.install_id != page.install_id
+        || receipt.source_revision != page.source_revision
+        || receipt.manifest_hash != page.manifest_hash
+        || receipt.domains != page.domains
+        || receipt.page_count != page.page_count
+        || receipt.accepted_pages != expected_pages
+    {
+        return Err(IntegratedRuntimeError::new(
+            "native-command-receipt-provenance",
+            "checkpoint content installer provenance page and aggregate receipt metadata disagree",
+        ));
+    }
+    Ok(())
+}
+
+/// V18 checkpoints must prove that every cached installer receipt arose from
+/// executing its exact sealed page command from the fresh same-config runtime.
+/// Per-entry shape checks are insufficient: an attacker can reseal a mutually
+/// consistent accepted receipt with a different resulting identity or content
+/// receipt payload. This replay runs before durable core proof validation, so
+/// that self-consistently rehashed forged entries fail on semantic grounds.
+struct PersistedContentInstallPrefixV18 {
+    install_id: String,
+    source_revision: String,
+    manifest_hash: CanonicalHash,
+    domains: BTreeMap<ContentDomain, ContentDomainDigest>,
+    page_count: u32,
+}
+
+fn replay_persisted_content_installer_provenance_v18(
+    config: &IntegratedRuntimeConfigV2,
+    entries: &BTreeMap<(String, String), IntegratedRuntimeCommandReceiptCacheEntryV1>,
+    order: &VecDeque<(String, String)>,
+) -> Result<(), IntegratedRuntimeError> {
+    let mut replay = IntegratedRuntimeV2::new(config.clone())?;
+    let mut expected_install: Option<PersistedContentInstallPrefixV18> = None;
+    let mut provenance_index = 0_u32;
+    for key in order {
+        let entry = entries.get(key).ok_or_else(|| {
+            IntegratedRuntimeError::new(
+                "native-command-receipt-provenance",
+                "checkpoint provenance order references a missing cache entry",
+            )
+        })?;
+        let Some(provenance) = &entry.content_installer_provenance else {
+            continue;
+        };
+        let RuntimeCommandReceiptV1::Accepted {
+            command_id,
+            idempotency_key,
+            command_hash,
+            before,
+            after,
+            domain_receipts,
+            ..
+        } = &entry.receipt
+        else {
+            return Err(IntegratedRuntimeError::new(
+                "native-command-receipt-provenance",
+                "checkpoint installer provenance requires an accepted receipt",
+            ));
+        };
+        let page = crate::decode_content_install_page_v1(&provenance.page_bytes).map_err(|_| {
+            IntegratedRuntimeError::new(
+                "native-command-receipt-provenance",
+                "checkpoint installer provenance page bytes are invalid",
+            )
+        })?;
+        if key.0 != "runtime-content-installer"
+            || key.1 != format!("{}:{provenance_index}", page.install_id)
+            || provenance.command_id != *command_id
+            || idempotency_key != &key.1
+            || command_hash != &entry.command_hash
+            || page.manifest_hash != config.content_hash
+            || page.page_index != provenance_index
+            || page.page_count == 0
+            || page.page_index >= page.page_count
+            || domain_receipts.len() != 1
+        {
+            return Err(IntegratedRuntimeError::new(
+                "native-command-receipt-provenance",
+                "checkpoint installer provenance is not an ordered built-in page prefix",
+            ));
+        }
+        if let Some(expected_install) = &expected_install {
+            if page.install_id != expected_install.install_id
+                || page.source_revision != expected_install.source_revision
+                || page.manifest_hash != expected_install.manifest_hash
+                || page.domains != expected_install.domains
+                || page.page_count != expected_install.page_count
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "native-command-receipt-provenance",
+                    "checkpoint installer provenance pages do not share one bounded install",
+                ));
+            }
+        } else {
+            expected_install = Some(PersistedContentInstallPrefixV18 {
+                install_id: page.install_id.clone(),
+                source_revision: page.source_revision.clone(),
+                manifest_hash: page.manifest_hash,
+                domains: page.domains.clone(),
+                page_count: page.page_count,
+            });
+        }
+        let reconstructed = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: provenance.command_id.clone(),
+            idempotency_key: key.1.clone(),
+            actor_id: key.0.clone(),
+            expected: runtime_wire_identity_v1(&replay.identity()),
+            operations: vec![RuntimeDomainOperationV1 {
+                domain: RuntimeDomainV1::Gameplay,
+                type_id: crate::CONTENT_INSTALL_PAGE_TYPE_V1.into(),
+                schema: 1,
+                payload_hash: WireHash(blockwild_runtime_wire::wire_checksum_v1(&provenance.page_bytes)),
+                payload: provenance.page_bytes.clone(),
+            }],
+            command_hash: WireHash::default(),
+        })
+        .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+        if reconstructed.command_hash != entry.command_hash
+            || before != &reconstructed.expected
+            || *command_hash != reconstructed.command_hash
+        {
+            return Err(IntegratedRuntimeError::new(
+                "native-command-receipt-provenance",
+                "checkpoint installer provenance does not reconstruct its exact sealed command",
+            ));
+        }
+        let receipt = replay.install_content_page(
+            page,
+            CanonicalHash(blockwild_runtime_wire::wire_checksum_v1(&provenance.page_bytes)),
+        )?;
+        let payload = crate::encode_content_install_receipt_v1(&receipt)
+            .map_err(|error| IntegratedRuntimeError::new(error.code, error.message))?;
+        let expected_domain = RuntimeDomainOperationV1 {
+            domain: RuntimeDomainV1::Gameplay,
+            type_id: crate::CONTENT_INSTALL_RECEIPT_TYPE_V1.into(),
+            schema: 1,
+            payload_hash: WireHash(blockwild_runtime_wire::wire_checksum_v1(&payload)),
+            payload,
+        };
+        if domain_receipts.as_slice() != [expected_domain] || after != &runtime_wire_identity_v1(&replay.identity()) {
+            return Err(IntegratedRuntimeError::new(
+                "native-command-receipt-provenance",
+                "checkpoint installer receipt differs from exact fresh-runtime replay",
+            ));
+        }
+        provenance_index = provenance_index.saturating_add(1);
     }
     Ok(())
 }
@@ -20558,11 +23061,7 @@ fn read_compatibility_journal_v1(
 
 fn runtime_core_snapshot_from_runtime_v1(runtime: &IntegratedRuntimeV2) -> IntegratedRuntimeCoreSnapshotV1 {
     IntegratedRuntimeCoreSnapshotV1 {
-        schema: if runtime.exact_player.is_some() {
-            NATIVE_RUNTIME_CORE_SCHEMA_V17
-        } else {
-            NATIVE_RUNTIME_CORE_SCHEMA_V16
-        },
+        schema: NATIVE_RUNTIME_CORE_SCHEMA_V18,
         config: runtime.config.clone(),
         expected_revision: runtime.revision(),
         tick: runtime.tick,
@@ -20770,7 +23269,7 @@ fn encode_runtime_core_snapshot_body_v1(
             "exact player authority cannot be represented before V17",
         ));
     }
-    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V17 && core.exact_player.is_none() {
+    if schema == NATIVE_RUNTIME_CORE_SCHEMA_V17 && core.exact_player.is_none() {
         return Err(IntegratedRuntimeError::new(
             "native-exact-pose-schema",
             "V17 is reserved for a present exact player continuation",
@@ -20878,6 +23377,17 @@ fn encode_runtime_core_snapshot_body_v1(
         return Err(IntegratedRuntimeError::new(
             "native-block-edit-dirty-downgrade",
             "a runtime core with V2 native block edit dirty evidence cannot be encoded as V13",
+        ));
+    }
+    if schema < NATIVE_RUNTIME_CORE_SCHEMA_V18
+        && core
+            .command_receipts
+            .values()
+            .any(|entry| entry.content_installer_provenance.is_some())
+    {
+        return Err(IntegratedRuntimeError::new(
+            "native-command-receipt-provenance-downgrade",
+            "a runtime core with content installer provenance cannot be encoded by an older schema",
         ));
     }
     if core.unknown_extension_bytes.len() > NATIVE_EXTENSION_MAX_BYTES_V1
@@ -21008,6 +23518,13 @@ fn encode_runtime_core_snapshot_body_v1(
             writer.string(&key.1)?;
             writer.raw(&entry.command_hash.0);
             writer.bytes(&entry.encoded_receipt)?;
+            if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V18 {
+                writer.bool(entry.content_installer_provenance.is_some());
+                if let Some(provenance) = &entry.content_installer_provenance {
+                    writer.string(&provenance.command_id)?;
+                    writer.bytes(&provenance.page_bytes)?;
+                }
+            }
         }
     }
     write_compatibility_journal_v1(&mut writer, &core.compatibility_journal)?;
@@ -21129,7 +23646,12 @@ fn durable_runtime_core_state_proof_v1(
     let mut normalized = core.clone();
     normalized.config.session_id = DURABLE_SESSION_NEUTRAL_ID_V1.into();
     normalized.durable_network_drained_proof = None;
-    let proof_schema = if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V17 {
+    let proof_schema = if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V18 {
+        normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V18;
+        normalized.durable_state_proof = Some(CanonicalHash::default());
+        normalized.durable_replay_proof = Some(CanonicalHash::default());
+        NATIVE_RUNTIME_CORE_SCHEMA_V18
+    } else if core.schema >= NATIVE_RUNTIME_CORE_SCHEMA_V17 {
         normalized.schema = NATIVE_RUNTIME_CORE_SCHEMA_V17;
         normalized.durable_state_proof = Some(CanonicalHash::default());
         normalized.durable_replay_proof = Some(CanonicalHash::default());
@@ -21241,6 +23763,7 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V15
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V16
         && schema != NATIVE_RUNTIME_CORE_SCHEMA_V17
+        && schema != NATIVE_RUNTIME_CORE_SCHEMA_V18
     {
         return Err(IntegratedRuntimeError::new(
             "native-runtime-schema",
@@ -21389,10 +23912,24 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
             }
             let command_hash = WireHash(reader.take(16)?.try_into().expect("fixed slice"));
             let encoded_receipt = reader.bytes(MAX_WIRE_BYTES)?;
+            let content_installer_provenance = if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V18 && reader.bool()? {
+                let command_id = reader.string()?;
+                let page_bytes = reader.bytes(MAX_WIRE_BYTES)?;
+                if command_id.is_empty() || command_id.len() > 256 {
+                    return Err(IntegratedRuntimeError::new(
+                        "native-command-receipt-provenance",
+                        "checkpoint content installer provenance command id is invalid",
+                    ));
+                }
+                Some(ContentInstallerCacheProvenanceV1 { command_id, page_bytes })
+            } else {
+                None
+            };
             command_receipt_bytes = command_receipt_bytes.saturating_add(runtime_command_receipt_cache_entry_bytes_v1(
                 &actor_id,
                 &idempotency_key,
                 encoded_receipt.len(),
+                content_installer_provenance.as_ref(),
             ));
             if command_receipt_bytes > INTEGRATED_RUNTIME_MAX_COMMAND_RECEIPT_CACHE_BYTES_V1 {
                 return Err(IntegratedRuntimeError::new(
@@ -21417,6 +23954,7 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
                         command_hash,
                         receipt,
                         encoded_receipt,
+                        content_installer_provenance,
                     },
                 )
                 .is_some()
@@ -21430,6 +23968,9 @@ fn decode_runtime_core_snapshot_v1(bytes: &[u8]) -> Result<IntegratedRuntimeCore
         }
     }
     validate_runtime_command_receipt_cache_v1(&command_receipts, &command_receipt_order, command_receipt_bytes)?;
+    if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V18 {
+        replay_persisted_content_installer_provenance_v18(&config, &command_receipts, &command_receipt_order)?;
+    }
     let compatibility_journal = read_compatibility_journal_v1(&mut reader, &config)?;
     let (durable_network_drained_proof, durable_state_proof, durable_replay_proof) =
         if schema >= NATIVE_RUNTIME_CORE_SCHEMA_V5 {
@@ -22914,7 +25455,7 @@ mod tests {
         }));
         runtime.validate_native_player_death_respawn_history_v1().unwrap();
         let core_snapshot = runtime_core_snapshot_from_runtime_v1(&runtime);
-        assert_eq!(core_snapshot.schema, NATIVE_RUNTIME_CORE_SCHEMA_V16);
+        assert_eq!(core_snapshot.schema, NATIVE_RUNTIME_CORE_SCHEMA_V18);
         assert_eq!(
             encode_runtime_core_snapshot_body_v1(&core_snapshot, NATIVE_RUNTIME_CORE_SCHEMA_V15)
                 .unwrap_err()
@@ -22941,7 +25482,7 @@ mod tests {
         );
         let core_bytes = encode_runtime_core_snapshot_v1(&runtime).unwrap();
         let decoded_core = decode_runtime_core_snapshot_v1(&core_bytes).unwrap();
-        assert_eq!(decoded_core.schema, NATIVE_RUNTIME_CORE_SCHEMA_V16);
+        assert_eq!(decoded_core.schema, NATIVE_RUNTIME_CORE_SCHEMA_V18);
         assert_eq!(
             decoded_core.native_player_death_respawn_receipts,
             runtime.native_player_death_respawn_receipts
@@ -23483,7 +26024,7 @@ mod tests {
     }
 
     fn runtime_with_section_config(config: IntegratedRuntimeConfigV2) -> IntegratedRuntimeV2 {
-        let mut runtime = IntegratedRuntimeV2::new(config).unwrap();
+        let mut runtime = IntegratedRuntimeV2::new(config.clone()).unwrap();
         let address = runtime.world().active_address().clone();
         for section_y in [4_i16, 7_i16, 8_i16] {
             let mut cells = vec![WorldCellV1::default(); WORLD_SECTION_CELL_COUNT_V1];
@@ -26452,7 +28993,8 @@ mod tests {
                 .code,
             "native-block-edit-cursor-stale"
         );
-        let core = runtime_core_snapshot_from_runtime_v1(&runtime);
+        let encoded_current = encode_runtime_core_snapshot_v1(&runtime).unwrap();
+        let core = decode_runtime_core_snapshot_v1(&encoded_current).unwrap();
         assert_eq!(
             encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V13)
                 .unwrap_err()
@@ -26794,6 +29336,22 @@ mod tests {
 
     #[test]
     fn exact_core_v17_rejects_downgrade_binding_and_orphaned_input_sidecars() {
+        let legacy_v16_source = runtime_with_bound_player();
+        let mut legacy_v16_core = runtime_core_snapshot_from_runtime_v1(&legacy_v16_source);
+        legacy_v16_core.schema = NATIVE_RUNTIME_CORE_SCHEMA_V16;
+        legacy_v16_core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&legacy_v16_core).unwrap());
+        legacy_v16_core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&legacy_v16_core));
+        let encoded_v16 =
+            encode_runtime_core_snapshot_body_v1(&legacy_v16_core, NATIVE_RUNTIME_CORE_SCHEMA_V16).unwrap();
+        let decoded_v16 = decode_runtime_core_snapshot_v1(&encoded_v16).unwrap();
+        assert_eq!(decoded_v16.schema, NATIVE_RUNTIME_CORE_SCHEMA_V16);
+        assert!(
+            decoded_v16
+                .command_receipts
+                .values()
+                .all(|entry| entry.content_installer_provenance.is_none())
+        );
+
         let mut runtime = runtime_with_bound_player();
         let player = runtime.player().unwrap().clone();
         runtime
@@ -26811,14 +29369,23 @@ mod tests {
                 pitch: 0.0,
             })
             .unwrap();
-        let core = runtime_core_snapshot_from_runtime_v1(&runtime);
-        assert_eq!(core.schema, NATIVE_RUNTIME_CORE_SCHEMA_V17);
+        let encoded_current = encode_runtime_core_snapshot_v1(&runtime).unwrap();
+        let core = decode_runtime_core_snapshot_v1(&encoded_current).unwrap();
+        assert_eq!(core.schema, NATIVE_RUNTIME_CORE_SCHEMA_V18);
         assert_eq!(
             encode_runtime_core_snapshot_body_v1(&core, NATIVE_RUNTIME_CORE_SCHEMA_V16)
                 .unwrap_err()
                 .code,
             "native-exact-pose-downgrade"
         );
+        let mut v17_core = core.clone();
+        v17_core.schema = NATIVE_RUNTIME_CORE_SCHEMA_V17;
+        v17_core.durable_state_proof = Some(durable_runtime_core_state_proof_v1(&v17_core).unwrap());
+        v17_core.durable_replay_proof = Some(durable_runtime_replay_proof_v1(&v17_core));
+        let legacy_v17 = encode_runtime_core_snapshot_body_v1(&v17_core, NATIVE_RUNTIME_CORE_SCHEMA_V17).unwrap();
+        let decoded_v17 = decode_runtime_core_snapshot_v1(&legacy_v17).unwrap();
+        assert_eq!(decoded_v17.schema, NATIVE_RUNTIME_CORE_SCHEMA_V17);
+        assert_eq!(decoded_v17.exact_player, core.exact_player);
 
         let mut wrong_binding = core.clone();
         wrong_binding
@@ -28961,7 +31528,7 @@ mod tests {
 
         let core_bytes = encode_runtime_core_snapshot_v1(&runtime).unwrap();
         let decoded_core = decode_runtime_core_snapshot_v1(&core_bytes).unwrap();
-        assert_eq!(decoded_core.schema, NATIVE_RUNTIME_CORE_SCHEMA_V16);
+        assert_eq!(decoded_core.schema, NATIVE_RUNTIME_CORE_SCHEMA_V18);
         assert_eq!(decoded_core.camera, runtime.camera);
         let mut contradictory = runtime_core_snapshot_from_runtime_v1(&runtime);
         contradictory.camera.look_pitch = contradictory.camera.look_pitch.saturating_add(1);
@@ -33043,6 +35610,1894 @@ mod tests {
             .collect::<Vec<_>>()
             .concat();
         assert_eq!(preserved, b"old");
+    }
+
+    fn historical_external_test_config_v2(session_id: &str) -> IntegratedRuntimeConfigV2 {
+        IntegratedRuntimeConfigV2 {
+            universe_id: "world:historical-fixture".into(),
+            location_id: "surface".into(),
+            world_seed: "historical-seed".into(),
+            session_id: session_id.into(),
+            ..IntegratedRuntimeConfigV2::default()
+        }
+    }
+
+    fn initial_historical_external_proposal_v2(
+        config: &IntegratedRuntimeConfigV2,
+        document: &[u8],
+        projection_bytes: &[u8],
+    ) -> HistoricalExternalDescriptorProposalV2 {
+        let projection = decode_compatibility_save_binary_v1(projection_bytes).unwrap();
+        let raw_sha256 = [0x11; 32];
+        let raw_hex = raw_sha256.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let document_identity = blockwild_persistence::HistoricalDocumentIdentityV2 {
+            hash: persistence_payload_hash_v1(document),
+            sha256: sha256_bytes_v1(document),
+            byte_length: document.len() as u64,
+        };
+        HistoricalExternalDescriptorProposalV2 {
+            schema_version: blockwild_persistence::HISTORICAL_EXTERNAL_DESCRIPTOR_SCHEMA_V2,
+            immutable: blockwild_persistence::HistoricalExternalImmutableV2 {
+                authority: blockwild_persistence::HistoricalExternalAuthorityV2 {
+                    claim: HISTORICAL_EXTERNAL_AUTHORITY_CLAIM_V2.into(),
+                    native_player: "off".into(),
+                    native_rich_state: "not-adopted".into(),
+                },
+                profile: HISTORICAL_EXTERNAL_PROFILE_V2.into(),
+                native_execution_scope: HISTORICAL_EXTERNAL_NATIVE_EXECUTION_SCOPE_V2.into(),
+                source: blockwild_persistence::HistoricalExternalImportSourceV2 {
+                    schema_version: 1,
+                    provenance: "uploaded-file-bytes".into(),
+                    source_format: "blockwild-world-export-v1".into(),
+                    encoding: "utf-8".into(),
+                    archive_world_id: "blockwild-original-import-sources-v1".into(),
+                    object_id: format!("sha256-{raw_hex}"),
+                    raw_sha256,
+                    byte_length: 17,
+                    generator_version: 17,
+                },
+                initial_document: document_identity.clone(),
+                plan_hash: CanonicalHash([0x21; 16]),
+                custody_root: CanonicalHash([0x22; 16]),
+                external_state_flags: LEGACY_STATE_PLAYER_V1 | LEGACY_STATE_GAMEPLAY_V1,
+                target: blockwild_persistence::HistoricalExternalTargetV2 {
+                    catalog_world_id: "historical-fixture".into(),
+                    universe_id: config.universe_id.clone(),
+                    location_id: config.location_id.clone(),
+                    world_seed: config.world_seed.clone(),
+                    content_hash: config.content_hash,
+                    generation_identity: blockwild_persistence::HistoricalExternalGenerationIdentityV2 {
+                        schema_version: 1,
+                        generator_hash: config.generator_hash,
+                        terrain_content_hash: config.terrain_content_hash,
+                        generation_options_json: config.generation_options_json.clone(),
+                        generation_options_hash: persistence_payload_hash_v1(config.generation_options_json.as_bytes()),
+                        generation_options_byte_length: config.generation_options_json.len() as u64,
+                    },
+                    options_semantic_hash: CanonicalHash([0x23; 16]),
+                    options_byte_length: 1,
+                },
+                bwas: blockwild_persistence::HistoricalExternalBwasV2 {
+                    projection_hash: persistence_payload_hash_v1(projection_bytes),
+                    projection_byte_length: projection_bytes.len() as u64,
+                    compatibility_checksum: parse_canonical_hash(&projection.compatibility_checksum).unwrap(),
+                    extension_checksum: parse_canonical_hash(&projection.extension_checksum).unwrap(),
+                    edit_count: projection.edits.iter().map(|chunk| chunk.entries.len() as u64).sum(),
+                    facing_count: projection.facings.len() as u64,
+                },
+            },
+            external: blockwild_persistence::HistoricalExternalFieldsV2 {
+                current_document: blockwild_persistence::HistoricalDocumentRevisionIdentityV2 {
+                    identity: document_identity,
+                    revision: 1,
+                },
+                expected_previous_document: None,
+                chunks: vec![blockwild_persistence::HistoricalExternalDocumentChunkFingerprintV2 {
+                    index: 0,
+                    byte_offset: 0,
+                    byte_length: document.len() as u32,
+                    payload_hash: persistence_payload_hash_v1(document),
+                }],
+                chunk_set_hash: CanonicalHash::default(),
+            },
+            proposal_hash: CanonicalHash::default(),
+        }
+        .with_calculated_hash()
+        .unwrap()
+    }
+
+    struct HistoricalSuccessorResumeFixtureV2 {
+        config: IntegratedRuntimeConfigV2,
+        document: Vec<u8>,
+        proposal_bytes: Vec<u8>,
+        recovery: PagedRecoveryCompleteV1,
+        prior_recovery: PagedRecoveryCompleteV1,
+        prior_checkpoint: Checkpoint,
+        prior_checkpoint_bytes: Vec<u8>,
+    }
+
+    fn historical_successor_resume_fixture_v2() -> HistoricalSuccessorResumeFixtureV2 {
+        let config = historical_external_test_config_v2("historical-successor-source");
+        let projection_source = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        let projection =
+            encode_compatibility_save_binary_v1(&projection_source.world().export_compatibility_save()).unwrap();
+        let document_v1 = br#"{"schema":2,"save":{"player":{"x":1},"opaque":"prior"}}"#;
+        let proposal_v1 = initial_historical_external_proposal_v2(&config, document_v1, &projection);
+        let proposal_v1_bytes =
+            blockwild_persistence::encode_historical_external_descriptor_proposal_v2(&proposal_v1).unwrap();
+
+        let mut source = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        source
+            .stage_compatibility_save_chunk("historical-successor-v1", 0, 1, document_v1.len() as u64, document_v1)
+            .unwrap();
+        source
+            .migrate_historical_external_v2("historical-successor-v1", 401, &proposal_v1_bytes, &projection)
+            .unwrap();
+        accept_all_authority_commits(&mut source);
+        let prior = recovered_authority_save(&source);
+        let prior_descriptor = source
+            .historical_external_descriptor_from_authority_v2()
+            .unwrap()
+            .expect("durable prior BWHE");
+
+        let document_v2 = br#"{"schema":2,"save":{"player":{"x":2},"opaque":"successor"}}"#.to_vec();
+        let document_identity_v2 = blockwild_persistence::HistoricalDocumentIdentityV2 {
+            hash: persistence_payload_hash_v1(&document_v2),
+            sha256: sha256_bytes_v1(&document_v2),
+            byte_length: document_v2.len() as u64,
+        };
+        let proposal_v2 = HistoricalExternalDescriptorProposalV2 {
+            schema_version: prior_descriptor.schema_version,
+            immutable: prior_descriptor.immutable.clone(),
+            external: blockwild_persistence::HistoricalExternalFieldsV2 {
+                current_document: blockwild_persistence::HistoricalDocumentRevisionIdentityV2 {
+                    identity: document_identity_v2,
+                    revision: prior_descriptor.mutable.external.current_document.revision + 1,
+                },
+                expected_previous_document: Some(prior_descriptor.mutable.external.current_document.clone()),
+                chunks: vec![blockwild_persistence::HistoricalExternalDocumentChunkFingerprintV2 {
+                    index: 0,
+                    byte_offset: 0,
+                    byte_length: document_v2.len() as u32,
+                    payload_hash: persistence_payload_hash_v1(&document_v2),
+                }],
+                chunk_set_hash: CanonicalHash::default(),
+            },
+            proposal_hash: CanonicalHash::default(),
+        }
+        .with_calculated_hash()
+        .unwrap();
+        let proposal_bytes =
+            blockwild_persistence::encode_historical_external_descriptor_proposal_v2(&proposal_v2).unwrap();
+        source
+            .stage_compatibility_save_chunk("historical-successor-v2", 0, 1, document_v2.len() as u64, &document_v2)
+            .unwrap();
+        source
+            .finalize_historical_external_save_v2(
+                "historical-successor-v2",
+                402,
+                &proposal_bytes,
+                &encode_checkpoint(&prior.checkpoint),
+            )
+            .unwrap();
+        accept_all_authority_commits(&mut source);
+        let target = recovered_authority_save(&source);
+        assert_eq!(
+            target.checkpoint.journal_sequence,
+            prior.checkpoint.journal_sequence + 1,
+            "fixture successor must be one direct canonical child"
+        );
+        assert_eq!(
+            target.checkpoint.parent_checkpoint_id.as_deref(),
+            Some(prior.checkpoint.checkpoint_id.as_str())
+        );
+        let descriptor_address =
+            historical_external_descriptor_address_v2(&config.universe_id, &config.location_id).unwrap();
+        let target_descriptor = target
+            .checkpoint
+            .records
+            .iter()
+            .find(|record| record.address == descriptor_address)
+            .expect("successor target BWHE")
+            .clone();
+        let mut prefix_records = prior.checkpoint.records.clone();
+        let descriptor_index = prefix_records
+            .binary_search_by(|record| record.address.cmp(&descriptor_address))
+            .expect("prior BWHE address");
+        prefix_records[descriptor_index] = target_descriptor;
+        let prefix_payloads = prefix_records
+            .iter()
+            .map(|record| {
+                let source = if record.address == descriptor_address {
+                    &target.payloads
+                } else {
+                    &prior.payloads
+                };
+                (
+                    record.address.clone(),
+                    source.get(&record.address).expect("exact prefix payload").clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let prefix_checkpoint = Checkpoint::new(
+            format!("bwcp:{}:successor-prefix", target.checkpoint.journal_sequence),
+            Some(prior.checkpoint.checkpoint_id.clone()),
+            target.checkpoint.world_id.clone(),
+            target.checkpoint.journal_sequence,
+            target.checkpoint.generator_hash,
+            target.checkpoint.content_hash,
+            target.checkpoint.created_at,
+            prefix_records,
+        )
+        .unwrap();
+
+        HistoricalSuccessorResumeFixtureV2 {
+            config,
+            document: document_v2,
+            proposal_bytes,
+            recovery: PagedRecoveryCompleteV1 {
+                checkpoint: prefix_checkpoint,
+                payloads: prefix_payloads,
+                missing_record_keys: Vec::new(),
+            },
+            prior_recovery: prior.clone(),
+            prior_checkpoint_bytes: encode_checkpoint(&prior.checkpoint),
+            prior_checkpoint: prior.checkpoint,
+        }
+    }
+
+    fn historical_successor_resume_runtime_v2(
+        fixture: &HistoricalSuccessorResumeFixtureV2,
+        recovery: PagedRecoveryCompleteV1,
+    ) -> IntegratedRuntimeV2 {
+        let mut config = fixture.config.clone();
+        config.session_id = "historical-successor-resume".into();
+        let mut runtime = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        runtime
+            .recovered_save_sets
+            .insert("durable-prior".into(), fixture.prior_recovery.clone());
+        runtime
+            .hydrate_historical_external_recovery_v2("durable-prior")
+            .unwrap();
+        runtime
+            .stage_compatibility_save_chunk(
+                "historical-successor-v2",
+                0,
+                1,
+                fixture.document.len() as u64,
+                &fixture.document,
+            )
+            .unwrap();
+        runtime.recovered_save_sets.insert("successor-prefix".into(), recovery);
+        runtime
+    }
+
+    fn assert_historical_successor_resume_rejected_without_mutation_v2(
+        runtime: &mut IntegratedRuntimeV2,
+        proposal_bytes: &[u8],
+        prior_checkpoint_bytes: &[u8],
+        expected_recovery: &PagedRecoveryCompleteV1,
+    ) {
+        let before = runtime.identity();
+        let error = runtime
+            .finalize_historical_external_save_v2(
+                "historical-successor-v2",
+                402,
+                proposal_bytes,
+                prior_checkpoint_bytes,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "historical-external-resume");
+        assert_eq!(runtime.identity(), before);
+        assert_eq!(
+            runtime.recovered_save_sets.get("successor-prefix"),
+            Some(expected_recovery)
+        );
+        assert!(runtime.save_stages.contains_key("historical-successor-v2"));
+        assert!(runtime.persistence_authority().checkpoint().is_some());
+        assert!(!runtime.persistence_authority().records().is_empty());
+        assert!(runtime.persistence_dispatcher().is_idle());
+        assert!(runtime.prepared_persistence_commits.is_empty());
+    }
+
+    #[test]
+    fn historical_successor_resume_rejects_unknown_record_atomically() {
+        let fixture = historical_successor_resume_fixture_v2();
+        let mut recovery = fixture.recovery.clone();
+        let address = RecordAddress::new(
+            &fixture.config.universe_id,
+            &fixture.config.location_id,
+            RecordKind::SettingsReference,
+            "foreign-successor-record",
+        )
+        .unwrap();
+        let payload = b"validly-hashed-but-unknown".to_vec();
+        let descriptor = RecordDescriptor {
+            address: address.clone(),
+            revision: 1,
+            byte_length: payload.len() as u32,
+            payload_hash: persistence_payload_hash_v1(&payload),
+        };
+        let mut records = recovery.checkpoint.records.clone();
+        records.push(descriptor);
+        records.sort_by(|left, right| left.address.cmp(&right.address));
+        recovery.payloads.insert(address, payload);
+        recovery.checkpoint = Checkpoint::new(
+            recovery.checkpoint.checkpoint_id.clone(),
+            recovery.checkpoint.parent_checkpoint_id.clone(),
+            recovery.checkpoint.world_id.clone(),
+            recovery.checkpoint.journal_sequence,
+            recovery.checkpoint.generator_hash,
+            recovery.checkpoint.content_hash,
+            recovery.checkpoint.created_at,
+            records,
+        )
+        .unwrap();
+        let mut runtime = historical_successor_resume_runtime_v2(&fixture, recovery.clone());
+        assert_historical_successor_resume_rejected_without_mutation_v2(
+            &mut runtime,
+            &fixture.proposal_bytes,
+            &fixture.prior_checkpoint_bytes,
+            &recovery,
+        );
+    }
+
+    #[test]
+    fn historical_successor_resume_rejects_non_direct_parent_atomically() {
+        let fixture = historical_successor_resume_fixture_v2();
+        let mut recovery = fixture.recovery.clone();
+        assert_eq!(
+            recovery.checkpoint.parent_checkpoint_id.as_deref(),
+            Some(fixture.prior_checkpoint.checkpoint_id.as_str())
+        );
+        recovery.checkpoint = Checkpoint::new(
+            recovery.checkpoint.checkpoint_id.clone(),
+            Some("bwcp:0:00000000000000000000000000000000".into()),
+            recovery.checkpoint.world_id.clone(),
+            recovery.checkpoint.journal_sequence,
+            recovery.checkpoint.generator_hash,
+            recovery.checkpoint.content_hash,
+            recovery.checkpoint.created_at,
+            recovery.checkpoint.records.clone(),
+        )
+        .unwrap();
+        let mut runtime = historical_successor_resume_runtime_v2(&fixture, recovery.clone());
+        assert_historical_successor_resume_rejected_without_mutation_v2(
+            &mut runtime,
+            &fixture.proposal_bytes,
+            &fixture.prior_checkpoint_bytes,
+            &recovery,
+        );
+    }
+
+    #[test]
+    fn historical_successor_resume_rejects_correct_sequence_wrong_parent_hash_atomically() {
+        let fixture = historical_successor_resume_fixture_v2();
+        let mut recovery = fixture.recovery.clone();
+        let parent_sequence = recovery.checkpoint.journal_sequence - 1;
+        let forged_parent = format!("bwcp:{parent_sequence}:00000000000000000000000000000000");
+        assert_ne!(
+            forged_parent, fixture.prior_checkpoint.checkpoint_id,
+            "fixture must use a distinct but syntactically valid parent hash"
+        );
+        recovery.checkpoint = Checkpoint::new(
+            recovery.checkpoint.checkpoint_id.clone(),
+            Some(forged_parent),
+            recovery.checkpoint.world_id.clone(),
+            recovery.checkpoint.journal_sequence,
+            recovery.checkpoint.generator_hash,
+            recovery.checkpoint.content_hash,
+            recovery.checkpoint.created_at,
+            recovery.checkpoint.records.clone(),
+        )
+        .unwrap();
+        let mut runtime = historical_successor_resume_runtime_v2(&fixture, recovery.clone());
+        assert_historical_successor_resume_rejected_without_mutation_v2(
+            &mut runtime,
+            &fixture.proposal_bytes,
+            &fixture.prior_checkpoint_bytes,
+            &recovery,
+        );
+    }
+
+    #[test]
+    fn historical_successor_resume_rejects_gapped_external_chunk_atomically() {
+        let fixture = historical_successor_resume_fixture_v2();
+        let mut recovery = fixture.recovery.clone();
+        let address =
+            historical_external_document_chunk_address_v2(&fixture.config.universe_id, &fixture.config.location_id, 2)
+                .unwrap();
+        let payload = b"gapped-old-document-chunk".to_vec();
+        let descriptor = RecordDescriptor {
+            address: address.clone(),
+            revision: 1,
+            byte_length: payload.len() as u32,
+            payload_hash: persistence_payload_hash_v1(&payload),
+        };
+        let mut records = recovery.checkpoint.records.clone();
+        records.push(descriptor);
+        records.sort_by(|left, right| left.address.cmp(&right.address));
+        recovery.payloads.insert(address, payload);
+        recovery.checkpoint = Checkpoint::new(
+            recovery.checkpoint.checkpoint_id.clone(),
+            recovery.checkpoint.parent_checkpoint_id.clone(),
+            recovery.checkpoint.world_id.clone(),
+            recovery.checkpoint.journal_sequence,
+            recovery.checkpoint.generator_hash,
+            recovery.checkpoint.content_hash,
+            recovery.checkpoint.created_at,
+            records,
+        )
+        .unwrap();
+        let mut runtime = historical_successor_resume_runtime_v2(&fixture, recovery.clone());
+        assert_historical_successor_resume_rejected_without_mutation_v2(
+            &mut runtime,
+            &fixture.proposal_bytes,
+            &fixture.prior_checkpoint_bytes,
+            &recovery,
+        );
+    }
+
+    #[test]
+    fn historical_successor_resume_rejects_contiguous_extra_external_chunk_atomically() {
+        let fixture = historical_successor_resume_fixture_v2();
+        let mut recovery = fixture.recovery.clone();
+        let address =
+            historical_external_document_chunk_address_v2(&fixture.config.universe_id, &fixture.config.location_id, 1)
+                .unwrap();
+        let payload = b"contiguous-but-not-prior-or-target".to_vec();
+        let descriptor = RecordDescriptor {
+            address: address.clone(),
+            revision: 1,
+            byte_length: payload.len() as u32,
+            payload_hash: persistence_payload_hash_v1(&payload),
+        };
+        let mut records = recovery.checkpoint.records.clone();
+        records.push(descriptor);
+        records.sort_by(|left, right| left.address.cmp(&right.address));
+        recovery.payloads.insert(address, payload);
+        recovery.checkpoint = Checkpoint::new(
+            recovery.checkpoint.checkpoint_id.clone(),
+            recovery.checkpoint.parent_checkpoint_id.clone(),
+            recovery.checkpoint.world_id.clone(),
+            recovery.checkpoint.journal_sequence,
+            recovery.checkpoint.generator_hash,
+            recovery.checkpoint.content_hash,
+            recovery.checkpoint.created_at,
+            records,
+        )
+        .unwrap();
+        let mut runtime = historical_successor_resume_runtime_v2(&fixture, recovery.clone());
+        assert_historical_successor_resume_rejected_without_mutation_v2(
+            &mut runtime,
+            &fixture.proposal_bytes,
+            &fixture.prior_checkpoint_bytes,
+            &recovery,
+        );
+    }
+
+    #[test]
+    fn historical_successor_resume_rejects_known_address_nonprefix_payload_atomically() {
+        let fixture = historical_successor_resume_fixture_v2();
+        let mut recovery = fixture.recovery.clone();
+        let address =
+            historical_external_document_chunk_address_v2(&fixture.config.universe_id, &fixture.config.location_id, 0)
+                .unwrap();
+        let payload = b"known-address-but-neither-prior-nor-target".to_vec();
+        let record = recovery
+            .checkpoint
+            .records
+            .iter_mut()
+            .find(|record| record.address == address)
+            .expect("fixture has external chunk zero");
+        record.revision += 1;
+        record.byte_length = payload.len() as u32;
+        record.payload_hash = persistence_payload_hash_v1(&payload);
+        recovery.payloads.insert(address, payload);
+        recovery.checkpoint = Checkpoint::new(
+            recovery.checkpoint.checkpoint_id.clone(),
+            recovery.checkpoint.parent_checkpoint_id.clone(),
+            recovery.checkpoint.world_id.clone(),
+            recovery.checkpoint.journal_sequence,
+            recovery.checkpoint.generator_hash,
+            recovery.checkpoint.content_hash,
+            recovery.checkpoint.created_at,
+            recovery.checkpoint.records.clone(),
+        )
+        .unwrap();
+        let mut runtime = historical_successor_resume_runtime_v2(&fixture, recovery.clone());
+        assert_historical_successor_resume_rejected_without_mutation_v2(
+            &mut runtime,
+            &fixture.proposal_bytes,
+            &fixture.prior_checkpoint_bytes,
+            &recovery,
+        );
+    }
+
+    #[test]
+    fn historical_successor_resume_accepts_exact_mixed_prefix() {
+        let fixture = historical_successor_resume_fixture_v2();
+        let mut runtime = historical_successor_resume_runtime_v2(&fixture, fixture.recovery.clone());
+        let receipt = runtime
+            .finalize_historical_external_save_v2(
+                "historical-successor-v2",
+                402,
+                &fixture.proposal_bytes,
+                &fixture.prior_checkpoint_bytes,
+            )
+            .unwrap();
+        assert_eq!(
+            receipt.operation,
+            IntegratedRuntimeHistoricalExternalOperationV2::ExternalSave
+        );
+        assert!(receipt.dispatcher_request_id.is_some());
+        assert!(receipt.remaining_dirty_records > 0);
+        assert!(runtime.recovered_save_sets.is_empty());
+        assert!(!runtime.save_stages.contains_key("historical-successor-v2"));
+    }
+
+    #[test]
+    fn historical_successor_resume_rejects_unanchored_client_proof_atomically() {
+        let fixture = historical_successor_resume_fixture_v2();
+        let mut config = fixture.config.clone();
+        config.session_id = "historical-successor-unanchored".into();
+        let mut runtime = IntegratedRuntimeV2::new(config).unwrap();
+        runtime
+            .stage_compatibility_save_chunk(
+                "historical-successor-v2",
+                0,
+                1,
+                fixture.document.len() as u64,
+                &fixture.document,
+            )
+            .unwrap();
+        runtime
+            .recovered_save_sets
+            .insert("successor-prefix".into(), fixture.recovery.clone());
+        let before = runtime.identity();
+        let error = runtime
+            .finalize_historical_external_save_v2(
+                "historical-successor-v2",
+                402,
+                &fixture.proposal_bytes,
+                &fixture.prior_checkpoint_bytes,
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "historical-external-cas");
+        assert_eq!(runtime.identity(), before);
+        assert_eq!(
+            runtime.recovered_save_sets.get("successor-prefix"),
+            Some(&fixture.recovery)
+        );
+        assert!(runtime.save_stages.contains_key("historical-successor-v2"));
+        assert!(runtime.persistence_authority().records().is_empty());
+        assert!(runtime.persistence_dispatcher().is_idle());
+        assert!(runtime.prepared_persistence_commits.is_empty());
+    }
+
+    #[test]
+    fn historical_successor_resume_survives_a_second_interrupted_save() {
+        let fixture = historical_successor_resume_fixture_v2();
+        let mut source = historical_successor_resume_runtime_v2(&fixture, fixture.recovery.clone());
+        source
+            .finalize_historical_external_save_v2(
+                "historical-successor-v2",
+                402,
+                &fixture.proposal_bytes,
+                &fixture.prior_checkpoint_bytes,
+            )
+            .unwrap();
+        accept_all_authority_commits(&mut source);
+        let prior = recovered_authority_save(&source);
+        let prior_descriptor = source
+            .historical_external_descriptor_from_authority_v2()
+            .unwrap()
+            .expect("durable resumed BWHE");
+
+        let document = br#"{"schema":2,"save":{"player":{"x":3},"opaque":"second-interruption"}}"#.to_vec();
+        let proposal = HistoricalExternalDescriptorProposalV2 {
+            schema_version: prior_descriptor.schema_version,
+            immutable: prior_descriptor.immutable.clone(),
+            external: blockwild_persistence::HistoricalExternalFieldsV2 {
+                current_document: blockwild_persistence::HistoricalDocumentRevisionIdentityV2 {
+                    identity: blockwild_persistence::HistoricalDocumentIdentityV2 {
+                        hash: persistence_payload_hash_v1(&document),
+                        sha256: sha256_bytes_v1(&document),
+                        byte_length: document.len() as u64,
+                    },
+                    revision: prior_descriptor.mutable.external.current_document.revision + 1,
+                },
+                expected_previous_document: Some(prior_descriptor.mutable.external.current_document.clone()),
+                chunks: vec![blockwild_persistence::HistoricalExternalDocumentChunkFingerprintV2 {
+                    index: 0,
+                    byte_offset: 0,
+                    byte_length: document.len() as u32,
+                    payload_hash: persistence_payload_hash_v1(&document),
+                }],
+                chunk_set_hash: CanonicalHash::default(),
+            },
+            proposal_hash: CanonicalHash::default(),
+        }
+        .with_calculated_hash()
+        .unwrap();
+        let proposal_bytes =
+            blockwild_persistence::encode_historical_external_descriptor_proposal_v2(&proposal).unwrap();
+        source
+            .stage_compatibility_save_chunk("historical-successor-v3", 0, 1, document.len() as u64, &document)
+            .unwrap();
+        source
+            .finalize_historical_external_save_v2(
+                "historical-successor-v3",
+                403,
+                &proposal_bytes,
+                &encode_checkpoint(&prior.checkpoint),
+            )
+            .unwrap();
+        accept_all_authority_commits(&mut source);
+        let target = recovered_authority_save(&source);
+
+        let descriptor_address =
+            historical_external_descriptor_address_v2(&fixture.config.universe_id, &fixture.config.location_id)
+                .unwrap();
+        let target_descriptor = target
+            .checkpoint
+            .records
+            .iter()
+            .find(|record| record.address == descriptor_address)
+            .expect("second successor target BWHE")
+            .clone();
+        let mut prefix_records = prior.checkpoint.records.clone();
+        let descriptor_index = prefix_records
+            .binary_search_by(|record| record.address.cmp(&descriptor_address))
+            .expect("prior BWHE address");
+        prefix_records[descriptor_index] = target_descriptor;
+        let prefix_payloads = prefix_records
+            .iter()
+            .map(|record| {
+                let records = if record.address == descriptor_address {
+                    &target.payloads
+                } else {
+                    &prior.payloads
+                };
+                (
+                    record.address.clone(),
+                    records
+                        .get(&record.address)
+                        .expect("second exact prefix payload")
+                        .clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let prefix = PagedRecoveryCompleteV1 {
+            checkpoint: Checkpoint::new(
+                format!("bwcp:{}:second-successor-prefix", target.checkpoint.journal_sequence),
+                Some(prior.checkpoint.checkpoint_id.clone()),
+                target.checkpoint.world_id.clone(),
+                target.checkpoint.journal_sequence,
+                target.checkpoint.generator_hash,
+                target.checkpoint.content_hash,
+                target.checkpoint.created_at,
+                prefix_records,
+            )
+            .unwrap(),
+            payloads: prefix_payloads,
+            missing_record_keys: Vec::new(),
+        };
+
+        let mut config = fixture.config.clone();
+        config.session_id = "historical-successor-second-restart".into();
+        let mut restored = IntegratedRuntimeV2::new(config).unwrap();
+        restored
+            .recovered_save_sets
+            .insert("durable-prior".into(), prior.clone());
+        restored
+            .hydrate_historical_external_recovery_v2("durable-prior")
+            .unwrap();
+        restored
+            .stage_compatibility_save_chunk("historical-successor-v3", 0, 1, document.len() as u64, &document)
+            .unwrap();
+        restored.recovered_save_sets.insert("successor-prefix".into(), prefix);
+        let receipt = restored
+            .finalize_historical_external_save_v2(
+                "historical-successor-v3",
+                403,
+                &proposal_bytes,
+                &encode_checkpoint(&prior.checkpoint),
+            )
+            .unwrap();
+        assert_eq!(
+            receipt.operation,
+            IntegratedRuntimeHistoricalExternalOperationV2::ExternalSave
+        );
+        assert!(receipt.dispatcher_request_id.is_some());
+        assert!(receipt.remaining_dirty_records > 0);
+    }
+
+    fn historical_fallback_actual_record_set_hash_v2(
+        records: &[blockwild_persistence::HistoricalFallbackActualRecordV2],
+    ) -> CanonicalHash {
+        let mut hasher = CanonicalHasher::new("blockwild-historical-fallback-actual-records-v2");
+        hasher.write_u16(HISTORICAL_FALLBACK_RECONCILIATION_SCHEMA_V2);
+        hasher.write_u32(records.len() as u32);
+        for record in records {
+            hasher.write_str(&record.address.universe_id);
+            hasher.write_str(&record.address.location_id);
+            hasher.write_str(record.address.kind.as_str());
+            hasher.write_str(&record.address.record_id);
+            hasher.write_u64(record.revision);
+            hasher.write_u32(record.byte_length);
+            hasher.write_str(&record.stored_payload_hash.to_hex());
+            hasher.write_str(&record.actual_payload_hash.to_hex());
+        }
+        hasher.finish()
+    }
+
+    #[test]
+    fn historical_external_migration_cas_and_recovery_preserve_exact_pair() {
+        assert_eq!(
+            sha256_bytes_v1(b"abc"),
+            [
+                0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23, 0xb0,
+                0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+            ],
+        );
+        let config = historical_external_test_config_v2("historical-origin");
+        let projection_source = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        let projection =
+            encode_compatibility_save_binary_v1(&projection_source.world().export_compatibility_save()).unwrap();
+        let document_v1 = br#"{"schema":2,"save":{"player":{"x":1}}}"#;
+        let proposal_v1 = initial_historical_external_proposal_v2(&config, document_v1, &projection);
+        let proposal_v1_bytes =
+            blockwild_persistence::encode_historical_external_descriptor_proposal_v2(&proposal_v1).unwrap();
+
+        let mut runtime = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        runtime
+            .stage_compatibility_save_chunk("historical-v1", 0, 1, document_v1.len() as u64, document_v1)
+            .unwrap();
+        let initial = runtime
+            .migrate_historical_external_v2("historical-v1", 101, &proposal_v1_bytes, &projection)
+            .unwrap();
+        assert_eq!(
+            initial.operation,
+            IntegratedRuntimeHistoricalExternalOperationV2::InitialMigration
+        );
+        assert!(initial.dispatcher_request_id.is_some());
+        assert!(initial.remaining_dirty_records > 0);
+        assert_eq!(
+            initial.native_world_semantic_hash,
+            proposal_v1.immutable.bwas.projection_hash
+        );
+        assert!(!runtime.save_stages.contains_key("historical-v1"));
+        accept_all_authority_commits(&mut runtime);
+        assert!(
+            runtime
+                .persistence_authority()
+                .records()
+                .keys()
+                .all(|address| !address.record_id.starts_with(COMPATIBILITY_RECORD_PREFIX_V1))
+        );
+
+        let descriptor_v1 = runtime
+            .historical_external_descriptor_from_authority_v2()
+            .unwrap()
+            .expect("durable initial BWHE");
+        let prior_checkpoint_bytes = encode_checkpoint(
+            runtime
+                .persistence_authority()
+                .checkpoint()
+                .expect("durable initial checkpoint"),
+        );
+        let document_v2 = br#"{"schema":2,"save":{"player":{"x":2},"mobs":[1]}}"#;
+        let identity_v2 = blockwild_persistence::HistoricalDocumentIdentityV2 {
+            hash: persistence_payload_hash_v1(document_v2),
+            sha256: sha256_bytes_v1(document_v2),
+            byte_length: document_v2.len() as u64,
+        };
+        let proposal_v2 = HistoricalExternalDescriptorProposalV2 {
+            schema_version: descriptor_v1.schema_version,
+            immutable: descriptor_v1.immutable.clone(),
+            external: blockwild_persistence::HistoricalExternalFieldsV2 {
+                current_document: blockwild_persistence::HistoricalDocumentRevisionIdentityV2 {
+                    identity: identity_v2,
+                    revision: 2,
+                },
+                expected_previous_document: Some(descriptor_v1.mutable.external.current_document.clone()),
+                chunks: vec![blockwild_persistence::HistoricalExternalDocumentChunkFingerprintV2 {
+                    index: 0,
+                    byte_offset: 0,
+                    byte_length: document_v2.len() as u32,
+                    payload_hash: persistence_payload_hash_v1(document_v2),
+                }],
+                chunk_set_hash: CanonicalHash::default(),
+            },
+            proposal_hash: CanonicalHash::default(),
+        }
+        .with_calculated_hash()
+        .unwrap();
+        let proposal_v2_bytes =
+            blockwild_persistence::encode_historical_external_descriptor_proposal_v2(&proposal_v2).unwrap();
+        runtime
+            .stage_compatibility_save_chunk("historical-v2", 0, 1, document_v2.len() as u64, document_v2)
+            .unwrap();
+        let stale_recovery = recovered_authority_save(&runtime);
+        runtime
+            .recovered_save_sets
+            .insert("stale-post-hydration".into(), stale_recovery.clone());
+        assert_eq!(
+            runtime
+                .finalize_historical_external_save_v2(
+                    "historical-v2",
+                    102,
+                    &proposal_v2_bytes,
+                    &prior_checkpoint_bytes,
+                )
+                .unwrap_err()
+                .code,
+            "historical-external-resume"
+        );
+        assert_eq!(
+            runtime.recovered_save_sets.remove("stale-post-hydration"),
+            Some(stale_recovery)
+        );
+        assert!(runtime.save_stages.contains_key("historical-v2"));
+        let before_proof_rejection = runtime.identity();
+        assert_eq!(
+            runtime
+                .finalize_historical_external_save_v2("historical-v2", 102, &proposal_v2_bytes, &[])
+                .unwrap_err()
+                .code,
+            "historical-external-prior-checkpoint"
+        );
+        assert_eq!(runtime.identity(), before_proof_rejection);
+        assert!(runtime.save_stages.contains_key("historical-v2"));
+        let current_checkpoint = runtime.persistence_authority().checkpoint().unwrap();
+        let foreign_checkpoint = Checkpoint::new(
+            format!("{}-foreign", current_checkpoint.checkpoint_id),
+            current_checkpoint.parent_checkpoint_id.clone(),
+            current_checkpoint.world_id.clone(),
+            current_checkpoint.journal_sequence,
+            current_checkpoint.generator_hash,
+            current_checkpoint.content_hash,
+            current_checkpoint.created_at,
+            current_checkpoint.records.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            runtime
+                .finalize_historical_external_save_v2(
+                    "historical-v2",
+                    102,
+                    &proposal_v2_bytes,
+                    &encode_checkpoint(&foreign_checkpoint),
+                )
+                .unwrap_err()
+                .code,
+            "historical-external-cas"
+        );
+        assert_eq!(runtime.identity(), before_proof_rejection);
+        assert!(runtime.save_stages.contains_key("historical-v2"));
+        let successor = runtime
+            .finalize_historical_external_save_v2("historical-v2", 102, &proposal_v2_bytes, &prior_checkpoint_bytes)
+            .unwrap();
+        assert_eq!(
+            successor.operation,
+            IntegratedRuntimeHistoricalExternalOperationV2::ExternalSave
+        );
+        assert_eq!(successor.external_document_revision, 2);
+        accept_all_authority_commits(&mut runtime);
+        assert_eq!(
+            runtime.finalize_native_save("bypass", 103).unwrap_err().code,
+            "historical-external-save-required",
+        );
+
+        let recovered = recovered_authority_save(&runtime);
+        let mut restored_config = config;
+        restored_config.session_id = "historical-restored".into();
+        let mut restored = IntegratedRuntimeV2::new(restored_config).unwrap();
+        restored
+            .recovered_save_sets
+            .insert("historical-recovery".into(), recovered);
+        let readback = restored
+            .hydrate_historical_external_recovery_v2("historical-recovery")
+            .unwrap();
+        assert_eq!(
+            readback.operation,
+            IntegratedRuntimeHistoricalExternalOperationV2::Recovery
+        );
+        assert_eq!(readback.created_at, 102);
+        assert_eq!(readback.external_document_revision, 2);
+        assert_eq!(readback.dispatcher_request_id, None);
+        assert_eq!(readback.remaining_dirty_records, 0);
+        assert_eq!(readback.save_set_hash, successor.save_set_hash);
+        assert_eq!(readback.manifest_hash, successor.manifest_hash);
+    }
+
+    #[test]
+    fn historical_external_migration_accepts_pristine_runtime_after_content_install() {
+        let artifact = ContentArtifact {
+            domain: ContentDomain::Item,
+            id: "603".into(),
+            schema_id: "item-definition".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["item:603".into()],
+            canonical_bytes: br#"{"id":603,"maxStack":64,"name":"Historical Fixture"}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let bundle = compile_content_bundle("historical-installed-content-v1", vec![artifact]).unwrap();
+        let mut config = historical_external_test_config_v2("historical-content-origin");
+        config.content_hash = bundle.manifest.manifest_hash;
+        let projection_source = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        let projection =
+            encode_compatibility_save_binary_v1(&projection_source.world().export_compatibility_save()).unwrap();
+        let document = br#"{"schema":2,"save":{"player":{"x":1}}}"#;
+        let proposal = initial_historical_external_proposal_v2(&config, document, &projection);
+        let proposal_bytes =
+            blockwild_persistence::encode_historical_external_descriptor_proposal_v2(&proposal).unwrap();
+
+        let mut runtime = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        let page = ContentInstallPageWireV1 {
+            install_id: format!("install:{}", bundle.manifest.manifest_hash.to_hex()),
+            manifest_schema: bundle.manifest.schema_version,
+            source_revision: bundle.manifest.source_revision.clone(),
+            manifest_hash: bundle.manifest.manifest_hash,
+            domains: bundle.manifest.domains,
+            page_index: 0,
+            page_count: 1,
+            artifacts: bundle.artifacts,
+        };
+        let page_bytes = crate::encode_content_install_page_v1(&page).unwrap();
+        let installer_before = command_cache_wire_identity(&runtime.identity());
+        let install_receipt = runtime
+            .install_content_page(
+                page,
+                CanonicalHash(blockwild_runtime_wire::wire_checksum_v1(&page_bytes)),
+            )
+            .unwrap();
+        let installer_after = command_cache_wire_identity(&runtime.identity());
+        let install_payload = crate::encode_content_install_receipt_v1(&install_receipt).unwrap();
+        let install_domain_receipt = blockwild_runtime_wire::RuntimeDomainOperationV1 {
+            domain: blockwild_runtime_wire::RuntimeDomainV1::Gameplay,
+            type_id: crate::CONTENT_INSTALL_RECEIPT_TYPE_V1.into(),
+            schema: 1,
+            payload_hash: blockwild_runtime_wire::WireHash(blockwild_runtime_wire::wire_checksum_v1(&install_payload)),
+            payload: install_payload,
+        };
+        let install_page_operation = blockwild_runtime_wire::RuntimeDomainOperationV1 {
+            domain: blockwild_runtime_wire::RuntimeDomainV1::Gameplay,
+            type_id: crate::CONTENT_INSTALL_PAGE_TYPE_V1.into(),
+            schema: 1,
+            payload_hash: blockwild_runtime_wire::WireHash(blockwild_runtime_wire::wire_checksum_v1(&page_bytes)),
+            payload: page_bytes.clone(),
+        };
+        let installer_key = format!("{}:0", install_receipt.install_id);
+        let installer_batch =
+            blockwild_runtime_wire::seal_runtime_command_batch_v1(blockwild_runtime_wire::RuntimeCommandBatchV1 {
+                command_id: "content:0".into(),
+                idempotency_key: installer_key.clone(),
+                actor_id: "runtime-content-installer".into(),
+                expected: installer_before.clone(),
+                operations: vec![install_page_operation],
+                command_hash: blockwild_runtime_wire::WireHash::default(),
+            })
+            .unwrap();
+        let installer_hash = installer_batch.command_hash;
+        let mut installer_receipt = blockwild_runtime_wire::RuntimeCommandReceiptV1::Accepted {
+            command_id: "content:0".into(),
+            idempotency_key: installer_key.clone(),
+            command_hash: installer_hash,
+            before: installer_before,
+            after: installer_after,
+            domain_receipts: vec![install_domain_receipt],
+            receipt_hash: blockwild_runtime_wire::WireHash::default(),
+        };
+        let receipt_hash = blockwild_runtime_wire::command_receipt_hash_v1(&installer_receipt);
+        let blockwild_runtime_wire::RuntimeCommandReceiptV1::Accepted { receipt_hash: slot, .. } =
+            &mut installer_receipt
+        else {
+            unreachable!()
+        };
+        *slot = receipt_hash;
+        let mut forged_direct_core = runtime.clone();
+        forged_direct_core
+            .cache_runtime_command_receipt(
+                "runtime-content-installer",
+                &installer_key,
+                installer_hash,
+                installer_receipt.clone(),
+            )
+            .unwrap();
+        forged_direct_core
+            .stage_compatibility_save_chunk("historical-content", 0, 1, document.len() as u64, document)
+            .unwrap();
+        let forged_before = forged_direct_core.identity();
+        assert_eq!(
+            forged_direct_core
+                .migrate_historical_external_v2("historical-content", 101, &proposal_bytes, &projection)
+                .unwrap_err()
+                .code,
+            "legacy-migration-not-pristine"
+        );
+        assert_eq!(forged_direct_core.identity(), forged_before);
+        assert!(forged_direct_core.save_stages.contains_key("historical-content"));
+        let mut runtime = IntegratedRuntimeV2::new(config).unwrap();
+        let installer_receipt = runtime
+            .execute_runtime_content_installer_command(&installer_batch)
+            .unwrap();
+        assert!(matches!(installer_receipt, RuntimeCommandReceiptV1::Accepted { .. }));
+        runtime
+            .stage_compatibility_save_chunk("historical-content", 0, 1, document.len() as u64, document)
+            .unwrap();
+        let cached = runtime.command_receipts.values().next().unwrap();
+        let provenance = cached.content_installer_provenance.as_ref().unwrap();
+        let attestation = runtime.content_attestation.as_ref().unwrap();
+        let receipt_bytes_without_provenance = runtime_command_receipt_cache_entry_bytes_v1(
+            "runtime-content-installer",
+            &installer_key,
+            cached.encoded_receipt.len(),
+            None,
+        );
+        let receipt_bytes_with_provenance = runtime_command_receipt_cache_entry_bytes_v1(
+            "runtime-content-installer",
+            &installer_key,
+            cached.encoded_receipt.len(),
+            Some(provenance),
+        );
+        assert_eq!(runtime.command_receipt_bytes, receipt_bytes_with_provenance);
+        assert_eq!(
+            receipt_bytes_with_provenance,
+            receipt_bytes_without_provenance + 4 + provenance.command_id.len() + 4 + provenance.page_bytes.len()
+        );
+        let mut bad_provenance_accounting = runtime.clone();
+        bad_provenance_accounting.command_receipt_bytes -= 1;
+        assert_eq!(
+            validate_runtime_command_receipt_cache_v1(
+                &bad_provenance_accounting.command_receipts,
+                &bad_provenance_accounting.command_receipt_order,
+                bad_provenance_accounting.command_receipt_bytes,
+            )
+            .unwrap_err()
+            .code,
+            "native-command-receipt-capacity"
+        );
+        assert_eq!(
+            CanonicalHash(blockwild_runtime_wire::wire_checksum_v1(&provenance.page_bytes)),
+            attestation.page_hashes[0]
+        );
+        assert!(
+            runtime
+                .command_receipt_cache_is_exact_attested_content_installer_prefix_v1(
+                    runtime.save_stages.get("historical-content"),
+                )
+                .unwrap()
+        );
+        let encoded_v18_core = encode_runtime_core_snapshot_v1(&runtime).unwrap();
+        assert_eq!(
+            decode_runtime_core_snapshot_v1(&encoded_v18_core)
+                .unwrap()
+                .command_receipts
+                .values()
+                .next()
+                .and_then(|entry| entry.content_installer_provenance.as_ref()),
+            Some(provenance)
+        );
+        let page_offset = encoded_v18_core
+            .windows(provenance.page_bytes.len())
+            .rposition(|window| window == provenance.page_bytes)
+            .expect("V18 core contains the exact persisted installer page bytes");
+        let mut malformed_v18_core = encoded_v18_core.clone();
+        malformed_v18_core[page_offset] ^= 1;
+        assert_eq!(
+            decode_runtime_core_snapshot_v1(&malformed_v18_core).unwrap_err().code,
+            "native-command-receipt-provenance"
+        );
+        assert!(decode_runtime_core_snapshot_v1(&encoded_v18_core[..encoded_v18_core.len() - 1]).is_err());
+        let replace_resealed_v18_receipt = |receipt: RuntimeCommandReceiptV1| {
+            let encoded = encode_command_receipt_v1(&receipt).unwrap();
+            assert_eq!(encoded.len(), cached.encoded_receipt.len());
+            let offset = encoded_v18_core
+                .windows(cached.encoded_receipt.len())
+                .rposition(|window| window == cached.encoded_receipt)
+                .expect("V18 core contains the canonical installer receipt bytes");
+            let mut forged_core = encoded_v18_core.clone();
+            forged_core[offset..offset + encoded.len()].copy_from_slice(&encoded);
+            forged_core
+        };
+        let mut forged_after = cached.receipt.clone();
+        if let RuntimeCommandReceiptV1::Accepted { after, .. } = &mut forged_after {
+            after.state_hash.0[0] ^= 1;
+        } else {
+            unreachable!()
+        }
+        let forged_after_hash = command_receipt_hash_v1(&forged_after);
+        if let RuntimeCommandReceiptV1::Accepted { receipt_hash, .. } = &mut forged_after {
+            *receipt_hash = forged_after_hash;
+        } else {
+            unreachable!()
+        }
+        assert_eq!(
+            decode_runtime_core_snapshot_v1(&replace_resealed_v18_receipt(forged_after))
+                .unwrap_err()
+                .code,
+            "native-command-receipt-provenance"
+        );
+        let mut forged_content_receipt = cached.receipt.clone();
+        if let RuntimeCommandReceiptV1::Accepted { domain_receipts, .. } = &mut forged_content_receipt {
+            let domain = domain_receipts.first_mut().unwrap();
+            let mut content_receipt = crate::decode_content_install_receipt_v1(&domain.payload).unwrap();
+            content_receipt.accepted_entries += 1;
+            content_receipt.installed_entries += 1;
+            content_receipt.installed_bytes += 1;
+            domain.payload = crate::encode_content_install_receipt_v1(&content_receipt).unwrap();
+            domain.payload_hash = WireHash(blockwild_runtime_wire::wire_checksum_v1(&domain.payload));
+        } else {
+            unreachable!()
+        }
+        let forged_content_hash = command_receipt_hash_v1(&forged_content_receipt);
+        if let RuntimeCommandReceiptV1::Accepted { receipt_hash, .. } = &mut forged_content_receipt {
+            *receipt_hash = forged_content_hash;
+        } else {
+            unreachable!()
+        }
+        assert_eq!(
+            decode_runtime_core_snapshot_v1(&replace_resealed_v18_receipt(forged_content_receipt))
+                .unwrap_err()
+                .code,
+            "native-command-receipt-provenance"
+        );
+
+        for mut non_pristine in [
+            {
+                let mut candidate = runtime.clone();
+                candidate.tick = 1;
+                candidate
+            },
+            {
+                let mut candidate = runtime.clone();
+                candidate.gameplay_authority_revision += 1;
+                candidate
+            },
+        ] {
+            let identity_before = non_pristine.identity();
+            assert_eq!(
+                non_pristine
+                    .migrate_historical_external_v2("historical-content", 101, &proposal_bytes, &projection,)
+                    .unwrap_err()
+                    .code,
+                "legacy-migration-not-pristine"
+            );
+            assert_eq!(non_pristine.identity(), identity_before);
+            assert!(non_pristine.save_stages.contains_key("historical-content"));
+        }
+
+        let receipt = runtime
+            .migrate_historical_external_v2("historical-content", 101, &proposal_bytes, &projection)
+            .unwrap();
+        assert_eq!(
+            receipt.operation,
+            IntegratedRuntimeHistoricalExternalOperationV2::InitialMigration
+        );
+        assert!(receipt.dispatcher_request_id.is_some());
+        assert!(receipt.remaining_dirty_records > 0);
+    }
+
+    #[test]
+    fn installer_provenance_fifo_eviction_restores_as_ordinary_reliability_state() {
+        let artifacts = vec![
+            ContentArtifact {
+                domain: ContentDomain::Item,
+                id: "701".into(),
+                schema_id: "item-definition".into(),
+                schema_version: 1,
+                content_version: 1,
+                aliases: vec!["item:701".into()],
+                canonical_bytes: br#"{"id":701,"maxStack":64,"name":"FIFO One"}"#.to_vec(),
+                unknown_extension_bytes: Vec::new(),
+            },
+            ContentArtifact {
+                domain: ContentDomain::Item,
+                id: "702".into(),
+                schema_id: "item-definition".into(),
+                schema_version: 1,
+                content_version: 1,
+                aliases: vec!["item:702".into()],
+                canonical_bytes: br#"{"id":702,"maxStack":64,"name":"FIFO Two"}"#.to_vec(),
+                unknown_extension_bytes: Vec::new(),
+            },
+        ];
+        let bundle = compile_content_bundle("historical-fifo-content-v1", artifacts).unwrap();
+        let mut config = historical_external_test_config_v2("historical-fifo-content");
+        config.content_hash = bundle.manifest.manifest_hash;
+        let projection_source = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        let projection =
+            encode_compatibility_save_binary_v1(&projection_source.world().export_compatibility_save()).unwrap();
+        let document = br#"{"schema":2,"save":{"player":{"x":1}}}"#;
+        let proposal = initial_historical_external_proposal_v2(&config, document, &projection);
+        let proposal_bytes =
+            blockwild_persistence::encode_historical_external_descriptor_proposal_v2(&proposal).unwrap();
+
+        let mut runtime = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        let install_id = format!("install:{}", bundle.manifest.manifest_hash.to_hex());
+        for (page_index, artifact) in bundle.artifacts.into_iter().enumerate() {
+            let page = ContentInstallPageWireV1 {
+                install_id: install_id.clone(),
+                manifest_schema: bundle.manifest.schema_version,
+                source_revision: bundle.manifest.source_revision.clone(),
+                manifest_hash: bundle.manifest.manifest_hash,
+                domains: bundle.manifest.domains.clone(),
+                page_index: page_index as u32,
+                page_count: 2,
+                artifacts: vec![artifact],
+            };
+            let page_bytes = crate::encode_content_install_page_v1(&page).unwrap();
+            let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+                command_id: format!("content:{page_index}"),
+                idempotency_key: format!("{install_id}:{page_index}"),
+                actor_id: "runtime-content-installer".into(),
+                expected: runtime_wire_identity_v1(&runtime.identity()),
+                operations: vec![RuntimeDomainOperationV1 {
+                    domain: RuntimeDomainV1::Gameplay,
+                    type_id: crate::CONTENT_INSTALL_PAGE_TYPE_V1.into(),
+                    schema: 1,
+                    payload_hash: WireHash(blockwild_runtime_wire::wire_checksum_v1(&page_bytes)),
+                    payload: page_bytes,
+                }],
+                command_hash: WireHash::default(),
+            })
+            .unwrap();
+            runtime.execute_runtime_content_installer_command(&batch).unwrap();
+        }
+        let installer_keys = runtime.command_receipt_order.clone();
+        assert_eq!(installer_keys.len(), 2);
+        assert!(
+            runtime
+                .command_receipts
+                .values()
+                .all(|entry| entry.content_installer_provenance.is_some())
+        );
+
+        let mut expected_order = runtime.command_receipt_order.clone();
+        let mut expected_bytes = runtime.command_receipt_bytes;
+        let mut expected_entry_bytes = runtime
+            .command_receipts
+            .iter()
+            .map(|(key, entry)| {
+                (
+                    key.clone(),
+                    runtime_command_receipt_cache_entry_bytes_v1(
+                        &key.0,
+                        &key.1,
+                        entry.encoded_receipt.len(),
+                        entry.content_installer_provenance.as_ref(),
+                    ),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        for index in 0..5_u8 {
+            let key = format!("reliability:{index}");
+            let payload = vec![index; 900_000];
+            let domain = RuntimeDomainOperationV1 {
+                domain: RuntimeDomainV1::World,
+                type_id: format!("reliability:{index}"),
+                schema: 1,
+                payload_hash: WireHash(blockwild_runtime_wire::wire_checksum_v1(&payload)),
+                payload,
+            };
+            let command_hash = WireHash([index; 16]);
+            let receipt = accepted_command_cache_receipt(&key, command_hash, vec![domain]);
+            let receipt_bytes = encode_command_receipt_v1(&receipt).unwrap();
+            let entry_bytes =
+                runtime_command_receipt_cache_entry_bytes_v1("reliability-fifo", &key, receipt_bytes.len(), None);
+            while expected_order.len() >= INTEGRATED_RUNTIME_MAX_IDEMPOTENCY_RECEIPTS
+                || expected_bytes.saturating_add(entry_bytes) > INTEGRATED_RUNTIME_MAX_COMMAND_RECEIPT_CACHE_BYTES_V1
+            {
+                let expired = expected_order.pop_front().unwrap();
+                expected_bytes = expected_bytes.saturating_sub(expected_entry_bytes.remove(&expired).unwrap());
+            }
+            expected_bytes = expected_bytes.saturating_add(entry_bytes);
+            expected_order.push_back(("reliability-fifo".into(), key.clone()));
+            expected_entry_bytes.insert(("reliability-fifo".into(), key.clone()), entry_bytes);
+            runtime
+                .cache_runtime_command_receipt("reliability-fifo", &key, command_hash, receipt)
+                .unwrap();
+        }
+        assert_eq!(runtime.command_receipt_order, expected_order);
+        assert_eq!(runtime.command_receipt_bytes, expected_bytes);
+        assert!(
+            installer_keys
+                .iter()
+                .all(|key| !runtime.command_receipts.contains_key(key))
+        );
+        assert!(
+            runtime
+                .command_receipts
+                .values()
+                .all(|entry| entry.content_installer_provenance.is_none())
+        );
+        validate_runtime_command_receipt_cache_v1(
+            &runtime.command_receipts,
+            &runtime.command_receipt_order,
+            runtime.command_receipt_bytes,
+        )
+        .unwrap();
+
+        let identity_before_checkpoint = runtime.identity();
+        let checkpoint = runtime.export_runtime_checkpoint().unwrap();
+        let mut restored = IntegratedRuntimeV2::restore_runtime_checkpoint(
+            &checkpoint,
+            integrated_runtime_checkpoint_hash_v1(&checkpoint),
+        )
+        .unwrap();
+        assert_eq!(restored.identity(), identity_before_checkpoint);
+        assert_eq!(restored.command_receipt_order, expected_order);
+        assert_eq!(restored.command_receipt_bytes, expected_bytes);
+        assert!(
+            restored
+                .command_receipts
+                .values()
+                .all(|entry| entry.content_installer_provenance.is_none())
+        );
+        assert!(
+            installer_keys
+                .iter()
+                .all(|key| !restored.command_receipts.contains_key(key))
+        );
+
+        restored
+            .stage_compatibility_save_chunk("historical-fifo-source", 0, 1, document.len() as u64, document)
+            .unwrap();
+        let identity_before_migration = restored.identity();
+        let source_before_migration = restored.save_stages["historical-fifo-source"].clone();
+        assert_eq!(
+            restored
+                .migrate_historical_external_v2("historical-fifo-source", 901, &proposal_bytes, &projection,)
+                .unwrap_err()
+                .code,
+            "legacy-migration-not-pristine"
+        );
+        assert_eq!(restored.identity(), identity_before_migration);
+        assert_eq!(
+            restored.save_stages.get("historical-fifo-source"),
+            Some(&source_before_migration)
+        );
+    }
+
+    #[test]
+    fn historical_external_initial_migration_resumes_every_canonical_strict_prefix() {
+        let config = historical_external_test_config_v2("historical-prefix-origin");
+        let projection_source = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        let projection =
+            encode_compatibility_save_binary_v1(&projection_source.world().export_compatibility_save()).unwrap();
+        let document = br#"{"schema":2,"save":{"player":{"x":1},"opaque":"retained"}}"#;
+        let proposal = initial_historical_external_proposal_v2(&config, document, &projection);
+        let proposal_bytes =
+            blockwild_persistence::encode_historical_external_descriptor_proposal_v2(&proposal).unwrap();
+
+        let mut source = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        source
+            .stage_compatibility_save_chunk("historical-prefix-source", 0, 1, document.len() as u64, document)
+            .unwrap();
+        source
+            .migrate_historical_external_v2("historical-prefix-source", 201, &proposal_bytes, &projection)
+            .unwrap();
+        accept_all_authority_commits(&mut source);
+        let complete = recovered_authority_save(&source);
+        let descriptor_address =
+            historical_external_descriptor_address_v2(&config.universe_id, &config.location_id).unwrap();
+        assert_eq!(
+            complete.checkpoint.records.first().map(|record| &record.address),
+            Some(&descriptor_address),
+            "BWHE must be the first canonical record so every non-empty prefix binds the proposal"
+        );
+
+        for prefix_len in 1..complete.checkpoint.records.len() {
+            let records = complete.checkpoint.records[..prefix_len].to_vec();
+            let payloads = records
+                .iter()
+                .map(|record| {
+                    (
+                        record.address.clone(),
+                        complete
+                            .payloads
+                            .get(&record.address)
+                            .expect("complete prefix payload")
+                            .clone(),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            let checkpoint = Checkpoint::new(
+                format!("historical-prefix-{prefix_len}"),
+                None,
+                complete.checkpoint.world_id.clone(),
+                1,
+                complete.checkpoint.generator_hash,
+                complete.checkpoint.content_hash,
+                201,
+                records,
+            )
+            .unwrap();
+            let mut resumed = IntegratedRuntimeV2::new(config.clone()).unwrap();
+            resumed
+                .stage_compatibility_save_chunk("historical-prefix-source", 0, 1, document.len() as u64, document)
+                .unwrap();
+            resumed.recovered_save_sets.insert(
+                format!("historical-prefix-recovery-{prefix_len}"),
+                PagedRecoveryCompleteV1 {
+                    checkpoint,
+                    payloads,
+                    missing_record_keys: Vec::new(),
+                },
+            );
+            let receipt = resumed
+                .migrate_historical_external_v2("historical-prefix-source", 201, &proposal_bytes, &projection)
+                .unwrap();
+            assert_eq!(
+                receipt.operation,
+                IntegratedRuntimeHistoricalExternalOperationV2::InitialMigration
+            );
+            assert!(receipt.dispatcher_request_id.is_some());
+            assert!(receipt.remaining_dirty_records > 0);
+            assert!(resumed.recovered_save_sets.is_empty());
+            assert!(!resumed.save_stages.contains_key("historical-prefix-source"));
+        }
+    }
+
+    #[test]
+    fn historical_external_fallback_reconciliation_queues_exact_rust_plan_and_keeps_fallback_read_only() {
+        let config = historical_external_test_config_v2("historical-reconciliation-origin");
+        let projection_source = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        let projection =
+            encode_compatibility_save_binary_v1(&projection_source.world().export_compatibility_save()).unwrap();
+        let document = br#"{"schema":2,"save":{"player":{"x":1},"opaque":"retained"}}"#;
+        let proposal = initial_historical_external_proposal_v2(&config, document, &projection);
+        let proposal_bytes =
+            blockwild_persistence::encode_historical_external_descriptor_proposal_v2(&proposal).unwrap();
+        let mut source = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        source
+            .stage_compatibility_save_chunk(
+                "historical-reconciliation-source",
+                0,
+                1,
+                document.len() as u64,
+                document,
+            )
+            .unwrap();
+        source
+            .migrate_historical_external_v2("historical-reconciliation-source", 301, &proposal_bytes, &projection)
+            .unwrap();
+        accept_all_authority_commits(&mut source);
+        let fallback_recovery = recovered_authority_save(&source);
+        let fallback_checkpoint = fallback_recovery.checkpoint.clone();
+
+        let mut partial_runtime = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        let mut partial_recovery = fallback_recovery.clone();
+        partial_recovery.missing_record_keys.push("missing-record".into());
+        partial_runtime
+            .recovered_save_sets
+            .insert("historical-partial".into(), partial_recovery.clone());
+        let partial_before = partial_runtime.identity();
+        assert_eq!(
+            partial_runtime
+                .hydrate_historical_external_recovery_v2("historical-partial")
+                .unwrap_err()
+                .code,
+            "recovery-incomplete"
+        );
+        assert_eq!(partial_runtime.identity(), partial_before);
+        assert_eq!(
+            partial_runtime.recovered_save_sets.get("historical-partial"),
+            Some(&partial_recovery)
+        );
+
+        let mut multiple_runtime = IntegratedRuntimeV2::new(config.clone()).unwrap();
+        multiple_runtime
+            .recovered_save_sets
+            .insert("historical-fallback".into(), fallback_recovery.clone());
+        multiple_runtime
+            .recovered_save_sets
+            .insert("historical-duplicate".into(), fallback_recovery.clone());
+        let multiple_before = multiple_runtime.identity();
+        assert_eq!(
+            multiple_runtime
+                .hydrate_historical_external_recovery_v2("historical-fallback")
+                .unwrap_err()
+                .code,
+            "historical-external-recovery"
+        );
+        assert_eq!(multiple_runtime.identity(), multiple_before);
+        assert_eq!(multiple_runtime.recovered_save_sets.len(), 2);
+
+        let mut latest_descriptors = fallback_checkpoint.records.clone();
+        latest_descriptors[0].revision += 1;
+        let latest_checkpoint = Checkpoint::new(
+            "historical-corrupt-latest",
+            Some(fallback_checkpoint.checkpoint_id.clone()),
+            fallback_checkpoint.world_id.clone(),
+            fallback_checkpoint.journal_sequence + 1,
+            fallback_checkpoint.generator_hash,
+            fallback_checkpoint.content_hash,
+            302,
+            latest_descriptors,
+        )
+        .unwrap();
+        let actual_records = fallback_checkpoint
+            .records
+            .iter()
+            .map(|record| {
+                let payload = fallback_recovery
+                    .payloads
+                    .get(&record.address)
+                    .expect("fallback payload");
+                blockwild_persistence::HistoricalFallbackActualRecordV2 {
+                    address: record.address.clone(),
+                    revision: record.revision,
+                    byte_length: record.byte_length,
+                    stored_payload_hash: record.payload_hash,
+                    actual_payload_hash: persistence_payload_hash_v1(payload),
+                }
+            })
+            .collect::<Vec<_>>();
+        let observation = blockwild_persistence::HistoricalFallbackObservationV2 {
+            schema_version: HISTORICAL_FALLBACK_RECONCILIATION_SCHEMA_V2,
+            world_id: fallback_checkpoint.world_id.clone(),
+            storage_revision: 17,
+            latest_checkpoint: latest_checkpoint.clone(),
+            fallback_checkpoint: fallback_checkpoint.clone(),
+            actual_record_set_hash: historical_fallback_actual_record_set_hash_v2(&actual_records),
+            actual_records,
+        };
+        let observation_bytes = blockwild_persistence::encode_historical_fallback_observation_v2(&observation)
+            .expect("canonical corrupt-head observation");
+
+        let mut reconciler_config = config;
+        reconciler_config.session_id = "historical-reconciliation-restart".into();
+        let mut reconciler = IntegratedRuntimeV2::new(reconciler_config).unwrap();
+        reconciler
+            .recovered_save_sets
+            .insert("historical-fallback".into(), fallback_recovery.clone());
+        reconciler
+            .hydrate_historical_external_recovery_v2("historical-fallback")
+            .unwrap();
+        let mut post_hydration_recovery = reconciler.clone();
+        post_hydration_recovery
+            .recovered_save_sets
+            .insert("post-hydration-extra".into(), fallback_recovery.clone());
+        let post_hydration_identity = post_hydration_recovery.identity();
+        let post_hydration_authority = post_hydration_recovery.persistence_authority.clone();
+        let post_hydration_dispatcher = post_hydration_recovery.persistence_dispatcher.clone();
+        let post_hydration_exports = post_hydration_recovery.hydrated_exports.clone();
+        let post_hydration_sets = post_hydration_recovery.recovered_save_sets.clone();
+        assert_eq!(
+            post_hydration_recovery
+                .reconcile_historical_external_fallback_v2("historical-fallback", 302, &observation_bytes)
+                .unwrap_err()
+                .code,
+            "historical-reconciliation-busy"
+        );
+        assert_eq!(post_hydration_recovery.identity(), post_hydration_identity);
+        assert_eq!(post_hydration_recovery.persistence_authority, post_hydration_authority);
+        assert_eq!(
+            post_hydration_recovery.persistence_dispatcher,
+            post_hydration_dispatcher
+        );
+        assert_eq!(post_hydration_recovery.hydrated_exports, post_hydration_exports);
+        assert_eq!(post_hydration_recovery.recovered_save_sets, post_hydration_sets);
+        let mut stale_hydration = reconciler.clone();
+        stale_hydration
+            .hydrated_exports
+            .get_mut("historical-fallback")
+            .unwrap()
+            .checkpoint = latest_checkpoint.clone();
+        let stale_before = stale_hydration.identity();
+        assert_eq!(
+            stale_hydration
+                .reconcile_historical_external_fallback_v2("historical-fallback", 302, &observation_bytes)
+                .unwrap_err()
+                .code,
+            "historical-reconciliation-fallback"
+        );
+        assert_eq!(stale_hydration.identity(), stale_before);
+        let before = reconciler.identity();
+        assert_eq!(
+            reconciler
+                .reconcile_historical_external_fallback_v2("historical-fallback", 303, &observation_bytes)
+                .unwrap_err()
+                .code,
+            "historical-reconciliation-fallback",
+            "changed reconciliation time must fail before queuing storage work"
+        );
+        assert_eq!(reconciler.identity(), before);
+        assert!(reconciler.persistence_dispatcher().is_idle());
+
+        let receipt = reconciler
+            .reconcile_historical_external_fallback_v2("historical-fallback", 302, &observation_bytes)
+            .unwrap();
+        assert_eq!(
+            receipt.operation,
+            IntegratedRuntimeHistoricalExternalOperationV2::Reconciliation
+        );
+        assert_eq!(receipt.remaining_dirty_records, 0);
+        let detail = receipt.reconciliation.as_ref().expect("reconciliation attestation");
+        assert_eq!(detail.expected_storage_revision, 17);
+        assert_eq!(
+            detail.observed_latest_checkpoint_hash,
+            latest_checkpoint.checkpoint_hash
+        );
+        assert_eq!(detail.fallback_checkpoint_hash, fallback_checkpoint.checkpoint_hash);
+        assert_eq!(detail.target_journal_sequence, latest_checkpoint.journal_sequence + 1);
+        assert_eq!(
+            reconciler.persistence_authority().checkpoint(),
+            Some(&fallback_checkpoint),
+            "op14 must not make the planned browser mutation in-memory authority"
+        );
+
+        let packet = reconciler
+            .poll_persistence_platform(INTEGRATED_RUNTIME_PERSISTENCE_MAX_PACKET_BYTES)
+            .unwrap()
+            .expect("reconciliation platform request");
+        let request = blockwild_persistence::decode_persistence_platform_request_v1(&packet.bytes).unwrap();
+        assert_eq!(
+            request.operation,
+            PersistencePlatformOperationV1::ReconcileHistoricalFallback
+        );
+        assert_eq!(request.cursor, 17);
+        assert_eq!(request.expected_head_hash, Some(latest_checkpoint.checkpoint_hash));
+        let plan = blockwild_persistence::decode_historical_fallback_reconciliation_plan_v2(&request.payload)
+            .expect("Rust-authored BWFP");
+        assert_eq!(plan.observation, observation);
+        assert_eq!(plan.target_checkpoint.checkpoint_hash, detail.target_checkpoint_hash);
+        assert_eq!(plan.plan_hash, detail.plan_hash);
+
+        let fallback_authority = reconciler.persistence_authority().checkpoint().unwrap().clone();
+        let dispatcher_before_ack = reconciler.persistence_dispatcher().state_hash();
+        let identity_before_ack = reconciler.identity();
+        let forged_ack = blockwild_persistence::encode_persistence_platform_response_v1(
+            &blockwild_persistence::PersistencePlatformResponseV1 {
+                request_id: request.request_id,
+                operation: request.operation,
+                code: blockwild_persistence::PersistencePlatformResultCodeV1::Accepted,
+                storage_revision: request.cursor + 1,
+                durable_hash: CanonicalHash([0x44; 16]),
+                next_cursor: None,
+                payload: Vec::new(),
+                message: "forged target".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            reconciler
+                .complete_persistence_platform(packet.transfer_token, &forged_ack)
+                .unwrap_err()
+                .code,
+            "persistence-dispatch-error"
+        );
+        assert_eq!(reconciler.identity(), identity_before_ack);
+        assert_eq!(reconciler.persistence_dispatcher().state_hash(), dispatcher_before_ack);
+        assert_eq!(reconciler.persistence_dispatcher().pending_count(), 1);
+        assert_eq!(
+            reconciler.persistence_authority().checkpoint(),
+            Some(&fallback_authority)
+        );
+
+        let rejected_ack = blockwild_persistence::encode_persistence_platform_response_v1(
+            &blockwild_persistence::PersistencePlatformResponseV1 {
+                request_id: request.request_id,
+                operation: request.operation,
+                code: blockwild_persistence::PersistencePlatformResultCodeV1::Conflict,
+                storage_revision: 0,
+                durable_hash: CanonicalHash::default(),
+                next_cursor: None,
+                payload: Vec::new(),
+                message: "conflict".into(),
+            },
+        )
+        .unwrap();
+        let rejected = reconciler
+            .complete_persistence_platform(packet.transfer_token, &rejected_ack)
+            .unwrap();
+        assert_eq!(rejected.status, PersistenceDispatchStatusV1::Rejected);
+        assert_eq!(reconciler.persistence_dispatcher().pending_count(), 1);
+        assert_eq!(
+            reconciler.persistence_authority().checkpoint(),
+            Some(&fallback_authority)
+        );
+
+        let retry_receipt = reconciler
+            .dispatch_persistence(RuntimePersistenceDispatchWireV1::Retry {
+                previous_request_id: request.request_id,
+            })
+            .unwrap();
+        let retry_request_id = retry_receipt.request_id.expect("rekeyed reconciliation retry");
+        let retry_packet = reconciler
+            .poll_persistence_platform(INTEGRATED_RUNTIME_PERSISTENCE_MAX_PACKET_BYTES)
+            .unwrap()
+            .expect("retry reconciliation platform request");
+        let retry_request = blockwild_persistence::decode_persistence_platform_request_v1(&retry_packet.bytes).unwrap();
+        assert_eq!(retry_request.request_id, retry_request_id);
+        let accepted_ack = blockwild_persistence::encode_persistence_platform_response_v1(
+            &blockwild_persistence::PersistencePlatformResponseV1 {
+                request_id: retry_request.request_id,
+                operation: retry_request.operation,
+                code: blockwild_persistence::PersistencePlatformResultCodeV1::Accepted,
+                storage_revision: retry_request.cursor + 1,
+                durable_hash: plan.target_checkpoint.checkpoint_hash,
+                next_cursor: None,
+                payload: Vec::new(),
+                message: "exact repaired target".into(),
+            },
+        )
+        .unwrap();
+        let accepted = reconciler
+            .complete_persistence_platform(retry_packet.transfer_token, &accepted_ack)
+            .unwrap();
+        assert_eq!(accepted.status, PersistenceDispatchStatusV1::Accepted);
+
+        let mut repaired_payloads = BTreeMap::new();
+        for copy in &plan.copy_records {
+            repaired_payloads.insert(
+                copy.address.clone(),
+                fallback_recovery
+                    .payloads
+                    .get(&copy.address)
+                    .expect("verified fallback copy payload")
+                    .clone(),
+            );
+        }
+        for inline in &plan.inline_records {
+            repaired_payloads.insert(inline.address.clone(), inline.payload.clone());
+        }
+        assert_eq!(repaired_payloads.len(), plan.target_checkpoint.records.len());
+        let repaired_recovery = PagedRecoveryCompleteV1 {
+            checkpoint: plan.target_checkpoint.clone(),
+            payloads: repaired_payloads,
+            missing_record_keys: Vec::new(),
+        };
+        reconciler
+            .recovered_save_sets
+            .insert("historical-repaired-target".into(), repaired_recovery.clone());
+        reconciler
+            .hydrate_historical_external_recovery_v2("historical-repaired-target")
+            .unwrap();
+        let repaired_prior = recovered_authority_save(&reconciler);
+        assert_eq!(repaired_prior.checkpoint, plan.target_checkpoint);
+
+        let repaired_descriptor = reconciler
+            .historical_external_descriptor_from_authority_v2()
+            .unwrap()
+            .expect("repaired target BWHE");
+        let next_document = br#"{"schema":2,"save":{"player":{"x":2},"opaque":"post-repair-interruption"}}"#.to_vec();
+        let next_proposal = HistoricalExternalDescriptorProposalV2 {
+            schema_version: repaired_descriptor.schema_version,
+            immutable: repaired_descriptor.immutable.clone(),
+            external: blockwild_persistence::HistoricalExternalFieldsV2 {
+                current_document: blockwild_persistence::HistoricalDocumentRevisionIdentityV2 {
+                    identity: blockwild_persistence::HistoricalDocumentIdentityV2 {
+                        hash: persistence_payload_hash_v1(&next_document),
+                        sha256: sha256_bytes_v1(&next_document),
+                        byte_length: next_document.len() as u64,
+                    },
+                    revision: repaired_descriptor.mutable.external.current_document.revision + 1,
+                },
+                expected_previous_document: Some(repaired_descriptor.mutable.external.current_document.clone()),
+                chunks: vec![blockwild_persistence::HistoricalExternalDocumentChunkFingerprintV2 {
+                    index: 0,
+                    byte_offset: 0,
+                    byte_length: next_document.len() as u32,
+                    payload_hash: persistence_payload_hash_v1(&next_document),
+                }],
+                chunk_set_hash: CanonicalHash::default(),
+            },
+            proposal_hash: CanonicalHash::default(),
+        }
+        .with_calculated_hash()
+        .unwrap();
+        let next_proposal_bytes =
+            blockwild_persistence::encode_historical_external_descriptor_proposal_v2(&next_proposal).unwrap();
+        reconciler
+            .stage_compatibility_save_chunk(
+                "historical-post-repair-successor",
+                0,
+                1,
+                next_document.len() as u64,
+                &next_document,
+            )
+            .unwrap();
+        reconciler
+            .finalize_historical_external_save_v2(
+                "historical-post-repair-successor",
+                303,
+                &next_proposal_bytes,
+                &encode_checkpoint(&repaired_prior.checkpoint),
+            )
+            .unwrap();
+        accept_all_authority_commits(&mut reconciler);
+        let next_target = recovered_authority_save(&reconciler);
+        let descriptor_address =
+            historical_external_descriptor_address_v2(&reconciler.config.universe_id, &reconciler.config.location_id)
+                .unwrap();
+        let next_target_descriptor = next_target
+            .checkpoint
+            .records
+            .iter()
+            .find(|record| record.address == descriptor_address)
+            .expect("post-repair target BWHE")
+            .clone();
+        let mut interrupted_records = repaired_prior.checkpoint.records.clone();
+        let descriptor_index = interrupted_records
+            .binary_search_by(|record| record.address.cmp(&descriptor_address))
+            .expect("repaired prior BWHE address");
+        interrupted_records[descriptor_index] = next_target_descriptor;
+        let interrupted_payloads = interrupted_records
+            .iter()
+            .map(|record| {
+                let payloads = if record.address == descriptor_address {
+                    &next_target.payloads
+                } else {
+                    &repaired_prior.payloads
+                };
+                (
+                    record.address.clone(),
+                    payloads
+                        .get(&record.address)
+                        .expect("post-repair exact prefix payload")
+                        .clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        let interrupted = PagedRecoveryCompleteV1 {
+            checkpoint: Checkpoint::new(
+                format!(
+                    "bwcp:{}:post-repair-successor-prefix",
+                    next_target.checkpoint.journal_sequence
+                ),
+                Some(repaired_prior.checkpoint.checkpoint_id.clone()),
+                next_target.checkpoint.world_id.clone(),
+                next_target.checkpoint.journal_sequence,
+                next_target.checkpoint.generator_hash,
+                next_target.checkpoint.content_hash,
+                next_target.checkpoint.created_at,
+                interrupted_records,
+            )
+            .unwrap(),
+            payloads: interrupted_payloads,
+            missing_record_keys: Vec::new(),
+        };
+
+        let mut post_repair_config = reconciler.config.clone();
+        post_repair_config.session_id = "historical-post-repair-restart".into();
+        let mut post_repair = IntegratedRuntimeV2::new(post_repair_config).unwrap();
+        post_repair
+            .recovered_save_sets
+            .insert("repaired-prior".into(), repaired_prior.clone());
+        post_repair
+            .hydrate_historical_external_recovery_v2("repaired-prior")
+            .unwrap();
+        post_repair
+            .stage_compatibility_save_chunk(
+                "historical-post-repair-successor",
+                0,
+                1,
+                next_document.len() as u64,
+                &next_document,
+            )
+            .unwrap();
+        post_repair
+            .recovered_save_sets
+            .insert("post-repair-prefix".into(), interrupted);
+        let resumed = post_repair
+            .finalize_historical_external_save_v2(
+                "historical-post-repair-successor",
+                303,
+                &next_proposal_bytes,
+                &encode_checkpoint(&repaired_prior.checkpoint),
+            )
+            .unwrap();
+        assert_eq!(
+            resumed.operation,
+            IntegratedRuntimeHistoricalExternalOperationV2::ExternalSave
+        );
+        assert!(resumed.dispatcher_request_id.is_some());
+        assert!(resumed.remaining_dirty_records > 0);
     }
 
     #[test]

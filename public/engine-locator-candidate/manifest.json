@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "generatedAt": "2026-09-05T10:07:25.822Z",
+  "defaultVariant": "compatibility",
+  "artifacts": {
+    "compatibility": {
+      "hash": "3f96f761f9f8ced86faca776b0852222c5c800231ba3eb8b1b9374ba076759ed",
+      "directory": "3f96f761f9f8ced86faca776b0852222c5c800231ba3eb8b1b9374ba076759ed",
+      "manifest": "3f96f761f9f8ced86faca776b0852222c5c800231ba3eb8b1b9374ba076759ed/manifest.json"
+    }
+  }
+}

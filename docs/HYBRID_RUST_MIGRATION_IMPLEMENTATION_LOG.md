@@ -927,6 +927,84 @@ The five-pair performance admission must be rerun from the committed immutable
 tree before this scheduler repair can close the failed R3 gate. Formal
 acceptance therefore remains 9/32 at this checkpoint.
 
+That immutable rerun now passes from committed tree `e19553f` against the
+twice-reproduced current-source candidate `ab4d66c5c165779c08bd1098be8b8ff1ad71b5702d938b72f38faae0c81493b1`
+(`9a6cc555af118f957456eea452a49a967c07f54a544fa8187c14535b66cd5212`,
+230 files). All ten alternating lanes pass 155/155 exact service cases and five
+420-tick movement traces. Median complete-corpus initialized p95 is 202.505 ms
+for TypeScript and 156.960 ms for Rust (0.7751x); reset-to-accepted is 202.745
+ms versus 175.305 ms (0.8647x). Every generation stratum and every landscape
+installed/drawable/update/rAF guard stays below the 1.05 regression ceiling.
+The separate 422-callback installed skill client now passes all five traces,
+all eleven retained screenshots were manually reviewed, and browser, process,
+mutex, source, selected-candidate, and canonical-artifact cleanup guards pass.
+Evidence is retained at
+`work/r3-e19553f-acceptance-1/work/r3-five-pair-3/`.
+
+The runner intentionally records `performanceAcceptance: false`: this is
+passing subsystem admission evidence, not self-promotion of R3 or whole-game
+performance. The compatibility candidate still needs the broader current-source
+artifact/browser matrix and deliberate canonical selection. Historical-save
+native adoption and other R3 exit gates remain open, so the formal 9/32 count
+is unchanged by this evidence alone.
+
+### R3 bounded closure checkpoint - 2026-09-04
+
+The failed streaming traces exposed a concrete scheduler defect rather than a
+readiness-threshold problem. At the first chunk crossing, leading-row chunks
+could already be installed and light-ready while their required local-height
+mesh sections remained unbuilt behind background generation/mesh debt. The
+bounded repair reschedules on discrete lookahead changes, preserves useful
+partial current/predicted work, selects exact required seam dependencies,
+admits queued predicted generation only after the current ring is drawable and
+the existing worker reserve is intact, and lends lane B's otherwise-idle slice
+to one exact predicted mesh target. The borrowed slice is removed from the
+ordinary allowance. Generation, lighting, mesh, frame-time and correctness
+reserves therefore keep their existing ceilings; no slower trace or relaxed
+readiness predicate was used to manufacture the pass.
+
+The immutable five-pair rerun is the performance evidence described immediately
+above: committed tree `e19553f`, source snapshot
+`9a6cc555af118f957456eea452a49a967c07f54a544fa8187c14535b66cd5212` /
+230 files, and reproduced compatibility bytes
+`ab4d66c5c165779c08bd1098be8b8ff1ad71b5702d938b72f38faae0c81493b1`.
+Its complete-corpus initialized p95 ratio is 0.7751x and reset-to-accepted ratio
+is 0.8647x; all declared generation and five-landscape regression ratios are
+below 1.05. The result remains explicitly `performanceAcceptance: false`: it is
+subsystem admission evidence, not a whole-game performance or R3 promotion.
+
+The later checked-in build is a distinct provenance boundary. Its compatibility
+manifest binds source `d4b466adda4483cca622b917295e07ea74d538be934a627f71d9756af1ecbb8a` /
+230 files, compatibility Wasm
+`f1b2286e350bf8839e387dad5b03b6ad4e7424e0ef68a9838fad252b5164594f`
+(7,424,538 bytes), and the same `ab4d66c5...` generated-byte identity. Current
+canonical evidence is retained at:
+
+- landscapes: `work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-final-check-1/`;
+- actual production worker/cancellation/reset/replacement/cache-reuse:
+  `work/hybrid-rust-migration/browser/r3-production-worker-ab4d66c5-20260904-canonical-1/`;
+- persistent cache, fresh-page restore and edit-halo namespace exclusion:
+  `work/hybrid-rust-migration/r3-persistent-cache/ab4d66c5-20260904-canonical-1/`;
+- trusted edit, Save & Quit, full reload and Continue: **root-owned final
+  accepted evidence path pending insertion**.
+
+The renderer-lab publication remains independent: artifact
+`988d4425660abdc12b055c0c1fbc082d5870fa7ff6ec2009f68d7c0e5a9c33fd`,
+manifest SHA-256
+`48e4d3a3de191689fdee6b445347ff49d8bc3eb2a9c29060f6603f154f4ebb9b`,
+and Wasm `5f188f05bec036ccbc44fd2e24bf70a483c5cf37cafdd22a6edd2b1e96de80e9`
+(7,552,651 bytes). Its **root-owned final accepted smoke path is pending
+insertion**; no passing smoke run is claimed until root replaces that placeholder
+with validated evidence. The gate proves only exact artifact/source delivery, a
+structured smoke fixture, and one offscreen browser-WebGPU submission. It does not prove
+full integrated rendering, pixel parity, device-loss recovery, performance, or
+renderer selection, and it cannot promote R10/R11.
+
+This checkpoint changes neither the master-plan checklist nor the authority
+ledger: formal acceptance remains **9/32**, and verified rollback releases
+remain **0/2**. Historical-save native adoption and the other R3 exit gates are
+still open; no deployment or authority promotion is claimed.
+
 ## Open completion gates
 
 - Promote the complete v18 generator with seed/chunk/POI byte parity and no `ChunkWorld` construction in its worker.

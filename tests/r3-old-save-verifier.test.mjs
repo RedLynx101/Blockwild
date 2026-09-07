@@ -8,10 +8,21 @@ import test, { before } from "node:test";
 import {
   assertHistoricalContinueNotRefused, assertHistoricalSaveScenarioEvidence, assertHistoricalStorageCheckpoint, assertHistoricalWorkerInputs,
   expectedHistoricalGenerationIdentity, expectedHistoricalGenerationOptions, expectedHistoricalWorldOptions,
-  parseOldSaveBrowserOptions, R3_OLD_SAVE_FIXTURES, readHistoricalSaveFixture,
+  oldSaveBrowserEvidenceMode, parseOldSaveBrowserOptions, R3_OLD_SAVE_AUTHORITY,
+  R3_OLD_SAVE_FIXTURES, R3_OLD_SAVE_GATE, R7_SCHEMA_CANDIDATE_OLD_SAVE_GATE,
+  R7_SCHEMA_CANDIDATE_OLD_SAVE_STATUS, R11_LOCATOR_CANDIDATE_OLD_SAVE_GATE,
+  R11_LOCATOR_CANDIDATE_OLD_SAVE_PINS, R11_LOCATOR_CANDIDATE_OLD_SAVE_STATUS,
+  R13_BROWSER_CANDIDATE_OLD_SAVE_GATE, R13_BROWSER_CANDIDATE_OLD_SAVE_PINS,
+  R13_BROWSER_CANDIDATE_OLD_SAVE_STATUS, readHistoricalSaveFixture,
 } from "../scripts/verify-rust-r3-old-save-browser.mjs";
 import {
-  REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH, runManagedRustTerrainBrowserScenario, TERRAIN_EDIT_GENERATION_CERTIFICATE,
+  REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH, R7_SCHEMA_CANDIDATE_ARTIFACT_HASH,
+  R11_LOCATOR_CANDIDATE_ARTIFACT_HASH, R11_LOCATOR_CANDIDATE_SOURCE_DIGEST,
+  R11_LOCATOR_CANDIDATE_SOURCE_FILE_COUNT, R11_LOCATOR_CANDIDATE_WASM_BYTES,
+  R11_LOCATOR_CANDIDATE_WASM_SHA256, R13_BROWSER_CANDIDATE_ARTIFACT_HASH,
+  R13_BROWSER_CANDIDATE_SOURCE_DIGEST, R13_BROWSER_CANDIDATE_SOURCE_FILE_COUNT,
+  R13_BROWSER_CANDIDATE_WASM_BYTES, R13_BROWSER_CANDIDATE_WASM_SHA256,
+  assertTerrainEditCandidateExactPins, runManagedRustTerrainBrowserScenario, TERRAIN_EDIT_GENERATION_CERTIFICATE,
 } from "../scripts/verify-rust-terrain-edit-reload-browser.mjs";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -194,14 +205,92 @@ test("worker request and applied result comparison is exact, not only a cell cou
   assert.throws(() => assertHistoricalWorkerInputs(value, fixture), /exact old edits/);
 });
 
-test("historical runner requires canonical artifact and has no arbitrary scenario CLI selector", async () => {
+test("historical runner accepts canonical, r7 schema, r11 locator, or r13 browser pins and has no arbitrary scenario CLI selector", async () => {
   const args = [process.execPath, "old-save", "--repo-root", repositoryRoot, "--engine-dir", "public/engine",
     "--expected-artifact-hash", REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH, "--output", "work/old-save-validator-only"];
-  assert.equal(parseOldSaveBrowserOptions(args).engineDirectory, path.join(repositoryRoot, "public", "engine"));
-  const alternate = [...args]; alternate[5] = "public/engine-locator-candidate";
-  assert.throws(() => parseOldSaveBrowserOptions(alternate), /canonical/);
+  const canonicalOptions = parseOldSaveBrowserOptions(args);
+  assert.equal(canonicalOptions.engineDirectory, path.join(repositoryRoot, "public", "engine"));
+  assert.deepEqual(oldSaveBrowserEvidenceMode(canonicalOptions), {
+    candidatePreview: false, gate: R3_OLD_SAVE_GATE, authorityClaim: R3_OLD_SAVE_AUTHORITY, successStatus: "passed",
+  });
+  const schemaCandidate = [...args]; schemaCandidate[5] = "public/engine-schema-candidate"; schemaCandidate[7] = R7_SCHEMA_CANDIDATE_ARTIFACT_HASH;
+  const schemaOptions = parseOldSaveBrowserOptions(schemaCandidate);
+  assert.equal(schemaOptions.engineDirectory, path.join(repositoryRoot, "public", "engine-schema-candidate"));
+  assert.deepEqual(oldSaveBrowserEvidenceMode(schemaOptions), {
+    candidatePreview: true, gate: R7_SCHEMA_CANDIDATE_OLD_SAVE_GATE, authorityClaim: "none", successStatus: R7_SCHEMA_CANDIDATE_OLD_SAVE_STATUS,
+  });
+  const locator = [...args]; locator[5] = "public/engine-locator-candidate"; locator[7] = R11_LOCATOR_CANDIDATE_ARTIFACT_HASH;
+  const locatorOptions = parseOldSaveBrowserOptions(locator);
+  assert.equal(locatorOptions.engineDirectory, path.join(repositoryRoot, "public", "engine-locator-candidate"));
+  assert.deepEqual(oldSaveBrowserEvidenceMode(locatorOptions), {
+    candidatePreview: true, gate: R11_LOCATOR_CANDIDATE_OLD_SAVE_GATE, authorityClaim: "none", successStatus: R11_LOCATOR_CANDIDATE_OLD_SAVE_STATUS,
+  });
+  assert.deepEqual(R11_LOCATOR_CANDIDATE_OLD_SAVE_PINS, {
+    artifactHash: R11_LOCATOR_CANDIDATE_ARTIFACT_HASH,
+    sourceDigest: R11_LOCATOR_CANDIDATE_SOURCE_DIGEST,
+    sourceFileCount: R11_LOCATOR_CANDIDATE_SOURCE_FILE_COUNT,
+    wasmBytes: R11_LOCATOR_CANDIDATE_WASM_BYTES,
+    wasmSha256: R11_LOCATOR_CANDIDATE_WASM_SHA256,
+  });
+  const browserCandidate = [...args]; browserCandidate[5] = "public/engine-r11-browser-candidate"; browserCandidate[7] = R13_BROWSER_CANDIDATE_ARTIFACT_HASH;
+  const browserOptions = parseOldSaveBrowserOptions(browserCandidate);
+  assert.equal(browserOptions.engineDirectory, path.join(repositoryRoot, "public", "engine-r11-browser-candidate"));
+  assert.deepEqual(oldSaveBrowserEvidenceMode(browserOptions), {
+    candidatePreview: true, gate: R13_BROWSER_CANDIDATE_OLD_SAVE_GATE, authorityClaim: "none", successStatus: R13_BROWSER_CANDIDATE_OLD_SAVE_STATUS,
+  });
+  assert.deepEqual(R13_BROWSER_CANDIDATE_OLD_SAVE_PINS, {
+    artifactHash: R13_BROWSER_CANDIDATE_ARTIFACT_HASH,
+    sourceDigest: R13_BROWSER_CANDIDATE_SOURCE_DIGEST,
+    sourceFileCount: R13_BROWSER_CANDIDATE_SOURCE_FILE_COUNT,
+    wasmBytes: R13_BROWSER_CANDIDATE_WASM_BYTES,
+    wasmSha256: R13_BROWSER_CANDIDATE_WASM_SHA256,
+  });
+  const unapproved = [...args]; unapproved[5] = "public/engine-other";
+  assert.throws(() => parseOldSaveBrowserOptions(unapproved), /must resolve exactly/);
+  const wrongSchemaPin = [...schemaCandidate]; wrongSchemaPin[7] = REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH;
+  assert.throws(() => parseOldSaveBrowserOptions(wrongSchemaPin), /requires exact artifact/);
+  const wrongLocatorPin = [...locator]; wrongLocatorPin[7] = REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH;
+  assert.throws(() => parseOldSaveBrowserOptions(wrongLocatorPin), /requires exact artifact/);
+  const wrongBrowserPin = [...browserCandidate]; wrongBrowserPin[7] = REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH;
+  assert.throws(() => parseOldSaveBrowserOptions(wrongBrowserPin), /requires exact artifact/);
+  const arbitraryRoot = [...locator]; arbitraryRoot[5] = "public/engine-locator-candidate-other";
+  assert.throws(() => parseOldSaveBrowserOptions(arbitraryRoot), /must resolve exactly/);
+  const browserSibling = [...browserCandidate]; browserSibling[5] = "public/engine-r11-browser-candidate-other";
+  assert.throws(() => parseOldSaveBrowserOptions(browserSibling), /must resolve exactly/);
+  const browserTraversal = [...browserCandidate]; browserTraversal[5] = "public/engine-r11-browser-candidate/../engine";
+  assert.throws(() => parseOldSaveBrowserOptions(browserTraversal), /traversal segments/);
+  const canonicalAuthority = oldSaveBrowserEvidenceMode(canonicalOptions);
+  const schemaAuthority = oldSaveBrowserEvidenceMode(schemaOptions);
+  const locatorAuthority = oldSaveBrowserEvidenceMode(locatorOptions);
+  const browserAuthority = oldSaveBrowserEvidenceMode(browserOptions);
+  assert.equal(canonicalAuthority.authorityClaim, R3_OLD_SAVE_AUTHORITY);
+  assert.equal(schemaAuthority.authorityClaim, "none");
+  assert.equal(locatorAuthority.authorityClaim, "none");
+  assert.equal(browserAuthority.authorityClaim, "none");
   assert.throws(() => parseOldSaveBrowserOptions([...args, "--scenario", "untrusted.mjs"]), /Unknown option/);
   await assert.rejects(runManagedRustTerrainBrowserScenario(args, { gate: "invalid", run() {} }), /explicit gate/);
+});
+
+test("r13 browser candidate rejects wrong source and Wasm pins", () => {
+  const manifest = {
+    artifactHash: R13_BROWSER_CANDIDATE_ARTIFACT_HASH, variant: "compatibility", package: "blockwild-wasm",
+    target: "wasm32-unknown-unknown", cargoProfile: "release",
+    files: [{ role: "wasm", path: "engine_bg.wasm", sha256: R13_BROWSER_CANDIDATE_WASM_SHA256, bytes: R13_BROWSER_CANDIDATE_WASM_BYTES }],
+  };
+  const sourceSnapshot = { schema: 1, digest: R13_BROWSER_CANDIDATE_SOURCE_DIGEST, fileCount: R13_BROWSER_CANDIDATE_SOURCE_FILE_COUNT };
+  const valid = { relativeDirectory: "public/engine-r11-browser-candidate", expectedArtifactHash: R13_BROWSER_CANDIDATE_ARTIFACT_HASH,
+    sourceSnapshot, currentSourceSnapshot: sourceSnapshot, manifest };
+  assert.doesNotThrow(() => assertTerrainEditCandidateExactPins(valid));
+  assert.throws(() => assertTerrainEditCandidateExactPins({ ...valid,
+    sourceSnapshot: { ...sourceSnapshot, digest: "0".repeat(64) },
+    currentSourceSnapshot: { ...sourceSnapshot, digest: "0".repeat(64) },
+  }), /exact required source/);
+  assert.throws(() => assertTerrainEditCandidateExactPins({ ...valid,
+    manifest: { ...manifest, files: [{ ...manifest.files[0], sha256: "0".repeat(64) }] },
+  }), /exact required Wasm/);
+  assert.throws(() => assertTerrainEditCandidateExactPins({ ...valid,
+    manifest: { ...manifest, files: [{ ...manifest.files[0], bytes: R13_BROWSER_CANDIDATE_WASM_BYTES + 1 }] },
+  }), /exact required Wasm/);
 });
 
 test("historical Continue captures production migration refusals as failures, never acceptance", () => {

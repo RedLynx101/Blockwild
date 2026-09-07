@@ -45,6 +45,21 @@ export const REQUIRED_TERRAIN_EDIT_SOURCE_DIGEST = "7a815caf45a4721aa5798c1d2509
 export const REQUIRED_TERRAIN_EDIT_SOURCE_FILE_COUNT = 230;
 export const REQUIRED_TERRAIN_EDIT_WASM_SHA256 = "2283f2c4f6510f5d80f4c49874d34029a6e0c3cd36f3ab19a0957c2ee2f86687";
 export const REQUIRED_TERRAIN_EDIT_WASM_BYTES = 7_424_470;
+export const R7_SCHEMA_CANDIDATE_ARTIFACT_HASH = "576917ff367f13bdbbca80ab2e15504020b79849356b91dc98a2ff9994f50f0a";
+export const R7_SCHEMA_CANDIDATE_SOURCE_DIGEST = "71248a6ce11eee9c54aef9f13b76a36978c26d7bb2e8c468d6629843aacb895c";
+export const R7_SCHEMA_CANDIDATE_SOURCE_FILE_COUNT = 231;
+export const R7_SCHEMA_CANDIDATE_WASM_SHA256 = "e5cddc46243ee987fc8bfcd5ec5e01a02f83f4697c42312b577f5a7cbedf53e4";
+export const R7_SCHEMA_CANDIDATE_WASM_BYTES = 7_675_060;
+export const R11_LOCATOR_CANDIDATE_ARTIFACT_HASH = "3f96f761f9f8ced86faca776b0852222c5c800231ba3eb8b1b9374ba076759ed";
+export const R11_LOCATOR_CANDIDATE_SOURCE_DIGEST = "b5821d1e8b0340c15e5b31f164258e982ec8b0a95eb8bdfa4370c0001ef82859";
+export const R11_LOCATOR_CANDIDATE_SOURCE_FILE_COUNT = 231;
+export const R11_LOCATOR_CANDIDATE_WASM_SHA256 = "993da56ceb1e940df62a2478fb373a62b52ae96ab00e748e94c893afb6a4c7fa";
+export const R11_LOCATOR_CANDIDATE_WASM_BYTES = 7_675_588;
+export const R13_BROWSER_CANDIDATE_ARTIFACT_HASH = "179849825480ef0f85ecae6fef5889e82997d53b6fd7dbb15a5a506642b8fd88";
+export const R13_BROWSER_CANDIDATE_SOURCE_DIGEST = "6963c7e6a5c88b56692842c278021580bbc020ce0bc61fe75cd68992bd096df5";
+export const R13_BROWSER_CANDIDATE_SOURCE_FILE_COUNT = 231;
+export const R13_BROWSER_CANDIDATE_WASM_SHA256 = "d11163afdd9e98fcf3aba609a5c023498ac0a56f20c7bcb5b468fbb7bcf7e994";
+export const R13_BROWSER_CANDIDATE_WASM_BYTES = 7_707_273;
 export const TERRAIN_EDIT_GENERATION_CERTIFICATE = Object.freeze({
   corpusCases: 155,
   corpusHash: "5d4e6b1445b00f3430164d1a8093d8dc",
@@ -65,7 +80,7 @@ export const TERRAIN_EDIT_TITLE_MENU_LABELS = Object.freeze([
 ]);
 export const TERRAIN_EDIT_TITLE_VISUAL_STABLE_SAMPLES = 4;
 
-const PROFILE_ROOT_NAME = ".terrain-edit-profile";
+const PROFILE_ROOT_PREFIX = "bw-terrain-";
 const PROFILE_PREFIX = "browser-";
 const VITE_RUNTIME_PREFIX = ".terrain-edit-vite-";
 const CHUNK_SIZE = 16;
@@ -79,6 +94,8 @@ const DEFAULT_TIMEOUT_MILLISECONDS = 300_000;
 export const TERRAIN_EDIT_ENGINE_DIRECTORIES = Object.freeze([
   "public/engine",
   "public/engine-locator-candidate",
+  "public/engine-schema-candidate",
+  "public/engine-r11-browser-candidate",
 ]);
 const MANAGED_CANONICAL_ASSET_URLS = Object.freeze([
   "https://blockwild.app/manifest.webmanifest",
@@ -558,6 +575,93 @@ function terrainEditEngineRelativeDirectory(repositoryRoot, requestedDirectory) 
   return relative;
 }
 
+function rejectTerrainEditPathTraversal(requestedDirectory) {
+  if (String(requestedDirectory).split(/[\\/]/u).includes("..")) {
+    fail("Selected engine directory may not contain traversal segments.");
+  }
+}
+
+function terrainEditAcceptancePins(relativeDirectory) {
+  if (relativeDirectory === "public/engine-schema-candidate") return Object.freeze({
+    artifactHash: R7_SCHEMA_CANDIDATE_ARTIFACT_HASH,
+    sourceDigest: R7_SCHEMA_CANDIDATE_SOURCE_DIGEST,
+    sourceFileCount: R7_SCHEMA_CANDIDATE_SOURCE_FILE_COUNT,
+    wasmSha256: R7_SCHEMA_CANDIDATE_WASM_SHA256,
+    wasmBytes: R7_SCHEMA_CANDIDATE_WASM_BYTES,
+  });
+  if (relativeDirectory === "public/engine-locator-candidate") return Object.freeze({
+    artifactHash: R11_LOCATOR_CANDIDATE_ARTIFACT_HASH,
+    sourceDigest: R11_LOCATOR_CANDIDATE_SOURCE_DIGEST,
+    sourceFileCount: R11_LOCATOR_CANDIDATE_SOURCE_FILE_COUNT,
+    wasmSha256: R11_LOCATOR_CANDIDATE_WASM_SHA256,
+    wasmBytes: R11_LOCATOR_CANDIDATE_WASM_BYTES,
+  });
+  if (relativeDirectory === "public/engine-r11-browser-candidate") return Object.freeze({
+    artifactHash: R13_BROWSER_CANDIDATE_ARTIFACT_HASH,
+    sourceDigest: R13_BROWSER_CANDIDATE_SOURCE_DIGEST,
+    sourceFileCount: R13_BROWSER_CANDIDATE_SOURCE_FILE_COUNT,
+    wasmSha256: R13_BROWSER_CANDIDATE_WASM_SHA256,
+    wasmBytes: R13_BROWSER_CANDIDATE_WASM_BYTES,
+  });
+  return Object.freeze({
+    artifactHash: REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH,
+    sourceDigest: REQUIRED_TERRAIN_EDIT_SOURCE_DIGEST,
+    sourceFileCount: REQUIRED_TERRAIN_EDIT_SOURCE_FILE_COUNT,
+    wasmSha256: REQUIRED_TERRAIN_EDIT_WASM_SHA256,
+    wasmBytes: REQUIRED_TERRAIN_EDIT_WASM_BYTES,
+  });
+}
+
+export function assertTerrainEditCandidateExactPins({
+  relativeDirectory,
+  expectedArtifactHash,
+  sourceSnapshot,
+  currentSourceSnapshot,
+  manifest,
+}) {
+  if (!TERRAIN_EDIT_ENGINE_DIRECTORIES.includes(relativeDirectory)) {
+    fail("Unknown terrain-edit engine root.");
+  }
+  const pins = terrainEditAcceptancePins(relativeDirectory);
+  if (expectedArtifactHash !== pins.artifactHash) {
+    fail(`Terrain edit acceptance requires exact artifact ${pins.artifactHash}.`);
+  }
+  if (sourceSnapshot?.schema !== 1
+    || !/^[a-f0-9]{64}$/u.test(sourceSnapshot.digest ?? "")
+    || !Number.isSafeInteger(sourceSnapshot.fileCount) || sourceSnapshot.fileCount <= 0) {
+    fail("Selected artifact has incomplete source-snapshot provenance.");
+  }
+  if (sourceSnapshot.digest !== currentSourceSnapshot?.digest
+    || sourceSnapshot.fileCount !== currentSourceSnapshot?.fileCount) {
+    fail(`Selected artifact is not current-source: artifact ${sourceSnapshot.digest}/${sourceSnapshot.fileCount}, current ${currentSourceSnapshot?.digest}/${currentSourceSnapshot?.fileCount}.`);
+  }
+  if (sourceSnapshot.digest !== pins.sourceDigest
+    || sourceSnapshot.fileCount !== pins.sourceFileCount) {
+    fail(`Selected artifact source snapshot is not exact required source ${pins.sourceDigest}/${pins.sourceFileCount}.`);
+  }
+  if (manifest?.artifactHash !== expectedArtifactHash
+    || manifest.variant !== "compatibility"
+    || manifest.package !== "blockwild-wasm"
+    || manifest.target !== "wasm32-unknown-unknown"
+    || manifest.cargoProfile !== "release") {
+    fail("Selected artifact build provenance is incomplete or inconsistent.");
+  }
+  const wasmFiles = Array.isArray(manifest.files) ? manifest.files.filter((file) => file.role === "wasm") : [];
+  if (wasmFiles.length !== 1 || wasmFiles[0].path !== "engine_bg.wasm"
+    || wasmFiles[0].sha256 !== pins.wasmSha256
+    || wasmFiles[0].bytes !== pins.wasmBytes) {
+    fail(`Selected artifact does not contain the exact required Wasm ${pins.wasmSha256}/${pins.wasmBytes}.`);
+  }
+  return Object.freeze({
+    pins,
+    wasm: Object.freeze({
+      path: wasmFiles[0].path,
+      bytes: wasmFiles[0].bytes,
+      sha256: wasmFiles[0].sha256,
+    }),
+  });
+}
+
 /** Canonical publication may retain renderer-lab; an isolated index stays single-artifact. */
 export function assertTerrainEditEngineIndex(index, relativeDirectory) {
   if (!TERRAIN_EDIT_ENGINE_DIRECTORIES.includes(relativeDirectory)) fail("Unknown terrain-edit engine root.");
@@ -613,14 +717,16 @@ export function parseTerrainEditBrowserOptions(argv = process.argv, context = {}
     ? findRepositoryRoot(path.resolve(context.cwd ?? process.cwd(), raw["repo-root"]))
     : findRepositoryRoot(context.cwd ?? process.cwd());
   if (raw.help) return Object.freeze({ help: true, repositoryRoot: realpathSync(repositoryRoot) });
-  if (raw["expected-artifact-hash"] !== REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH) {
-    fail(`Terrain edit acceptance requires exact artifact ${REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH}.`);
-  }
   if (typeof raw["engine-dir"] !== "string" || raw["engine-dir"].trim() === "") {
     fail(`--engine-dir is required and must explicitly select ${TERRAIN_EDIT_ENGINE_DIRECTORIES.join(" or ")}.`);
   }
+  rejectTerrainEditPathTraversal(raw["engine-dir"]);
   const engineDirectory = path.resolve(repositoryRoot, raw["engine-dir"]);
-  terrainEditEngineRelativeDirectory(repositoryRoot, engineDirectory);
+  const relativeDirectory = terrainEditEngineRelativeDirectory(repositoryRoot, engineDirectory);
+  const pins = terrainEditAcceptancePins(relativeDirectory);
+  if (raw["expected-artifact-hash"] !== pins.artifactHash) {
+    fail(`Terrain edit acceptance requires exact artifact ${pins.artifactHash}.`);
+  }
   const timeoutMilliseconds = raw["timeout-ms"] ?? DEFAULT_TIMEOUT_MILLISECONDS;
   if (!Number.isSafeInteger(timeoutMilliseconds) || timeoutMilliseconds < 60_000 || timeoutMilliseconds > 900_000) {
     fail("--timeout-ms must be an integer from 60000 through 900000.");
@@ -629,7 +735,7 @@ export function parseTerrainEditBrowserOptions(argv = process.argv, context = {}
     help: false,
     repositoryRoot: realpathSync(repositoryRoot),
     engineDirectory,
-    expectedArtifactHash: REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH,
+    expectedArtifactHash: pins.artifactHash,
     outputDirectory: resolveWorkOutputDirectory(repositoryRoot, raw.output),
     timeoutMilliseconds,
     playwrightModule: raw["playwright-module"] ? path.resolve(repositoryRoot, raw["playwright-module"]) : null,
@@ -698,9 +804,7 @@ function canonicalCandidateFile(filePath, contentType, immutable) {
 
 /** Historical API name retained; selection now covers canonical or isolated packages. */
 export function selectTerrainEditCandidate(repositoryRoot, requestedDirectory, expectedArtifactHash) {
-  if (expectedArtifactHash !== REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH) {
-    fail(`Terrain edit acceptance requires exact artifact ${REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH}.`);
-  }
+  rejectTerrainEditPathTraversal(requestedDirectory);
   const lexicalRoot = path.resolve(repositoryRoot);
   const canonicalRoot = realpathSync(lexicalRoot);
   const publicRoot = path.join(lexicalRoot, "public");
@@ -710,6 +814,10 @@ export function selectTerrainEditCandidate(repositoryRoot, requestedDirectory, e
   const canonicalPublic = realpathSync(publicRoot);
   const selectedLexicalDirectory = path.resolve(lexicalRoot, requestedDirectory);
   const relativeDirectory = terrainEditEngineRelativeDirectory(lexicalRoot, selectedLexicalDirectory);
+  const pins = terrainEditAcceptancePins(relativeDirectory);
+  if (expectedArtifactHash !== pins.artifactHash) {
+    fail(`Terrain edit acceptance requires exact artifact ${pins.artifactHash}.`);
+  }
   if (!existsSync(selectedLexicalDirectory)) fail(`Selected engine directory is missing: ${selectedLexicalDirectory}.`);
   assertNonSymlinkTree(selectedLexicalDirectory, "Selected terrain-edit engine tree");
   const selectedDirectory = realpathSync(selectedLexicalDirectory);
@@ -723,37 +831,14 @@ export function selectTerrainEditCandidate(repositoryRoot, requestedDirectory, e
   if (!pathIsInside(selectedDirectory, artifact.directory)) fail("Selected artifact resolves outside its engine index.");
   const currentSourceSnapshot = createRustEngineSourceSnapshot(canonicalRoot);
   const sourceSnapshot = artifact.manifest?.sourceSnapshot;
-  if (sourceSnapshot?.schema !== 1
-    || !/^[a-f0-9]{64}$/u.test(sourceSnapshot.digest ?? "")
-    || !Number.isSafeInteger(sourceSnapshot.fileCount) || sourceSnapshot.fileCount <= 0) {
-    fail("Selected artifact has incomplete source-snapshot provenance.");
-  }
-  if (sourceSnapshot.digest !== currentSourceSnapshot.digest
-    || sourceSnapshot.fileCount !== currentSourceSnapshot.fileCount) {
-    fail(`Selected artifact is not current-source: artifact ${sourceSnapshot.digest}/${sourceSnapshot.fileCount}, current ${currentSourceSnapshot.digest}/${currentSourceSnapshot.fileCount}.`);
-  }
-  if (sourceSnapshot.digest !== REQUIRED_TERRAIN_EDIT_SOURCE_DIGEST
-    || sourceSnapshot.fileCount !== REQUIRED_TERRAIN_EDIT_SOURCE_FILE_COUNT) {
-    fail(`Selected artifact source snapshot is not exact required source ${REQUIRED_TERRAIN_EDIT_SOURCE_DIGEST}/${REQUIRED_TERRAIN_EDIT_SOURCE_FILE_COUNT}.`);
-  }
-  if (artifact.manifest.artifactHash !== expectedArtifactHash
-    || artifact.manifest.variant !== "compatibility"
-    || artifact.manifest.package !== "blockwild-wasm"
-    || artifact.manifest.target !== "wasm32-unknown-unknown"
-    || artifact.manifest.cargoProfile !== "release") {
-    fail("Selected artifact build provenance is incomplete or inconsistent.");
-  }
-  const wasmFiles = artifact.manifest.files.filter((file) => file.role === "wasm");
-  if (wasmFiles.length !== 1 || wasmFiles[0].path !== "engine_bg.wasm"
-    || wasmFiles[0].sha256 !== REQUIRED_TERRAIN_EDIT_WASM_SHA256
-    || wasmFiles[0].bytes !== REQUIRED_TERRAIN_EDIT_WASM_BYTES) {
-    fail(`Selected artifact does not contain the exact required Wasm ${REQUIRED_TERRAIN_EDIT_WASM_SHA256}/${REQUIRED_TERRAIN_EDIT_WASM_BYTES}.`);
-  }
-  const wasm = Object.freeze({
-    path: wasmFiles[0].path,
-    bytes: wasmFiles[0].bytes,
-    sha256: wasmFiles[0].sha256,
+  const pinEvidence = assertTerrainEditCandidateExactPins({
+    relativeDirectory,
+    expectedArtifactHash,
+    sourceSnapshot,
+    currentSourceSnapshot,
+    manifest: artifact.manifest,
   });
+  const wasm = pinEvidence.wasm;
   const routes = new Map();
   routes.set("/engine/manifest.json", canonicalCandidateFile(
     path.join(selectedDirectory, "manifest.json"),
@@ -775,7 +860,8 @@ export function selectTerrainEditCandidate(repositoryRoot, requestedDirectory, e
   return Object.freeze({
     repositoryRoot: canonicalRoot,
     relativeDirectory,
-    packageKind: relativeDirectory === "public/engine" ? "canonical" : "isolated-candidate",
+    packageKind: relativeDirectory === "public/engine" ? "canonical"
+      : relativeDirectory === "public/engine-schema-candidate" ? "schema-candidate" : "isolated-candidate",
     directory: selectedDirectory,
     artifactDirectory: artifact.directory,
     hash: artifact.hash,
@@ -889,6 +975,100 @@ export function safeRemoveTerrainEditOwnedDirectory(parentDirectory, ownedDirect
   }
   rmSync(canonicalOwned, { recursive: true, force: false, maxRetries: 5, retryDelay: 200 });
   return !existsSync(lexicalOwned);
+}
+
+export function createTerrainEditProfileRoot(tempDirectory = os.tmpdir()) {
+  const parentDirectory = path.resolve(tempDirectory);
+  const profileRoot = mkdtempSync(path.join(parentDirectory, PROFILE_ROOT_PREFIX));
+  if (path.dirname(profileRoot) !== parentDirectory || !path.basename(profileRoot).startsWith(PROFILE_ROOT_PREFIX)) {
+    fail(`Browser profile root escaped its trusted temporary directory: ${profileRoot}.`);
+  }
+  return profileRoot;
+}
+
+function assertTerrainEditOwnedDirectory(directory, parentDirectory, prefix, label) {
+  assertCondition(typeof directory === "string" && directory.length > 0,
+    `${label} did not return a path.`);
+  const lexicalParent = path.resolve(parentDirectory);
+  const lexicalDirectory = path.resolve(directory);
+  if (path.dirname(lexicalDirectory) !== lexicalParent
+    || !path.basename(lexicalDirectory).startsWith(prefix)) {
+    fail(`${label} escaped its owned parent: ${lexicalDirectory}.`);
+  }
+  assertCondition(existsSync(lexicalDirectory), `${label} did not create ${lexicalDirectory}.`);
+  const metadata = lstatSync(lexicalDirectory);
+  if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+    fail(`${label} must create a non-symlink directory: ${lexicalDirectory}.`);
+  }
+  const canonicalParent = realpathSync(lexicalParent);
+  const canonicalDirectory = realpathSync(lexicalDirectory);
+  if (!pathIsInside(canonicalParent, canonicalDirectory)) {
+    fail(`${label} is not contained by its owned parent: ${canonicalDirectory}.`);
+  }
+  return lexicalDirectory;
+}
+
+/**
+ * Create the three verifier-owned temporary directories as one transaction.
+ * Every successful stage is tracked locally, so a fault in any later stage
+ * removes only the exact owned paths already created by this transaction.
+ * The injected creators are intentionally test-only seams; production callers
+ * use the real mkdtemp-backed creators below.
+ */
+export function createTerrainEditOwnedSetup({
+  outputDirectory,
+  tempDirectory = os.tmpdir(),
+  createProfileRoot = () => createTerrainEditProfileRoot(tempDirectory),
+  createProfileDirectory = (profileRoot) => mkdtempSync(path.join(profileRoot, PROFILE_PREFIX)),
+  createViteRuntimeDirectory = (ownedOutputDirectory) => mkdtempSync(
+    path.join(ownedOutputDirectory, VITE_RUNTIME_PREFIX),
+  ),
+} = {}) {
+  assertCondition(typeof outputDirectory === "string" && outputDirectory.length > 0,
+    "Terrain edit setup requires an output directory.");
+  const ownedOutputDirectory = path.resolve(outputDirectory);
+  const ownedTempDirectory = path.resolve(tempDirectory);
+  let profileRoot = null;
+  let profileDirectory = null;
+  let viteRuntimeDirectory = null;
+  try {
+    const createdProfileRoot = createProfileRoot();
+    profileRoot = createdProfileRoot;
+    profileRoot = assertTerrainEditOwnedDirectory(
+      createdProfileRoot, ownedTempDirectory, PROFILE_ROOT_PREFIX, "Browser profile root",
+    );
+    const createdProfileDirectory = createProfileDirectory(profileRoot);
+    profileDirectory = createdProfileDirectory;
+    profileDirectory = assertTerrainEditOwnedDirectory(
+      createdProfileDirectory, profileRoot, PROFILE_PREFIX, "Browser profile directory",
+    );
+    const createdViteRuntimeDirectory = createViteRuntimeDirectory(ownedOutputDirectory);
+    viteRuntimeDirectory = createdViteRuntimeDirectory;
+    viteRuntimeDirectory = assertTerrainEditOwnedDirectory(
+      createdViteRuntimeDirectory,
+      ownedOutputDirectory,
+      VITE_RUNTIME_PREFIX,
+      "Managed Vite runtime directory",
+    );
+    return Object.freeze({ profileRoot, profileDirectory, viteRuntimeDirectory });
+  } catch (error) {
+    const cleanupErrors = [];
+    for (const [directory, parent, prefix] of [
+      [viteRuntimeDirectory, ownedOutputDirectory, VITE_RUNTIME_PREFIX],
+      [profileDirectory, profileRoot, PROFILE_PREFIX],
+      [profileRoot, ownedTempDirectory, PROFILE_ROOT_PREFIX],
+    ]) {
+      if (!directory || !parent) continue;
+      try { safeRemoveTerrainEditOwnedDirectory(parent, directory, prefix); }
+      catch (cleanupError) { cleanupErrors.push(cleanupError); }
+    }
+    if (cleanupErrors.length > 0 && error && typeof error === "object") {
+      error.ownedSetupCleanupErrors = cleanupErrors.map((cleanupError) => (
+        cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+      ));
+    }
+    throw error;
+  }
 }
 
 async function reserveLoopbackPort() {
@@ -1623,7 +1803,7 @@ async function observeTerrainEditReloadTitleVisuals(page) {
   }, TERRAIN_EDIT_TITLE_MENU_LABELS);
 }
 
-async function waitForTerrainEditReloadTitleVisualReadiness(page, timeoutMilliseconds) {
+export async function waitForTerrainEditReloadTitleVisualReadiness(page, timeoutMilliseconds) {
   const deadline = Date.now() + timeoutMilliseconds;
   let stableSamples = [];
   let stableSignature = null;
@@ -1681,15 +1861,6 @@ export async function runTerrainEditReloadBrowser(argv = process.argv, scenario 
     options.engineDirectory,
     options.expectedArtifactHash,
   );
-  const profileRoot = path.join(options.outputDirectory, PROFILE_ROOT_NAME);
-  if (existsSync(profileRoot)) {
-    const metadata = lstatSync(profileRoot);
-    if (metadata.isSymbolicLink() || !metadata.isDirectory() || readdirSync(profileRoot).length > 0) {
-      fail(`Browser profile root must be absent or empty: ${profileRoot}.`);
-    }
-  } else mkdirSync(profileRoot);
-  const profileDirectory = mkdtempSync(path.join(profileRoot, PROFILE_PREFIX));
-  const viteRuntimeDirectory = mkdtempSync(path.join(options.outputDirectory, VITE_RUNTIME_PREFIX));
   const routeRequests = [];
   const canonicalAssetRequests = [];
   const streams = {
@@ -1746,6 +1917,9 @@ export async function runTerrainEditReloadBrowser(argv = process.argv, scenario 
   let page = null;
   let cdp = null;
   let result = null;
+  let profileRoot = null;
+  let profileDirectory = null;
+  let viteRuntimeDirectory = null;
   let lastSnapshot = null;
   let beforeEdit = null;
   let afterGesture = null;
@@ -1760,6 +1934,13 @@ export async function runTerrainEditReloadBrowser(argv = process.argv, scenario 
     }
   };
   try {
+    // Chromium's IndexedDB backend still encounters MAX_PATH-sensitive file
+    // opens on Windows. Keep the owned profile under the trusted OS temp root
+    // so a long, evidence-rich output path cannot make storage look unavailable.
+    // This setup is deliberately inside the finalizer's try block: if any
+    // creation stage fails, already-created owned paths are still cleaned up.
+    const ownedSetup = createTerrainEditOwnedSetup({ outputDirectory: options.outputDirectory });
+    ({ profileRoot, profileDirectory, viteRuntimeDirectory } = ownedSetup);
     try {
       browserMutex = await acquireTerrainEditBrowserMutex(options.repositoryRoot);
       browserMutexEvidence = browserMutex.evidence;
@@ -2222,7 +2403,9 @@ export async function runTerrainEditReloadBrowser(argv = process.argv, scenario 
       cleanup,
     };
   } finally {
-    cleanup.databasePathsBeforeCleanup = findOwnedDatabasePaths(profileDirectory);
+    cleanup.databasePathsBeforeCleanup = profileDirectory
+      ? findOwnedDatabasePaths(profileDirectory)
+      : [];
     if (context) {
       await context.close().then(() => { cleanup.browserClosed = true; }).catch((error) => {
         boundedPush(streams.runtimeErrors, `browser cleanup: ${error instanceof Error ? error.message : String(error)}`);
@@ -2262,17 +2445,26 @@ export async function runTerrainEditReloadBrowser(argv = process.argv, scenario 
       }
     });
     if (cleanup.browserDisconnected && cleanup.aliveChildPidsAfterCleanup.length === 0) {
-      try { cleanup.profileRemoved = safeRemoveTerrainEditOwnedDirectory(profileRoot, profileDirectory, PROFILE_PREFIX); }
-      catch (error) { boundedPush(streams.runtimeErrors, `profile cleanup: ${error instanceof Error ? error.message : String(error)}`); }
+      if (!profileDirectory) cleanup.profileRemoved = true;
+      else {
+        try { cleanup.profileRemoved = safeRemoveTerrainEditOwnedDirectory(profileRoot, profileDirectory, PROFILE_PREFIX); }
+        catch (error) { boundedPush(streams.runtimeErrors, `profile cleanup: ${error instanceof Error ? error.message : String(error)}`); }
+      }
     } else boundedPush(streams.runtimeErrors, "profile cleanup refused before exact browser process shutdown.");
-    cleanup.databasePathsAfterCleanup = existsSync(profileDirectory) ? findOwnedDatabasePaths(profileDirectory) : [];
+    cleanup.databasePathsAfterCleanup = profileDirectory && existsSync(profileDirectory)
+      ? findOwnedDatabasePaths(profileDirectory)
+      : [];
     cleanup.databasePathsRemoved = cleanup.profileRemoved && cleanup.databasePathsAfterCleanup.length === 0;
-    try {
-      if (existsSync(profileRoot) && readdirSync(profileRoot).length === 0) rmdirSync(profileRoot);
-      cleanup.profileRootRemoved = !existsSync(profileRoot);
-    } catch (error) { boundedPush(streams.runtimeErrors, `profile-root cleanup: ${error instanceof Error ? error.message : String(error)}`); }
-    if (cleanup.serverClosed && cleanup.serverPortRefused && cleanup.environmentRestored) {
+    if (!profileRoot) cleanup.profileRootRemoved = true;
+    else {
       try {
+        if (existsSync(profileRoot) && readdirSync(profileRoot).length === 0) rmdirSync(profileRoot);
+        cleanup.profileRootRemoved = !existsSync(profileRoot);
+      } catch (error) { boundedPush(streams.runtimeErrors, `profile-root cleanup: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    if (cleanup.serverClosed && cleanup.serverPortRefused && cleanup.environmentRestored) {
+      if (!viteRuntimeDirectory) cleanup.viteRuntimeRemoved = true;
+      else try {
         cleanup.viteRuntimeRemoved = safeRemoveTerrainEditOwnedDirectory(
           options.outputDirectory,
           viteRuntimeDirectory,

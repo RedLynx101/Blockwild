@@ -3,6 +3,7 @@ import {
   PERSISTENCE_SCHEMA_V1,
   createLegacyMigrationBundleV1,
   createPersistenceCheckpointV1,
+  persistencePayloadHashV1,
   persistencePayloadMatchesV1,
   persistenceRecordKeyV1,
   type PersistenceCheckpointV1,
@@ -16,6 +17,8 @@ import {
   RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1,
   RUST_PERSISTENCE_PLATFORM_MAX_PAGE_RECORDS_V1,
   RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1,
+  decodeRustPersistenceCheckpointWireV1,
+  encodeRustPersistenceCheckpointWireV1,
   rustPersistencePlatformPayloadHashV1,
   rustPersistenceZeroHashV1,
   type RustPersistencePlatformCodeV1,
@@ -387,11 +390,333 @@ class PlatformReader {
   u8() { return this.take(1)[0]; }
   u16() { const bytes = this.take(2); return new DataView(bytes.buffer, bytes.byteOffset, 2).getUint16(0, true); }
   u32() { const bytes = this.take(4); return new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true); }
+  u64() { const bytes = this.take(8); const view = new DataView(bytes.buffer, bytes.byteOffset, 8); const value = view.getUint32(0, true) + view.getUint32(4, true) * 0x1_0000_0000; if (!Number.isSafeInteger(value)) throw new Error("platform u64 exceeds JavaScript's exact range"); return value; }
   skipU64() { this.take(8); }
   hash() { return [...this.take(16)].map((value) => value.toString(16).padStart(2, "0")).join(""); }
   bytes(maximum = RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1) { const length = this.u32(); if (length > maximum) throw new Error("portable field exceeds its bound"); return this.take(length); }
   string() { return new TextDecoder("utf-8", { fatal: true }).decode(this.bytes(16 * 1024)); }
   finish() { if (this.offset !== this.source.byteLength) throw new Error("portable archive contains trailing bytes"); }
+}
+
+export type RustHistoricalFallbackActualRecordV2 = Readonly<{
+  address: PersistenceRecordAddressV1;
+  revision: number;
+  byteLength: number;
+  storedPayloadHash: string;
+  actualPayloadHash: string;
+}>;
+
+export type RustHistoricalFallbackObservationV2 = Readonly<{
+  schemaVersion: 2;
+  worldId: string;
+  storageRevision: number;
+  latestCheckpoint: PersistenceCheckpointV1;
+  fallbackCheckpoint: PersistenceCheckpointV1;
+  actualRecords: readonly RustHistoricalFallbackActualRecordV2[];
+  actualRecordSetHash: string;
+}>;
+
+export type RustHistoricalFallbackCopyRecordV2 = Readonly<{
+  address: PersistenceRecordAddressV1;
+  sourceRevision: number;
+  targetRevision: number;
+  byteLength: number;
+  payloadHash: string;
+}>;
+
+export type RustHistoricalFallbackInlineRecordV2 = Readonly<{
+  address: PersistenceRecordAddressV1;
+  targetRevision: number;
+  payload: Uint8Array;
+}>;
+
+export type RustHistoricalFallbackReconciliationPlanV2 = Readonly<{
+  schemaVersion: 2;
+  createdAt: number;
+  observation: RustHistoricalFallbackObservationV2;
+  observationBytes: Uint8Array;
+  observationHash: string;
+  targetCheckpoint: PersistenceCheckpointV1;
+  copyRecords: readonly RustHistoricalFallbackCopyRecordV2[];
+  inlineRecords: readonly RustHistoricalFallbackInlineRecordV2[];
+  deleteAddresses: readonly PersistenceRecordAddressV1[];
+  saveSetHash: string;
+  manifestHash: string;
+  descriptorHash: string;
+  planHash: string;
+}>;
+
+function writeHistoricalAddress(writer: PlatformWriter, address: PersistenceRecordAddressV1) {
+  const kind = PERSISTENCE_RECORD_KIND_ORDER_V1.indexOf(address.kind);
+  if (kind < 0) throw new Error("historical reconciliation address has an unknown record kind");
+  writer.string(address.universeId); writer.string(address.locationId); writer.u8(kind); writer.string(address.recordId);
+}
+
+function readHistoricalAddress(reader: PlatformReader): PersistenceRecordAddressV1 {
+  const universeId = reader.string(); const locationId = reader.string(); const tag = reader.u8(); const recordId = reader.string();
+  const kind = PERSISTENCE_RECORD_KIND_ORDER_V1[tag];
+  if (!kind) throw new Error("historical reconciliation address has an unknown record kind");
+  return Object.freeze({ universeId, locationId, kind, recordId });
+}
+
+function historicalActualRecordSetHashV2(records: readonly RustHistoricalFallbackActualRecordV2[]) {
+  const hasher = new TypeScriptCanonicalHasher("blockwild-historical-fallback-actual-records-v2");
+  hasher.writeU16(2); hasher.writeU32(records.length);
+  for (const record of records) {
+    hasher.writeString(record.address.universeId); hasher.writeString(record.address.locationId);
+    hasher.writeString(record.address.kind); hasher.writeString(record.address.recordId);
+    hasher.writeU64(record.revision); hasher.writeU32(record.byteLength);
+    hasher.writeString(record.storedPayloadHash); hasher.writeString(record.actualPayloadHash);
+  }
+  return hasher.finishHex();
+}
+
+function sameRecordAddress(left: PersistenceRecordAddressV1, right: PersistenceRecordAddressV1) {
+  return left.universeId === right.universeId && left.locationId === right.locationId
+    && left.kind === right.kind && left.recordId === right.recordId;
+}
+
+function compareRecordAddresses(left: PersistenceRecordAddressV1, right: PersistenceRecordAddressV1) {
+  const leftKey = persistenceRecordKeyV1(left);
+  const rightKey = persistenceRecordKeyV1(right);
+  return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+}
+
+function historicalActualRecordV2(record: StoredRecord): RustHistoricalFallbackActualRecordV2 {
+  const key = persistenceRecordKeyV1(record.address);
+  if (record.key !== key
+    || !Number.isSafeInteger(record.revision) || record.revision < 1
+    || !(record.payload instanceof Uint8Array)
+    || typeof record.payloadHash !== "string" || !/^[0-9a-f]{32}$/u.test(record.payloadHash)) {
+    throw new Error("historical fallback current record cannot be represented canonically");
+  }
+  return Object.freeze({
+    address: Object.freeze({ ...record.address }),
+    revision: record.revision,
+    byteLength: record.payload.byteLength,
+    storedPayloadHash: record.payloadHash,
+    actualPayloadHash: persistencePayloadHashV1(record.payload),
+  });
+}
+
+function historicalActualRecordsV2(records: readonly StoredRecord[], worldId: string) {
+  const relevant = records.filter(record => recordBelongsToWorld(record, worldId)
+    || recordStorageKeyBelongsToWorld(record?.key, worldId));
+  return Object.freeze(relevant.map(historicalActualRecordV2).sort((left, right) => compareRecordAddresses(left.address, right.address)));
+}
+
+function sameHistoricalActualRecordsV2(
+  left: readonly RustHistoricalFallbackActualRecordV2[],
+  right: readonly RustHistoricalFallbackActualRecordV2[],
+) {
+  return left.length === right.length && left.every((record, index) => {
+    const expected = right[index];
+    return expected !== undefined && sameRecordAddress(record.address, expected.address)
+      && record.revision === expected.revision && record.byteLength === expected.byteLength
+      && record.storedPayloadHash === expected.storedPayloadHash
+      && record.actualPayloadHash === expected.actualPayloadHash;
+  });
+}
+
+function historicalObservationIsCorruptV2(observation: RustHistoricalFallbackObservationV2) {
+  if (observation.actualRecords.length !== observation.latestCheckpoint.records.length) return true;
+  return observation.actualRecords.some((actual, index) => {
+    const expected = observation.latestCheckpoint.records[index];
+    return !expected || !sameRecordAddress(actual.address, expected.address)
+      || actual.revision !== expected.revision || actual.byteLength !== expected.byteLength
+      || actual.storedPayloadHash !== expected.payloadHash || actual.actualPayloadHash !== expected.payloadHash;
+  });
+}
+
+function validateHistoricalFallbackObservationV2(observation: RustHistoricalFallbackObservationV2) {
+  const latest = observation.latestCheckpoint; const fallback = observation.fallbackCheckpoint;
+  if (observation.schemaVersion !== 2 || latest.worldId !== observation.worldId || fallback.worldId !== observation.worldId
+    || !Number.isSafeInteger(observation.storageRevision) || observation.storageRevision < 0
+    || latest.parentCheckpointId !== fallback.checkpointId || latest.journalSequence !== fallback.journalSequence + 1
+    || latest.generatorHash !== fallback.generatorHash || latest.contentHash !== fallback.contentHash) {
+    throw new Error("historical fallback observation does not bind one exact direct parent lineage");
+  }
+  for (let index = 0; index < observation.actualRecords.length; index += 1) {
+    const actual = observation.actualRecords[index];
+    if (!Number.isSafeInteger(actual.revision) || actual.revision < 1 || !Number.isSafeInteger(actual.byteLength) || actual.byteLength < 0
+      || index > 0 && persistenceRecordKeyV1(observation.actualRecords[index - 1].address) >= persistenceRecordKeyV1(actual.address)) {
+      throw new Error("historical fallback actual record fingerprints are invalid or unsorted");
+    }
+  }
+  if (historicalActualRecordSetHashV2(observation.actualRecords) !== observation.actualRecordSetHash) {
+    throw new Error("historical fallback actual record-set hash mismatch");
+  }
+  if (!historicalObservationIsCorruptV2(observation)) throw new Error("historical fallback reconciliation is not needed for an exact latest head");
+}
+
+export function encodeRustHistoricalFallbackObservationV2(observation: RustHistoricalFallbackObservationV2) {
+  validateHistoricalFallbackObservationV2(observation);
+  const writer = new PlatformWriter(); writer.ascii("BWHO"); writer.u16(2); writer.string(observation.worldId);
+  writer.u64(observation.storageRevision); writer.bytes(encodeRustPersistenceCheckpointWireV1(observation.latestCheckpoint));
+  writer.bytes(encodeRustPersistenceCheckpointWireV1(observation.fallbackCheckpoint)); writer.u32(observation.actualRecords.length);
+  for (const actual of observation.actualRecords) {
+    writeHistoricalAddress(writer, actual.address); writer.u64(actual.revision); writer.u32(actual.byteLength);
+    writer.hash(actual.storedPayloadHash); writer.hash(actual.actualPayloadHash);
+  }
+  writer.hash(observation.actualRecordSetHash); return writer.finish();
+}
+
+export function decodeRustHistoricalFallbackObservationV2(bytes: Uint8Array): RustHistoricalFallbackObservationV2 {
+  const reader = new PlatformReader(bytes);
+  if (new TextDecoder().decode(reader.take(4)) !== "BWHO" || reader.u16() !== 2) throw new Error("historical fallback observation header mismatch");
+  const worldId = reader.string(); const storageRevision = reader.u64();
+  const latestCheckpoint = decodeRustPersistenceCheckpointWireV1(reader.bytes(RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1));
+  const fallbackCheckpoint = decodeRustPersistenceCheckpointWireV1(reader.bytes(RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1));
+  const count = reader.u32();
+  if (count > 1_000_000) throw new Error("historical fallback observation exceeds the record budget");
+  const actualRecords = Object.freeze(Array.from({ length: count }, () => Object.freeze({
+    address: readHistoricalAddress(reader), revision: reader.u64(), byteLength: reader.u32(),
+    storedPayloadHash: reader.hash(), actualPayloadHash: reader.hash(),
+  })));
+  const observation = Object.freeze({ schemaVersion: 2 as const, worldId, storageRevision, latestCheckpoint, fallbackCheckpoint, actualRecords, actualRecordSetHash: reader.hash() });
+  reader.finish(); validateHistoricalFallbackObservationV2(observation); return observation;
+}
+
+function historicalFallbackPlanHashV2(plan: Omit<RustHistoricalFallbackReconciliationPlanV2, "planHash">) {
+  const hasher = new TypeScriptCanonicalHasher("blockwild-historical-fallback-reconciliation-plan-v2");
+  hasher.writeU16(plan.schemaVersion); hasher.writeU64(plan.createdAt); hasher.writeString(plan.observationHash);
+  hasher.writeString(plan.targetCheckpoint.checkpointId); hasher.writeString(plan.targetCheckpoint.checkpointHash);
+  hasher.writeU64(plan.targetCheckpoint.journalSequence); hasher.writeU32(plan.copyRecords.length);
+  for (const record of plan.copyRecords) {
+    hasher.writeString(record.address.universeId); hasher.writeString(record.address.locationId);
+    hasher.writeString(record.address.kind); hasher.writeString(record.address.recordId);
+    hasher.writeU64(record.sourceRevision); hasher.writeU64(record.targetRevision); hasher.writeU32(record.byteLength);
+    hasher.writeString(record.payloadHash);
+  }
+  hasher.writeU32(plan.inlineRecords.length);
+  for (const record of plan.inlineRecords) {
+    hasher.writeString(record.address.universeId); hasher.writeString(record.address.locationId);
+    hasher.writeString(record.address.kind); hasher.writeString(record.address.recordId);
+    hasher.writeU64(record.targetRevision); hasher.writeBytes(record.payload);
+  }
+  hasher.writeU32(plan.deleteAddresses.length);
+  for (const address of plan.deleteAddresses) {
+    hasher.writeString(address.universeId); hasher.writeString(address.locationId);
+    hasher.writeString(address.kind); hasher.writeString(address.recordId);
+  }
+  hasher.writeString(plan.saveSetHash); hasher.writeString(plan.manifestHash); hasher.writeString(plan.descriptorHash);
+  return hasher.finishHex();
+}
+
+export function encodeRustHistoricalFallbackReconciliationPlanV2(
+  plan: Omit<RustHistoricalFallbackReconciliationPlanV2, "planHash"> & Readonly<{ planHash?: string }>,
+) {
+  const planHash = historicalFallbackPlanHashV2(plan);
+  if (plan.planHash !== undefined && plan.planHash !== planHash) {
+    throw new Error("historical fallback plan hash mismatch");
+  }
+  const writer = new PlatformWriter();
+  writer.ascii("BWFP"); writer.u16(2); writer.u64(plan.createdAt);
+  writer.bytes(plan.observationBytes); writer.hash(plan.observationHash);
+  writer.bytes(encodeRustPersistenceCheckpointWireV1(plan.targetCheckpoint));
+  writer.u32(plan.copyRecords.length);
+  for (const record of plan.copyRecords) {
+    writeHistoricalAddress(writer, record.address); writer.u64(record.sourceRevision); writer.u64(record.targetRevision);
+    writer.u32(record.byteLength); writer.hash(record.payloadHash);
+  }
+  writer.u32(plan.inlineRecords.length);
+  for (const record of plan.inlineRecords) {
+    writeHistoricalAddress(writer, record.address); writer.u64(record.targetRevision); writer.bytes(record.payload);
+  }
+  writer.u32(plan.deleteAddresses.length);
+  for (const address of plan.deleteAddresses) writeHistoricalAddress(writer, address);
+  writer.hash(plan.saveSetHash); writer.hash(plan.manifestHash); writer.hash(plan.descriptorHash); writer.hash(planHash);
+  const result = writer.finish();
+  // Reuse the production decoder as the final canonicality and structural gate.
+  decodeRustHistoricalFallbackReconciliationPlanV2(result);
+  return result;
+}
+
+function decodeRustHistoricalFallbackReconciliationPlanV2(bytes: Uint8Array): RustHistoricalFallbackReconciliationPlanV2 {
+  const reader = new PlatformReader(bytes);
+  if (new TextDecoder().decode(reader.take(4)) !== "BWFP" || reader.u16() !== 2) throw new Error("historical fallback plan header mismatch");
+  const createdAt = reader.u64(); const observationBytes = Uint8Array.from(reader.bytes(RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1));
+  const observation = decodeRustHistoricalFallbackObservationV2(observationBytes); const observationHash = reader.hash();
+  if (persistencePayloadHashV1(observationBytes) !== observationHash) throw new Error("historical fallback plan observation hash mismatch");
+  const targetCheckpoint = decodeRustPersistenceCheckpointWireV1(reader.bytes(RUST_PERSISTENCE_PLATFORM_CHUNK_BYTES_V1));
+  const copyCount = reader.u32(); if (copyCount > 1_000_000) throw new Error("historical fallback copy set exceeds the record budget");
+  const copyRecords = Object.freeze(Array.from({ length: copyCount }, () => Object.freeze({
+    address: readHistoricalAddress(reader), sourceRevision: reader.u64(), targetRevision: reader.u64(),
+    byteLength: reader.u32(), payloadHash: reader.hash(),
+  })));
+  const inlineCount = reader.u32(); if (inlineCount > 1_000_000 - copyCount) throw new Error("historical fallback inline set exceeds the record budget");
+  const inlineRecords = Object.freeze(Array.from({ length: inlineCount }, () => Object.freeze({
+    address: readHistoricalAddress(reader), targetRevision: reader.u64(), payload: Uint8Array.from(reader.bytes(64 * 1024 * 1024)),
+  })));
+  const deleteCount = reader.u32(); if (deleteCount > 1_000_000) throw new Error("historical fallback delete set exceeds the record budget");
+  const deleteAddresses = Object.freeze(Array.from({ length: deleteCount }, () => readHistoricalAddress(reader)));
+  const partial = Object.freeze({
+    schemaVersion: 2 as const, createdAt, observation, observationBytes, observationHash, targetCheckpoint,
+    copyRecords, inlineRecords, deleteAddresses, saveSetHash: reader.hash(), manifestHash: reader.hash(), descriptorHash: reader.hash(),
+  });
+  const planHash = reader.hash(); reader.finish();
+  if (historicalFallbackPlanHashV2(partial) !== planHash) throw new Error("historical fallback plan hash mismatch");
+  if (createdAt !== observation.latestCheckpoint.createdAt || targetCheckpoint.worldId !== observation.worldId
+    || targetCheckpoint.parentCheckpointId !== observation.latestCheckpoint.checkpointId
+    || targetCheckpoint.journalSequence !== observation.latestCheckpoint.journalSequence + 1
+    || targetCheckpoint.generatorHash !== observation.latestCheckpoint.generatorHash
+    || targetCheckpoint.contentHash !== observation.latestCheckpoint.contentHash) {
+    throw new Error("historical fallback plan target is not the exact next checkpoint");
+  }
+  const planned = new Map<string, { targetRevision: number; byteLength: number; payloadHash: string }>();
+  const fallback = new Map(observation.fallbackCheckpoint.records.map(record => [persistenceRecordKeyV1(record.address), record]));
+  for (const record of copyRecords) {
+    const key = persistenceRecordKeyV1(record.address); const source = fallback.get(key);
+    if (planned.has(key) || !source || source.revision !== record.sourceRevision || source.byteLength !== record.byteLength || source.payloadHash !== record.payloadHash) {
+      throw new Error("historical fallback plan copy record does not bind its source");
+    }
+    planned.set(key, { targetRevision: record.targetRevision, byteLength: record.byteLength, payloadHash: record.payloadHash });
+  }
+  for (const record of inlineRecords) {
+    const key = persistenceRecordKeyV1(record.address); const payloadHash = persistencePayloadHashV1(record.payload);
+    if (planned.has(key)) throw new Error("historical fallback plan repeats a target record");
+    planned.set(key, { targetRevision: record.targetRevision, byteLength: record.payload.byteLength, payloadHash });
+  }
+  if (planned.size !== targetCheckpoint.records.length || targetCheckpoint.records.some(record => {
+    const target = planned.get(persistenceRecordKeyV1(record.address));
+    return !target || target.targetRevision !== record.revision || target.byteLength !== record.byteLength || target.payloadHash !== record.payloadHash;
+  })) throw new Error("historical fallback plan does not exactly cover its target checkpoint");
+  const expectedDeletes = observation.actualRecords.map(record => record.address)
+    .filter(address => !planned.has(persistenceRecordKeyV1(address))).sort(compareRecordAddresses);
+  if (expectedDeletes.length !== deleteAddresses.length || expectedDeletes.some((address, index) => !sameRecordAddress(address, deleteAddresses[index]))) {
+    throw new Error("historical fallback plan delete set mismatch");
+  }
+  return Object.freeze({ ...partial, planHash });
+}
+
+function historicalFallbackRequestMatchesPlanV2(
+  request: RustPersistencePlatformRequestV1,
+  plan: RustHistoricalFallbackReconciliationPlanV2,
+) {
+  return request.operation === "reconcile-historical-fallback"
+    && request.worldId === plan.observation.worldId
+    && request.objectId === plan.targetCheckpoint.checkpointHash
+    && request.expectedHeadHash === plan.observation.latestCheckpoint.checkpointHash
+    && request.cursor === plan.observation.storageRevision
+    && request.limit === plan.targetCheckpoint.records.length
+    && request.totalBytes === request.payload.byteLength
+    && request.payloadHash === rustPersistencePlatformPayloadHashV1(request.payload);
+}
+
+function storedRecordForTargetV2(
+  address: PersistenceRecordAddressV1,
+  revision: number,
+  payload: Uint8Array,
+  payloadHash: string,
+) {
+  const key = persistenceRecordKeyV1(address);
+  return Object.freeze({
+    key,
+    address: Object.freeze({ ...address }),
+    revision,
+    payload: Uint8Array.from(payload),
+    payloadHash,
+  }) satisfies StoredRecord;
 }
 
 function platformReceiptHash(request: RustPersistencePlatformRequestV1, storageRevision: number, payload = new Uint8Array()) {
@@ -740,6 +1065,55 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
     return Uint8Array.from(result.payload);
   }
 
+  /**
+   * Capture the complete CAS boundary for a Rust-authored historical fallback
+   * repair in one readonly transaction. The returned BWHO is deliberately
+   * untrusted until Rust validates the retained fallback semantics.
+   */
+  async captureHistoricalExternalReconciliationObservationV2(worldId: string, fallbackCheckpointId: string) {
+    const database = await this.open();
+    const idb = database.transaction([STORE_META, STORE_RECORDS, STORE_CHECKPOINTS, STORE_TOMBSTONES], "readonly");
+    const done = transactionDone(idb);
+    try {
+      const meta = idb.objectStore(STORE_META);
+      const checkpoints = idb.objectStore(STORE_CHECKPOINTS);
+      const [head, sequence, storageRevision, tombstone, records] = await Promise.all([
+        requestValue(meta.get(latestCheckpointKey(worldId))) as Promise<StoredMeta | undefined>,
+        requestValue(meta.get(sequenceKey(worldId))) as Promise<StoredMeta | undefined>,
+        requestValue(meta.get(storageRevisionKey(worldId))) as Promise<StoredMeta | undefined>,
+        requestValue(idb.objectStore(STORE_TOMBSTONES).get(tombstoneKey(worldId))) as Promise<StoredTombstone | undefined>,
+        requestValue(idb.objectStore(STORE_RECORDS).getAll()) as Promise<StoredRecord[]>,
+      ]);
+      if (tombstone || typeof head?.value !== "string" || typeof sequence?.value !== "number"
+        || typeof storageRevision?.value !== "number") {
+        throw new Error("historical fallback observation requires a live durable checkpoint head");
+      }
+      const [latestStored, fallbackStored] = await Promise.all([
+        requestValue(checkpoints.get(checkpointKey(worldId, head.value))) as Promise<StoredCheckpoint | undefined>,
+        requestValue(checkpoints.get(checkpointKey(worldId, fallbackCheckpointId))) as Promise<StoredCheckpoint | undefined>,
+      ]);
+      if (!latestStored || !fallbackStored || latestStored.checkpoint.journalSequence !== sequence.value) {
+        throw new Error("historical fallback observation found inconsistent checkpoint metadata");
+      }
+      const actualRecords = historicalActualRecordsV2(records, worldId);
+      const observation = Object.freeze({
+        schemaVersion: 2 as const,
+        worldId,
+        storageRevision: storageRevision.value,
+        latestCheckpoint: cloneCheckpoint(latestStored.checkpoint),
+        fallbackCheckpoint: cloneCheckpoint(fallbackStored.checkpoint),
+        actualRecords,
+        actualRecordSetHash: historicalActualRecordSetHashV2(actualRecords),
+      });
+      const bytes = encodeRustHistoricalFallbackObservationV2(observation);
+      await done;
+      return bytes;
+    } catch (error) {
+      await abortTransaction(idb, done);
+      throw error;
+    }
+  }
+
   async estimate() {
     const storage = typeof navigator !== "undefined" ? navigator.storage : undefined;
     if (!storage?.estimate) return Object.freeze({ usage: 0, quota: null });
@@ -788,6 +1162,7 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
         case "export-page": return this.exportPagePlatform(request);
         case "import-chunk": return this.writePlatformChunk(request, "import-chunk");
         case "finalize-import": return this.finalizeImportPlatform(request);
+        case "reconcile-historical-fallback": return this.reconcileHistoricalFallbackPlatform(request);
       }
     } catch (error) {
       const candidate = error as { name?: string; message?: string } | null;
@@ -802,6 +1177,146 @@ export class IndexedDbPersistenceAdapterV1 implements PersistencePlatformAdapter
     const value = await requestValue(idb.objectStore(STORE_META).get(storageRevisionKey(worldId))) as StoredMeta | undefined;
     await transactionDone(idb);
     return typeof value?.value === "number" ? value.value : 0;
+  }
+
+  private async reconcileHistoricalFallbackPlatform(request: RustPersistencePlatformRequestV1) {
+    let plan: RustHistoricalFallbackReconciliationPlanV2;
+    try { plan = decodeRustHistoricalFallbackReconciliationPlanV2(request.payload); }
+    catch (error) {
+      return platformResponse(request, "corrupt", {
+        message: error instanceof Error ? error.message : "Historical fallback reconciliation plan is corrupt.",
+      });
+    }
+    if (!historicalFallbackRequestMatchesPlanV2(request, plan)) {
+      return platformResponse(request, "corrupt", { message: "Historical fallback request disagrees with its Rust-authored repair plan." });
+    }
+
+    const database = await this.open();
+    const idb = database.transaction(
+      [STORE_META, STORE_RECORDS, STORE_RECORD_VERSIONS, STORE_CHECKPOINTS, STORE_TOMBSTONES],
+      "readwrite",
+      { durability: "strict" },
+    );
+    const done = transactionDone(idb);
+    const rejectRepair = async (code: "conflict" | "corrupt", message: string) => {
+      await abortTransaction(idb, done);
+      return platformResponse(request, code, { message });
+    };
+    try {
+      const observation = plan.observation;
+      const meta = idb.objectStore(STORE_META);
+      const records = idb.objectStore(STORE_RECORDS);
+      const versions = idb.objectStore(STORE_RECORD_VERSIONS);
+      const checkpoints = idb.objectStore(STORE_CHECKPOINTS);
+      const [head, sequence, storageRevision, tombstone, latestStored, fallbackStored, targetStored, currentRecords] = await Promise.all([
+        requestValue(meta.get(latestCheckpointKey(request.worldId))) as Promise<StoredMeta | undefined>,
+        requestValue(meta.get(sequenceKey(request.worldId))) as Promise<StoredMeta | undefined>,
+        requestValue(meta.get(storageRevisionKey(request.worldId))) as Promise<StoredMeta | undefined>,
+        requestValue(idb.objectStore(STORE_TOMBSTONES).get(tombstoneKey(request.worldId))) as Promise<StoredTombstone | undefined>,
+        requestValue(checkpoints.get(checkpointKey(request.worldId, observation.latestCheckpoint.checkpointId))) as Promise<StoredCheckpoint | undefined>,
+        requestValue(checkpoints.get(checkpointKey(request.worldId, observation.fallbackCheckpoint.checkpointId))) as Promise<StoredCheckpoint | undefined>,
+        requestValue(checkpoints.get(checkpointKey(request.worldId, plan.targetCheckpoint.checkpointId))) as Promise<StoredCheckpoint | undefined>,
+        requestValue(records.getAll()) as Promise<StoredRecord[]>,
+      ]);
+      if (tombstone) return rejectRepair("conflict", "World was deleted after the fallback observation was captured.");
+      if (head?.value !== observation.latestCheckpoint.checkpointId
+        || sequence?.value !== observation.latestCheckpoint.journalSequence
+        || storageRevision?.value !== observation.storageRevision
+        || !latestStored || !sameCheckpoint(latestStored.checkpoint, observation.latestCheckpoint)
+        || !fallbackStored || !sameCheckpoint(fallbackStored.checkpoint, observation.fallbackCheckpoint)) {
+        return rejectRepair("conflict", "Historical fallback checkpoint lineage changed after observation.");
+      }
+      if (targetStored) {
+        return rejectRepair("corrupt", "A partial reconciliation target checkpoint already exists outside the observed head.");
+      }
+      let actualRecords: readonly RustHistoricalFallbackActualRecordV2[];
+      try { actualRecords = historicalActualRecordsV2(currentRecords, request.worldId); }
+      catch (error) {
+        return rejectRepair("corrupt", error instanceof Error ? error.message : "Current record state cannot be fingerprinted.");
+      }
+      if (historicalActualRecordSetHashV2(actualRecords) !== observation.actualRecordSetHash
+        || !sameHistoricalActualRecordsV2(actualRecords, observation.actualRecords)) {
+        return rejectRepair("conflict", "Current record bytes or descriptors changed after fallback observation.");
+      }
+
+      const currentByKey = new Map(currentRecords
+        .filter(record => recordBelongsToWorld(record, request.worldId))
+        .map(record => [persistenceRecordKeyV1(record.address), record]));
+      const sourceRequests = plan.copyRecords.map(record => requestValue(
+        versions.get(recordVersionKey(record.address, record.sourceRevision)),
+      ) as Promise<StoredRecord | undefined>);
+      const targetVersionRequests = plan.targetCheckpoint.records.map(record => requestValue(
+        versions.get(recordVersionKey(record.address, record.revision)),
+      ) as Promise<StoredRecord | undefined>);
+      const [sourceVersions, existingTargetVersions] = await Promise.all([
+        Promise.all(sourceRequests), Promise.all(targetVersionRequests),
+      ]);
+      const targetRecords = new Map<string, StoredRecord>();
+      for (let index = 0; index < plan.copyRecords.length; index += 1) {
+        const copy = plan.copyRecords[index];
+        const key = persistenceRecordKeyV1(copy.address);
+        let source = sourceVersions[index];
+        if (!source) {
+          const current = currentByKey.get(key);
+          if (current?.revision === copy.sourceRevision) source = current;
+        }
+        if (!source || source.revision !== copy.sourceRevision || source.payloadHash !== copy.payloadHash
+          || source.payload.byteLength !== copy.byteLength || persistencePayloadHashV1(source.payload) !== copy.payloadHash
+          || persistenceRecordKeyV1(source.address) !== key) {
+          return rejectRepair("corrupt", `Verified fallback source ${key} is missing or corrupt.`);
+        }
+        targetRecords.set(key, storedRecordForTargetV2(copy.address, copy.targetRevision, source.payload, copy.payloadHash));
+      }
+      for (const inline of plan.inlineRecords) {
+        const key = persistenceRecordKeyV1(inline.address);
+        const stored = storedRecordForTargetV2(
+          inline.address,
+          inline.targetRevision,
+          inline.payload,
+          persistencePayloadHashV1(inline.payload),
+        );
+        if (!recordBelongsToWorld(stored, request.worldId) || targetRecords.has(key)) {
+          return rejectRepair("corrupt", `Historical fallback target record ${key} is invalid or duplicated.`);
+        }
+        targetRecords.set(key, stored);
+      }
+      if (targetRecords.size !== plan.targetCheckpoint.records.length) {
+        return rejectRepair("corrupt", "Historical fallback target record assembly is incomplete.");
+      }
+      for (let index = 0; index < plan.targetCheckpoint.records.length; index += 1) {
+        const descriptor = plan.targetCheckpoint.records[index];
+        const key = persistenceRecordKeyV1(descriptor.address);
+        const stored = targetRecords.get(key);
+        if (!stored || !recordBelongsToWorld(stored, request.worldId)
+          || stored.revision !== descriptor.revision || stored.payload.byteLength !== descriptor.byteLength
+          || stored.payloadHash !== descriptor.payloadHash || existingTargetVersions[index] !== undefined) {
+          return rejectRepair("corrupt", `Historical fallback target ${key} collides with partial or invalid durable state.`);
+        }
+      }
+
+      for (const address of plan.deleteAddresses) records.delete(persistenceRecordKeyV1(address));
+      for (const stored of targetRecords.values()) {
+        records.put(stored);
+        versions.put(Object.freeze({ ...stored, key: recordVersionKey(stored.address, stored.revision) }) satisfies StoredRecord);
+      }
+      checkpoints.put(Object.freeze({
+        key: checkpointKey(plan.targetCheckpoint.worldId, plan.targetCheckpoint.checkpointId),
+        checkpoint: cloneCheckpoint(plan.targetCheckpoint),
+      }) satisfies StoredCheckpoint);
+      meta.put(Object.freeze({ key: latestCheckpointKey(request.worldId), value: plan.targetCheckpoint.checkpointId }) satisfies StoredMeta);
+      meta.put(Object.freeze({ key: sequenceKey(request.worldId), value: plan.targetCheckpoint.journalSequence }) satisfies StoredMeta);
+      meta.put(Object.freeze({ key: storageRevisionKey(request.worldId), value: observation.storageRevision + 1 }) satisfies StoredMeta);
+      await done;
+      return platformResponse(request, "accepted", {
+        storageRevision: observation.storageRevision + 1,
+        durableHash: plan.targetCheckpoint.checkpointHash,
+        message: "Verified historical fallback was atomically reconciled as the exact next durable head.",
+      });
+    } catch (error) {
+      try { idb.abort(); } catch { /* already settled */ }
+      try { await done; } catch { /* classified by caller */ }
+      throw error;
+    }
   }
 
   private async recoverHeadPlatform(request: RustPersistencePlatformRequestV1) {
@@ -1148,6 +1663,27 @@ export class MemoryPersistenceAdapterV1 implements PersistencePlatformAdapterV1 
       : this.recordVersions.get(recordVersionKey(address, revision)) ?? this.records.get(persistenceRecordKeyV1(address));
     return !value || revision !== undefined && value.revision !== revision ? null : Uint8Array.from(value.payload);
   }
+  async captureHistoricalExternalReconciliationObservationV2(worldId: string, fallbackCheckpointId: string) {
+    if (this.tombstones.has(worldId)) throw new Error("historical fallback observation cannot reconcile a deleted world");
+    const latestId = this.latestCheckpoints.get(worldId);
+    const latest = latestId ? this.checkpoints.get(checkpointKey(worldId, latestId)) : undefined;
+    const fallback = this.checkpoints.get(checkpointKey(worldId, fallbackCheckpointId));
+    const sequence = this.sequences.get(worldId);
+    const storageRevision = this.storageRevisions.get(worldId);
+    if (!latest || !fallback || sequence !== latest.journalSequence || storageRevision === undefined) {
+      throw new Error("historical fallback observation requires consistent live checkpoint metadata");
+    }
+    const actualRecords = historicalActualRecordsV2([...this.records.values()], worldId);
+    return encodeRustHistoricalFallbackObservationV2(Object.freeze({
+      schemaVersion: 2 as const,
+      worldId,
+      storageRevision,
+      latestCheckpoint: cloneCheckpoint(latest),
+      fallbackCheckpoint: cloneCheckpoint(fallback),
+      actualRecords,
+      actualRecordSetHash: historicalActualRecordSetHashV2(actualRecords),
+    }));
+  }
   private migrationState(worldId: string): MigrationStateSnapshotV1 {
     const marker = this.migrationMarkers.has(worldId) ? Object.freeze({ key: migrationKey(worldId), value: this.migrationMarkers.get(worldId)! }) : undefined;
     const head = this.latestCheckpoints.has(worldId) ? Object.freeze({ key: latestCheckpointKey(worldId), value: this.latestCheckpoints.get(worldId)! }) : undefined;
@@ -1195,6 +1731,101 @@ export class MemoryPersistenceAdapterV1 implements PersistencePlatformAdapterV1 
       .sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
     for (const [key, value] of chunks) assembly.append(value, key);
     return assembly.finish();
+  }
+  private reconcileHistoricalFallbackPlatform(request: RustPersistencePlatformRequestV1) {
+    let plan: RustHistoricalFallbackReconciliationPlanV2;
+    try { plan = decodeRustHistoricalFallbackReconciliationPlanV2(request.payload); }
+    catch (error) {
+      return platformResponse(request, "corrupt", {
+        message: error instanceof Error ? error.message : "Historical fallback reconciliation plan is corrupt.",
+      });
+    }
+    if (!historicalFallbackRequestMatchesPlanV2(request, plan)) {
+      return platformResponse(request, "corrupt", { message: "Historical fallback request disagrees with its Rust-authored repair plan." });
+    }
+    const observation = plan.observation;
+    const latestId = this.latestCheckpoints.get(request.worldId);
+    const latest = this.checkpoints.get(checkpointKey(request.worldId, observation.latestCheckpoint.checkpointId));
+    const fallback = this.checkpoints.get(checkpointKey(request.worldId, observation.fallbackCheckpoint.checkpointId));
+    if (this.tombstones.has(request.worldId)
+      || latestId !== observation.latestCheckpoint.checkpointId
+      || this.sequences.get(request.worldId) !== observation.latestCheckpoint.journalSequence
+      || this.storageRevisions.get(request.worldId) !== observation.storageRevision
+      || !latest || !sameCheckpoint(latest, observation.latestCheckpoint)
+      || !fallback || !sameCheckpoint(fallback, observation.fallbackCheckpoint)) {
+      return platformResponse(request, "conflict", { message: "Historical fallback checkpoint lineage changed after observation." });
+    }
+    if (this.checkpoints.has(checkpointKey(request.worldId, plan.targetCheckpoint.checkpointId))) {
+      return platformResponse(request, "corrupt", { message: "A partial reconciliation target checkpoint already exists outside the observed head." });
+    }
+    let actualRecords: readonly RustHistoricalFallbackActualRecordV2[];
+    try { actualRecords = historicalActualRecordsV2([...this.records.values()], request.worldId); }
+    catch (error) {
+      return platformResponse(request, "corrupt", { message: error instanceof Error ? error.message : "Current record state cannot be fingerprinted." });
+    }
+    if (historicalActualRecordSetHashV2(actualRecords) !== observation.actualRecordSetHash
+      || !sameHistoricalActualRecordsV2(actualRecords, observation.actualRecords)) {
+      return platformResponse(request, "conflict", { message: "Current record bytes or descriptors changed after fallback observation." });
+    }
+
+    const nextRecords = new Map(this.records);
+    const nextVersions = new Map(this.recordVersions);
+    const targetRecords = new Map<string, StoredRecord>();
+    for (const copy of plan.copyRecords) {
+      const key = persistenceRecordKeyV1(copy.address);
+      let source = this.recordVersions.get(recordVersionKey(copy.address, copy.sourceRevision));
+      if (!source) {
+        const current = this.records.get(key);
+        if (current?.revision === copy.sourceRevision) source = current;
+      }
+      if (!source || source.revision !== copy.sourceRevision || source.payloadHash !== copy.payloadHash
+        || source.payload.byteLength !== copy.byteLength || persistencePayloadHashV1(source.payload) !== copy.payloadHash
+        || persistenceRecordKeyV1(source.address) !== key) {
+        return platformResponse(request, "corrupt", { message: `Verified fallback source ${key} is missing or corrupt.` });
+      }
+      targetRecords.set(key, storedRecordForTargetV2(copy.address, copy.targetRevision, source.payload, copy.payloadHash));
+    }
+    for (const inline of plan.inlineRecords) {
+      const key = persistenceRecordKeyV1(inline.address);
+      const stored = storedRecordForTargetV2(inline.address, inline.targetRevision, inline.payload, persistencePayloadHashV1(inline.payload));
+      if (!recordBelongsToWorld(stored, request.worldId) || targetRecords.has(key)) {
+        return platformResponse(request, "corrupt", { message: `Historical fallback target record ${key} is invalid or duplicated.` });
+      }
+      targetRecords.set(key, stored);
+    }
+    if (targetRecords.size !== plan.targetCheckpoint.records.length) {
+      return platformResponse(request, "corrupt", { message: "Historical fallback target record assembly is incomplete." });
+    }
+    for (const descriptor of plan.targetCheckpoint.records) {
+      const key = persistenceRecordKeyV1(descriptor.address);
+      const stored = targetRecords.get(key);
+      if (!stored || !recordBelongsToWorld(stored, request.worldId)
+        || stored.revision !== descriptor.revision || stored.payload.byteLength !== descriptor.byteLength
+        || stored.payloadHash !== descriptor.payloadHash
+        || this.recordVersions.has(recordVersionKey(descriptor.address, descriptor.revision))) {
+        return platformResponse(request, "corrupt", { message: `Historical fallback target ${key} collides with partial or invalid durable state.` });
+      }
+    }
+    for (const address of plan.deleteAddresses) nextRecords.delete(persistenceRecordKeyV1(address));
+    for (const stored of targetRecords.values()) {
+      nextRecords.set(stored.key, stored);
+      nextVersions.set(recordVersionKey(stored.address, stored.revision), Object.freeze({
+        ...stored,
+        key: recordVersionKey(stored.address, stored.revision),
+      }));
+    }
+    // All fallible validation is complete before mutating the live maps.
+    this.records.clear(); for (const [key, value] of nextRecords) this.records.set(key, value);
+    this.recordVersions.clear(); for (const [key, value] of nextVersions) this.recordVersions.set(key, value);
+    this.checkpoints.set(checkpointKey(request.worldId, plan.targetCheckpoint.checkpointId), cloneCheckpoint(plan.targetCheckpoint));
+    this.latestCheckpoints.set(request.worldId, plan.targetCheckpoint.checkpointId);
+    this.sequences.set(request.worldId, plan.targetCheckpoint.journalSequence);
+    this.storageRevisions.set(request.worldId, observation.storageRevision + 1);
+    return platformResponse(request, "accepted", {
+      storageRevision: observation.storageRevision + 1,
+      durableHash: plan.targetCheckpoint.checkpointHash,
+      message: "Verified historical fallback was atomically reconciled as the exact next durable head.",
+    });
   }
   async executePlatform(request: RustPersistencePlatformRequestV1): Promise<Extract<RustPersistenceResponseV1, { kind: "platform" }>> {
     const revision = () => this.storageRevisions.get(request.worldId) ?? 0;
@@ -1265,6 +1896,7 @@ export class MemoryPersistenceAdapterV1 implements PersistencePlatformAdapterV1 
       if (offset !== request.totalBytes) return platformResponse(request, "conflict");
       const next = revision() + 1; this.storageRevisions.set(request.worldId, next); return platformResponse(request, "accepted", { storageRevision: next, durableHash: request.expectedHeadHash! });
     }
+    if (request.operation === "reconcile-historical-fallback") return this.reconcileHistoricalFallbackPlatform(request);
     return platformResponse(request, "unavailable");
   }
   async deleteWorld(worldId: string) {

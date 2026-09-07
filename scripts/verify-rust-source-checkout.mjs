@@ -17,6 +17,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -149,6 +150,66 @@ function snapshotsMatch(left, right) {
   return left.schema === right.schema && left.digest === right.digest && left.fileCount === right.fileCount;
 }
 
+function assertNoLinksRecursively(target) {
+  assertNoLinks(target);
+  const entry = lstatSync(target);
+  if (entry.isSymbolicLink()) throw new Error(`Links are not allowed in generated cleanup targets: ${target}`);
+  if (entry.isFile()) return;
+  if (!entry.isDirectory()) throw new Error(`Unsupported filesystem entry in generated cleanup targets: ${target}`);
+  for (const child of readdirSync(target, { withFileTypes: true })) {
+    assertNoLinksRecursively(path.join(target, child.name));
+  }
+}
+
+function assertSafeGeneratedTarget(output, target, label, kind) {
+  const resolvedOutput = path.resolve(output);
+  const resolvedTarget = path.resolve(target);
+  const forbidden = new Set([
+    path.parse(resolvedOutput).root,
+    path.resolve(os.homedir()),
+    WORKSPACE_ROOT,
+    WORK_ROOT,
+  ]);
+  if (forbidden.has(resolvedTarget) || path.dirname(resolvedTarget) !== resolvedOutput || !isWithin(resolvedOutput, resolvedTarget)) {
+    throw new Error(`${label} is not an exact child of the owned output directory: ${resolvedTarget}`);
+  }
+  assertNoLinks(resolvedOutput);
+  if (!existsSync(resolvedTarget)) return resolvedTarget;
+  const targetEntry = lstatSync(resolvedTarget);
+  if (targetEntry.isSymbolicLink()) throw new Error(`Links are not allowed in generated cleanup targets: ${resolvedTarget}`);
+  if ((kind === "directory" && !targetEntry.isDirectory()) || (kind === "file" && !targetEntry.isFile())) {
+    throw new Error(`${label} has an unexpected filesystem type: ${resolvedTarget}`);
+  }
+  assertNoLinksRecursively(resolvedTarget);
+  const canonicalOutput = realpathSync(resolvedOutput);
+  const canonicalTarget = realpathSync(resolvedTarget);
+  if (!isWithin(canonicalOutput, canonicalTarget)) {
+    throw new Error(`${label} escapes the owned output directory: ${resolvedTarget}`);
+  }
+  return resolvedTarget;
+}
+
+function cleanupGeneratedCheckout(output, generatedPaths) {
+  const removed = [];
+  try {
+    for (const { path: target, label, kind } of generatedPaths) {
+      const safeTarget = assertSafeGeneratedTarget(output, target, label, kind);
+      if (!existsSync(safeTarget)) continue;
+      rmSync(safeTarget, { recursive: true, force: true });
+      if (existsSync(safeTarget)) throw new Error(`Generated cleanup did not remove ${safeTarget}`);
+      removed.push(path.basename(safeTarget));
+    }
+  } catch (error) {
+    error.removedGeneratedPaths = removed;
+    throw error;
+  }
+  return {
+    status: "passed",
+    retained: ["report.json"],
+    removed,
+  };
+}
+
 export function verifyRustSourceCheckout({
   repositoryRoot = WORKSPACE_ROOT,
   outputDirectory,
@@ -188,6 +249,7 @@ export function verifyRustSourceCheckout({
     files: [],
   };
   let failure;
+  let cleanupFailure;
   try {
     mkdirSync(staging);
     mkdirSync(emptyTemplate);
@@ -261,11 +323,38 @@ export function verifyRustSourceCheckout({
       failure = error;
     }
     report.status = failure ? "failed" : "passed";
-    if (failure) report.error = failure.message;
     report.finishedAt = new Date().toISOString();
+    try {
+      report.cleanup = cleanupGeneratedCheckout(output, [
+        { path: staging, label: "Source repository cleanup target", kind: "directory" },
+        { path: checkout, label: "Clean checkout cleanup target", kind: "directory" },
+        { path: emptyConfig, label: "Git config cleanup target", kind: "file" },
+        { path: emptyTemplate, label: "Git template cleanup target", kind: "directory" },
+      ]);
+    } catch (error) {
+      cleanupFailure = error;
+      report.cleanup = {
+        status: "failed",
+        retained: ["report.json"],
+        removed: error.removedGeneratedPaths ?? [],
+        error: error.message,
+      };
+    }
+    if (failure) report.verificationError = failure.message;
+    if (cleanupFailure) {
+      report.error = failure
+        ? `${failure.message}; generated checkout cleanup failed: ${cleanupFailure.message}`
+        : `Generated checkout cleanup failed: ${cleanupFailure.message}`;
+    } else if (failure) {
+      report.error = failure.message;
+    }
+    report.status = failure || cleanupFailure ? "failed" : "passed";
     writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, { flag: "wx" });
   }
-  if (failure) throw new Error(`${failure.message} Retained report: ${reportPath}`, { cause: failure });
+  if (failure || cleanupFailure) {
+    const message = report.error ?? cleanupFailure?.message ?? failure?.message ?? "Verification failed";
+    throw new Error(`${message} Retained report: ${reportPath}`, { cause: failure ?? cleanupFailure });
+  }
   return { ...report, reportPath };
 }
 

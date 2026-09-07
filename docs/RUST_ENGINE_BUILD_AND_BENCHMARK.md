@@ -1,6 +1,6 @@
 # Rust engine build and browser benchmark
 
-This runbook is the executable delivery contract for phases R0-R2 of the hybrid engine migration. It packages `blockwild-wasm` without hiding tool installation, publishes immutable content-addressed files, rejects stale or modified artifacts, and records browser bootstrap and Worker-transfer costs as JSON.
+This runbook is the executable delivery contract for phases R0-R3 of the hybrid engine migration. It packages `blockwild-wasm` without hiding tool installation, publishes immutable content-addressed files, rejects stale or modified artifacts, and records browser bootstrap and Worker-transfer costs as JSON.
 
 ## What the tooling owns
 
@@ -64,7 +64,12 @@ node scripts/build-rust-engine.mjs --package blockwild-wasm --variant speed-lab 
 
 Only use a feature after that feature exists in the crate. The script forwards feature names but never invents or enables accelerated behavior implicitly.
 
-The compatibility artifact intentionally contains only the authoritative engine facade. The `renderer-lab` artifact is separately loaded by diagnostics because `wgpu` increases its current raw Wasm payload by roughly an order of magnitude. Keeping these modules split proves the renderer without charging every supported browser the renderer-lab download during the strangler phases.
+The compatibility artifact intentionally contains only the authoritative engine facade. The `renderer-lab` artifact is separately selected so renderer-only exports, feature identity and browser evidence cannot be confused with the default compatibility package. The checked-in 2026-09-04 publication is exact:
+
+- `compatibility`: artifact `ab4d66c5c165779c08bd1098be8b8ff1ad71b5702d938b72f38faae0c81493b1`; nested-manifest SHA-256 `4864774d43297992105b145550c5683b20f6d88cbe2b2230af1f412dd4ac5889`; source `d4b466adda4483cca622b917295e07ea74d538be934a627f71d9756af1ecbb8a` / 230 files; Wasm `f1b2286e350bf8839e387dad5b03b6ad4e7424e0ef68a9838fad252b5164594f`, 7,424,538 bytes; total raw package 7,470,175 bytes.
+- `renderer-lab`: artifact `988d4425660abdc12b055c0c1fbc082d5870fa7ff6ec2009f68d7c0e5a9c33fd`; nested-manifest SHA-256 `48e4d3a3de191689fdee6b445347ff49d8bc3eb2a9c29060f6603f154f4ebb9b`; the same source snapshot; Wasm `5f188f05bec036ccbc44fd2e24bf70a483c5cf37cafdd22a6edd2b1e96de80e9`, 7,552,651 bytes; total raw package 7,648,643 bytes.
+
+The renderer-lab Wasm is 128,113 bytes (1.726%) larger, and the complete raw package is 178,468 bytes (2.389%) larger. That is not an order-of-magnitude difference. Keeping the variants split avoids loading renderer-only bytes and, more importantly, preserves independent immutable identities, feature declarations and promotion gates.
 
 ### Published manifests
 
@@ -109,6 +114,31 @@ node scripts/check-rust-engine-artifacts.mjs --base-url https://blockwild.app --
 ```
 
 The index itself remains mutable; only content-addressed files require a long-lived immutable cache policy.
+
+### Bounded renderer-lab browser smoke
+
+Run the renderer feature through its exact checked-in artifact and one canonical
+offscreen WebGPU submission:
+
+```powershell
+node scripts/verify-rust-renderer-smoke-browser.mjs `
+  --public-dir public/engine `
+  --artifact-hash 988d4425660abdc12b055c0c1fbc082d5870fa7ff6ec2009f68d7c0e5a9c33fd `
+  --manifest-sha256 48e4d3a3de191689fdee6b445347ff49d8bc3eb2a9c29060f6603f154f4ebb9b `
+  --fixture-hash e96ae8f9a8521204c83a571e10c717c7 `
+  --source-digest d4b466adda4483cca622b917295e07ea74d538be934a627f71d9756af1ecbb8a `
+  --source-file-count 230 `
+  --output work/hybrid-rust-migration/renderer-lab-wasm-smoke-fresh
+```
+
+The verifier rechecks the publication and source before and after the run,
+requires immutable exact-byte HTTP responses, decodes the structured BWEP
+fixture independently, requires a real browser WebGPU adapter/device and a
+successful offscreen submission, retains diagnostics and a screenshot, and
+closes its owned browser, server and profile. Its evidence deliberately records
+`promotionAuthorized: false`. This is not full-scene renderer integration,
+Three/wgpu pixel parity, device-loss recovery, performance acceptance, or a
+production renderer-selector promotion.
 
 ## Browser bootstrap and transfer benchmark
 
@@ -218,16 +248,17 @@ browser performance, old-save and cache/soak requirements.
 ### Historical import and persistent-cache gates
 
 These are separate, unmeasured correctness lanes. Use fresh output directories,
-the unchanged canonical `c7bfb66c` package, and no concurrent source edits or
+the exact canonical `ab4d66c5` compatibility package, and no concurrent source edits or
 browser gates:
 
 ```powershell
 node --import tsx scripts/verify-rust-r3-old-save-browser.mjs `
   --engine-dir public/engine `
-  --expected-artifact-hash c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b `
+  --expected-artifact-hash ab4d66c5c165779c08bd1098be8b8ff1ad71b5702d938b72f38faae0c81493b1 `
   --output work/hybrid-rust-migration/browser/r3-old-saves-fresh
 
 node --import tsx scripts/verify-rust-r3-persistent-cache-browser.mjs `
+  --expected-artifact-hash ab4d66c5c165779c08bd1098be8b8ff1ad71b5702d938b72f38faae0c81493b1 `
   --output work/hybrid-rust-migration/r3-persistent-cache/fresh
 ```
 

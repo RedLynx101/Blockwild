@@ -701,7 +701,7 @@ test("combined lane requires exact R5 player authority, pump, and native outboun
   }
 });
 
-test("managed Vite owns cache, Cloudflare state, environment, HMR, and watch lifecycle", () => {
+test("managed Vite owns cache, filters Cloudflare, environment, HMR, and watch lifecycle", () => {
   const plugin = { name: "blockwild-rust-multiplayer-exact-engine" };
   const runtimeDirectory = path.join(ROOT, "work", "rust-multiplayer-browser-unit-runtime");
   const config = rustMultiplayerManagedViteInlineConfig(ROOT, 51_739, runtimeDirectory, plugin);
@@ -714,8 +714,10 @@ test("managed Vite owns cache, Cloudflare state, environment, HMR, and watch lif
   assert.equal(config.server.strictPort, true);
   assert.equal(config.server.watch.ignored(path.join(ROOT, "app", "page.tsx")), true);
   const wrapper = rustMultiplayerManagedViteWrapperSource(ROOT, runtimeDirectory);
-  assert.match(wrapper, /persistState:/u);
-  assert.equal(wrapper.includes(JSON.stringify(path.join(runtimeDirectory, "cloudflare-state"))), true);
+  assert.match(wrapper, /\.filter\(\(plugin\) => !cloudflarePlugin\(plugin\)\)/u);
+  assert.match(wrapper, /plugins: productionPlugins/u);
+  assert.doesNotMatch(wrapper, /import \{ cloudflare \}/u);
+  assert.doesNotMatch(wrapper, /persistState:/u);
   assert.equal(wrapper.includes(JSON.stringify(path.join(runtimeDirectory, "node_modules", ".vite"))), true);
   assert.match(wrapper, /const resolvedBaseConfig = typeof baseConfig === "function"/u);
   assert.match(wrapper, /\? await baseConfig\(multiplayerConfigEnvironment\)/u);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -13,6 +13,7 @@ import {
   assertWorldgenRollbackErrorStreams,
   isExpectedWorldgenRollbackRequestCancellation,
   assertWorldgenRollbackUi,
+  assertWorldgenRollbackTitleUtilityVisualReadiness,
   collectWorldgenRollbackRuntimeErrors,
   isPublicRustArtifactRequestPath,
   parseWorldgenRollbackBrowserOptions,
@@ -20,6 +21,7 @@ import {
   worldgenRollbackManagedViteInlineConfig,
   worldgenRollbackManagedViteWrapperSource,
   worldgenRollbackViteEnvironment,
+  runWorldgenRollbackBrowser,
 } from "../scripts/verify-worldgen-rollback-browser.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -130,6 +132,31 @@ test("rollback browser CLI owns its server and limits output to work", () => {
     "--output", "work/worldgen-rollback-browser-unit",
     "--timeout-ms", "29999",
   ), { cwd: ROOT }), /30000 through 900000/u);
+});
+
+test("rollback setup failures clean every partially created owned directory", async () => {
+  for (const stage of ["output-directory", "browser-profile", "vite-runtime", "artifact-prefixes"]) {
+    const outputDirectory = path.join(ROOT, "work", `worldgen-rollback-browser-setup-failure-${stage}`);
+    rmSync(outputDirectory, { recursive: true, force: true });
+    try {
+      const result = await runWorldgenRollbackBrowser(argv("--output", path.relative(ROOT, outputDirectory)), {
+        injectSetupFailureAt: stage,
+      });
+      assert.equal(result.status, "failed");
+      assert.match(result.error, new RegExp(`Injected rollback setup failure after ${stage}`));
+      assert.equal(result.cleanup.profileRemoved, true);
+      assert.equal(result.cleanup.viteRuntimeRemoved, true);
+      assert.equal(result.cleanup.browserClosed, true);
+      assert.equal(result.cleanup.serverClosed, true);
+      assert.deepEqual(
+        readdirSync(outputDirectory).filter((entry) =>
+          entry.startsWith("browser-profile-") || entry.startsWith("vite-runtime-")),
+        [],
+      );
+    } finally {
+      rmSync(outputDirectory, { recursive: true, force: true });
+    }
+  }
 });
 
 test("managed rollback Vite is mutable, HMR-free, watcher-free, and candidate-free", () => {
@@ -283,6 +310,75 @@ test("rollback UI requires the exact visible title and gameplay disclosure", () 
   }, "playing"), /badge ARIA/u);
 });
 
+test("rollback title capture requires painted, stable upper utility labels", () => {
+  const visual = (fontReady = true) => ({
+    visible: true,
+    inViewport: true,
+    unoccluded: true,
+    bounds: { x: 10, y: 10, width: 120, height: 22 },
+    fontReady,
+    colorVisible: true,
+  });
+  const sample = {
+    documentVisibility: "visible",
+    fontsStatus: "loaded",
+    utility: visual(),
+    version: {
+      text: "v1.12 Field Archive · TERRAIN ROLLBACK",
+      textVisual: visual(),
+    },
+    labels: [
+      { text: "WIKI", textVisual: visual() },
+      { text: "FULLSCREEN", textVisual: visual() },
+    ],
+    menu: visual(),
+    buttons: [
+      ["Continue", "Create New World", "Worlds", "Characters", "Multiplayer", "How to Play", "Settings"]
+        .map((label) => ({
+          label,
+          disabled: false,
+          button: visual(),
+          strong: visual(),
+          small: label === "How to Play" || label === "Settings"
+            ? null
+            : { text: "supporting text", ...visual() },
+        })),
+    ].flat(),
+  };
+  assert.equal(assertWorldgenRollbackTitleUtilityVisualReadiness({
+    schema: 1,
+    samples: [sample, structuredClone(sample), structuredClone(sample)],
+  }).stableSamples, 3);
+
+  const blankUpperLabel = structuredClone(sample);
+  blankUpperLabel.labels[1].textVisual.fontReady = false;
+  assert.throws(() => assertWorldgenRollbackTitleUtilityVisualReadiness({
+    schema: 1,
+    samples: [blankUpperLabel, blankUpperLabel, blankUpperLabel],
+  }), /FULLSCREEN label font is not ready/u);
+
+  const blankMenuLabel = structuredClone(sample);
+  blankMenuLabel.buttons[0].strong.fontReady = false;
+  assert.throws(() => assertWorldgenRollbackTitleUtilityVisualReadiness({
+    schema: 1,
+    samples: [blankMenuLabel, blankMenuLabel, blankMenuLabel],
+  }), /Continue label font is not ready/u);
+
+  const blankSupportingLabel = structuredClone(sample);
+  blankSupportingLabel.buttons[1].small.colorVisible = false;
+  assert.throws(() => assertWorldgenRollbackTitleUtilityVisualReadiness({
+    schema: 1,
+    samples: [blankSupportingLabel, blankSupportingLabel, blankSupportingLabel],
+  }), /Create New World supporting text color is transparent/u);
+
+  const unstable = structuredClone(sample);
+  unstable.version.textVisual.bounds.x = 11;
+  assert.throws(() => assertWorldgenRollbackTitleUtilityVisualReadiness({
+    schema: 1,
+    samples: [sample, sample, unstable],
+  }), /did not remain visually stable/u);
+});
+
 test("worker and request audit forbids generation workers, certificates, and every engine path", () => {
   const healthy = {
     audits: [1, 2].map((navigation) => ({
@@ -332,12 +428,15 @@ test("worker and request audit forbids generation workers, certificates, and eve
 
 test("every tracked public Rust artifact root is discovered and classified", () => {
   const prefixes = resolvePublicRustArtifactPrefixes(ROOT);
-  assert.deepEqual(prefixes, [
+  const approved = [
     "/engine",
     "/engine-locator-candidate",
     "/engine-r5-candidate",
     "/engine-r5-debug",
-  ]);
+    "/engine-schema-candidate",
+  ].filter((prefix) => existsSync(path.join(ROOT, "public", prefix.slice(1))))
+    .sort((left, right) => left.localeCompare(right, "en"));
+  assert.deepEqual(prefixes, approved);
   for (const prefix of prefixes) {
     assert.equal(isPublicRustArtifactRequestPath(prefix, prefixes), true);
     assert.equal(isPublicRustArtifactRequestPath(`${prefix}/manifest.json`, prefixes), true);
@@ -374,6 +473,9 @@ test("tracked verifier retains the full managed production UI lifecycle", () => 
     /desired === 9 && ring\.ready === 9/u,
     /Save & Quit to Title/u,
     /page\.reload\(/u,
+    /await page\.screenshot\(\{ type: "png" \}\);[\s\S]*await waitForTerrainEditReloadTitleVisualReadiness\(page, options\.timeoutMilliseconds\);/u,
+    /await waitForTerrainEditReloadTitleVisualReadiness\(page, options\.timeoutMilliseconds\);\s*await waitForWorldgenRollbackTitleUtilityVisualReadiness\(page, options\.timeoutMilliseconds\);/u,
+    /await waitForTerrainEditReloadTitleVisualReadiness\(page, options\.timeoutMilliseconds\);\s*await capture\("title-after-full-reload"\)/u,
     /name: \/Continue\/u/u,
     /worldgen-rollback-badge/u,
     /TERRAIN ROLLBACK/u,

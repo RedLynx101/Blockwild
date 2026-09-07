@@ -601,28 +601,9 @@ export function installRustMultiplayerViteEnvironment(runtimeDirectory, environm
 export function rustMultiplayerManagedViteWrapperSource(repositoryRoot, runtimeDirectory) {
   const canonicalRoot = realpathSync(repositoryRoot);
   const ownedRuntime = resolveMultiplayerWorkOutputDirectory(canonicalRoot, runtimeDirectory);
-  const hostingPath = path.join(canonicalRoot, ".openai", "hosting.json");
-  if (!existsSync(hostingPath) || lstatSync(hostingPath).isSymbolicLink() || !statSync(hostingPath).isFile()) {
-    fail(`Managed multiplayer Vite requires the repository hosting config: ${hostingPath}`);
-  }
-  const hosting = JSON.parse(readFileSync(hostingPath, "utf8"));
-  const localBindingConfig = {
-    main: "./worker/index.ts",
-    compatibility_flags: ["nodejs_compat"],
-    d1_databases: hosting.d1 ? [{
-      binding: hosting.d1,
-      database_name: "site-creator-d1",
-      database_id: "00000000-0000-4000-8000-000000000000",
-    }] : [],
-    r2_buckets: hosting.r2 ? [{ binding: hosting.r2, bucket_name: "site-creator-r2" }] : [],
-  };
   const baseConfigUrl = pathToFileURL(path.join(canonicalRoot, "vite.config.ts")).href;
-  const persistStatePath = path.join(ownedRuntime, "cloudflare-state");
   const cacheDirectory = path.join(ownedRuntime, "node_modules", ".vite");
   return `import baseConfig from ${JSON.stringify(baseConfigUrl)};
-import { cloudflare } from "@cloudflare/vite-plugin";
-
-const localBindingConfig = ${JSON.stringify(localBindingConfig, null, 2)};
 const cloudflarePlugin = (plugin) => plugin?.name === "vite-plugin-cloudflare"
   || plugin?.name?.startsWith("vite-plugin-cloudflare:");
 const ownVinextRuntimeWrites = (plugin) => {
@@ -655,15 +636,7 @@ const productionPlugins = (resolvedBaseConfig.plugins ?? []).flat(Infinity)
 export default {
   ...resolvedBaseConfig,
   cacheDir: ${JSON.stringify(cacheDirectory)},
-  plugins: [
-    ...productionPlugins,
-    ...cloudflare({
-      viteEnvironment: { name: "rsc", childEnvironments: ["ssr"] },
-      inspectorPort: false,
-      persistState: { path: ${JSON.stringify(persistStatePath)} },
-      config: localBindingConfig,
-    }),
-  ],
+  plugins: productionPlugins,
 };
 `;
 }

@@ -23,12 +23,15 @@ pub const PERSISTENCE_RESPONSE_TYPE_V1: &str = "blockwild.persistence.browser-re
 pub const PERSISTENCE_COMPATIBILITY_STAGE_CHUNK_TYPE_V1: &str = "blockwild.persistence.compatibility-stage-chunk.r8.v1";
 pub const PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1: &str =
     "blockwild.persistence.compatibility-hydration-chunk.r8.v1";
+pub const PERSISTENCE_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2: &str =
+    "blockwild.persistence.historical-external-receipt.r8.v2";
 pub const RUNTIME_BULK_SAVE_CHUNK_BYTES_V1: usize = 4 * 1024 * 1024;
 pub const RUNTIME_BULK_MAX_SAVE_CHUNKS_V1: u32 = 64;
 pub const RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1: usize = 4 * 1024;
 
 const REQUEST_MAGIC: [u8; 4] = *b"BWRB";
 const RESPONSE_MAGIC: [u8; 4] = *b"BWRC";
+const RUNTIME_BULK_HISTORICAL_EXTERNAL_RECEIPT_BYTES_V2: usize = 64 * 1024;
 const MAX_SAFE_U64: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -590,6 +593,44 @@ fn decode_control<'a>(control: &'a [u8], attachment: &'a [u8], magic: [u8; 4]) -
     })
 }
 
+fn validate_data_response_v1(
+    type_id: &str,
+    transfer_token: u64,
+    chunk_index: u32,
+    chunk_count: u32,
+    payload: &[u8],
+) -> Result<(), WireError> {
+    if transfer_token == 0 {
+        return Err(WireError::new("integer", "bulk data transfer token must be non-zero"));
+    }
+    match type_id {
+        PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1 => {
+            if chunk_count == 0 || chunk_index >= chunk_count || payload.len() > RUNTIME_BULK_SAVE_CHUNK_BYTES_V1 {
+                return Err(WireError::new(
+                    "hydration-data",
+                    "bulk hydration chunk metadata is invalid",
+                ));
+            }
+        }
+        PERSISTENCE_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2 => {
+            if chunk_index != 0
+                || chunk_count != 1
+                || payload.is_empty()
+                || payload.len() > RUNTIME_BULK_HISTORICAL_EXTERNAL_RECEIPT_BYTES_V2
+            {
+                return Err(WireError::new(
+                    "historical-receipt-data",
+                    "bulk historical receipt must be one nonempty bounded chunk",
+                ));
+            }
+        }
+        _ => {
+            return Err(WireError::new("type-id", "bulk data type is unsupported"));
+        }
+    }
+    Ok(())
+}
+
 pub fn encode_bulk_request_v1(value: &RuntimeBulkRequestV1) -> Result<RuntimeBulkEncodedV1, WireError> {
     let mut writer = Writer::default();
     let (operation, attachment) = match value {
@@ -972,17 +1013,9 @@ pub fn encode_bulk_response_v1(value: &RuntimeBulkResponseV1) -> Result<RuntimeB
             ..
         } => {
             writer.state(current)?;
-            if *transfer_token == 0 {
-                return Err(WireError::new("integer", "bulk data transfer token must be non-zero"));
-            }
+            validate_data_response_v1(type_id, *transfer_token, *chunk_index, *chunk_count, payload)?;
             writer.u64(*transfer_token)?;
-            writer.string(type_id, Some(PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1), 160)?;
-            if *chunk_count == 0 || *chunk_index >= *chunk_count || payload.len() > RUNTIME_BULK_SAVE_CHUNK_BYTES_V1 {
-                return Err(WireError::new(
-                    "hydration-data",
-                    "bulk hydration chunk metadata is invalid",
-                ));
-            }
+            writer.string(type_id, None, 160)?;
             writer.u32(*chunk_index);
             writer.u32(*chunk_count);
             (6, 0, payload.clone())
@@ -1166,19 +1199,10 @@ pub fn decode_bulk_response_v1(control: &[u8], attachment: &[u8]) -> Result<Runt
         6 => {
             let current = reader.state()?;
             let transfer_token = reader.u64()?;
-            let type_id = reader.string(Some(PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1), 160)?;
+            let type_id = reader.string(None, 160)?;
             let chunk_index = reader.u32()?;
             let chunk_count = reader.u32()?;
-            if transfer_token == 0
-                || chunk_count == 0
-                || chunk_index >= chunk_count
-                || attachment.len() > RUNTIME_BULK_SAVE_CHUNK_BYTES_V1
-            {
-                return Err(WireError::new(
-                    "hydration-data",
-                    "bulk hydration chunk metadata is invalid",
-                ));
-            }
+            validate_data_response_v1(&type_id, transfer_token, chunk_index, chunk_count, attachment)?;
             RuntimeBulkResponseV1::Data {
                 request_id: envelope.request_id,
                 client_epoch: envelope.client_epoch,
@@ -1427,6 +1451,179 @@ mod tests {
         assert_eq!(
             decode_bulk_response_v1(&encoded.control, &encoded.attachment).expect("decode hydration data"),
             response
+        );
+    }
+
+    #[test]
+    fn historical_external_receipt_data_uses_the_exact_single_nonempty_chunk_contract() {
+        for payload in [
+            vec![0x80],
+            vec![0xff; RUNTIME_BULK_HISTORICAL_EXTERNAL_RECEIPT_BYTES_V2],
+        ] {
+            let response = RuntimeBulkResponseV1::Data {
+                request_id: 10,
+                client_epoch: 2,
+                worker_epoch: 3,
+                current: state(),
+                transfer_token: 93,
+                type_id: PERSISTENCE_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2.into(),
+                chunk_index: 0,
+                chunk_count: 1,
+                payload,
+            };
+            let encoded = encode_bulk_response_v1(&response).expect("encode historical receipt data");
+            assert_eq!(
+                decode_bulk_response_v1(&encoded.control, &encoded.attachment).expect("decode historical receipt data"),
+                response
+            );
+        }
+    }
+
+    fn historical_receipt_response(payload: Vec<u8>) -> RuntimeBulkResponseV1 {
+        RuntimeBulkResponseV1::Data {
+            request_id: 10,
+            client_epoch: 2,
+            worker_epoch: 3,
+            current: state(),
+            transfer_token: 93,
+            type_id: PERSISTENCE_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2.into(),
+            chunk_index: 0,
+            chunk_count: 1,
+            payload,
+        }
+    }
+
+    fn refresh_data_envelope_checksums(control: &mut [u8], attachment: &[u8]) {
+        let body_len = control.len() - RUNTIME_BULK_HEADER_BYTES_V1;
+        let body_checksum = wire_checksum_v1(&control[RUNTIME_BULK_HEADER_BYTES_V1..]);
+        let attachment_checksum = wire_checksum_v1(attachment);
+        control[24..28].copy_from_slice(&(body_len as u32).to_le_bytes());
+        control[28..32].copy_from_slice(&(attachment.len() as u32).to_le_bytes());
+        control[32..48].copy_from_slice(&body_checksum);
+        control[48..64].copy_from_slice(&attachment_checksum);
+    }
+
+    #[test]
+    fn historical_external_receipt_data_rejects_invalid_encode_inputs() {
+        let mut invalid_index = historical_receipt_response(vec![1]);
+        let mut invalid_count = historical_receipt_response(vec![1]);
+        let mut unknown_type = historical_receipt_response(vec![1]);
+        let mut zero_transfer_token = historical_receipt_response(vec![1]);
+        let RuntimeBulkResponseV1::Data { chunk_index, .. } = &mut invalid_index else {
+            unreachable!("historical receipt helper must return data")
+        };
+        *chunk_index = 1;
+        let RuntimeBulkResponseV1::Data { chunk_count, .. } = &mut invalid_count else {
+            unreachable!("historical receipt helper must return data")
+        };
+        *chunk_count = 2;
+        let RuntimeBulkResponseV1::Data { type_id, .. } = &mut unknown_type else {
+            unreachable!("historical receipt helper must return data")
+        };
+        *type_id = "blockwild.persistence.historical-external-receipt.r8.vx".into();
+        let RuntimeBulkResponseV1::Data { transfer_token, .. } = &mut zero_transfer_token else {
+            unreachable!("historical receipt helper must return data")
+        };
+        *transfer_token = 0;
+        let cases = [
+            historical_receipt_response(Vec::new()),
+            historical_receipt_response(vec![0; RUNTIME_BULK_HISTORICAL_EXTERNAL_RECEIPT_BYTES_V2 + 1]),
+            invalid_index,
+            invalid_count,
+            unknown_type,
+            zero_transfer_token,
+        ];
+        for response in cases {
+            assert!(
+                encode_bulk_response_v1(&response).is_err(),
+                "invalid historical receipt response must not encode: {response:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn historical_external_receipt_data_rejects_invalid_decode_inputs() {
+        let valid = encode_bulk_response_v1(&historical_receipt_response(vec![1, 2, 3]))
+            .expect("encode valid historical receipt");
+        let transfer_token_offset = RUNTIME_BULK_HEADER_BYTES_V1 + 80;
+        let metadata_offset =
+            RUNTIME_BULK_HEADER_BYTES_V1 + 80 + 8 + 2 + PERSISTENCE_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2.len();
+
+        let mut zero_transfer_token = valid.control.clone();
+        zero_transfer_token[transfer_token_offset..transfer_token_offset + 8].copy_from_slice(&0_u64.to_le_bytes());
+        refresh_data_envelope_checksums(&mut zero_transfer_token, &valid.attachment);
+        assert_eq!(
+            decode_bulk_response_v1(&zero_transfer_token, &valid.attachment)
+                .expect_err("zero historical receipt transfer token must reject")
+                .code,
+            "integer"
+        );
+
+        let mut unknown_type = valid.control.clone();
+        unknown_type[metadata_offset - 1] = b'x';
+        refresh_data_envelope_checksums(&mut unknown_type, &valid.attachment);
+        assert_eq!(
+            decode_bulk_response_v1(&unknown_type, &valid.attachment)
+                .expect_err("unrecognized historical receipt type must reject")
+                .code,
+            "type-id"
+        );
+
+        let mut invalid_index = valid.control.clone();
+        invalid_index[metadata_offset..metadata_offset + 4].copy_from_slice(&1_u32.to_le_bytes());
+        refresh_data_envelope_checksums(&mut invalid_index, &valid.attachment);
+        assert_eq!(
+            decode_bulk_response_v1(&invalid_index, &valid.attachment)
+                .expect_err("reordered historical receipt chunk must reject")
+                .code,
+            "historical-receipt-data"
+        );
+
+        let mut invalid_count = valid.control.clone();
+        invalid_count[metadata_offset + 4..metadata_offset + 8].copy_from_slice(&2_u32.to_le_bytes());
+        refresh_data_envelope_checksums(&mut invalid_count, &valid.attachment);
+        assert_eq!(
+            decode_bulk_response_v1(&invalid_count, &valid.attachment)
+                .expect_err("multi-chunk historical receipt must reject")
+                .code,
+            "historical-receipt-data"
+        );
+
+        let empty_attachment = Vec::new();
+        let mut empty = valid.control.clone();
+        refresh_data_envelope_checksums(&mut empty, &empty_attachment);
+        assert_eq!(
+            decode_bulk_response_v1(&empty, &empty_attachment)
+                .expect_err("empty historical receipt must reject")
+                .code,
+            "historical-receipt-data"
+        );
+
+        let oversized_attachment = vec![0; RUNTIME_BULK_HISTORICAL_EXTERNAL_RECEIPT_BYTES_V2 + 1];
+        let mut oversized = valid.control.clone();
+        refresh_data_envelope_checksums(&mut oversized, &oversized_attachment);
+        assert_eq!(
+            decode_bulk_response_v1(&oversized, &oversized_attachment)
+                .expect_err("oversized historical receipt must reject")
+                .code,
+            "historical-receipt-data"
+        );
+
+        let mut truncated = valid.control.clone();
+        truncated.pop();
+        assert!(
+            decode_bulk_response_v1(&truncated, &valid.attachment).is_err(),
+            "truncated historical receipt control must reject"
+        );
+
+        let mut extraneous = valid.control.clone();
+        extraneous.push(0);
+        refresh_data_envelope_checksums(&mut extraneous, &valid.attachment);
+        assert_eq!(
+            decode_bulk_response_v1(&extraneous, &valid.attachment)
+                .expect_err("extraneous historical receipt control data must reject")
+                .code,
+            "trailing"
         );
     }
 

@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "generatedAt": "2026-09-04T06:57:19.709Z",
+  "defaultVariant": "compatibility",
+  "artifacts": {
+    "compatibility": {
+      "hash": "6a70291bc1655b6a01436b25590d646f064212d20e807dbbfe409b88e8f2322f",
+      "directory": "6a70291bc1655b6a01436b25590d646f064212d20e807dbbfe409b88e8f2322f",
+      "manifest": "6a70291bc1655b6a01436b25590d646f064212d20e807dbbfe409b88e8f2322f/manifest.json"
+    },
+    "renderer-lab": {
+      "hash": "9a63e7cc336c21cb530a1b0305ff6280f0df00f9f5e5421ea7abbdcdd4fa4ba3",
+      "directory": "9a63e7cc336c21cb530a1b0305ff6280f0df00f9f5e5421ea7abbdcdd4fa4ba3",
+      "manifest": "9a63e7cc336c21cb530a1b0305ff6280f0df00f9f5e5421ea7abbdcdd4fa4ba3/manifest.json"
+    }
+  }
+}

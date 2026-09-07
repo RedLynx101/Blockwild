@@ -73,6 +73,28 @@ export class RustIntegratedRuntimeBrowserAdapterV1 {
     return this.service.stageCompatibilitySaveChunk(stageId, chunkIndex, chunkCount, totalBytes, payload);
   }
   finalizeCompatibilitySave(stageId: string, createdAt: number) { return this.service.finalizeCompatibilitySave(stageId, createdAt); }
+  migrateHistoricalExternalV2(stageId: string, createdAt: number, proposal: Uint8Array, worldProjection: Uint8Array) {
+    return this.service.migrateHistoricalExternalV2(stageId, createdAt, proposal, worldProjection);
+  }
+  finalizeHistoricalExternalSaveV2(
+    stageId: string,
+    createdAt: number,
+    proposal: Uint8Array,
+    expectedPriorCheckpointBytes: Uint8Array,
+  ) {
+    return this.service.finalizeHistoricalExternalSaveV2(
+      stageId,
+      createdAt,
+      proposal,
+      expectedPriorCheckpointBytes,
+    );
+  }
+  hydrateHistoricalExternalRecoveryV2(recoveryId: string) {
+    return this.service.hydrateHistoricalExternalRecoveryV2(recoveryId);
+  }
+  reconcileHistoricalExternalFallbackV2(fallbackRecoveryId: string, createdAt: number, observation: Uint8Array) {
+    return this.service.reconcileHistoricalExternalFallbackV2(fallbackRecoveryId, createdAt, observation);
+  }
   hydrateCompatibilityRecovery(recoveryId: string) { return this.service.hydrateCompatibilityRecovery(recoveryId); }
   readHydratedCompatibility(recoveryId: string, chunkIndex: number) { return this.service.readHydratedCompatibility(recoveryId, chunkIndex); }
   cancelCompatibilitySaveStage(stageId: string) { return this.service.cancelCompatibilitySaveStage(stageId); }

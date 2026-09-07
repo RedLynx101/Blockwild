@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { MemoryPersistenceAdapterV1, persistenceAdapterSchemaV1 } from "../app/game/indexeddb-persistence-adapter.ts";
+import {
+  MemoryPersistenceAdapterV1,
+  decodeRustHistoricalFallbackObservationV2,
+  encodeRustHistoricalFallbackReconciliationPlanV2,
+  persistenceAdapterSchemaV1,
+} from "../app/game/indexeddb-persistence-adapter.ts";
 import {
   PERSISTENCE_SCHEMA_V1,
   createLegacyMigrationBundleV1,
@@ -17,6 +22,141 @@ import {
 const HASH_A = "0123456789abcdef0123456789abcdef";
 const HASH_B = "fedcba9876543210fedcba9876543210";
 const address = (recordId: string) => ({ universeId: "world:fixture", locationId: "overworld", kind: "entity" as const, recordId });
+
+async function historicalFallbackFixture(label: string) {
+  const adapter = new MemoryPersistenceAdapterV1();
+  const worldId = `world:historical-reconciliation:${label}`;
+  const recordAddress = Object.freeze({
+    universeId: worldId,
+    locationId: "overworld",
+    kind: "entity" as const,
+    recordId: "historical-state",
+  });
+  const recordKey = persistenceRecordKeyV1(recordAddress);
+  const fallbackPayload = Uint8Array.of(1, 2, 3);
+  const corruptLatestPayload = Uint8Array.of(9, 8, 7);
+  const fallbackCheckpoint = createPersistenceCheckpointV1({
+    checkpointId: `checkpoint:fallback:${label}`,
+    parentCheckpointId: null,
+    worldId,
+    journalSequence: 1,
+    generatorHash: HASH_A,
+    contentHash: HASH_B,
+    createdAt: 10,
+    records: [{
+      address: recordAddress,
+      revision: 1,
+      byteLength: fallbackPayload.byteLength,
+      payloadHash: persistencePayloadHashV1(fallbackPayload),
+    }],
+  });
+  const latestCheckpoint = createPersistenceCheckpointV1({
+    checkpointId: `checkpoint:corrupt-latest:${label}`,
+    parentCheckpointId: fallbackCheckpoint.checkpointId,
+    worldId,
+    journalSequence: 2,
+    generatorHash: HASH_A,
+    contentHash: HASH_B,
+    createdAt: 20,
+    records: [{
+      address: recordAddress,
+      revision: 2,
+      byteLength: corruptLatestPayload.byteLength,
+      payloadHash: persistencePayloadHashV1(corruptLatestPayload),
+    }],
+  });
+  const checkpointStorageKey = (checkpointId: string) => `${encodeURIComponent(worldId)}|${encodeURIComponent(checkpointId)}`;
+  const versionKey = (revision: number) => `${recordKey}|revision:${String(revision).padStart(20, "0")}`;
+  const storedFallback = Object.freeze({
+    key: recordKey,
+    address: recordAddress,
+    revision: 1,
+    payload: Uint8Array.from(fallbackPayload),
+    payloadHash: persistencePayloadHashV1(fallbackPayload),
+  });
+  const internal = adapter as unknown as {
+    sequences: Map<string, number>;
+    records: Map<string, typeof storedFallback>;
+    recordVersions: Map<string, typeof storedFallback>;
+    checkpoints: Map<string, ReturnType<typeof createPersistenceCheckpointV1>>;
+    latestCheckpoints: Map<string, string>;
+    storageRevisions: Map<string, number>;
+  };
+  internal.sequences.set(worldId, latestCheckpoint.journalSequence);
+  internal.records.set(recordKey, storedFallback);
+  internal.recordVersions.set(versionKey(1), Object.freeze({ ...storedFallback, key: versionKey(1) }));
+  internal.checkpoints.set(checkpointStorageKey(fallbackCheckpoint.checkpointId), fallbackCheckpoint);
+  internal.checkpoints.set(checkpointStorageKey(latestCheckpoint.checkpointId), latestCheckpoint);
+  internal.latestCheckpoints.set(worldId, latestCheckpoint.checkpointId);
+  internal.storageRevisions.set(worldId, 5);
+
+  const observationBytes = await adapter.captureHistoricalExternalReconciliationObservationV2(
+    worldId,
+    fallbackCheckpoint.checkpointId,
+  );
+  const targetCheckpoint = createPersistenceCheckpointV1({
+    checkpointId: `checkpoint:reconciled:${label}`,
+    parentCheckpointId: latestCheckpoint.checkpointId,
+    worldId,
+    journalSequence: 3,
+    generatorHash: HASH_A,
+    contentHash: HASH_B,
+    createdAt: 20,
+    records: [{
+      address: recordAddress,
+      revision: 2,
+      byteLength: fallbackPayload.byteLength,
+      payloadHash: persistencePayloadHashV1(fallbackPayload),
+    }],
+  });
+  const payload = encodeRustHistoricalFallbackReconciliationPlanV2({
+    schemaVersion: 2,
+    createdAt: 20,
+    observation: decodeRustHistoricalFallbackObservationV2(observationBytes),
+    observationBytes,
+    observationHash: persistencePayloadHashV1(observationBytes),
+    targetCheckpoint,
+    copyRecords: Object.freeze([Object.freeze({
+      address: recordAddress,
+      sourceRevision: 1,
+      targetRevision: 2,
+      byteLength: fallbackPayload.byteLength,
+      payloadHash: persistencePayloadHashV1(fallbackPayload),
+    })]),
+    inlineRecords: Object.freeze([]),
+    deleteAddresses: Object.freeze([]),
+    saveSetHash: "1".repeat(32),
+    manifestHash: "2".repeat(32),
+    descriptorHash: "3".repeat(32),
+  });
+  const request = Object.freeze({
+    kind: "platform" as const,
+    operation: "reconcile-historical-fallback" as const,
+    requestId: 90,
+    worldId,
+    objectId: targetCheckpoint.checkpointHash,
+    expectedHeadHash: latestCheckpoint.checkpointHash,
+    cursor: 5,
+    limit: targetCheckpoint.records.length,
+    totalBytes: payload.byteLength,
+    payloadHash: rustPersistencePlatformPayloadHashV1(payload),
+    payload,
+  }) satisfies RustPersistencePlatformRequestV1;
+  return Object.freeze({
+    adapter,
+    internal,
+    worldId,
+    recordAddress,
+    recordKey,
+    fallbackPayload,
+    fallbackCheckpoint,
+    latestCheckpoint,
+    targetCheckpoint,
+    checkpointStorageKey,
+    versionKey,
+    request,
+  });
+}
 
 function migrationFixture(worldId: string, label: string, seed: number) {
   const sourcePayload = Uint8Array.of(seed, seed + 1, seed + 2);
@@ -228,4 +368,76 @@ test("memory migration conflicts and corrupt exact retries leave all durable sta
   assert.ok(corruptReadback.missingRecords.includes(`version:${versionKey}`));
   assert.deepEqual(await exactAdapter.readRecord(firstDescriptor.address), exact.recordPayloads.get(persistenceRecordKeyV1(firstDescriptor.address)), "retry does not rewrite the remaining current record");
   assert.equal(internal.recordVersions.has(versionKey), false, "retry does not heal a corrupt immutable version");
+});
+
+test("historical fallback reconciliation atomically promotes one verified direct parent", async () => {
+  const fixture = await historicalFallbackFixture("success");
+  const result = await fixture.adapter.executePlatform(fixture.request);
+  assert.equal(result.code, "accepted");
+  assert.equal(result.storageRevision, 6);
+  assert.equal(result.durableHash, fixture.targetCheckpoint.checkpointHash);
+  assert.deepEqual(await fixture.adapter.readLatestCheckpoint(fixture.worldId), fixture.targetCheckpoint);
+  assert.deepEqual(await fixture.adapter.readRecord(fixture.recordAddress), fixture.fallbackPayload);
+  assert.deepEqual(await fixture.adapter.readRecord(fixture.recordAddress, 1), fixture.fallbackPayload);
+  assert.deepEqual(await fixture.adapter.readRecord(fixture.recordAddress, 2), fixture.fallbackPayload);
+  assert.deepEqual(
+    await fixture.adapter.readCheckpoint(fixture.worldId, fixture.latestCheckpoint.checkpointId),
+    fixture.latestCheckpoint,
+    "the corrupt checkpoint is retained as immutable lineage evidence",
+  );
+  assert.deepEqual(
+    await fixture.adapter.readCheckpoint(fixture.worldId, fixture.fallbackCheckpoint.checkpointId),
+    fixture.fallbackCheckpoint,
+    "the verified fallback remains recoverable",
+  );
+});
+
+test("historical fallback reconciliation rejects stale, byte-drifted, and partial durable state without writes", async () => {
+  const stale = await historicalFallbackFixture("stale");
+  stale.internal.storageRevisions.set(stale.worldId, 6);
+  const staleResult = await stale.adapter.executePlatform(stale.request);
+  assert.equal(staleResult.code, "conflict");
+  assert.deepEqual(await stale.adapter.readLatestCheckpoint(stale.worldId), stale.latestCheckpoint);
+  assert.equal(await stale.adapter.readCheckpoint(stale.worldId, stale.targetCheckpoint.checkpointId), null);
+  assert.deepEqual(await stale.adapter.readRecord(stale.recordAddress), stale.fallbackPayload);
+
+  const changed = await historicalFallbackFixture("changed");
+  const original = changed.internal.records.get(changed.recordKey)!;
+  changed.internal.records.set(changed.recordKey, Object.freeze({
+    ...original,
+    payload: Uint8Array.of(4, 5, 6),
+  }));
+  const changedResult = await changed.adapter.executePlatform(changed.request);
+  assert.equal(changedResult.code, "conflict");
+  assert.deepEqual(await changed.adapter.readLatestCheckpoint(changed.worldId), changed.latestCheckpoint);
+  assert.equal(await changed.adapter.readCheckpoint(changed.worldId, changed.targetCheckpoint.checkpointId), null);
+  assert.deepEqual(await changed.adapter.readRecord(changed.recordAddress), Uint8Array.of(4, 5, 6));
+
+  const partial = await historicalFallbackFixture("partial");
+  await partial.adapter.putCheckpoint(partial.targetCheckpoint, false);
+  const partialResult = await partial.adapter.executePlatform(partial.request);
+  assert.equal(partialResult.code, "corrupt");
+  assert.deepEqual(await partial.adapter.readLatestCheckpoint(partial.worldId), partial.latestCheckpoint);
+  assert.deepEqual(await partial.adapter.readRecord(partial.recordAddress), partial.fallbackPayload);
+  assert.equal(partial.internal.storageRevisions.get(partial.worldId), 5);
+});
+
+test("historical fallback reconciliation rejects altered Rust intent fields before any durable write", async () => {
+  const fixture = await historicalFallbackFixture("request-binding");
+  const invalid = [
+    { cursor: fixture.request.cursor + 1 },
+    { limit: fixture.request.limit + 1 },
+    { totalBytes: fixture.request.totalBytes + 1 },
+    { expectedHeadHash: HASH_A },
+    { objectId: HASH_B },
+    { payloadHash: HASH_A },
+  ] as const;
+  for (const changes of invalid) {
+    const result = await fixture.adapter.executePlatform(Object.freeze({ ...fixture.request, ...changes }));
+    assert.equal(result.code, "corrupt");
+    assert.deepEqual(await fixture.adapter.readLatestCheckpoint(fixture.worldId), fixture.latestCheckpoint);
+    assert.equal(await fixture.adapter.readCheckpoint(fixture.worldId, fixture.targetCheckpoint.checkpointId), null);
+    assert.deepEqual(await fixture.adapter.readRecord(fixture.recordAddress), fixture.fallbackPayload);
+    assert.equal(fixture.internal.storageRevisions.get(fixture.worldId), 5);
+  }
 });

@@ -17,16 +17,23 @@ import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
+import { inflateSync } from "node:zlib";
 import { findRepositoryRoot, isDirectInvocation } from "./rust-engine-common.mjs";
 import {
   resolveManagedCanonicalAsset,
   resolveWorkOutputDirectory,
 } from "./verify-rust-r5-player-browser.mjs";
+import {
+  TERRAIN_EDIT_TITLE_MENU_LABELS,
+  waitForTerrainEditReloadTitleVisualReadiness,
+} from "./verify-rust-terrain-edit-reload-browser.mjs";
 
 export const WORLDGEN_ROLLBACK_PROFILE = "typescript-rollback";
 export const WORLDGEN_ROLLBACK_SELECTION_SOURCE = "build-typescript-rollback";
 export const WORLDGEN_ROLLBACK_BADGE_ARIA = "TypeScript terrain rollback build; changing terrain authority requires a reload";
 export const WORLDGEN_ROLLBACK_TITLE_MARKER = "TERRAIN ROLLBACK";
+const WORLDGEN_ROLLBACK_TITLE_UTILITY_LABELS = Object.freeze(["WIKI", "FULLSCREEN"]);
+const WORLDGEN_ROLLBACK_TITLE_UTILITY_STABLE_SAMPLES = 3;
 
 const DEFAULT_TIMEOUT_MILLISECONDS = 240_000;
 const PROFILE_PREFIX = "browser-profile-";
@@ -604,6 +611,99 @@ export function assertWorldgenRollbackUi(ui, phase) {
   return true;
 }
 
+function worldgenRollbackTitleUtilitySignature(observation) {
+  const visual = (element) => [
+    element?.visible,
+    element?.inViewport,
+    element?.unoccluded,
+    element?.bounds?.x,
+    element?.bounds?.y,
+    element?.bounds?.width,
+    element?.bounds?.height,
+    element?.fontReady,
+    element?.colorVisible,
+  ];
+  return JSON.stringify({
+    documentVisibility: observation?.documentVisibility,
+    fontsStatus: observation?.fontsStatus,
+    utility: visual(observation?.utility),
+    version: [observation?.version?.text, ...visual(observation?.version?.textVisual)],
+    labels: observation?.labels?.map((label) => [label.text, ...visual(label.textVisual)]),
+    menu: visual(observation?.menu),
+    buttons: observation?.buttons?.map((button) => [
+      button.label,
+      button.disabled,
+      ...visual(button.button),
+      ...visual(button.strong),
+      ...visual(button.small),
+    ]),
+  });
+}
+
+export function assertWorldgenRollbackTitleUtilityVisualReadiness(evidence) {
+  assertCondition(evidence?.schema === 1, "Rollback title utility visual evidence schema is not 1.");
+  assertCondition(Array.isArray(evidence.samples), "Rollback title utility visual samples are absent.");
+  assertCondition(evidence.samples.length >= WORLDGEN_ROLLBACK_TITLE_UTILITY_STABLE_SAMPLES,
+    `Rollback title utility produced ${evidence.samples.length} stable visual sample(s) instead of ${WORLDGEN_ROLLBACK_TITLE_UTILITY_STABLE_SAMPLES}.`);
+  const samples = evidence.samples.slice(-WORLDGEN_ROLLBACK_TITLE_UTILITY_STABLE_SAMPLES);
+  const assertPainted = (element, label) => {
+    assertCondition(element?.visible === true, `${label} is not visibly rendered.`);
+    assertCondition(element?.inViewport === true, `${label} is outside the retained viewport.`);
+    assertCondition(element?.unoccluded === true, `${label} is obscured in the retained viewport.`);
+    assertCondition(element?.bounds && element.bounds.width >= 1 && element.bounds.height >= 1,
+      `${label} has no painted bounds.`);
+  };
+  for (const [index, observation] of samples.entries()) {
+    const prefix = `Rollback title utility observation ${index + 1}`;
+    assertCondition(observation?.documentVisibility === "visible", `${prefix} document is not visible.`);
+    assertCondition(observation?.fontsStatus === "loaded", `${prefix} fonts are not loaded.`);
+    assertPainted(observation.utility, `${prefix} utility`);
+    assertCondition(observation.version?.text?.includes(WORLDGEN_ROLLBACK_TITLE_MARKER),
+      `${prefix} version label lacks ${WORLDGEN_ROLLBACK_TITLE_MARKER}.`);
+    assertPainted(observation.version?.textVisual, `${prefix} version label text`);
+    assertCondition(observation.version.textVisual.fontReady === true, `${prefix} version label font is not ready.`);
+    assertCondition(observation.version.textVisual.colorVisible === true, `${prefix} version label text color is transparent.`);
+    assertCondition(Array.isArray(observation.labels), `${prefix} utility labels are absent.`);
+    assertCondition(observation.labels.length === WORLDGEN_ROLLBACK_TITLE_UTILITY_LABELS.length,
+      `${prefix} rendered ${observation.labels.length} utility labels instead of ${WORLDGEN_ROLLBACK_TITLE_UTILITY_LABELS.length}.`);
+    for (const [labelIndex, label] of observation.labels.entries()) {
+      const expected = WORLDGEN_ROLLBACK_TITLE_UTILITY_LABELS[labelIndex];
+      assertCondition(label.text === expected, `${prefix} utility label ${labelIndex} is not ${expected}.`);
+      assertPainted(label.textVisual, `${prefix} ${expected} label`);
+      assertCondition(label.textVisual.fontReady === true, `${prefix} ${expected} label font is not ready.`);
+      assertCondition(label.textVisual.colorVisible === true, `${prefix} ${expected} label text color is transparent.`);
+    }
+    assertPainted(observation.menu, `${prefix} main menu`);
+    assertCondition(Array.isArray(observation.buttons), `${prefix} main menu buttons are absent.`);
+    assertCondition(observation.buttons.length === TERRAIN_EDIT_TITLE_MENU_LABELS.length,
+      `${prefix} rendered ${observation.buttons.length} main menu buttons instead of ${TERRAIN_EDIT_TITLE_MENU_LABELS.length}.`);
+    for (const [buttonIndex, button] of observation.buttons.entries()) {
+      const expected = TERRAIN_EDIT_TITLE_MENU_LABELS[buttonIndex];
+      assertCondition(button.label === expected, `${prefix} main menu label ${buttonIndex} is not ${expected}.`);
+      assertCondition(button.disabled === false, `${prefix} ${expected} button is disabled.`);
+      assertPainted(button.button, `${prefix} ${expected} button`);
+      assertPainted(button.strong, `${prefix} ${expected} label text`);
+      assertCondition(button.strong.fontReady === true, `${prefix} ${expected} label font is not ready.`);
+      assertCondition(button.strong.colorVisible === true, `${prefix} ${expected} label text color is transparent.`);
+      if (button.small?.text) {
+        assertPainted(button.small, `${prefix} ${expected} supporting text`);
+        assertCondition(button.small.fontReady === true, `${prefix} ${expected} supporting font is not ready.`);
+        assertCondition(button.small.colorVisible === true, `${prefix} ${expected} supporting text color is transparent.`);
+      }
+    }
+  }
+  const signatures = samples.map(worldgenRollbackTitleUtilitySignature);
+  assertCondition(signatures.every((signature) => signature === signatures[0]),
+    "Rollback title utility labels did not remain visually stable across compositor observations.");
+  return Object.freeze({
+    ...evidence,
+    samples: Object.freeze(samples.map((sample) => Object.freeze(structuredClone(sample)))),
+    expectedLabels: WORLDGEN_ROLLBACK_TITLE_UTILITY_LABELS,
+    expectedMenuLabels: TERRAIN_EDIT_TITLE_MENU_LABELS,
+    stableSamples: WORLDGEN_ROLLBACK_TITLE_UTILITY_STABLE_SAMPLES,
+  });
+}
+
 function isRustGenerationWorker(worker) {
   const identity = `${worker?.url ?? ""} ${worker?.name ?? ""}`.toLowerCase();
   return identity.includes("terrain-generation-worker") || identity.includes("rust-generation");
@@ -748,14 +848,282 @@ function snapshotUiInPage() {
   };
 }
 
-export async function runWorldgenRollbackBrowser(argv = process.argv) {
+async function observeWorldgenRollbackTitleUtilityVisuals(page) {
+  return page.evaluate(async (expectedLabels) => {
+    await document.fonts.ready;
+    await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+    const rounded = (value) => Math.round(Number(value) * 4) / 4;
+    const boundsOf = (rect) => ({
+      x: rounded(rect?.x ?? 0),
+      y: rounded(rect?.y ?? 0),
+      width: rounded(rect?.width ?? 0),
+      height: rounded(rect?.height ?? 0),
+    });
+    const visual = (element, rect = element?.getBoundingClientRect()) => {
+      if (!(element instanceof Element)) return {
+        visible: false,
+        inViewport: false,
+        unoccluded: false,
+        bounds: boundsOf(null),
+      };
+      const style = getComputedStyle(element);
+      const bounds = boundsOf(rect);
+      const visible = typeof element.checkVisibility === "function"
+        ? element.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true })
+        : style.display !== "none" && style.visibility === "visible" && Number(style.opacity) > 0;
+      const inViewport = bounds.width >= 1 && bounds.height >= 1
+        && bounds.x >= 0 && bounds.y >= 0
+        && bounds.x + bounds.width <= innerWidth && bounds.y + bounds.height <= innerHeight;
+      const centerX = Math.max(0, Math.min(innerWidth - 1, bounds.x + bounds.width / 2));
+      const centerY = Math.max(0, Math.min(innerHeight - 1, bounds.y + bounds.height / 2));
+      const unoccluded = inViewport && document.elementsFromPoint(centerX, centerY)
+        .some((hit) => hit === element || element.contains(hit) || hit.contains(element));
+      return { visible, inViewport, unoccluded, bounds };
+    };
+    const textVisual = (element, text) => {
+      if (!(element instanceof Element)) return {
+        ...visual(null),
+        fontReady: false,
+        colorVisible: false,
+      };
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      const style = getComputedStyle(element);
+      const font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+      const colors = [style.color, style.webkitTextFillColor]
+        .filter((color) => typeof color === "string" && color.length > 0);
+      const colorVisible = colors.every((color) => color !== "transparent"
+        && !/^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/u.test(color));
+      return {
+        ...visual(element, range.getBoundingClientRect()),
+        fontReady: document.fonts.check(font, text),
+        colorVisible,
+      };
+    };
+    const utility = document.querySelector(".title-screen-utility");
+    const version = document.querySelector(".game-version-badge");
+    const actions = document.querySelector(".title-screen-actions");
+    const menu = document.querySelector(".title-main-menu[aria-label='Main menu']");
+    const labels = actions instanceof Element
+      ? [...actions.querySelectorAll(":scope > a, :scope > button")]
+      : [];
+    const buttons = menu instanceof Element
+      ? [...menu.querySelectorAll(":scope > button.title-menu-choice")]
+      : [];
+    return {
+      documentVisibility: document.visibilityState,
+      fontsStatus: document.fonts.status,
+      utility: visual(utility),
+      version: {
+        text: version?.textContent?.trim() ?? "",
+        textVisual: textVisual(version, version?.textContent?.trim() ?? ""),
+      },
+      labels: labels.map((element) => ({
+        text: element.textContent?.trim() ?? "",
+        textVisual: textVisual(element, element.textContent?.trim() ?? ""),
+      })),
+      menu: visual(menu),
+      buttons: buttons.map((button) => {
+        const strong = button.querySelector(":scope > strong");
+        const small = button.querySelector(":scope > small");
+        return {
+          label: strong?.textContent?.trim() ?? "",
+          disabled: button instanceof HTMLButtonElement ? button.disabled : null,
+          button: visual(button),
+          strong: textVisual(strong, strong?.textContent?.trim() ?? ""),
+          small: small
+            ? { text: small.textContent?.trim() ?? "", ...textVisual(small, small.textContent?.trim() ?? "") }
+            : null,
+        };
+      }),
+      expectedLabels,
+    };
+  }, WORLDGEN_ROLLBACK_TITLE_UTILITY_LABELS);
+}
+
+async function waitForWorldgenRollbackTitleUtilityVisualReadiness(page, timeoutMilliseconds) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  let stableSamples = [];
+  let stableSignature = null;
+  let lastObservation = null;
+  let lastError = "No title utility visual observation completed.";
+  while (Date.now() < deadline) {
+    lastObservation = await observeWorldgenRollbackTitleUtilityVisuals(page);
+    try {
+      assertWorldgenRollbackTitleUtilityVisualReadiness({
+        schema: 1,
+        samples: [lastObservation, lastObservation, lastObservation],
+      });
+      const signature = worldgenRollbackTitleUtilitySignature(lastObservation);
+      if (signature === stableSignature) stableSamples.push(lastObservation);
+      else {
+        stableSignature = signature;
+        stableSamples = [lastObservation];
+      }
+      if (stableSamples.length >= WORLDGEN_ROLLBACK_TITLE_UTILITY_STABLE_SAMPLES) {
+        return assertWorldgenRollbackTitleUtilityVisualReadiness({
+          schema: 1,
+          samples: stableSamples.slice(-WORLDGEN_ROLLBACK_TITLE_UTILITY_STABLE_SAMPLES),
+        });
+      }
+    } catch (error) {
+      stableSamples = [];
+      stableSignature = null;
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await page.waitForTimeout(80);
+  }
+  const error = new Error(`Rollback title utility did not become visually ready: ${lastError}`);
+  error.titleUtilityVisualReadinessEvidence = {
+    schema: 1,
+    expectedLabels: WORLDGEN_ROLLBACK_TITLE_UTILITY_LABELS,
+    requiredStableSamples: WORLDGEN_ROLLBACK_TITLE_UTILITY_STABLE_SAMPLES,
+    lastObservation,
+  };
+  throw error;
+}
+
+function decodeRollbackScreenshot(buffer) {
+  const source = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer);
+  const signature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  assertCondition(source.subarray(0, signature.length).equals(signature), "Rollback screenshot is not a PNG.");
+  let width = 0;
+  let height = 0;
+  let channels = 0;
+  const compressed = [];
+  let offset = signature.length;
+  while (offset + 12 <= source.length) {
+    const length = source.readUInt32BE(offset);
+    const type = source.toString("ascii", offset + 4, offset + 8);
+    const dataStart = offset + 8;
+    const dataEnd = dataStart + length;
+    assertCondition(dataEnd + 4 <= source.length, "Rollback screenshot PNG chunk is truncated.");
+    const data = source.subarray(dataStart, dataEnd);
+    if (type === "IHDR") {
+      assertCondition(length === 13, "Rollback screenshot PNG header is malformed.");
+      width = data.readUInt32BE(0);
+      height = data.readUInt32BE(4);
+      assertCondition(data[8] === 8 && (data[9] === 2 || data[9] === 6) && data[10] === 0 && data[11] === 0 && data[12] === 0,
+        "Rollback screenshot PNG uses an unsupported pixel format.");
+      channels = data[9] === 6 ? 4 : 3;
+    } else if (type === "IDAT") compressed.push(data);
+    offset = dataEnd + 4;
+    if (type === "IEND") break;
+  }
+  assertCondition(width > 0 && height > 0 && channels === 3, "Rollback screenshot PNG pixels are absent.");
+  const rowBytes = width * channels;
+  const inflated = inflateSync(Buffer.concat(compressed));
+  assertCondition(inflated.length >= height * (rowBytes + 1), "Rollback screenshot PNG pixel data is truncated.");
+  const pixels = Buffer.alloc(height * rowBytes);
+  const paeth = (left, up, upperLeft) => {
+    const estimate = left + up - upperLeft;
+    const leftDistance = Math.abs(estimate - left);
+    const upDistance = Math.abs(estimate - up);
+    const upperLeftDistance = Math.abs(estimate - upperLeft);
+    if (leftDistance <= upDistance && leftDistance <= upperLeftDistance) return left;
+    if (upDistance <= upperLeftDistance) return up;
+    return upperLeft;
+  };
+  let inputOffset = 0;
+  for (let y = 0; y < height; y += 1) {
+    const filter = inflated[inputOffset++];
+    const rowStart = y * rowBytes;
+    const previousRowStart = (y - 1) * rowBytes;
+    for (let x = 0; x < rowBytes; x += 1) {
+      const raw = inflated[inputOffset++];
+      const left = x >= channels ? pixels[rowStart + x - channels] : 0;
+      const up = y > 0 ? pixels[previousRowStart + x] : 0;
+      const upperLeft = y > 0 && x >= channels ? pixels[previousRowStart + x - channels] : 0;
+      let value = raw;
+      if (filter === 1) value += left;
+      else if (filter === 2) value += up;
+      else if (filter === 3) value += Math.floor((left + up) / 2);
+      else if (filter === 4) value += paeth(left, up, upperLeft);
+      else assertCondition(filter === 0, `Rollback screenshot PNG filter ${filter} is unsupported.`);
+      pixels[rowStart + x] = value & 0xff;
+    }
+  }
+  return Object.freeze({ width, height, channels, pixels });
+}
+
+function rollbackScreenshotBrightPixelCount(decoded, bounds) {
+  const xStart = Math.max(0, Math.floor(bounds?.x ?? 0));
+  const yStart = Math.max(0, Math.floor(bounds?.y ?? 0));
+  const xEnd = Math.min(decoded.width, Math.ceil((bounds?.x ?? 0) + (bounds?.width ?? 0)));
+  const yEnd = Math.min(decoded.height, Math.ceil((bounds?.y ?? 0) + (bounds?.height ?? 0)));
+  let count = 0;
+  for (let y = yStart; y < yEnd; y += 1) {
+    for (let x = xStart; x < xEnd; x += 1) {
+      const offset = (y * decoded.width + x) * decoded.channels;
+      const red = decoded.pixels[offset];
+      const green = decoded.pixels[offset + 1];
+      const blue = decoded.pixels[offset + 2];
+      if (Math.min(red, green, blue) >= 180 && Math.max(red, green, blue) - Math.min(red, green, blue) <= 100) count += 1;
+    }
+  }
+  return count;
+}
+
+function assertRollbackTitleScreenshotPainted(buffer, observation) {
+  const decoded = decodeRollbackScreenshot(buffer);
+  const count = (element, label) => {
+    const pixels = rollbackScreenshotBrightPixelCount(decoded, element?.bounds);
+    assertCondition(pixels >= 3, `${label} has no painted screenshot pixels.`);
+    return pixels;
+  };
+  const counts = {
+    version: count(observation?.version?.textVisual, "Rollback version label"),
+    labels: observation?.labels?.map((label) => count(label.textVisual, `Rollback ${label.text} label`)),
+    buttons: observation?.buttons?.map((button) => ({
+      label: button.label,
+      strong: count(button.strong, `Rollback ${button.label} menu label`),
+      ...(button.small?.text ? { small: count(button.small, `Rollback ${button.label} supporting text`) } : {}),
+    })),
+  };
+  return Object.freeze({ width: decoded.width, height: decoded.height, counts });
+}
+
+async function capturePaintedRollbackTitleScreenshot(page, filePath, timeoutMilliseconds) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  let stableSignature = null;
+  let stableSamples = 0;
+  let lastEvidence = null;
+  let lastError = "No painted screenshot sample completed.";
+  while (Date.now() < deadline) {
+    try {
+      const observation = await observeWorldgenRollbackTitleUtilityVisuals(page);
+      assertWorldgenRollbackTitleUtilityVisualReadiness({ schema: 1, samples: [observation, observation, observation] });
+      const buffer = await page.screenshot({ type: "png" });
+      const painted = assertRollbackTitleScreenshotPainted(buffer, observation);
+      const signature = JSON.stringify(painted.counts);
+      if (signature === stableSignature) stableSamples += 1;
+      else {
+        stableSignature = signature;
+        stableSamples = 1;
+      }
+      lastEvidence = { observation, painted };
+      if (stableSamples >= WORLDGEN_ROLLBACK_TITLE_UTILITY_STABLE_SAMPLES) {
+        writeFileSync(filePath, buffer);
+        return Object.freeze({ schema: 1, stableSamples, ...painted });
+      }
+    } catch (error) {
+      stableSignature = null;
+      stableSamples = 0;
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await page.waitForTimeout(100);
+  }
+  const error = new Error(`Rollback title screenshot did not retain painted menu text: ${lastError}`);
+  error.titleScreenshotPaintEvidence = { schema: 1, requiredStableSamples: WORLDGEN_ROLLBACK_TITLE_UTILITY_STABLE_SAMPLES, lastEvidence };
+  throw error;
+}
+
+export async function runWorldgenRollbackBrowser(argv = process.argv, runContext = {}) {
   const options = parseWorldgenRollbackBrowserOptions(argv);
   if (options.help) return Object.freeze({ help: true, usage: usage() });
-  mkdirSync(options.outputDirectory, { recursive: true });
-  resolveWorkOutputDirectory(options.repositoryRoot, options.outputDirectory);
-  const profileDirectory = mkdtempSync(path.join(options.outputDirectory, PROFILE_PREFIX));
-  const viteRuntimeDirectory = mkdtempSync(path.join(options.outputDirectory, VITE_RUNTIME_PREFIX));
-  const artifactPrefixes = resolvePublicRustArtifactPrefixes(options.repositoryRoot);
+  const profileDirectory = { value: null };
+  const viteRuntimeDirectory = { value: null };
+  const artifactPrefixes = { value: [] };
   let playwright = null;
   let browserExecutable = null;
   const screenshots = Object.create(null);
@@ -782,6 +1150,10 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
   let page = null;
   let lastSnapshot = null;
   let result = null;
+  const injectedSetupFailureAt = runContext.injectSetupFailureAt ?? null;
+  const injectSetupFailure = (stage) => {
+    if (injectedSetupFailureAt === stage) fail(`Injected rollback setup failure after ${stage}.`);
+  };
 
   const addRuntimeErrors = (entries, label) => {
     for (const entry of entries ?? []) {
@@ -791,13 +1163,22 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
   };
 
   try {
+    mkdirSync(options.outputDirectory, { recursive: true });
+    resolveWorkOutputDirectory(options.repositoryRoot, options.outputDirectory);
+    injectSetupFailure("output-directory");
+    profileDirectory.value = mkdtempSync(path.join(options.outputDirectory, PROFILE_PREFIX));
+    injectSetupFailure("browser-profile");
+    viteRuntimeDirectory.value = mkdtempSync(path.join(options.outputDirectory, VITE_RUNTIME_PREFIX));
+    injectSetupFailure("vite-runtime");
+    artifactPrefixes.value = resolvePublicRustArtifactPrefixes(options.repositoryRoot);
+    injectSetupFailure("artifact-prefixes");
     playwright = await loadPlaywright(options.playwrightModule);
     browserExecutable = discoverBrowserExecutable(options.browserExecutable);
-    managed = await startManagedRollbackVite(options.repositoryRoot, viteRuntimeDirectory);
+    managed = await startManagedRollbackVite(options.repositoryRoot, viteRuntimeDirectory.value);
     cleanup.serverStarted = true;
     cleanup.serverClosed = false;
     cleanup.environmentRestored = false;
-    context = await playwright.module.chromium.launchPersistentContext(profileDirectory, {
+    context = await playwright.module.chromium.launchPersistentContext(profileDirectory.value, {
       headless: options.headless,
       ...(browserExecutable ? { executablePath: browserExecutable } : {}),
       viewport: { width: 1280, height: 720 },
@@ -818,7 +1199,7 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
     await installManagedCanonicalAssetRoutes(context, options.repositoryRoot, canonicalAssetRequests);
     const auditRustArtifactRequest = async (route) => {
       const requestUrl = new URL(route.request().url());
-      if (!isPublicRustArtifactRequestPath(requestUrl.pathname, artifactPrefixes)) {
+      if (!isPublicRustArtifactRequestPath(requestUrl.pathname, artifactPrefixes.value)) {
         await route.fallback();
         return;
       }
@@ -844,7 +1225,7 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
     })));
     page.on("request", (request) => {
       const url = new URL(request.url());
-      if (isPublicRustArtifactRequestPath(url.pathname, artifactPrefixes)) {
+      if (isPublicRustArtifactRequestPath(url.pathname, artifactPrefixes.value)) {
         if (!artifactRequests.some((entry) => entry.url === request.url())) artifactRequests.push(Object.freeze({
           url: request.url(), method: request.method(), resourceType: request.resourceType(), blocked: false,
         }));
@@ -972,7 +1353,18 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
 
     const capture = async (name) => {
       const filePath = path.join(options.outputDirectory, `${name}.png`);
-      await page.screenshot({ path: filePath, type: "png" });
+      if (name === "title-after-save" || name === "title-after-full-reload") {
+        // Chromium can expose complete DOM/font metrics one compositor pass before
+        // the glyph atlas appears in a screenshot. Prime that capture path, then
+        // re-prove the full menu is painted before retaining the evidence image.
+        await page.screenshot({ type: "png" });
+        await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        await waitForTerrainEditReloadTitleVisualReadiness(page, options.timeoutMilliseconds);
+        await waitForWorldgenRollbackTitleUtilityVisualReadiness(page, options.timeoutMilliseconds);
+        await capturePaintedRollbackTitleScreenshot(page, filePath, options.timeoutMilliseconds);
+      } else {
+        await page.screenshot({ path: filePath, type: "png" });
+      }
       screenshots[name] = relativeEvidencePath(options.repositoryRoot, filePath);
       return screenshots[name];
     };
@@ -1018,6 +1410,7 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
     recordSnapshotErrors(title, "title-after-save");
     assertWorldgenRollbackCheckpoint(title, "title-after-save", "title");
     assertWorldgenRollbackUi(title.ui, "title");
+    await waitForTerrainEditReloadTitleVisualReadiness(page, options.timeoutMilliseconds);
     await capture("title-after-save");
     const firstDocumentFinal = await readSnapshot();
     recordSnapshotErrors(firstDocumentFinal, "first-document-final");
@@ -1035,6 +1428,7 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
     await freshContinue.waitFor({ timeout: 120_000 });
     await page.waitForFunction(() => [...document.querySelectorAll("button")]
       .some((button) => /Continue/u.test(button.textContent ?? "") && !button.disabled), undefined, { timeout: 120_000 });
+    await waitForTerrainEditReloadTitleVisualReadiness(page, options.timeoutMilliseconds);
     await capture("title-after-full-reload");
     await freshContinue.click({ noWaitAfter: true });
     await waitForGameplay("continue-after-full-reload");
@@ -1067,8 +1461,8 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
         candidateAlias: false,
         productionRouteSearch: "",
         browserOwnership: "playwright-persistent-context",
-        browserProfileToken: path.basename(profileDirectory),
-        viteRuntimeToken: path.basename(viteRuntimeDirectory),
+        browserProfileToken: path.basename(profileDirectory.value),
+        viteRuntimeToken: path.basename(viteRuntimeDirectory.value),
         browserExecutable: browserExecutable ?? "playwright-managed",
         playwrightSource: playwright.source,
       },
@@ -1089,7 +1483,7 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
       noRustGeneration,
       persistence,
       workerAudits: documentAudits,
-      artifactPrefixes,
+      artifactPrefixes: artifactPrefixes.value,
       artifactRequests,
       managedCanonicalAssetRequests: canonicalAssetRequests,
       checkpoints: {
@@ -1134,7 +1528,7 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
       state: lastSnapshot?.state ?? null,
       ui: lastSnapshot?.ui ?? null,
       workerAudits: documentAudits,
-      artifactPrefixes,
+      artifactPrefixes: artifactPrefixes.value,
       artifactRequests,
       managedCanonicalAssetRequests: canonicalAssetRequests,
       screenshots,
@@ -1166,18 +1560,22 @@ export async function runWorldgenRollbackBrowser(argv = process.argv) {
         runtimeErrors.push(`environment cleanup: ${error instanceof Error ? error.message : String(error)}`);
       }
     }
-    if (cleanup.serverClosed) {
+    if (!viteRuntimeDirectory.value) {
+      cleanup.viteRuntimeRemoved = true;
+    } else if (cleanup.serverClosed) {
       try {
-        cleanup.viteRuntimeRemoved = removeOwnedRuntimeDirectory(options.outputDirectory, viteRuntimeDirectory);
+        cleanup.viteRuntimeRemoved = removeOwnedRuntimeDirectory(options.outputDirectory, viteRuntimeDirectory.value);
       } catch (error) {
         runtimeErrors.push(`Vite runtime cleanup: ${error instanceof Error ? error.message : String(error)}`);
       }
     } else {
       runtimeErrors.push("Vite runtime cleanup refused because the exact owned server did not close.");
     }
-    if (cleanup.browserClosed) {
+    if (!profileDirectory.value) {
+      cleanup.profileRemoved = true;
+    } else if (cleanup.browserClosed) {
       try {
-        cleanup.profileRemoved = removeOwnedProfile(options.outputDirectory, profileDirectory);
+        cleanup.profileRemoved = removeOwnedProfile(options.outputDirectory, profileDirectory.value);
       } catch (error) {
         runtimeErrors.push(`profile cleanup: ${error instanceof Error ? error.message : String(error)}`);
       }

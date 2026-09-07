@@ -5,12 +5,37 @@ import { isDirectInvocation } from "./rust-engine-common.mjs";
 import {
   assertRustTerrainCheckpoint, assertTerrainEditBrowserErrorStreams, assertTerrainEditCleanupEvidence,
   canonicalSavedEdits, parseTerrainEditBrowserOptions, proveReloadedTerrainRay, REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH,
+  R11_LOCATOR_CANDIDATE_ARTIFACT_HASH, R11_LOCATOR_CANDIDATE_SOURCE_DIGEST,
+  R11_LOCATOR_CANDIDATE_SOURCE_FILE_COUNT, R11_LOCATOR_CANDIDATE_WASM_BYTES,
+  R11_LOCATOR_CANDIDATE_WASM_SHA256, R13_BROWSER_CANDIDATE_ARTIFACT_HASH,
+  R13_BROWSER_CANDIDATE_SOURCE_DIGEST, R13_BROWSER_CANDIDATE_SOURCE_FILE_COUNT,
+  R13_BROWSER_CANDIDATE_WASM_BYTES, R13_BROWSER_CANDIDATE_WASM_SHA256,
   runManagedRustTerrainBrowserScenario, terrainRayCells,
 } from "./verify-rust-terrain-edit-reload-browser.mjs";
 import { assessRustMultiplayerVisualTerrainReadiness, waitForRustMultiplayerVisualTerrainReadiness } from "./verify-rust-multiplayer-browser.mjs";
 
 export const R3_OLD_SAVE_GATE = "blockwild-rust-r3-old-save-browser-v1";
 export const R3_OLD_SAVE_AUTHORITY = "rust-terrain-generation-plus-typescript-historical-save-compatibility-only";
+export const R7_SCHEMA_CANDIDATE_OLD_SAVE_GATE = "blockwild-rust-r3-old-save-browser-r7-preview-v1";
+export const R7_SCHEMA_CANDIDATE_OLD_SAVE_STATUS = "preview-passed";
+export const R11_LOCATOR_CANDIDATE_OLD_SAVE_GATE = "blockwild-rust-r3-old-save-browser-r11-preview-v1";
+export const R11_LOCATOR_CANDIDATE_OLD_SAVE_STATUS = "preview-passed";
+export const R11_LOCATOR_CANDIDATE_OLD_SAVE_PINS = Object.freeze({
+  artifactHash: R11_LOCATOR_CANDIDATE_ARTIFACT_HASH,
+  sourceDigest: R11_LOCATOR_CANDIDATE_SOURCE_DIGEST,
+  sourceFileCount: R11_LOCATOR_CANDIDATE_SOURCE_FILE_COUNT,
+  wasmBytes: R11_LOCATOR_CANDIDATE_WASM_BYTES,
+  wasmSha256: R11_LOCATOR_CANDIDATE_WASM_SHA256,
+});
+export const R13_BROWSER_CANDIDATE_OLD_SAVE_GATE = "blockwild-rust-r3-old-save-browser-r13-preview-v1";
+export const R13_BROWSER_CANDIDATE_OLD_SAVE_STATUS = "preview-passed";
+export const R13_BROWSER_CANDIDATE_OLD_SAVE_PINS = Object.freeze({
+  artifactHash: R13_BROWSER_CANDIDATE_ARTIFACT_HASH,
+  sourceDigest: R13_BROWSER_CANDIDATE_SOURCE_DIGEST,
+  sourceFileCount: R13_BROWSER_CANDIDATE_SOURCE_FILE_COUNT,
+  wasmBytes: R13_BROWSER_CANDIDATE_WASM_BYTES,
+  wasmSha256: R13_BROWSER_CANDIDATE_WASM_SHA256,
+});
 export const R3_OLD_SAVE_FIXTURES = Object.freeze([
   Object.freeze({ id: "g16-omitted-settlement-pattern", filename: "g16-omitted-settlement-pattern.blockwild.json", generatorVersion: 16,
     bytes: 2136, sha256: "e9541ff6ff649d9b22b8c5641c93072a0e6729bf71aa5125bece9ab67b08926b" }),
@@ -424,13 +449,33 @@ async function runHistoricalScenario(harness, fixture) {
 
 export function parseOldSaveBrowserOptions(argv = process.argv, context = {}) {
   const options = parseTerrainEditBrowserOptions(argv, context);
-  if (!options.help) invariant(path.resolve(options.engineDirectory) === path.join(options.repositoryRoot, "public", "engine"),
-    "historical-save acceptance requires canonical public/engine, never an alias candidate");
+  if (!options.help) {
+    const relativeDirectory = path.relative(options.repositoryRoot, options.engineDirectory).replaceAll(path.sep, "/");
+    invariant(["public/engine", "public/engine-schema-candidate", "public/engine-locator-candidate", "public/engine-r11-browser-candidate"].includes(relativeDirectory),
+      "historical-save acceptance requires canonical public/engine, the exact public/engine-schema-candidate, the exact public/engine-locator-candidate, or the exact public/engine-r11-browser-candidate");
+  }
   return options;
+}
+export function oldSaveBrowserEvidenceMode(options) {
+  const relativeDirectory = path.relative(options.repositoryRoot, options.engineDirectory).replaceAll(path.sep, "/");
+  const candidatePreview = relativeDirectory !== "public/engine";
+  const locatorCandidate = relativeDirectory === "public/engine-locator-candidate";
+  const browserCandidate = relativeDirectory === "public/engine-r11-browser-candidate";
+  return Object.freeze({
+    candidatePreview,
+    gate: browserCandidate ? R13_BROWSER_CANDIDATE_OLD_SAVE_GATE
+      : locatorCandidate ? R11_LOCATOR_CANDIDATE_OLD_SAVE_GATE
+      : candidatePreview ? R7_SCHEMA_CANDIDATE_OLD_SAVE_GATE : R3_OLD_SAVE_GATE,
+    authorityClaim: candidatePreview ? "none" : R3_OLD_SAVE_AUTHORITY,
+    successStatus: browserCandidate ? R13_BROWSER_CANDIDATE_OLD_SAVE_STATUS
+      : locatorCandidate ? R11_LOCATOR_CANDIDATE_OLD_SAVE_STATUS
+      : candidatePreview ? R7_SCHEMA_CANDIDATE_OLD_SAVE_STATUS : "passed",
+  });
 }
 function laneArguments(options, id) {
   const args = [process.execPath, "verify-rust-r3-old-save-browser.mjs", "--repo-root", options.repositoryRoot,
-    "--engine-dir", "public/engine", "--expected-artifact-hash", REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH,
+    "--engine-dir", path.relative(options.repositoryRoot, options.engineDirectory).replaceAll(path.sep, "/"),
+    "--expected-artifact-hash", options.expectedArtifactHash,
     "--output", path.join(options.outputDirectory, id), "--timeout-ms", String(options.timeoutMilliseconds)];
   if (!options.headless) args.push("--headed");
   if (options.playwrightModule) args.push("--playwright-module", options.playwrightModule);
@@ -440,6 +485,7 @@ function laneArguments(options, id) {
 export async function runOldSaveBrowser(argv = process.argv) {
   const options = parseOldSaveBrowserOptions(argv);
   if (options.help) return { help: true, usage: usage() };
+  const evidenceMode = oldSaveBrowserEvidenceMode(options);
   const fixtures = R3_OLD_SAVE_FIXTURES.map(descriptor => readHistoricalSaveFixture(options.repositoryRoot, descriptor));
   const sources = sourceSnapshot(options.repositoryRoot);
   if (existsSync(options.outputDirectory)) invariant(!lstatSync(options.outputDirectory).isSymbolicLink()
@@ -449,7 +495,7 @@ export async function runOldSaveBrowser(argv = process.argv) {
   try {
     for (const fixture of fixtures) {
       const result = await runManagedRustTerrainBrowserScenario(laneArguments(options, fixture.descriptor.id), {
-        gate: R3_OLD_SAVE_GATE, authorityClaim: R3_OLD_SAVE_AUTHORITY, observeHistoricalSave: true,
+        gate: evidenceMode.gate, authorityClaim: evidenceMode.authorityClaim, observeHistoricalSave: true,
         run: harness => runHistoricalScenario(harness, fixture),
       });
       lanes.push(result);
@@ -467,8 +513,9 @@ export async function runOldSaveBrowser(argv = process.argv) {
   } catch (failure) { error ??= failure instanceof Error ? failure.message : String(failure); }
   const passed = error === null && sourceFixturesUnchanged && guardedSourcesUnchanged
     && lanes.length === fixtures.length && lanes.every(lane => lane.status === "passed");
-  const result = { schema: 1, gate: R3_OLD_SAVE_GATE, status: passed ? "passed" : "failed", createdAt: new Date().toISOString(),
-    authorityClaim: passed ? R3_OLD_SAVE_AUTHORITY : "none", sourceFixturesUnchanged, guardedSourcesUnchanged, guardedSources: sources,
+  const result = { schema: 1, gate: evidenceMode.gate, status: passed ? evidenceMode.successStatus : "failed", createdAt: new Date().toISOString(),
+    authorityClaim: passed ? evidenceMode.authorityClaim : "none", candidatePreview: evidenceMode.candidatePreview,
+    sourceFixturesUnchanged, guardedSourcesUnchanged, guardedSources: sources,
     fixtures: fixtures.map(fixture => fixture.provenance),
     lanes, error,
     coveredBySeparateGate: ["live-persistent-terrain-cache-evict-rehydrate"],
@@ -478,11 +525,11 @@ export async function runOldSaveBrowser(argv = process.argv) {
   return { ...result, outputPath };
 }
 export function usage() {
-  return `Usage: node scripts/verify-rust-r3-old-save-browser.mjs --engine-dir public/engine --expected-artifact-hash ${REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH} --output work/rust-r3-old-saves [--repo-root .] [--timeout-ms 300000] [--headed]\nRuns both frozen synthetic g16/g17 exports through public Import, canonical Rust workers, Save/Quit, a confirmed offline Builder-to-Survival edit, hard reload and Continue. No R8 authority claim.\n`;
+  return `Usage: node scripts/verify-rust-r3-old-save-browser.mjs --engine-dir public/engine --expected-artifact-hash ${REQUIRED_TERRAIN_EDIT_ARTIFACT_HASH} --output work/rust-r3-old-saves [--repo-root .] [--timeout-ms 300000] [--headed]\nThe exact public/engine-schema-candidate, public/engine-locator-candidate, and public/engine-r11-browser-candidate paths are also accepted with their separately pinned artifact hashes. Runs both frozen synthetic g16/g17 exports through public Import, canonical Rust workers, Save/Quit, a confirmed offline Builder-to-Survival edit, hard reload and Continue. Candidate lanes are preview-only and claim no authority.\n`;
 }
 if (isDirectInvocation(import.meta.url)) {
   runOldSaveBrowser().then(result => {
     if (result.help) process.stdout.write(result.usage);
-    else { process.stdout.write(`${JSON.stringify({ status: result.status, outputPath: result.outputPath })}\n`); if (result.status !== "passed") process.exitCode = 1; }
+    else { process.stdout.write(`${JSON.stringify({ status: result.status, outputPath: result.outputPath })}\n`); if (!["passed", R7_SCHEMA_CANDIDATE_OLD_SAVE_STATUS, R11_LOCATOR_CANDIDATE_OLD_SAVE_STATUS, R13_BROWSER_CANDIDATE_OLD_SAVE_STATUS].includes(result.status)) process.exitCode = 1; }
   }).catch(error => { process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); process.exitCode = 1; });
 }

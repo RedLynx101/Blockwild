@@ -197,3 +197,11 @@ The application does not currently require D1, R2, or a server database. The emp
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before changing content or systems, and use [SECURITY.md](SECURITY.md) for vulnerability reports. Changes should preserve deterministic generation, save compatibility, host authority, bounded runtime work, canonical visual identity, and accessible UI behavior.
 
 Blockwild is open source under the [MIT License](LICENSE). Original third-party media, where present, remains subject to its recorded attribution and license.
+
+## Development workspace and cache policy
+
+The canonical development checkout is `C:\Users\NoahH\Desktop\CMU\Random\blockwild` on `main`. Bounded workers use that same checkout and branch with explicit, non-overlapping ownership; the parent owns Git/index operations, source integration, commits, and final verification. Workers use fresh minimal-context briefs by default and do not create worktrees, nested clones, branch switches, full-history forks, or competing installs/builds.
+
+Builds that share outputs are serialized. Prefer one `engine/target`; Cargo's normal target/profile/feature subdirectories may coexist, but output identity must be checked before consumption. At most one explicitly approved incompatible toolchain/configuration alternate target is allowed. Review combined target/cache storage at 20 GiB and stale material after 14 days; target output and ordinary caches are disposable, while published artifacts and verification reports remain separate retained evidence. Cleanup is path-safe and preservation-accounted, never automatic broad deletion.
+
+The source-checkout verifier's synthetic Git repositories and clean checkout are a bounded byte-preservation test exception under named `work/` output, not worker checkout provisioning; retain the report, then clean the exact generated fixture tree after independent path/link checks. The source-repair campaign remains paused, and this policy does not grant release, deployment, publication, migration-acceptance, or authority-promotion permission.

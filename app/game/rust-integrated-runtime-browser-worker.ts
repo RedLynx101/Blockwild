@@ -44,6 +44,27 @@ export type RustIntegratedRuntimeWasmExportsV2 = RustEngineWasmExports & Readonl
     sourceFormat: string,
     worldProjection: Uint8Array,
   ): RustEngineBytes;
+  blockwild_runtime_migrate_historical_external_v2(
+    handle: number,
+    control: Uint8Array,
+    proposal: Uint8Array,
+    worldProjection: Uint8Array,
+  ): RustEngineBytes;
+  blockwild_runtime_finalize_historical_external_save_v2(
+    handle: number,
+    control: Uint8Array,
+    proposal: Uint8Array,
+    expectedPriorCheckpointBytes: Uint8Array,
+  ): RustEngineBytes;
+  blockwild_runtime_hydrate_historical_external_v2(
+    handle: number,
+    control: Uint8Array,
+  ): RustEngineBytes;
+  blockwild_runtime_reconcile_historical_external_fallback_v2(
+    handle: number,
+    control: Uint8Array,
+    observation: Uint8Array,
+  ): RustEngineBytes;
   blockwild_runtime_bulk_v2(handle: number, control: Uint8Array, attachment: Uint8Array): RustEngineBytes;
   blockwild_runtime_bulk_take_attachment_v2(handle: number, transferToken: number): RustEngineBytes;
   blockwild_runtime_destroy_v2(handle: number, request: Uint8Array): RustEngineBytes;
@@ -57,6 +78,10 @@ const integratedExportNames = Object.freeze([
   "blockwild_runtime_export_save_v2",
   "blockwild_runtime_initialize_native_save_v2",
   "blockwild_runtime_migrate_legacy_v2",
+  "blockwild_runtime_migrate_historical_external_v2",
+  "blockwild_runtime_finalize_historical_external_save_v2",
+  "blockwild_runtime_hydrate_historical_external_v2",
+  "blockwild_runtime_reconcile_historical_external_fallback_v2",
   "blockwild_runtime_bulk_v2",
   "blockwild_runtime_bulk_take_attachment_v2",
   "blockwild_runtime_destroy_v2",
@@ -148,13 +173,31 @@ export class RustIntegratedRuntimeBrowserKernelV1 implements RustIntegratedRunti
     const exports = await this.load();
     const nativeInitialization = request.type === "runtime-bulk-initialize-native-save-v1";
     const legacyWorldMigration = request.type === "runtime-bulk-migrate-legacy-world-v1";
-    const translatedFinalize = nativeInitialization || legacyWorldMigration ? Object.freeze({
+    const historicalExternalMigration = request.type === "runtime-bulk-migrate-historical-external-v2";
+    const historicalExternalSave = request.type === "runtime-bulk-finalize-historical-external-save-v2";
+    const historicalExternalHydration = request.type === "runtime-bulk-hydrate-historical-external-v2";
+    const historicalExternalReconciliation = request.type === "runtime-bulk-reconcile-historical-external-fallback-v2";
+    const translatedFinalize = nativeInitialization
+      || legacyWorldMigration
+      || historicalExternalMigration
+      || historicalExternalSave
+      || historicalExternalReconciliation ? Object.freeze({
       type: "runtime-bulk-finalize-save-v1" as const,
       requestId: request.requestId,
       clientEpoch: request.clientEpoch,
       expected: request.expected,
-      stageId: nativeInitialization ? request.saveId : request.stageId,
+      stageId: nativeInitialization
+        ? request.saveId
+        : historicalExternalReconciliation
+          ? request.fallbackRecoveryId
+          : request.stageId,
       createdAt: request.createdAt,
+    }) : historicalExternalHydration ? Object.freeze({
+      type: "runtime-bulk-hydrate-recovery-v1" as const,
+      requestId: request.requestId,
+      clientEpoch: request.clientEpoch,
+      expected: request.expected,
+      recoveryId: request.recoveryId,
     }) : request;
     const encoded = encodeRustIntegratedRuntimeBulkRequestV1(translatedFinalize);
     const control = asBytes(
@@ -169,6 +212,31 @@ export class RustIntegratedRuntimeBrowserKernelV1 implements RustIntegratedRunti
             request.sourceFormat,
             request.worldProjection,
           )
+          : historicalExternalMigration
+            ? exports.blockwild_runtime_migrate_historical_external_v2(
+              this.requireHandle(),
+              encoded.control,
+              request.proposal,
+              request.worldProjection,
+            )
+            : historicalExternalSave
+              ? exports.blockwild_runtime_finalize_historical_external_save_v2(
+                this.requireHandle(),
+                encoded.control,
+                request.proposal,
+                request.expectedPriorCheckpointBytes,
+              )
+              : historicalExternalHydration
+                ? exports.blockwild_runtime_hydrate_historical_external_v2(
+                  this.requireHandle(),
+                  encoded.control,
+                )
+                : historicalExternalReconciliation
+                  ? exports.blockwild_runtime_reconcile_historical_external_fallback_v2(
+                    this.requireHandle(),
+                    encoded.control,
+                    request.observation,
+                  )
           : exports.blockwild_runtime_bulk_v2(this.requireHandle(), encoded.control, encoded.attachment),
     );
     const metadata = inspectRustIntegratedRuntimeBulkResponseAttachmentV1(control);
@@ -179,7 +247,16 @@ export class RustIntegratedRuntimeBrowserKernelV1 implements RustIntegratedRunti
       ? asBytes(exports.blockwild_runtime_bulk_take_attachment_v2(this.requireHandle(), metadata.transferToken))
       : new Uint8Array();
     if (attachment.byteLength !== metadata.attachmentLength) throw new Error("integrated runtime bulk attachment export returned the wrong byte length");
-    return decodeRustIntegratedRuntimeBulkResponseV1(control, attachment);
+    const response = decodeRustIntegratedRuntimeBulkResponseV1(control, attachment);
+    if ((historicalExternalMigration
+      || historicalExternalSave
+      || historicalExternalHydration
+      || historicalExternalReconciliation)
+      && metadata.attachmentLength === 0
+      && response.type !== "runtime-bulk-error-v1") {
+      throw new Error("historical external runtime operation omitted its attestation attachment");
+    }
+    return response;
   }
 
   dispose() {

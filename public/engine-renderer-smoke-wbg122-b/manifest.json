@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "generatedAt": "2026-09-04T06:42:28.801Z",
+  "defaultVariant": "renderer-lab",
+  "artifacts": {
+    "renderer-lab": {
+      "hash": "9a63e7cc336c21cb530a1b0305ff6280f0df00f9f5e5421ea7abbdcdd4fa4ba3",
+      "directory": "9a63e7cc336c21cb530a1b0305ff6280f0df00f9f5e5421ea7abbdcdd4fa4ba3",
+      "manifest": "9a63e7cc336c21cb530a1b0305ff6280f0df00f9f5e5421ea7abbdcdd4fa4ba3/manifest.json"
+    }
+  }
+}

@@ -14,11 +14,13 @@ use blockwild_engine::{
     CONTENT_INSTALL_RECEIPT_TYPE_V1, CONTEXT_COMMAND_CONTINUITY_RECEIPT_TYPE_V2, CONTEXT_COMMAND_CONTINUITY_TYPE_V2,
     ENTITY_AUTHORITY_EXPORT_TYPE_V1, ENTITY_AUTHORITY_IMPORT_RECEIPT_TYPE_V1, ENTITY_AUTHORITY_IMPORT_TYPE_V2,
     ENTITY_AUTHORITY_SNAPSHOT_TYPE_V2, ENTITY_COMPATIBILITY_EXPORT_TYPE_V1, ENTITY_COMPATIBILITY_IMPORT_TYPE_V1,
-    ENTITY_COMPATIBILITY_RECORD_TYPE_V1, INTEGRATED_RUNTIME_LEGACY_MIGRATION_SCHEMA_V1,
-    INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_CAPABILITY_ID_V1, INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_CAPABILITY_ID_V2,
-    IntegratedRuntimeBatchV2, IntegratedRuntimeConfigV2, IntegratedRuntimeError, IntegratedRuntimeIdentityV2,
-    IntegratedRuntimeLegacyMigrationV1, IntegratedRuntimeReceiptV2, IntegratedRuntimeRenderPresentationBindingV1,
-    IntegratedRuntimeV2, NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V1, NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V2,
+    ENTITY_COMPATIBILITY_RECORD_TYPE_V1, HISTORICAL_EXTERNAL_KNOWN_STATE_FLAGS_V2,
+    INTEGRATED_RUNTIME_LEGACY_MIGRATION_SCHEMA_V1, INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_CAPABILITY_ID_V1,
+    INTEGRATED_RUNTIME_NATIVE_BLOCK_EDIT_CAPABILITY_ID_V2, IntegratedRuntimeBatchV2, IntegratedRuntimeConfigV2,
+    IntegratedRuntimeError, IntegratedRuntimeHistoricalExternalOperationV2,
+    IntegratedRuntimeHistoricalExternalReceiptV2, IntegratedRuntimeIdentityV2, IntegratedRuntimeLegacyMigrationV1,
+    IntegratedRuntimeReceiptV2, IntegratedRuntimeRenderPresentationBindingV1, IntegratedRuntimeV2,
+    NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V1, NATIVE_BLOCK_EDIT_PROJECTION_RECEIPT_TYPE_V2,
     NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V1, NATIVE_BLOCK_EDIT_RECEIPT_TYPE_V2,
     NATIVE_DROP_PICKUP_PROJECTION_RECEIPT_TYPE_V1, NATIVE_DROP_PICKUP_RECEIPT_TYPE_V1,
     NATIVE_PLAYER_DROP_PROJECTION_RECEIPT_TYPE_V1, NATIVE_PLAYER_DROP_RECEIPT_TYPE_V1,
@@ -69,15 +71,15 @@ use blockwild_runtime_wire::{
     NETWORK_RECONNECT_TYPE_V1, NETWORK_REPLICATION_RECEIPT_TYPE_V1, NETWORK_REPLICATION_REMOVE_TYPE_V1,
     NETWORK_REPLICATION_UPSERT_TYPE_V1, NETWORK_REQUEST_TYPE_V1, NETWORK_RESPONSE_TYPE_V1,
     PERSISTENCE_COMPATIBILITY_HYDRATION_CHUNK_TYPE_V1, PERSISTENCE_DISPATCH_RECEIPT_TYPE_V1,
-    PERSISTENCE_DISPATCH_TYPE_V1, PERSISTENCE_REQUEST_TYPE_V1, PERSISTENCE_STATUS_RECEIPT_TYPE_V1,
-    RUNTIME_BULK_MAX_PENDING_V1, RUNTIME_BULK_MAX_QUEUED_BYTES_V1, RuntimeBulkEncodedV1, RuntimeBulkRequestV1,
-    RuntimeBulkResponseV1, RuntimeBulkSaveStageStateV1, RuntimeBulkStateV1, RuntimeCommandBatchV1,
-    RuntimeCommandReceiptV1, RuntimeConfigV1, RuntimeDomainOperationV1, RuntimeDomainV1, RuntimeExtractionV1,
-    RuntimeIdentityV1, RuntimeLegacyMigrationAttestationWireV1, RuntimeRequestV1, RuntimeResponseV1, RuntimeRevisionV1,
-    RuntimeStepResponseV2, SIMULATION_PLAYER_BIND_RECEIPT_TYPE_V2, SIMULATION_PLAYER_BIND_TYPE_V2, WireHash,
-    command_receipt_hash_v1, decode_bulk_request_v1, decode_request_v1, decode_step_request_v2,
-    encode_bulk_response_v1, encode_response_v1, encode_step_response_v2, extraction_checksum_v1,
-    seal_semantic_action_receipt_v2, wire_checksum_v1,
+    PERSISTENCE_DISPATCH_TYPE_V1, PERSISTENCE_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2, PERSISTENCE_REQUEST_TYPE_V1,
+    PERSISTENCE_STATUS_RECEIPT_TYPE_V1, RUNTIME_BULK_MAX_PENDING_V1, RUNTIME_BULK_MAX_QUEUED_BYTES_V1,
+    RuntimeBulkEncodedV1, RuntimeBulkRequestV1, RuntimeBulkResponseV1, RuntimeBulkSaveStageStateV1, RuntimeBulkStateV1,
+    RuntimeCommandBatchV1, RuntimeCommandReceiptV1, RuntimeConfigV1, RuntimeDomainOperationV1, RuntimeDomainV1,
+    RuntimeExtractionV1, RuntimeIdentityV1, RuntimeLegacyMigrationAttestationWireV1, RuntimeRequestV1,
+    RuntimeResponseV1, RuntimeRevisionV1, RuntimeStepResponseV2, SIMULATION_PLAYER_BIND_RECEIPT_TYPE_V2,
+    SIMULATION_PLAYER_BIND_TYPE_V2, WireHash, command_receipt_hash_v1, decode_bulk_request_v1, decode_request_v1,
+    decode_step_request_v2, encode_bulk_response_v1, encode_response_v1, encode_step_response_v2,
+    extraction_checksum_v1, seal_semantic_action_receipt_v2, wire_checksum_v1,
 };
 use blockwild_simulation::{CameraModeV1, CameraPoseV1, CameraProfileV1};
 use blockwild_types::{CanonicalHash, CanonicalHasher};
@@ -99,10 +101,11 @@ const DOMAIN_VIEW_MAX_FIELDS_V1: usize = 2_048;
 const DOMAIN_VIEW_MAX_BLOCKERS_V1: usize = 32;
 const DOMAIN_VIEW_COUNT_V1: u16 = 8;
 const AUDIO_EXTRACTION_SCHEMA_V2: u16 = 2;
+const HISTORICAL_EXTERNAL_TRANSFER_TOKEN_BASE_V2: u64 = 4_600_000_000_000_000;
 // `bounded-extraction-v1` attests the fixed, bounded extraction protocol. Live
 // BWX/BWR6 completeness remains per-envelope evidence through domain statuses
 // and `bounded-extraction-blockers-v1`; it never mutates the Ready capability set.
-const CAPABILITIES: [&str; 23] = [
+const CAPABILITIES: [&str; 25] = [
     "awaited-receipts-v1",
     "basic-dirt-action-receipt-v1",
     "bounded-entity-extraction-v1",
@@ -116,6 +119,8 @@ const CAPABILITIES: [&str; 23] = [
     "entity-compatibility-bridge-v1",
     "fixed-step-input-v1",
     "gameplay-command-v1",
+    "historical-external-save-v2",
+    "historical-external-reconciliation-v2",
     "integrated-runtime-v1",
     "network-authority-v1",
     "player-game-mode-set-v1",
@@ -152,6 +157,7 @@ struct RuntimeExtractionCursorV1 {
 #[derive(Default)]
 struct IntegratedRuntimeStoreV2 {
     next_handle: u32,
+    next_historical_transfer_token: u64,
     runtimes: BTreeMap<u32, IntegratedRuntimeV2>,
     bulk_attachments: BTreeMap<(u32, u64), Vec<u8>>,
     extraction_cursors: BTreeMap<u32, RuntimeExtractionCursorV1>,
@@ -175,6 +181,23 @@ impl IntegratedRuntimeStoreV2 {
             .retain(|(runtime_handle, _, _)| *runtime_handle != handle);
         self.runtimes.insert(handle, runtime);
         handle
+    }
+
+    fn allocate_historical_transfer_token(&mut self, handle: u32) -> u64 {
+        if self.next_historical_transfer_token < HISTORICAL_EXTERNAL_TRANSFER_TOKEN_BASE_V2 {
+            self.next_historical_transfer_token = HISTORICAL_EXTERNAL_TRANSFER_TOKEN_BASE_V2;
+        }
+        loop {
+            let token = self.next_historical_transfer_token;
+            self.next_historical_transfer_token = self
+                .next_historical_transfer_token
+                .checked_add(1)
+                .filter(|value| *value <= MAX_SAFE_U64)
+                .unwrap_or(HISTORICAL_EXTERNAL_TRANSFER_TOKEN_BASE_V2);
+            if !self.bulk_attachments.contains_key(&(handle, token)) {
+                return token;
+            }
+        }
     }
 
     fn cache_step_v2_retry(&mut self, key: (u32, u32, u32), request_hash: WireHash, response: Vec<u8>) {
@@ -364,6 +387,24 @@ pub fn blockwild_runtime_command_v2(handle: u32, request_bytes: &[u8]) -> Vec<u8
                 "command was authored against an obsolete integrated authority identity",
                 current,
             )
+        } else if batch.actor_id == "runtime-content-installer"
+            && batch.operations.len() == 1
+            && batch.operations[0].domain == RuntimeDomainV1::Gameplay
+            && batch.operations[0].type_id == CONTENT_INSTALL_PAGE_TYPE_V1
+        {
+            let mut candidate = runtime.clone();
+            match candidate.execute_runtime_content_installer_command(&batch) {
+                Ok(receipt) => {
+                    store.runtimes.insert(handle, candidate);
+                    return encode(RuntimeResponseV1::CommandReceipt {
+                        request_id,
+                        client_epoch,
+                        worker_epoch: WORKER_EPOCH,
+                        receipt,
+                    });
+                }
+                Err(error) => rejected_command_receipt(&batch, &error.code, error.message, current),
+            }
         } else {
             match dispatch_command(&runtime, &batch) {
                 Ok((mut candidate, domain_receipts)) => {
@@ -1363,6 +1404,323 @@ pub fn blockwild_runtime_migrate_legacy_v2(
             }
         };
         encode_bulk_control(handle, response, &mut store.bulk_attachments)
+    })
+}
+
+/// Op 11. The normal FinalizeSave control envelope carries identity, stage,
+/// and timestamp only. BWHP and BWAS remain distinct bounded arguments so the
+/// browser cannot smuggle a pre-bound BWHE native fingerprint set.
+#[wasm_bindgen]
+#[must_use]
+pub fn blockwild_runtime_migrate_historical_external_v2(
+    handle: u32,
+    control_bytes: &[u8],
+    proposal_bytes: &[u8],
+    world_projection_bytes: &[u8],
+) -> Vec<u8> {
+    let Ok(request) = decode_bulk_request_v1(control_bytes, &[]) else {
+        return Vec::new();
+    };
+    let RuntimeBulkRequestV1::FinalizeSave {
+        request_id,
+        client_epoch,
+        expected,
+        stage_id,
+        created_at,
+    } = request
+    else {
+        return Vec::new();
+    };
+    INTEGRATED_RUNTIMES.with(|store| {
+        let mut store = store.borrow_mut();
+        let transfer_token = store.allocate_historical_transfer_token(handle);
+        let IntegratedRuntimeStoreV2 {
+            runtimes,
+            bulk_attachments,
+            ..
+        } = &mut *store;
+        match runtimes.get_mut(&handle) {
+            None => encode_bulk_control(
+                handle,
+                RuntimeBulkResponseV1::Error {
+                    request_id,
+                    client_epoch,
+                    worker_epoch: WORKER_EPOCH,
+                    code: "invalid-handle".into(),
+                    message: "unknown integrated runtime handle".into(),
+                    current: None,
+                },
+                bulk_attachments,
+            ),
+            Some(runtime) => {
+                let current = RuntimeBulkStateV1::from(&wire_identity(&runtime.identity()));
+                if expected != current {
+                    encode_bulk_control(
+                        handle,
+                        RuntimeBulkResponseV1::Error {
+                            request_id,
+                            client_epoch,
+                            worker_epoch: WORKER_EPOCH,
+                            code: "stale-runtime".into(),
+                            message: "historical external migration references obsolete authority".into(),
+                            current: Some(current),
+                        },
+                        bulk_attachments,
+                    )
+                } else {
+                    encode_historical_external_operation(
+                        handle,
+                        runtime,
+                        bulk_attachments,
+                        request_id,
+                        client_epoch,
+                        transfer_token,
+                        |candidate| {
+                            candidate.migrate_historical_external_v2(
+                                &stage_id,
+                                created_at,
+                                proposal_bytes,
+                                world_projection_bytes,
+                            )
+                        },
+                    )
+                }
+            }
+        }
+    })
+}
+
+/// Op 12. Advances one durable BWHE head using the exact browser BWHP CAS
+/// proposal, separately staged opaque successor document, and the canonical
+/// wire bytes of the durable checkpoint it must extend.
+#[wasm_bindgen]
+#[must_use]
+pub fn blockwild_runtime_finalize_historical_external_save_v2(
+    handle: u32,
+    control_bytes: &[u8],
+    proposal_bytes: &[u8],
+    expected_prior_checkpoint_bytes: &[u8],
+) -> Vec<u8> {
+    let Ok(request) = decode_bulk_request_v1(control_bytes, &[]) else {
+        return Vec::new();
+    };
+    let RuntimeBulkRequestV1::FinalizeSave {
+        request_id,
+        client_epoch,
+        expected,
+        stage_id,
+        created_at,
+    } = request
+    else {
+        return Vec::new();
+    };
+    INTEGRATED_RUNTIMES.with(|store| {
+        let mut store = store.borrow_mut();
+        let transfer_token = store.allocate_historical_transfer_token(handle);
+        let IntegratedRuntimeStoreV2 {
+            runtimes,
+            bulk_attachments,
+            ..
+        } = &mut *store;
+        match runtimes.get_mut(&handle) {
+            None => encode_bulk_control(
+                handle,
+                RuntimeBulkResponseV1::Error {
+                    request_id,
+                    client_epoch,
+                    worker_epoch: WORKER_EPOCH,
+                    code: "invalid-handle".into(),
+                    message: "unknown integrated runtime handle".into(),
+                    current: None,
+                },
+                bulk_attachments,
+            ),
+            Some(runtime) => {
+                let current = RuntimeBulkStateV1::from(&wire_identity(&runtime.identity()));
+                if expected != current {
+                    encode_bulk_control(
+                        handle,
+                        RuntimeBulkResponseV1::Error {
+                            request_id,
+                            client_epoch,
+                            worker_epoch: WORKER_EPOCH,
+                            code: "stale-runtime".into(),
+                            message: "historical external save references obsolete authority".into(),
+                            current: Some(current),
+                        },
+                        bulk_attachments,
+                    )
+                } else {
+                    encode_historical_external_operation(
+                        handle,
+                        runtime,
+                        bulk_attachments,
+                        request_id,
+                        client_epoch,
+                        transfer_token,
+                        |candidate| {
+                            candidate.finalize_historical_external_save_v2(
+                                &stage_id,
+                                created_at,
+                                proposal_bytes,
+                                expected_prior_checkpoint_bytes,
+                            )
+                        },
+                    )
+                }
+            }
+        }
+    })
+}
+
+/// Op 13. Hydrates and attests a descriptor-bound external/native pair. It
+/// deliberately reuses only the generic HydrateRecovery control shape.
+#[wasm_bindgen]
+#[must_use]
+pub fn blockwild_runtime_hydrate_historical_external_v2(handle: u32, control_bytes: &[u8]) -> Vec<u8> {
+    let Ok(request) = decode_bulk_request_v1(control_bytes, &[]) else {
+        return Vec::new();
+    };
+    let RuntimeBulkRequestV1::HydrateRecovery {
+        request_id,
+        client_epoch,
+        expected,
+        recovery_id,
+    } = request
+    else {
+        return Vec::new();
+    };
+    INTEGRATED_RUNTIMES.with(|store| {
+        let mut store = store.borrow_mut();
+        let transfer_token = store.allocate_historical_transfer_token(handle);
+        let IntegratedRuntimeStoreV2 {
+            runtimes,
+            bulk_attachments,
+            ..
+        } = &mut *store;
+        match runtimes.get_mut(&handle) {
+            None => encode_bulk_control(
+                handle,
+                RuntimeBulkResponseV1::Error {
+                    request_id,
+                    client_epoch,
+                    worker_epoch: WORKER_EPOCH,
+                    code: "invalid-handle".into(),
+                    message: "unknown integrated runtime handle".into(),
+                    current: None,
+                },
+                bulk_attachments,
+            ),
+            Some(runtime) => {
+                let current = RuntimeBulkStateV1::from(&wire_identity(&runtime.identity()));
+                if expected != current {
+                    encode_bulk_control(
+                        handle,
+                        RuntimeBulkResponseV1::Error {
+                            request_id,
+                            client_epoch,
+                            worker_epoch: WORKER_EPOCH,
+                            code: "stale-runtime".into(),
+                            message: "historical external recovery references obsolete authority".into(),
+                            current: Some(current),
+                        },
+                        bulk_attachments,
+                    )
+                } else {
+                    encode_historical_external_operation(
+                        handle,
+                        runtime,
+                        bulk_attachments,
+                        request_id,
+                        client_epoch,
+                        transfer_token,
+                        |candidate| candidate.hydrate_historical_external_recovery_v2(&recovery_id),
+                    )
+                }
+            }
+        }
+    })
+}
+
+/// Op 14. Builds a Rust-authored BWFP repair from one exact BWHO browser
+/// observation and the already hydrated direct-parent authority. FinalizeSave
+/// supplies only expected runtime identity, fallback recovery id, and the
+/// deterministic observed-latest timestamp; BWHO remains a distinct argument.
+#[wasm_bindgen]
+#[must_use]
+pub fn blockwild_runtime_reconcile_historical_external_fallback_v2(
+    handle: u32,
+    control_bytes: &[u8],
+    observation_bytes: &[u8],
+) -> Vec<u8> {
+    let Ok(request) = decode_bulk_request_v1(control_bytes, &[]) else {
+        return Vec::new();
+    };
+    let RuntimeBulkRequestV1::FinalizeSave {
+        request_id,
+        client_epoch,
+        expected,
+        stage_id: fallback_recovery_id,
+        created_at,
+    } = request
+    else {
+        return Vec::new();
+    };
+    INTEGRATED_RUNTIMES.with(|store| {
+        let mut store = store.borrow_mut();
+        let transfer_token = store.allocate_historical_transfer_token(handle);
+        let IntegratedRuntimeStoreV2 {
+            runtimes,
+            bulk_attachments,
+            ..
+        } = &mut *store;
+        match runtimes.get_mut(&handle) {
+            None => encode_bulk_control(
+                handle,
+                RuntimeBulkResponseV1::Error {
+                    request_id,
+                    client_epoch,
+                    worker_epoch: WORKER_EPOCH,
+                    code: "invalid-handle".into(),
+                    message: "unknown integrated runtime handle".into(),
+                    current: None,
+                },
+                bulk_attachments,
+            ),
+            Some(runtime) => {
+                let current = RuntimeBulkStateV1::from(&wire_identity(&runtime.identity()));
+                if expected != current {
+                    encode_bulk_control(
+                        handle,
+                        RuntimeBulkResponseV1::Error {
+                            request_id,
+                            client_epoch,
+                            worker_epoch: WORKER_EPOCH,
+                            code: "stale-runtime".into(),
+                            message: "historical fallback reconciliation references obsolete authority".into(),
+                            current: Some(current),
+                        },
+                        bulk_attachments,
+                    )
+                } else {
+                    encode_historical_external_operation(
+                        handle,
+                        runtime,
+                        bulk_attachments,
+                        request_id,
+                        client_epoch,
+                        transfer_token,
+                        |candidate| {
+                            candidate.reconcile_historical_external_fallback_v2(
+                                &fallback_recovery_id,
+                                created_at,
+                                observation_bytes,
+                            )
+                        },
+                    )
+                }
+            }
+        }
     })
 }
 
@@ -4816,15 +5174,270 @@ fn bulk_runtime_error(
     }
 }
 
+fn encode_historical_external_receipt_v2(
+    receipt: &IntegratedRuntimeHistoricalExternalReceiptV2,
+) -> Result<Vec<u8>, IntegratedRuntimeError> {
+    let (operation_tag, operation_id, maximum_id_bytes, dispatcher_required, dirty_required) = match receipt.operation {
+        IntegratedRuntimeHistoricalExternalOperationV2::InitialMigration => (
+            1_u8,
+            receipt.stage_id.as_deref().filter(|_| receipt.recovery_id.is_none()),
+            180_usize,
+            true,
+            true,
+        ),
+        IntegratedRuntimeHistoricalExternalOperationV2::ExternalSave => (
+            2_u8,
+            receipt.stage_id.as_deref().filter(|_| receipt.recovery_id.is_none()),
+            180_usize,
+            true,
+            true,
+        ),
+        IntegratedRuntimeHistoricalExternalOperationV2::Recovery => (
+            3_u8,
+            receipt.recovery_id.as_deref().filter(|_| receipt.stage_id.is_none()),
+            256_usize,
+            false,
+            false,
+        ),
+        IntegratedRuntimeHistoricalExternalOperationV2::Reconciliation => (
+            4_u8,
+            receipt.recovery_id.as_deref().filter(|_| receipt.stage_id.is_none()),
+            256_usize,
+            true,
+            false,
+        ),
+    };
+    let operation_id = operation_id.ok_or_else(|| {
+        IntegratedRuntimeError::new(
+            "historical-external-operation-id",
+            "historical external receipt operation identity is missing or ambiguous",
+        )
+    })?;
+    let operation_id_bytes = operation_id.as_bytes();
+    if operation_id_bytes.is_empty() || operation_id_bytes.len() > maximum_id_bytes {
+        return Err(IntegratedRuntimeError::new(
+            "historical-external-operation-id",
+            "historical external receipt operation identity exceeds its wire bound",
+        ));
+    }
+    let dispatcher_request_id = receipt.dispatcher_request_id.unwrap_or_default();
+    if receipt.external_state_flags == 0
+        || receipt.external_state_flags & !HISTORICAL_EXTERNAL_KNOWN_STATE_FLAGS_V2 != 0
+        || receipt.external_document_byte_length == 0
+        || receipt.external_document_revision == 0
+        || receipt.external_chunk_count == 0
+        || receipt.external_chunk_count > 64
+        || receipt.projection_byte_length == 0
+        || receipt.projection_byte_length > 32 * 1024 * 1024
+        || dispatcher_required != (dispatcher_request_id != 0)
+        || dirty_required != (receipt.remaining_dirty_records != 0)
+        || (receipt.operation == IntegratedRuntimeHistoricalExternalOperationV2::Reconciliation)
+            != receipt.reconciliation.is_some()
+    {
+        return Err(IntegratedRuntimeError::new(
+            "historical-external-receipt",
+            "historical external receipt dimensions or persistence custody are invalid",
+        ));
+    }
+    let operation_id_length = u16::try_from(operation_id_bytes.len()).map_err(|_| {
+        IntegratedRuntimeError::new(
+            "historical-external-operation-id",
+            "historical external receipt operation identity exceeds u16",
+        )
+    })?;
+    let mut output = Vec::with_capacity(256 + operation_id_bytes.len());
+    output.extend_from_slice(b"BWHR");
+    output.extend_from_slice(&2_u16.to_le_bytes());
+    output.push(operation_tag);
+    output.push(1); // typescript-historical-save-compatibility-v1
+    output.push(0); // native player/rich-state adoption flags
+    output.push(0); // reserved
+    output.extend_from_slice(&receipt.external_state_flags.to_le_bytes());
+    output.extend_from_slice(&operation_id_length.to_le_bytes());
+    output.extend_from_slice(operation_id_bytes);
+    output.extend_from_slice(&receipt.created_at.to_le_bytes());
+    output.extend_from_slice(receipt.descriptor_hash.as_bytes());
+    output.extend_from_slice(receipt.external_document_hash.as_bytes());
+    output.extend_from_slice(&receipt.external_document_byte_length.to_le_bytes());
+    output.extend_from_slice(&receipt.external_document_revision.to_le_bytes());
+    output.extend_from_slice(&receipt.external_chunk_count.to_le_bytes());
+    output.extend_from_slice(receipt.external_chunk_set_hash.as_bytes());
+    output.extend_from_slice(receipt.projection_hash.as_bytes());
+    output.extend_from_slice(&receipt.projection_byte_length.to_le_bytes());
+    output.extend_from_slice(receipt.native_world_semantic_hash.as_bytes());
+    output.extend_from_slice(&receipt.native_world_edit_count.to_le_bytes());
+    output.extend_from_slice(&receipt.native_world_facing_count.to_le_bytes());
+    output.extend_from_slice(receipt.save_set_hash.as_bytes());
+    output.extend_from_slice(receipt.manifest_hash.as_bytes());
+    output.extend_from_slice(&dispatcher_request_id.to_le_bytes());
+    output.extend_from_slice(&receipt.remaining_dirty_records.to_le_bytes());
+    match &receipt.reconciliation {
+        None => output.push(0),
+        Some(reconciliation) => {
+            let ids = [
+                reconciliation.observed_latest_checkpoint_id.as_str(),
+                reconciliation.fallback_checkpoint_id.as_str(),
+                reconciliation.target_checkpoint_id.as_str(),
+            ];
+            if ids.iter().any(|value| value.is_empty() || value.len() > 180)
+                || reconciliation.observed_latest_journal_sequence
+                    != reconciliation.fallback_journal_sequence.saturating_add(1)
+                || reconciliation.target_journal_sequence
+                    != reconciliation.observed_latest_journal_sequence.saturating_add(1)
+            {
+                return Err(IntegratedRuntimeError::new(
+                    "historical-external-reconciliation",
+                    "historical reconciliation receipt has invalid checkpoint lineage",
+                ));
+            }
+            output.push(1);
+            output.extend_from_slice(reconciliation.observation_hash.as_bytes());
+            output.extend_from_slice(&reconciliation.expected_storage_revision.to_le_bytes());
+            for (id, hash, sequence) in [
+                (
+                    &reconciliation.observed_latest_checkpoint_id,
+                    reconciliation.observed_latest_checkpoint_hash,
+                    reconciliation.observed_latest_journal_sequence,
+                ),
+                (
+                    &reconciliation.fallback_checkpoint_id,
+                    reconciliation.fallback_checkpoint_hash,
+                    reconciliation.fallback_journal_sequence,
+                ),
+                (
+                    &reconciliation.target_checkpoint_id,
+                    reconciliation.target_checkpoint_hash,
+                    reconciliation.target_journal_sequence,
+                ),
+            ] {
+                let length = u16::try_from(id.len()).map_err(|_| {
+                    IntegratedRuntimeError::new(
+                        "historical-external-reconciliation",
+                        "historical reconciliation checkpoint id exceeds u16",
+                    )
+                })?;
+                output.extend_from_slice(&length.to_le_bytes());
+                output.extend_from_slice(id.as_bytes());
+                output.extend_from_slice(hash.as_bytes());
+                output.extend_from_slice(&sequence.to_le_bytes());
+            }
+            output.extend_from_slice(reconciliation.plan_hash.as_bytes());
+        }
+    }
+    Ok(output)
+}
+
+fn historical_external_data_response_v2(
+    request_id: u32,
+    client_epoch: u32,
+    transfer_token: u64,
+    receipt: &IntegratedRuntimeHistoricalExternalReceiptV2,
+    runtime: &IntegratedRuntimeV2,
+) -> Result<RuntimeBulkResponseV1, IntegratedRuntimeError> {
+    let payload = encode_historical_external_receipt_v2(receipt).map_err(|error| {
+        IntegratedRuntimeError::new(
+            "bulk-encode",
+            format!("historical external response encoding failed: {}", error.message),
+        )
+    })?;
+    Ok(RuntimeBulkResponseV1::Data {
+        request_id,
+        client_epoch,
+        worker_epoch: WORKER_EPOCH,
+        current: RuntimeBulkStateV1::from(&wire_identity(&runtime.identity())),
+        transfer_token,
+        type_id: PERSISTENCE_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2.into(),
+        chunk_index: 0,
+        chunk_count: 1,
+        payload,
+    })
+}
+
+fn bulk_response_current(response: &RuntimeBulkResponseV1) -> Option<RuntimeBulkStateV1> {
+    match response {
+        RuntimeBulkResponseV1::Empty { current, .. }
+        | RuntimeBulkResponseV1::PlatformRequest { current, .. }
+        | RuntimeBulkResponseV1::Completed { current, .. }
+        | RuntimeBulkResponseV1::SaveProgress { current, .. }
+        | RuntimeBulkResponseV1::Hydration { current, .. }
+        | RuntimeBulkResponseV1::Data { current, .. }
+        | RuntimeBulkResponseV1::PersistenceStatus { current, .. } => Some(current.clone()),
+        RuntimeBulkResponseV1::Error { current, .. } => current.clone(),
+    }
+}
+
+fn encode_bulk_error_value(error: RuntimeBulkResponseV1) -> Vec<u8> {
+    match encode_bulk_response_v1(&error) {
+        Ok(encoded) => encoded.control,
+        Err(_) => {
+            let fallback = RuntimeBulkResponseV1::Error {
+                request_id: error.request_id().max(1),
+                client_epoch: error.client_epoch().max(1),
+                worker_epoch: error.worker_epoch(),
+                code: "bulk-encode".into(),
+                message: "bulk response encoding failed".into(),
+                current: None,
+            };
+            encode_bulk_response_v1(&fallback)
+                .expect("bounded bulk error response must remain encodable")
+                .control
+        }
+    }
+}
+
+fn encode_historical_external_operation<F>(
+    handle: u32,
+    runtime: &mut IntegratedRuntimeV2,
+    attachments: &mut BTreeMap<(u32, u64), Vec<u8>>,
+    request_id: u32,
+    client_epoch: u32,
+    transfer_token: u64,
+    operation: F,
+) -> Vec<u8>
+where
+    F: FnOnce(&mut IntegratedRuntimeV2) -> Result<IntegratedRuntimeHistoricalExternalReceiptV2, IntegratedRuntimeError>,
+{
+    let mut candidate = runtime.clone();
+    match operation(&mut candidate) {
+        Ok(receipt) => {
+            let response = match historical_external_data_response_v2(
+                request_id,
+                client_epoch,
+                transfer_token,
+                &receipt,
+                &candidate,
+            ) {
+                Ok(response) => response,
+                Err(error) => {
+                    let response = bulk_runtime_error(request_id, client_epoch, error, runtime);
+                    return encode_bulk_control(handle, response, attachments);
+                }
+            };
+            match encode_bulk_control_result(handle, response, attachments) {
+                Ok(control) => {
+                    *runtime = candidate;
+                    control
+                }
+                Err(error) => encode_bulk_error_value(error),
+            }
+        }
+        Err(error) => {
+            let response = bulk_runtime_error(request_id, client_epoch, error, runtime);
+            encode_bulk_control(handle, response, attachments)
+        }
+    }
+}
+
 fn encode(response: RuntimeResponseV1) -> Vec<u8> {
     encode_response_v1(&response).unwrap_or_default()
 }
 
-fn encode_bulk_control(
+#[allow(clippy::result_large_err)]
+fn encode_bulk_control_result(
     handle: u32,
     response: RuntimeBulkResponseV1,
     attachments: &mut BTreeMap<(u32, u64), Vec<u8>>,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, RuntimeBulkResponseV1> {
     let attachment_metadata = match &response {
         RuntimeBulkResponseV1::PlatformRequest {
             request_id,
@@ -4850,9 +5463,15 @@ fn encode_bulk_control(
         )),
         _ => None,
     };
-    let Ok(RuntimeBulkEncodedV1 { control, attachment }) = encode_bulk_response_v1(&response) else {
-        return Vec::new();
-    };
+    let RuntimeBulkEncodedV1 { control, attachment } =
+        encode_bulk_response_v1(&response).map_err(|error| RuntimeBulkResponseV1::Error {
+            request_id: response.request_id(),
+            client_epoch: response.client_epoch(),
+            worker_epoch: response.worker_epoch(),
+            code: "bulk-encode".into(),
+            message: format!("bulk response encoding failed: {}", error.message),
+            current: bulk_response_current(&response),
+        })?;
     if let Some((request_id, client_epoch, worker_epoch, current, token)) = attachment_metadata
         && !attachment.is_empty()
     {
@@ -4880,19 +5499,29 @@ fn encode_bulk_control(
             None
         };
         if let Some((code, message)) = rejection {
-            return encode_bulk_response_v1(&RuntimeBulkResponseV1::Error {
+            return Err(RuntimeBulkResponseV1::Error {
                 request_id,
                 client_epoch,
                 worker_epoch,
                 code: code.into(),
                 message: message.into(),
                 current: Some(current),
-            })
-            .map_or_else(|_| Vec::new(), |encoded| encoded.control);
+            });
         }
         attachments.insert((handle, token), attachment);
     }
-    control
+    Ok(control)
+}
+
+fn encode_bulk_control(
+    handle: u32,
+    response: RuntimeBulkResponseV1,
+    attachments: &mut BTreeMap<(u32, u64), Vec<u8>>,
+) -> Vec<u8> {
+    match encode_bulk_control_result(handle, response, attachments) {
+        Ok(control) => control,
+        Err(error) => encode_bulk_error_value(error),
+    }
 }
 
 #[cfg(test)]
@@ -5411,6 +6040,110 @@ mod tests {
         })
         .unwrap();
         dispatch_command(&runtime, &batch).unwrap().0
+    }
+
+    #[test]
+    fn wasm_content_installer_handler_receipt_survives_checkpoint_recovery() {
+        let artifact = ContentArtifact {
+            domain: ContentDomain::Item,
+            id: "603".into(),
+            schema_id: "item-definition".into(),
+            schema_version: 1,
+            content_version: 1,
+            aliases: vec!["item:603".into()],
+            canonical_bytes: br#"{"id":603,"maxStack":64,"name":"Handler Provenance Fixture"}"#.to_vec(),
+            unknown_extension_bytes: Vec::new(),
+        };
+        let bundle = compile_content_bundle("wasm-handler-provenance-v1", vec![artifact.clone()]).unwrap();
+        let mut create = create_request(31);
+        let RuntimeRequestV1::Create { config, .. } = &mut create else {
+            unreachable!()
+        };
+        config.content_hash = WireHash(bundle.manifest.manifest_hash.0);
+        let RuntimeResponseV1::Ready {
+            runtime_handle,
+            identity,
+            ..
+        } = decode_response_v1(&blockwild_runtime_create_v2(&encode_request_v1(&create).unwrap())).unwrap()
+        else {
+            panic!("expected ready runtime")
+        };
+        let page = ContentInstallPageWireV1 {
+            install_id: format!("install:{}", bundle.manifest.manifest_hash.to_hex()),
+            manifest_schema: bundle.manifest.schema_version,
+            source_revision: bundle.manifest.source_revision,
+            manifest_hash: bundle.manifest.manifest_hash,
+            domains: bundle.manifest.domains,
+            page_index: 0,
+            page_count: 1,
+            artifacts: vec![artifact],
+        };
+        let page_bytes = encode_content_install_page_v1(&page).unwrap();
+        let batch = seal_runtime_command_batch_v1(RuntimeCommandBatchV1 {
+            command_id: "handler-content:0".into(),
+            idempotency_key: format!("{}:0", page.install_id),
+            actor_id: "runtime-content-installer".into(),
+            expected: identity,
+            operations: vec![domain_operation(
+                RuntimeDomainV1::Gameplay,
+                CONTENT_INSTALL_PAGE_TYPE_V1,
+                page_bytes,
+            )],
+            command_hash: WireHash::default(),
+        })
+        .unwrap();
+        let RuntimeResponseV1::CommandReceipt { receipt: accepted, .. } =
+            decode_response_v1(&blockwild_runtime_command_v2(
+                runtime_handle,
+                &encode_request_v1(&RuntimeRequestV1::Command {
+                    request_id: 32,
+                    client_epoch: 1,
+                    batch: batch.clone(),
+                })
+                .unwrap(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected accepted handler-path content receipt")
+        };
+        assert!(matches!(accepted, RuntimeCommandReceiptV1::Accepted { .. }));
+        let checkpoint = INTEGRATED_RUNTIMES.with(|store| {
+            store.borrow().runtimes[&runtime_handle]
+                .export_runtime_checkpoint()
+                .unwrap()
+        });
+        let checkpoint_hash = WireHash(integrated_runtime_checkpoint_hash_v1(&checkpoint).0);
+        let RuntimeResponseV1::Restored {
+            runtime_handle: restored_handle,
+            ..
+        } = decode_response_v1(&blockwild_runtime_create_v2(
+            &encode_request_v1(&RuntimeRequestV1::Restore {
+                request_id: 33,
+                client_epoch: 1,
+                expected_checkpoint_hash: checkpoint_hash,
+                checkpoint,
+            })
+            .unwrap(),
+        ))
+        .unwrap()
+        else {
+            panic!("expected checkpoint restore")
+        };
+        let RuntimeResponseV1::CommandReceipt { receipt: recovered, .. } =
+            decode_response_v1(&blockwild_runtime_command_v2(
+                restored_handle,
+                &encode_request_v1(&RuntimeRequestV1::RecoverCommand {
+                    request_id: 34,
+                    client_epoch: 1,
+                    batch,
+                })
+                .unwrap(),
+            ))
+            .unwrap()
+        else {
+            panic!("expected exact recovered content installer receipt")
+        };
+        assert_eq!(recovered, accepted);
     }
 
     fn runtime_with_bound_locator_item_v1(creative_mode: bool) -> IntegratedRuntimeV2 {
@@ -10735,6 +11468,167 @@ mod tests {
             decode_bulk_response_v1(&control, &[0x80, 0xff]).unwrap(),
             RuntimeBulkResponseV1::Data { transfer_token: 44, .. }
         ));
+    }
+
+    #[test]
+    fn historical_special_export_response_round_trips_and_retains_exact_attachment() {
+        let runtime = checked_r9_fixture_runtime("historical-wire-response");
+        let receipt = IntegratedRuntimeHistoricalExternalReceiptV2 {
+            operation: IntegratedRuntimeHistoricalExternalOperationV2::InitialMigration,
+            stage_id: Some("historical-stage".into()),
+            recovery_id: None,
+            created_at: 11,
+            external_state_flags: 1,
+            descriptor_hash: CanonicalHash([1; 16]),
+            external_document_hash: CanonicalHash([2; 16]),
+            external_document_byte_length: 1,
+            external_document_revision: 1,
+            external_chunk_count: 1,
+            external_chunk_set_hash: CanonicalHash([3; 16]),
+            projection_hash: CanonicalHash([4; 16]),
+            projection_byte_length: 1,
+            native_world_semantic_hash: CanonicalHash([5; 16]),
+            native_world_edit_count: 1,
+            native_world_facing_count: 1,
+            save_set_hash: CanonicalHash([6; 16]),
+            manifest_hash: CanonicalHash([7; 16]),
+            dispatcher_request_id: Some(1),
+            remaining_dirty_records: 1,
+            reconciliation: None,
+        };
+        let response = historical_external_data_response_v2(41, 2, 77, &receipt, &runtime).unwrap();
+        let mut attachments = BTreeMap::new();
+        let control = encode_bulk_control(9, response, &mut attachments);
+        let attachment = attachments.remove(&(9, 77)).expect("historical attachment retained");
+        assert!((64..=16 * 1024).contains(&control.len()));
+        assert!(!attachment.is_empty());
+        assert_eq!(&attachment[..4], b"BWHR");
+        let RuntimeBulkResponseV1::Data {
+            type_id,
+            transfer_token,
+            chunk_index,
+            chunk_count,
+            payload,
+            ..
+        } = decode_bulk_response_v1(&control, &attachment).expect("historical response wire round trip")
+        else {
+            panic!("historical special export must return data")
+        };
+        assert_eq!(type_id, PERSISTENCE_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2);
+        assert_eq!(transfer_token, 77);
+        assert_eq!((chunk_index, chunk_count), (0, 1));
+        assert_eq!(payload, attachment);
+    }
+
+    #[test]
+    fn public_historical_special_export_apis_use_bounded_error_controls() {
+        let make_runtime = |session_id: &str| {
+            let runtime = checked_r9_fixture_runtime(session_id);
+            insert_test_runtime(runtime)
+        };
+        let (migrate_handle, migrate_identity) = make_runtime("historical-public-migrate");
+        let (finalize_handle, finalize_identity) = make_runtime("historical-public-finalize");
+        let (hydrate_handle, hydrate_identity) = make_runtime("historical-public-hydrate");
+        let (reconcile_handle, reconcile_identity) = make_runtime("historical-public-reconcile");
+        let finalize_request = |request_id: u32, expected: RuntimeIdentityV1| {
+            encode_bulk_request_v1(&RuntimeBulkRequestV1::FinalizeSave {
+                request_id,
+                client_epoch: 1,
+                expected: RuntimeBulkStateV1::from(&expected),
+                stage_id: "missing-stage".into(),
+                created_at: 1,
+            })
+            .unwrap()
+            .control
+        };
+        let hydrate_request = |request_id: u32, expected: RuntimeIdentityV1| {
+            encode_bulk_request_v1(&RuntimeBulkRequestV1::HydrateRecovery {
+                request_id,
+                client_epoch: 1,
+                expected: RuntimeBulkStateV1::from(&expected),
+                recovery_id: "missing-recovery".into(),
+            })
+            .unwrap()
+            .control
+        };
+        let assert_error = |control: Vec<u8>| {
+            assert!((64..=16 * 1024).contains(&control.len()));
+            assert!(matches!(
+                decode_bulk_response_v1(&control, &[]).expect("bounded public historical error"),
+                RuntimeBulkResponseV1::Error { .. }
+            ));
+        };
+        assert_error(blockwild_runtime_migrate_historical_external_v2(
+            migrate_handle,
+            &finalize_request(101, migrate_identity),
+            b"invalid-proposal",
+            b"invalid-projection",
+        ));
+        assert_error(blockwild_runtime_finalize_historical_external_save_v2(
+            finalize_handle,
+            &finalize_request(102, finalize_identity),
+            b"invalid-proposal",
+            b"invalid-checkpoint",
+        ));
+        assert_error(blockwild_runtime_hydrate_historical_external_v2(
+            hydrate_handle,
+            &hydrate_request(103, hydrate_identity),
+        ));
+        assert_error(blockwild_runtime_reconcile_historical_external_fallback_v2(
+            reconcile_handle,
+            &finalize_request(104, reconcile_identity),
+            b"invalid-observation",
+        ));
+    }
+
+    #[test]
+    fn historical_special_export_encode_failure_is_structured_atomic_and_attachment_free() {
+        let mut runtime = checked_r9_fixture_runtime("historical-wire-atomicity");
+        let identity_before = runtime.identity();
+        let checkpoint_before = runtime.export_runtime_checkpoint().expect("baseline checkpoint");
+        let mut attachments = BTreeMap::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            encode_historical_external_operation(10, &mut runtime, &mut attachments, 42, 2, 77, |candidate| {
+                candidate
+                    .stage_compatibility_save_chunk("atomic-stage", 0, 1, 1, &[1])
+                    .map(|_| IntegratedRuntimeHistoricalExternalReceiptV2 {
+                        operation: IntegratedRuntimeHistoricalExternalOperationV2::InitialMigration,
+                        stage_id: None,
+                        recovery_id: None,
+                        created_at: 11,
+                        external_state_flags: 1,
+                        descriptor_hash: CanonicalHash([1; 16]),
+                        external_document_hash: CanonicalHash([2; 16]),
+                        external_document_byte_length: 1,
+                        external_document_revision: 1,
+                        external_chunk_count: 1,
+                        external_chunk_set_hash: CanonicalHash([3; 16]),
+                        projection_hash: CanonicalHash([4; 16]),
+                        projection_byte_length: 1,
+                        native_world_semantic_hash: CanonicalHash([5; 16]),
+                        native_world_edit_count: 1,
+                        native_world_facing_count: 1,
+                        save_set_hash: CanonicalHash([6; 16]),
+                        manifest_hash: CanonicalHash([7; 16]),
+                        dispatcher_request_id: Some(1),
+                        remaining_dirty_records: 1,
+                        reconciliation: None,
+                    })
+            })
+        }));
+        assert!(result.is_ok(), "forced wire failure must not panic");
+        let control = result.unwrap();
+        assert!(!control.is_empty());
+        assert!(matches!(
+            decode_bulk_response_v1(&control, &[]).expect("structured encode error"),
+            RuntimeBulkResponseV1::Error { code, .. } if code == "bulk-encode"
+        ));
+        assert_eq!(runtime.identity(), identity_before);
+        assert_eq!(
+            runtime.export_runtime_checkpoint().expect("post-failure checkpoint"),
+            checkpoint_before
+        );
+        assert!(attachments.is_empty(), "failed response must not retain attachment");
     }
 
     #[test]

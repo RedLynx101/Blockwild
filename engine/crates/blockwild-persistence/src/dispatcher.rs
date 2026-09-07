@@ -1,9 +1,9 @@
 //! Bounded Rust-owned persistence request dispatcher.
 
 use crate::{
-    Checkpoint, DurableCommitReceiptV1, PersistenceBrowserCommitCodeV1, PersistenceBrowserResponseV1, PersistenceError,
-    PersistencePlatformOperationV1, PersistencePlatformRequestV1, PersistencePlatformResponseV1,
-    PersistencePlatformResultCodeV1, Transaction, decode_persistence_browser_request_v1,
+    Checkpoint, DurableCommitReceiptV1, HistoricalFallbackReconciliationPlanV2, PersistenceBrowserCommitCodeV1,
+    PersistenceBrowserResponseV1, PersistenceError, PersistencePlatformOperationV1, PersistencePlatformRequestV1,
+    PersistencePlatformResponseV1, PersistencePlatformResultCodeV1, Transaction, decode_persistence_browser_request_v1,
     decode_persistence_browser_response_v1, decode_persistence_platform_request_v1,
     decode_persistence_platform_response_v1, encode_persistence_platform_request_v1,
     prepare_persistence_commit_request_v1,
@@ -367,6 +367,16 @@ impl PersistenceDispatcherV1 {
             Vec::new(),
         )?;
         self.enqueue_platform(request)
+    }
+
+    pub fn reconcile_historical_fallback(
+        &mut self,
+        plan: &HistoricalFallbackReconciliationPlanV2,
+    ) -> Result<u64, PersistenceError> {
+        let request_id = self.allocate_request_id()?;
+        self.enqueue_platform(PersistencePlatformRequestV1::reconcile_historical_fallback(
+            request_id, plan,
+        )?)
     }
 
     pub fn poll(&mut self, max_bytes: usize) -> Result<Option<PersistenceDispatchPacketV1>, PersistenceError> {
@@ -880,6 +890,7 @@ impl PersistenceDispatcherV1 {
                 | PersistencePlatformOperationV1::PreserveLegacyBackupChunk
                 | PersistencePlatformOperationV1::ImportChunk
                 | PersistencePlatformOperationV1::FinalizeImport
+                | PersistencePlatformOperationV1::ReconcileHistoricalFallback
         );
         if status == PersistenceDispatchStatusV1::Accepted && durable_mutation {
             self.persistence_revision = self.persistence_revision.saturating_add(1);
@@ -1381,6 +1392,116 @@ mod tests {
         assert_eq!(
             dispatcher.complete(packet.transfer_token, &correct).unwrap().status,
             PersistenceDispatchStatusV1::Accepted
+        );
+    }
+
+    #[test]
+    fn historical_reconciliation_acknowledgement_must_exactly_bind_the_active_repair_intent() {
+        let mut dispatcher = PersistenceDispatcherV1::new(PersistenceDispatcherLimitsV1::default()).unwrap();
+        let target = hash(7);
+        let request = PersistencePlatformRequestV1::new(
+            1,
+            PersistencePlatformOperationV1::ReconcileHistoricalFallback,
+            "world",
+            target.to_hex(),
+            Some(hash(6)),
+            5,
+            1,
+            1,
+            vec![0x42],
+        )
+        .unwrap();
+        dispatcher.enqueue_platform(request).unwrap();
+        let packet = dispatcher.poll(1024).unwrap().unwrap();
+
+        let invalid = [
+            PersistencePlatformResponseV1 {
+                request_id: 1,
+                operation: PersistencePlatformOperationV1::ReconcileHistoricalFallback,
+                code: PersistencePlatformResultCodeV1::Accepted,
+                storage_revision: 5,
+                durable_hash: target,
+                next_cursor: None,
+                payload: Vec::new(),
+                message: "stale revision".into(),
+            },
+            PersistencePlatformResponseV1 {
+                request_id: 1,
+                operation: PersistencePlatformOperationV1::ReconcileHistoricalFallback,
+                code: PersistencePlatformResultCodeV1::Accepted,
+                storage_revision: 6,
+                durable_hash: hash(8),
+                next_cursor: None,
+                payload: Vec::new(),
+                message: "forged target".into(),
+            },
+            PersistencePlatformResponseV1 {
+                request_id: 1,
+                operation: PersistencePlatformOperationV1::ReconcileHistoricalFallback,
+                code: PersistencePlatformResultCodeV1::Accepted,
+                storage_revision: 6,
+                durable_hash: target,
+                next_cursor: Some(1),
+                payload: Vec::new(),
+                message: "gapped cursor".into(),
+            },
+            PersistencePlatformResponseV1 {
+                request_id: 1,
+                operation: PersistencePlatformOperationV1::ReconcileHistoricalFallback,
+                code: PersistencePlatformResultCodeV1::Accepted,
+                storage_revision: 6,
+                durable_hash: target,
+                next_cursor: None,
+                payload: vec![0x01],
+                message: "partial payload".into(),
+            },
+            PersistencePlatformResponseV1 {
+                request_id: 1,
+                operation: PersistencePlatformOperationV1::ReconcileHistoricalFallback,
+                code: PersistencePlatformResultCodeV1::Conflict,
+                storage_revision: 0,
+                durable_hash: target,
+                next_cursor: None,
+                payload: Vec::new(),
+                message: "forged rejection attestation".into(),
+            },
+        ];
+        for response in invalid {
+            let bytes = encode_persistence_platform_response_v1(&response).unwrap();
+            assert_eq!(
+                dispatcher.complete(packet.transfer_token, &bytes).unwrap_err().code,
+                "platform-response"
+            );
+            assert_eq!(
+                dispatcher.pending_count(),
+                1,
+                "invalid acknowledgement keeps the repair intent in flight"
+            );
+            assert_eq!(
+                dispatcher.persistence_revision(),
+                0,
+                "invalid acknowledgement cannot promote authority"
+            );
+        }
+
+        let accepted = encode_persistence_platform_response_v1(&PersistencePlatformResponseV1 {
+            request_id: 1,
+            operation: PersistencePlatformOperationV1::ReconcileHistoricalFallback,
+            code: PersistencePlatformResultCodeV1::Accepted,
+            storage_revision: 6,
+            durable_hash: target,
+            next_cursor: None,
+            payload: Vec::new(),
+            message: "exact repair acknowledgement".into(),
+        })
+        .unwrap();
+        let outcome = dispatcher.complete(packet.transfer_token, &accepted).unwrap();
+        assert_eq!(outcome.status, PersistenceDispatchStatusV1::Accepted);
+        assert_eq!(dispatcher.persistence_revision(), 1);
+        assert_eq!(
+            dispatcher.complete(packet.transfer_token, &accepted).unwrap(),
+            outcome,
+            "the exact duplicate is idempotent"
         );
     }
 

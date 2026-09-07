@@ -40,6 +40,7 @@ export const RUST_PERSISTENCE_PLATFORM_OPERATIONS_V1 = Object.freeze({
   "export-page": 10,
   "import-chunk": 11,
   "finalize-import": 12,
+  "reconcile-historical-fallback": 13,
 } as const);
 
 export type RustPersistencePlatformOperationV1 = keyof typeof RUST_PERSISTENCE_PLATFORM_OPERATIONS_V1;
@@ -188,6 +189,12 @@ function validatePlatformRequestV1(request: RustPersistencePlatformRequestV1) {
         throw new RustPersistenceRuntimeContractError("platform-shape", "finalize-import request is malformed");
       }
       break;
+    case "reconcile-historical-fallback":
+      if (!/^[0-9a-f]{32}$/u.test(request.objectId) || empty || request.expectedHeadHash === null
+        || request.limit < 1 || request.totalBytes !== request.payload.byteLength) {
+        throw new RustPersistenceRuntimeContractError("platform-shape", "historical fallback reconciliation request is malformed");
+      }
+      break;
   }
 }
 
@@ -289,7 +296,7 @@ function decodeRustTransactionV1(wire: Uint8Array) {
   return transaction;
 }
 
-function decodeRustCheckpointV1(wire: Uint8Array) {
+export function decodeRustPersistenceCheckpointWireV1(wire: Uint8Array) {
   const outer = unwrap(wire, PERSISTENCE_WIRE_MAGIC, "blockwild-persistence-wire-v1", PERSISTENCE_WIRE_HEADER_BYTES);
   if (outer.schema !== PERSISTENCE_SCHEMA_V1 || outer.kind !== 2) throw new RustPersistenceRuntimeContractError("kind", "browser request did not contain a Rust checkpoint");
   const reader = new Reader(outer.payload);
@@ -318,12 +325,12 @@ export function decodeRustPersistenceRequestV1(message: Uint8Array): RustPersist
   let result: RustPersistenceRequestV1;
   if (outer.kind === 1) {
     const transaction = decodeRustTransactionV1(reader.bytes(PERSISTENCE_MAX_TRANSACTION_BYTES_V1 + 1024 * 1024));
-    const checkpoint = decodeRustCheckpointV1(reader.bytes(RUST_PERSISTENCE_BROWSER_MAX_WIRE_BYTES_V1));
+    const checkpoint = decodeRustPersistenceCheckpointWireV1(reader.bytes(RUST_PERSISTENCE_BROWSER_MAX_WIRE_BYTES_V1));
     if (transaction.worldId !== checkpoint.worldId || transaction.nextJournalSequence !== checkpoint.journalSequence) throw new RustPersistenceRuntimeContractError("commit", "transaction and checkpoint do not share one durable head");
     result = Object.freeze({ kind: "commit", requestId: outer.requestId, transaction, checkpoint });
   } else if (outer.kind === 2) result = Object.freeze({ kind: "recover-latest", requestId: outer.requestId, worldId: reader.string() });
   else if (outer.kind === 3) result = Object.freeze({ kind: "read-checkpoint", requestId: outer.requestId, worldId: reader.string(), checkpointId: reader.string() });
-  else if (outer.kind >= 4 && outer.kind <= 12) {
+  else if (outer.kind >= 4 && outer.kind <= 13) {
     const operation = platformOperation(outer.kind);
     const worldId = reader.string();
     const objectId = reader.string();
@@ -382,6 +389,15 @@ function validatePlatformResponsePayloadV1(operation: RustPersistencePlatformOpe
   );
 }
 
+function validatePlatformResponseV1(response: Extract<RustPersistenceResponseV1, { kind: "platform" }>) {
+  validatePlatformResponsePayloadV1(response.operation, response.payload);
+  if (response.code !== "accepted"
+    && (response.storageRevision !== 0 || response.durableHash !== ZERO_HASH
+      || response.payload.byteLength !== 0 || response.nextCursor !== null)) {
+    throw new RustPersistenceRuntimeContractError("platform-response", "rejected platform operation attempted to advance or attest durable state");
+  }
+}
+
 export function encodeRustPersistenceResponseV1(response: RustPersistenceResponseV1) {
   const payload = new Writer(); let kind: number;
   if (response.kind === "commit") {
@@ -396,9 +412,8 @@ export function encodeRustPersistenceResponseV1(response: RustPersistenceRespons
     payload.u32(response.corruptRecordKeys.length); for (const key of response.corruptRecordKeys) payload.string(key);
     payload.string(response.message);
   } else if (response.kind === "platform") {
-    validatePlatformResponsePayloadV1(response.operation, response.payload);
-    if (response.code !== "accepted" && response.storageRevision !== 0) throw new RustPersistenceRuntimeContractError("platform-response", "rejected platform operation attempted to advance storage revision");
-    if (response.code === "accepted" && ["compact", "delete-world", "preserve-legacy-backup-chunk", "import-chunk", "finalize-import"].includes(response.operation) && response.durableHash === ZERO_HASH) {
+    validatePlatformResponseV1(response);
+    if (response.code === "accepted" && ["compact", "delete-world", "preserve-legacy-backup-chunk", "import-chunk", "finalize-import", "reconcile-historical-fallback"].includes(response.operation) && response.durableHash === ZERO_HASH) {
       throw new RustPersistenceRuntimeContractError("platform-response", "accepted durable mutation returned a zero durable hash");
     }
     kind = 110;
@@ -422,7 +437,7 @@ export function decodeRustPersistenceResponseV1(message: Uint8Array): RustPersis
     result = Object.freeze({ kind: "commit", requestId: outer.requestId, code, transactionId: reader.string(), journalSequence: reader.u64(), durableHash: reader.hash(), checkpointHash: reader.hash(), verifiedReadback: reader.flag(), message: reader.string() });
   } else if (outer.kind === 102) {
     const code = RECOVERY_CODES[reader.u8() - 1]; if (!code) throw new RustPersistenceRuntimeContractError("status", "unknown recovery result status");
-    const worldId = reader.string(); const checkpoint = reader.flag() ? decodeRustCheckpointV1(reader.bytes()) : null; const count = reader.u32();
+    const worldId = reader.string(); const checkpoint = reader.flag() ? decodeRustPersistenceCheckpointWireV1(reader.bytes()) : null; const count = reader.u32();
     if (count > PERSISTENCE_MAX_CHECKPOINT_RECORDS_V1) throw new RustPersistenceRuntimeContractError("record-count", "recovery payload count exceeds its V1 budget");
     const recordPayloads = Object.freeze(Array.from({ length: count }, () => reader.flag() ? reader.bytes(PERSISTENCE_MAX_RECORD_BYTES_V1) : null));
     const missingCount = reader.u32(); if (missingCount > PERSISTENCE_MAX_CHECKPOINT_RECORDS_V1) throw new RustPersistenceRuntimeContractError("record-count", "missing recovery key count exceeds its V1 budget"); const missingRecordKeys = Object.freeze(Array.from({ length: missingCount }, () => reader.string()));
@@ -439,9 +454,8 @@ export function decodeRustPersistenceResponseV1(message: Uint8Array): RustPersis
     const nextCursor = reader.flag() ? reader.u64() : null;
     const payload = reader.bytes(platformResponsePayloadLimitV1(operation));
     const message = reader.string();
-    validatePlatformResponsePayloadV1(operation, payload);
-    if (code !== "accepted" && storageRevision !== 0) throw new RustPersistenceRuntimeContractError("platform-response", "rejected platform operation attempted to advance storage revision");
     result = Object.freeze({ kind: "platform", requestId: outer.requestId, operation, code, storageRevision, durableHash, nextCursor, payload, message });
+    validatePlatformResponseV1(result);
   } else if (outer.kind === 255) result = Object.freeze({ kind: "error", requestId: outer.requestId, code: reader.string(), message: reader.string() });
   else throw new RustPersistenceRuntimeContractError("kind", "unknown persistence browser response");
   reader.finish(); return result;

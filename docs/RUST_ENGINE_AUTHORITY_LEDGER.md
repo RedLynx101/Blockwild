@@ -25,18 +25,27 @@ A domain changes mode only in a reviewed commit that updates this table, names i
 
 Browser terrain generation currently selects the certified Rust/Wasm worker at compilation and fails closed when its exact generator and locator certificates are unavailable. Production TypeScript generation is reachable only through an explicit `typescript-rollback` build selected by the private `BLOCKWILD_WORLDGEN_BUILD_PROFILE`; URLs and public runtime environment variables cannot change the implementation. Explicit constructor and Node-test seams remain for deterministic tests, and switching production implementations requires another build and reload.
 
-The terrain row remains `typescript-authoritative` in this formal ledger. On 2026-09-02 the local canonical compatibility package was refreshed to `c7bfb66cb842b08ea722f3be306d85cbf2d018794a86944b153b9764d4d1e20b`, reproducing the already-validated isolated candidate. Its Wasm payload is `27581732bb4b6ac744b31ca870211b9656036b6f949b78f875f65c0fb54c1d30` (7,377,970 bytes), with source snapshot `e4fcec5a5762968647960f41e5c18ee7688c81c4c56fa833cb3d476b7f2a0cda` / 222 files. Canonical, no-override tests pass all 155 generation cases (131 frozen plus 24 normalized public-option lanes, including `legacy-v14`; corpus `5d4e6b1445b00f3430164d1a8093d8dc`) and all 114 settlement / 16 lair locator cases. The five shared Three/wgpu landscape records were reviewed and refreshed for the existing corrected linear-light environment and explicit vertex lighting, then passed a fresh check. Geometry, materials, camera records and generated chunk hashes did not change. This is local integration evidence, not a deployment or formal authority promotion.
+The terrain row remains `typescript-authoritative` in this formal ledger. On 2026-09-04 the checked-in selector names canonical compatibility artifact `ab4d66c5c165779c08bd1098be8b8ff1ad71b5702d938b72f38faae0c81493b1`. Its Wasm payload is `f1b2286e350bf8839e387dad5b03b6ad4e7424e0ef68a9838fad252b5164594f` (7,424,538 bytes), and its current build-only manifest binds source snapshot `d4b466adda4483cca622b917295e07ea74d538be934a627f71d9756af1ecbb8a` / 230 files. Canonical, no-override tests pass all 155 generation cases (131 frozen plus 24 normalized public-option lanes, including `legacy-v14`; corpus `5d4e6b1445b00f3430164d1a8093d8dc`) and all 114 settlement / 16 lair locator cases. The five shared Three/wgpu landscape records pass the exact-source check retained at `work/hybrid-rust-migration/r3-landscape-ab4d66c5-20260904-final-check-1/`; geometry, materials, camera records and generated chunk hashes remain bound by the fixture evidence.
+
+The same publication keeps renderer-lab separate at artifact `988d4425660abdc12b055c0c1fbc082d5870fa7ff6ec2009f68d7c0e5a9c33fd`, nested-manifest SHA-256 `48e4d3a3de191689fdee6b445347ff49d8bc3eb2a9c29060f6603f154f4ebb9b`, and Wasm `5f188f05bec036ccbc44fd2e24bf70a483c5cf37cafdd22a6edd2b1e96de80e9` (7,552,651 bytes), from the same `d4b466...` / 230-file source snapshot. Its browser smoke is a bounded exact-artifact/offscreen-WebGPU gate only; the final retained passing evidence path is root-owned and pending insertion, and the placeholder does not itself claim a passing run. None of this is a deployment or formal authority/renderer promotion.
 
 Historical release-profile TypeScript/native runs on the earlier frozen corpus measured p50 147.1109/16.913 ms, p95 254.2003/100.016 ms, and computed p99 1190.2876/479.885 ms; then p50 152.3564/17.724 ms, p95 346.7067/102.327 ms, and p99 1179.447/525.609 ms. An earlier byte-exact debug-fixture run is retained as rejected performance evidence. These historical timings measure the native boundary, not current browser-Wasm end-to-end performance, and do not by themselves isolate the cause of the speedup.
 
-The current canonical real-worker gate passes 155 cases in three orders (465
+The accepted five-pair subsystem rerun is a distinct provenance record: committed tree `e19553f` used source snapshot `9a6cc555af118f957456eea452a49a967c07f54a544fa8187c14535b66cd5212` / 230 files and reproduced compatibility bytes `ab4d66c5...`. Across five alternating pairs, complete-corpus initialized p95 was 202.505 ms for TypeScript and 156.960 ms for Rust (0.7751x); reset-to-accepted was 202.745 ms versus 175.305 ms (0.8647x). Every declared generation and landscape ratio stayed below 1.05, but the retained result intentionally says `performanceAcceptance: false`. The later `d4b466...` build-only source identity in the checked-in manifests must not be read backward into this `e19553f` performance run. Evidence: `work/r3-e19553f-acceptance-1/work/r3-five-pair-3/`.
+
+The current canonical real-worker gate at
+`work/hybrid-rust-migration/browser/r3-production-worker-ab4d66c5-20260904-canonical-1/`
+passes 155 cases in three orders (465
 exact comparisons, 4,650 payload streams and 741 POI rows), plus cancellation,
 stale rejection, epoch reset and diagnostic crash/replacement with all five
 workers terminated. The normal game also passes trusted single-cell mining,
 Save & Quit, full reload and Continue with exact edit preservation. Both gates
-were repeated successfully after the validated byte-hasher optimization.
+were repeated successfully after the validated byte-hasher optimization. The
+final accepted edit-gate evidence path is root-owned and pending insertion here.
 
-The real persistent-cache/POI gate passes natural eviction, committed IndexedDB
+The real persistent-cache/POI gate at
+`work/hybrid-rust-migration/r3-persistent-cache/ab4d66c5-20260904-canonical-1/`
+passes natural eviction, committed IndexedDB
 readback and fresh-page restoration with exact payloads and no target regeneration.
 Its separate third-page edit-halo scenario also passes: an ordinary unloaded-neighbor
 edit changes the namespace, production observes a real miss while the old record
@@ -46,28 +55,28 @@ not stale-inflight-response or R4/R8 authority acceptance. See the 2026-09-02
 checkpoints in the implementation log.
 
 R3 promotion still requires historical-save native adoption beyond the current-world
-edit witness and comparable cold/warm browser generation and readiness-tail
-measurements meeting the scenario policy. Both historical public imports preserve
-their source but are refused by the existing world-only native migration policy;
-rich-save adoption remains an implementation dependency, not an accepted import.
-Post-hash diagnostic 8 passes both measured readiness lanes and shows lower
-complete-corpus initialized generation and streaming-update p95. It still has
-named-terrain/cold-start regressions and separate skill-client mesh-readiness
-failures, so performance is not accepted. The 155-case code parity, canonical
-binding, actual-worker correctness/recovery and live edit-halo cache rejection
-are no longer open prerequisites.
+edit witness. Both historical public imports preserve their source but are refused
+by the existing world-only native migration policy; rich-save adoption remains an
+implementation dependency, not an accepted import. The five-pair browser study now
+passes its declared subsystem regression ceilings, but its explicit
+`performanceAcceptance: false` prevents that evidence from self-promoting R3 or
+standing in for whole-game acceptance. The 155-case code parity, canonical binding,
+actual-worker correctness/recovery, current landscape check and live edit-halo cache
+rejection are no longer open implementation prerequisites. The formal acceptance
+count remains 9/32 and the verified rollback-release count remains 0/2.
 
 The two independently verified stable Rust-primary releases govern **retirement
 of the fallback after cutover**, not permission to begin a domain cutover;
 `RUST_ENGINE_ROLLBACK_WINDOWS.json` therefore retains an empty verified-release
 list and `retireAfter: null`.
 
-The coherent source/artifact checkpoint requirement is closed by local
+An earlier coherent source/artifact checkpoint was closed by local
 commit `3775d22f0bf4780e555b752f137b30ddf041c37b`: its exact extracted tree passes
 native source/publication validation, 1,739 tests with zero failures and two
-existing skips, and TypeScript. Subsequent startup/performance/cache changes
-remain separate until validated and committed. This does not promote R3 or any
-other authority row, and no push or deployment is implied.
+existing skips, and TypeScript. The newer current publication and browser evidence
+above bind the separate build-only `d4b466...` / 230-file source snapshot; that
+manifest binding is not itself a new authority-promotion record. No push or
+deployment is implied.
 
 The separate R9 host/guest promotion still needs canonical/public binding, closure of its `coarse-legacy-projection` world-keyframe exclusion and hosted rendezvous coverage. Isolated R54 closes the earlier player-movement-simulation exclusion only in the explicit combined candidate lane: native R5 supplies the guest kinematics, then Rust validates, records, and projects the pose before host gameplay consumes it. Artifact `0099873c2f6a4758fdcca5b4e17877a2b063853f1141799bdf3331045dd28bbd` passes movement, interest rollover, disconnect, title-only reconnect, and exact cleanup, but the public simulation default remains TypeScript and periodic world records are still authored from a TypeScript compatibility snapshot. Those R5/R9 gates do not silently become R3 prerequisites unless a concrete generation/save compatibility failure requires them.
 

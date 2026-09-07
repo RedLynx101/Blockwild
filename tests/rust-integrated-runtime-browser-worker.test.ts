@@ -5,9 +5,13 @@ import {
   RustIntegratedRuntimeBrowserKernelV1,
 } from "../app/game/rust-integrated-runtime-browser-worker.ts";
 import {
+  RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+  RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2,
+  RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_TYPE_V2,
   RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
   decodeRustIntegratedRuntimeBulkRequestV1,
   encodeRustIntegratedRuntimeBulkResponseV1,
+  encodeRustIntegratedRuntimeHistoricalExternalReceiptV2,
   rustIntegratedRuntimeBulkStateV1,
   type RustIntegratedRuntimeBulkRequestV1,
 } from "../app/game/rust-integrated-runtime-bulk-platform.ts";
@@ -52,6 +56,17 @@ test("browser kernel attests the manifest-selected artifact instead of trusting 
   }>> = [];
   let ordinaryBulkCalls = 0;
   let recoveryCommandCalls = 0;
+  let historicalAttachment = new Uint8Array();
+  let historicalSaveMode: "success" | "error" | "missing-attestation" = "success";
+  const historicalSaveRequests: Array<Readonly<{
+    request: Extract<RustIntegratedRuntimeBulkRequestV1, { type: "runtime-bulk-finalize-save-v1" }>;
+    proposal: Uint8Array;
+    expectedPriorCheckpointBytes: Uint8Array;
+  }>> = [];
+  const reconciliationRequests: Array<Readonly<{
+    request: Extract<RustIntegratedRuntimeBulkRequestV1, { type: "runtime-bulk-finalize-save-v1" }>;
+    observation: Uint8Array;
+  }>> = [];
   let stepMode: "v2" | "error" | "legacy-success" = "v2";
   const base: RustEngineWasmExports = {
     blockwild_protocol_version: () => RUST_ENGINE_PROTOCOL_VERSION,
@@ -186,8 +201,156 @@ test("browser kernel attests the manifest-selected artifact instead of trusting 
         remainingDirtyRecords: 5,
       }).control;
     },
+    blockwild_runtime_migrate_historical_external_v2: () => new Uint8Array(),
+    blockwild_runtime_finalize_historical_external_save_v2: (
+      _handle: number,
+      control: Uint8Array,
+      proposal: Uint8Array,
+      expectedPriorCheckpointBytes: Uint8Array,
+    ) => {
+      const request = decodeRustIntegratedRuntimeBulkRequestV1(control);
+      if (request.type !== "runtime-bulk-finalize-save-v1") throw new Error("expected translated historical external FinalizeSave control");
+      historicalSaveRequests.push({
+        request,
+        proposal: Uint8Array.from(proposal),
+        expectedPriorCheckpointBytes: Uint8Array.from(expectedPriorCheckpointBytes),
+      });
+      historicalAttachment = new Uint8Array();
+      if (historicalSaveMode === "error") {
+        return encodeRustIntegratedRuntimeBulkResponseV1({
+          type: "runtime-bulk-error-v1",
+          requestId: request.requestId,
+          clientEpoch: request.clientEpoch,
+          workerEpoch: 1,
+          current: rustIntegratedRuntimeBulkStateV1(identity()),
+          code: "fixture-historical-rejection",
+          message: "fixture exact rejection",
+        }).control;
+      }
+      if (historicalSaveMode === "missing-attestation") {
+        return encodeRustIntegratedRuntimeBulkResponseV1({
+          type: "runtime-bulk-save-progress-v1",
+          requestId: request.requestId,
+          clientEpoch: request.clientEpoch,
+          workerEpoch: 1,
+          current: rustIntegratedRuntimeBulkStateV1(identity()),
+          stageId: request.stageId,
+          state: "finalized",
+          receivedChunks: 1,
+          chunkCount: 1,
+          receivedBytes: 3,
+          setHash: "3".repeat(32),
+          manifestHash: "4".repeat(32),
+          dispatcherRequestId: 2,
+          remainingDirtyRecords: 5,
+        }).control;
+      }
+      const payload = encodeRustIntegratedRuntimeHistoricalExternalReceiptV2({
+        operation: "external-save",
+        stageId: request.stageId,
+        recoveryId: null,
+        createdAt: request.createdAt,
+        authorityProfile: "typescript-historical-save-compatibility-v1",
+        nativePlayer: "off",
+        nativeRichState: "not-adopted",
+        externalStateFlags: 0x7f,
+        descriptorHash: "1".repeat(32),
+        externalDocumentHash: "2".repeat(32),
+        externalDocumentByteLength: 100,
+        externalDocumentRevision: 2,
+        externalChunkCount: 1,
+        externalChunkSetHash: "3".repeat(32),
+        projectionHash: "4".repeat(32),
+        projectionByteLength: 20,
+        nativeWorldSemanticHash: "4".repeat(32),
+        nativeWorldEditCount: 2,
+        nativeWorldFacingCount: 1,
+        saveSetHash: "5".repeat(32),
+        manifestHash: "6".repeat(32),
+        dispatcherRequestId: 3,
+        remainingDirtyRecords: 1,
+        reconciliation: null,
+      });
+      const encodedResponse = encodeRustIntegratedRuntimeBulkResponseV1({
+        type: "runtime-bulk-data-v1",
+        requestId: request.requestId,
+        clientEpoch: request.clientEpoch,
+        workerEpoch: 1,
+        current: rustIntegratedRuntimeBulkStateV1(identity()),
+        transferToken: 70,
+        typeId: RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2,
+        chunkIndex: 0,
+        chunkCount: 1,
+        payload,
+      });
+      historicalAttachment = Uint8Array.from(encodedResponse.attachment);
+      return encodedResponse.control;
+    },
+    blockwild_runtime_hydrate_historical_external_v2: () => new Uint8Array(),
+    blockwild_runtime_reconcile_historical_external_fallback_v2: (
+      _handle: number,
+      control: Uint8Array,
+      observation: Uint8Array,
+    ) => {
+      const request = decodeRustIntegratedRuntimeBulkRequestV1(control);
+      if (request.type !== "runtime-bulk-finalize-save-v1") throw new Error("expected translated historical reconciliation FinalizeSave control");
+      reconciliationRequests.push({ request, observation: Uint8Array.from(observation) });
+      const payload = encodeRustIntegratedRuntimeHistoricalExternalReceiptV2({
+        operation: "reconciliation",
+        stageId: null,
+        recoveryId: request.stageId,
+        createdAt: request.createdAt,
+        authorityProfile: "typescript-historical-save-compatibility-v1",
+        nativePlayer: "off",
+        nativeRichState: "not-adopted",
+        externalStateFlags: 0x7f,
+        descriptorHash: "5".repeat(32),
+        externalDocumentHash: "6".repeat(32),
+        externalDocumentByteLength: 100,
+        externalDocumentRevision: 2,
+        externalChunkCount: 1,
+        externalChunkSetHash: "7".repeat(32),
+        projectionHash: "8".repeat(32),
+        projectionByteLength: 20,
+        nativeWorldSemanticHash: "8".repeat(32),
+        nativeWorldEditCount: 2,
+        nativeWorldFacingCount: 1,
+        saveSetHash: "9".repeat(32),
+        manifestHash: "a".repeat(32),
+        dispatcherRequestId: 3,
+        remainingDirtyRecords: 0,
+        reconciliation: Object.freeze({
+          observationHash: "b".repeat(32),
+          expectedStorageRevision: 6,
+          observedLatestCheckpointId: "corrupt-latest",
+          observedLatestCheckpointHash: "c".repeat(32),
+          observedLatestJournalSequence: 8,
+          fallbackCheckpointId: "verified-fallback",
+          fallbackCheckpointHash: "d".repeat(32),
+          fallbackJournalSequence: 7,
+          targetCheckpointId: "reconciled-target",
+          targetCheckpointHash: "e".repeat(32),
+          targetJournalSequence: 9,
+          planHash: "f".repeat(32),
+        }),
+      });
+      const encodedResponse = encodeRustIntegratedRuntimeBulkResponseV1({
+        type: "runtime-bulk-data-v1",
+        requestId: request.requestId,
+        clientEpoch: request.clientEpoch,
+        workerEpoch: 1,
+        current: rustIntegratedRuntimeBulkStateV1(identity()),
+        transferToken: 71,
+        typeId: RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2,
+        chunkIndex: 0,
+        chunkCount: 1,
+        payload,
+      });
+      historicalAttachment = Uint8Array.from(encodedResponse.attachment);
+      return encodedResponse.control;
+    },
     blockwild_runtime_bulk_v2: () => { ordinaryBulkCalls += 1; return new Uint8Array(); },
-    blockwild_runtime_bulk_take_attachment_v2: () => new Uint8Array(),
+    blockwild_runtime_bulk_take_attachment_v2: () => historicalAttachment,
     blockwild_runtime_destroy_v2: () => new Uint8Array(),
   };
   assert.throws(
@@ -302,5 +465,76 @@ test("browser kernel attests the manifest-selected artifact instead of trusting 
   assert.equal(legacyMigrationRequests[0].sourceKey, "blockwild-world-data-v1:fixture");
   assert.equal(legacyMigrationRequests[0].sourceFormat, "blockwild-world-save-canonical-v1");
   assert.deepEqual(legacyMigrationRequests[0].worldProjection, projection);
+
+  const historicalProposal = Uint8Array.of(0x42, 0x57, 0x48, 0x50, 0x80, 0xff);
+  const priorCheckpoint = Uint8Array.of(0x42, 0x57, 0x50, 0x53, 0x01, 0x02, 0x80, 0xff);
+  const finalizedHistorical = await kernel.handleBulk({
+    type: "runtime-bulk-finalize-historical-external-save-v2",
+    requestId: 4,
+    clientEpoch: 1,
+    expected: rustIntegratedRuntimeBulkStateV1(identity()),
+    stageId: "historical.external.1",
+    createdAt: 12,
+    proposalTypeId: RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+    proposal: historicalProposal,
+    expectedPriorCheckpointBytes: priorCheckpoint,
+  });
+  assert.equal(finalizedHistorical.type, "runtime-bulk-data-v1");
+  assert.equal(historicalSaveRequests.length, 1);
+  assert.equal(historicalSaveRequests[0].request.stageId, "historical.external.1");
+  assert.equal(historicalSaveRequests[0].request.createdAt, 12);
+  assert.deepEqual(historicalSaveRequests[0].proposal, historicalProposal);
+  assert.deepEqual(
+    historicalSaveRequests[0].expectedPriorCheckpointBytes,
+    priorCheckpoint,
+    "the browser worker must pass the canonical checkpoint proof byte-for-byte to Wasm",
+  );
+
+  historicalSaveMode = "error";
+  const historicalError = await kernel.handleBulk({
+    type: "runtime-bulk-finalize-historical-external-save-v2",
+    requestId: 6,
+    clientEpoch: 1,
+    expected: rustIntegratedRuntimeBulkStateV1(identity()),
+    stageId: "historical.external.error",
+    createdAt: 13,
+    proposalTypeId: RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+    proposal: historicalProposal,
+    expectedPriorCheckpointBytes: priorCheckpoint,
+  });
+  assert.equal(historicalError.type, "runtime-bulk-error-v1");
+  assert.equal(historicalError.type === "runtime-bulk-error-v1" ? historicalError.code : null, "fixture-historical-rejection");
+  assert.equal(historicalError.type === "runtime-bulk-error-v1" ? historicalError.message : null, "fixture exact rejection");
+
+  historicalSaveMode = "missing-attestation";
+  await assert.rejects(kernel.handleBulk({
+    type: "runtime-bulk-finalize-historical-external-save-v2",
+    requestId: 7,
+    clientEpoch: 1,
+    expected: rustIntegratedRuntimeBulkStateV1(identity()),
+    stageId: "historical.external.missing-attestation",
+    createdAt: 14,
+    proposalTypeId: RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+    proposal: historicalProposal,
+    expectedPriorCheckpointBytes: priorCheckpoint,
+  }), /historical external runtime operation omitted its attestation attachment/u);
+  historicalSaveMode = "success";
+
+  const observation = Uint8Array.of(0x42, 0x57, 0x48, 0x4f, 0x80, 0xff);
+  const reconciled = await kernel.handleBulk({
+    type: "runtime-bulk-reconcile-historical-external-fallback-v2",
+    requestId: 5,
+    clientEpoch: 1,
+    expected: rustIntegratedRuntimeBulkStateV1(identity()),
+    fallbackRecoveryId: "historical-fallback-recovery",
+    createdAt: 12,
+    observationTypeId: RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_TYPE_V2,
+    observation,
+  });
+  assert.equal(reconciled.type, "runtime-bulk-data-v1");
+  assert.equal(reconciliationRequests.length, 1);
+  assert.equal(reconciliationRequests[0].request.stageId, "historical-fallback-recovery");
+  assert.equal(reconciliationRequests[0].request.createdAt, 12);
+  assert.deepEqual(reconciliationRequests[0].observation, observation);
   assert.equal(ordinaryBulkCalls, 0, "native initialization and legacy migration never enter ordinary compatibility finalize");
 });

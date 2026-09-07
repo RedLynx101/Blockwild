@@ -67,7 +67,7 @@
     "benchmark:agents": "node --import tsx scripts/soak-agent-platform.ts",
     "analyze:performance": "node --import tsx scripts/analyze-performance-log.ts",
     "soak:living-world": "node --import tsx scripts/soak-living-world.ts",
-    "test:agent-platform": "node --test --import tsx tests/agent-platform.test.ts tests/agent-bridge.test.ts tests/agent-navigation.test.ts tests/agent-work.test.ts tests/agent-voice.test.ts tests/agent-runner.test.ts tests/drone-model.test.ts tests/multiplayer.test.ts",
+    "test:agent-platform": "node --test --import tsx tests/agent-platform.test.ts tests/agent-bridge.test.ts tests/agent-navigation.test.ts tests/agent-work.test.ts tests/agent-voice.test.ts tests/agent-runner.test.ts tests/multiplayer.test.ts",
     "audit:ecology": "node --import tsx scripts/audit-biome-ecology.ts",
     "audit:mobs": "node --import tsx scripts/audit-mob-ecology.ts --write",
     "audit:world-overhaul": "node --import tsx scripts/audit-world-overhaul.ts",

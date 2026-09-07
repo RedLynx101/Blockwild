@@ -25,14 +25,34 @@ import {
   RUST_INTEGRATED_RUNTIME_BULK_PERSISTENCE_STATUS_BYTES_V1,
   RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1,
   RUST_INTEGRATED_RUNTIME_BULK_SAVE_CHUNK_BYTES_V1,
+  RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_MAX_BYTES_V2,
+  RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+  RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PRIOR_CHECKPOINT_MAX_BYTES_V2,
+  RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2,
+  RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_MAX_BYTES_V2,
+  RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_TYPE_V2,
   RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1,
   RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
+  decodeRustIntegratedRuntimeHistoricalExternalReceiptV2,
   rustIntegratedRuntimeBulkStateV1,
   type RustIntegratedRuntimeBulkResponseV1,
   type RustIntegratedRuntimeBulkStateV1,
   type RustIntegratedRuntimeBulkTransportDiagnosticsV1,
   type RustIntegratedRuntimeBulkTransportV1,
+  type RustIntegratedRuntimeHistoricalExternalReceiptV2,
 } from "./rust-integrated-runtime-bulk-platform";
+
+type RustIntegratedRuntimeHistoricalExternalReceiptForOperationV2<
+  TOperation extends RustIntegratedRuntimeHistoricalExternalReceiptV2["operation"],
+> = Readonly<
+  Omit<RustIntegratedRuntimeHistoricalExternalReceiptV2, "operation" | "reconciliation">
+  & {
+    operation: TOperation;
+    reconciliation: TOperation extends "reconciliation"
+      ? NonNullable<RustIntegratedRuntimeHistoricalExternalReceiptV2["reconciliation"]>
+      : null;
+  }
+>;
 import {
   RUST_CONTENT_AUTHORITY_CAPABILITY_V1,
   RUST_CONTENT_INSTALL_CAPABILITY_V1,
@@ -48,6 +68,7 @@ import {
   createRustIntegratedRuntimeDomainOperationV1,
 } from "./rust-integrated-runtime-codec";
 import { rustIntegratedRuntimeDomainWireFamilyV1 } from "./rust-integrated-runtime-domain-schema.generated.ts";
+import { persistencePayloadHashV1 } from "./persistence-journal-contract";
 
 export const RUST_INTEGRATED_RUNTIME_COMMAND_P95_BUDGET_MS = 50;
 export const RUST_INTEGRATED_RUNTIME_STEP_P95_BUDGET_MS = 8;
@@ -66,6 +87,8 @@ const CONTENT_INSTALL_PAGE_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("
 const CONTENT_INSTALL_RECEIPT_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("content-install-receipt-v1");
 const PLAYER_LOCATOR_ITEM_CONSUME_SCHEMA_V1 = rustIntegratedRuntimeDomainWireFamilyV1("player-locator-item-consume-v1");
 const PLAYER_LOCATOR_ITEM_CONSUME_TYPE_V1 = PLAYER_LOCATOR_ITEM_CONSUME_SCHEMA_V1.typeId;
+const HISTORICAL_EXTERNAL_SAVE_CAPABILITY_V2 = "historical-external-save-v2";
+const HISTORICAL_EXTERNAL_RECONCILIATION_CAPABILITY_V2 = "historical-external-reconciliation-v2";
 
 export type RustIntegratedRuntimeServiceStateV1 = "idle" | "starting" | "ready" | "failed" | "recovering" | "stopping" | "stopped";
 
@@ -79,6 +102,7 @@ export class RustIntegratedRuntimeServiceError extends Error {
       | "capacity"
       | "content-install"
       | "disposed"
+      | "historical-checkpoint-proof"
       | "idempotency-conflict"
       | "indeterminate-command"
       | "invalid-response"
@@ -1034,6 +1058,208 @@ export class RustIntegratedRuntimeServiceV1 {
     });
   }
 
+  /**
+   * Op 11. Rust treats BWHP as an unbound proposal, imports only the exact
+   * BWAS projection into R4, attaches its own six native record fingerprints,
+   * and checkpoints those records beside the staged opaque StoredWorld chunks.
+   */
+  migrateHistoricalExternalV2(
+    stageId: string,
+    createdAt: number,
+    proposal: Uint8Array,
+    worldProjection: Uint8Array,
+  ) {
+    this.requireReady();
+    this.requireHistoricalExternalSaveCapabilityV2();
+    if (!(proposal instanceof Uint8Array)
+      || proposal.byteLength < 1
+      || proposal.byteLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_MAX_BYTES_V2) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError(
+        "capacity",
+        "historical external proposal is outside its 1 MiB byte budget",
+      ));
+    }
+    if (!(worldProjection instanceof Uint8Array)
+      || worldProjection.byteLength < 1
+      || worldProjection.byteLength > RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_MAX_BYTES_V1) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError(
+        "capacity",
+        "historical external BWAS projection is outside its 32 MiB byte budget",
+      ));
+    }
+    return this.enqueue(async () => {
+      const expected = this.requireIdentity();
+      try {
+        const response = await this.sendBulk({
+          type: "runtime-bulk-migrate-historical-external-v2",
+          requestId: this.requestId(),
+          clientEpoch: this.clientEpoch,
+          expected: rustIntegratedRuntimeBulkStateV1(expected),
+          stageId,
+          createdAt,
+          proposalTypeId: RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+          proposal,
+          worldProjectionTypeId: RUST_INTEGRATED_RUNTIME_LEGACY_WORLD_PROJECTION_TYPE_V1,
+          worldProjection,
+        });
+        this.acceptBulkWorkerEpoch(response);
+        if (response.type === "runtime-bulk-error-v1") return this.rejectBulkError(response, expected);
+        const receipt = this.acceptHistoricalExternalReceiptV2(
+          response,
+          "initial-migration",
+          stageId,
+          createdAt,
+        );
+        this.acceptBulkAuthorityAdvance(expected, response.current, "historical external migration");
+        return Object.freeze({ response, receipt });
+      } catch (error) {
+        if (error instanceof RustIntegratedRuntimeServiceError && error.code === "bulk-platform") throw error;
+        this.failClosed(error);
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * Op 12. Rust revalidates BWHP against the durable BWHE descriptor and
+   * atomically CAS-advances the external document, descriptor, and current R4.
+   */
+  finalizeHistoricalExternalSaveV2(
+    stageId: string,
+    createdAt: number,
+    proposal: Uint8Array,
+    expectedPriorCheckpointBytes: Uint8Array,
+  ) {
+    this.requireReady();
+    this.requireHistoricalExternalSaveCapabilityV2();
+    if (!(proposal instanceof Uint8Array)
+      || proposal.byteLength < 1
+      || proposal.byteLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_MAX_BYTES_V2) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError(
+        "capacity",
+        "historical external proposal is outside its 1 MiB byte budget",
+      ));
+    }
+    // This is intentionally opaque to the service. Rust alone validates the
+    // canonical persistence-checkpoint proof before it can advance a
+    // historical successor; accepting an absent proof would reopen resume.
+    if (!(expectedPriorCheckpointBytes instanceof Uint8Array)
+      || expectedPriorCheckpointBytes.byteLength < 1
+      || expectedPriorCheckpointBytes.byteLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PRIOR_CHECKPOINT_MAX_BYTES_V2) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError(
+        "historical-checkpoint-proof",
+        "historical external save requires an exact bounded prior checkpoint proof",
+      ));
+    }
+    return this.enqueue(async () => {
+      const expected = this.requireIdentity();
+      try {
+        const response = await this.sendBulk({
+          type: "runtime-bulk-finalize-historical-external-save-v2",
+          requestId: this.requestId(),
+          clientEpoch: this.clientEpoch,
+          expected: rustIntegratedRuntimeBulkStateV1(expected),
+          stageId,
+          createdAt,
+          proposalTypeId: RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_PROPOSAL_TYPE_V2,
+          proposal,
+          expectedPriorCheckpointBytes,
+        });
+        this.acceptBulkWorkerEpoch(response);
+        if (response.type === "runtime-bulk-error-v1") return this.rejectBulkError(response, expected);
+        const receipt = this.acceptHistoricalExternalReceiptV2(response, "external-save", stageId, createdAt);
+        this.acceptBulkAuthorityAdvance(expected, response.current, "historical external save");
+        return Object.freeze({ response, receipt });
+      } catch (error) {
+        if (error instanceof RustIntegratedRuntimeServiceError && error.code === "bulk-platform") throw error;
+        this.failClosed(error);
+        throw error;
+      }
+    });
+  }
+
+  /** Op 13. Hydrates and returns Rust-derived attestation for the exact R4/external pair. */
+  hydrateHistoricalExternalRecoveryV2(recoveryId: string) {
+    this.requireReady();
+    this.requireHistoricalExternalSaveCapabilityV2();
+    return this.enqueue(async () => {
+      const expected = this.requireIdentity();
+      try {
+        const response = await this.sendBulk({
+          type: "runtime-bulk-hydrate-historical-external-v2",
+          requestId: this.requestId(),
+          clientEpoch: this.clientEpoch,
+          expected: rustIntegratedRuntimeBulkStateV1(expected),
+          recoveryId,
+        });
+        this.acceptBulkWorkerEpoch(response);
+        if (response.type === "runtime-bulk-error-v1") return this.rejectBulkError(response, expected);
+        const receipt = this.acceptHistoricalExternalReceiptV2(response, "recovery", recoveryId, null);
+        this.acceptBulkAuthorityAdvance(expected, response.current, "historical external recovery");
+        return Object.freeze({ response, receipt });
+      } catch (error) {
+        if (error instanceof RustIntegratedRuntimeServiceError && error.code === "bulk-platform") throw error;
+        this.failClosed(error);
+        throw error;
+      }
+    });
+  }
+
+  /**
+   * Op 14. Queues one Rust-authored atomic repair from the already hydrated
+   * direct parent. The runtime remains read-only until the caller drains this
+   * request and re-hydrates the returned target checkpoint through op13.
+   */
+  reconcileHistoricalExternalFallbackV2(
+    fallbackRecoveryId: string,
+    createdAt: number,
+    observation: Uint8Array,
+  ) {
+    this.requireReady();
+    this.requireHistoricalExternalReconciliationCapabilityV2();
+    if (!(observation instanceof Uint8Array)
+      || observation.byteLength < 1
+      || observation.byteLength > RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_MAX_BYTES_V2) {
+      return Promise.reject(new RustIntegratedRuntimeServiceError(
+        "capacity",
+        "historical fallback observation is outside its 4 MiB byte budget",
+      ));
+    }
+    const observationHash = persistencePayloadHashV1(observation);
+    return this.enqueue(async () => {
+      const expected = this.requireIdentity();
+      try {
+        const response = await this.sendBulk({
+          type: "runtime-bulk-reconcile-historical-external-fallback-v2",
+          requestId: this.requestId(),
+          clientEpoch: this.clientEpoch,
+          expected: rustIntegratedRuntimeBulkStateV1(expected),
+          fallbackRecoveryId,
+          createdAt,
+          observationTypeId: RUST_INTEGRATED_RUNTIME_HISTORICAL_FALLBACK_OBSERVATION_TYPE_V2,
+          observation,
+        });
+        this.acceptBulkWorkerEpoch(response);
+        if (response.type === "runtime-bulk-error-v1") return this.rejectBulkError(response, expected);
+        const receipt = this.acceptHistoricalExternalReceiptV2(
+          response,
+          "reconciliation",
+          fallbackRecoveryId,
+          createdAt,
+        );
+        if (!receipt.reconciliation || receipt.reconciliation.observationHash !== observationHash) {
+          throw this.failBulkProtocol("historical reconciliation receipt does not bind the exact BWHO observation");
+        }
+        this.acceptBulkAuthorityAdvance(expected, response.current, "historical external fallback reconciliation");
+        return Object.freeze({ response, receipt });
+      } catch (error) {
+        if (error instanceof RustIntegratedRuntimeServiceError && error.code === "bulk-platform") throw error;
+        this.failClosed(error);
+        throw error;
+      }
+    });
+  }
+
   /** Hydrates every required native domain atomically from an assembled recovery. */
   hydrateCompatibilityRecovery(recoveryId: string) {
     this.requireReady();
@@ -1326,6 +1552,49 @@ export class RustIntegratedRuntimeServiceV1 {
     });
   }
 
+  private acceptHistoricalExternalReceiptV2<
+    TOperation extends RustIntegratedRuntimeHistoricalExternalReceiptV2["operation"],
+  >(
+    response: Exclude<RustIntegratedRuntimeBulkResponseV1, { type: "runtime-bulk-error-v1" }>,
+    operation: TOperation,
+    operationId: string,
+    createdAt: number | null,
+  ): RustIntegratedRuntimeHistoricalExternalReceiptForOperationV2<TOperation> {
+    if (response.type !== "runtime-bulk-data-v1"
+      || response.typeId !== RUST_INTEGRATED_RUNTIME_HISTORICAL_EXTERNAL_RECEIPT_TYPE_V2
+      || response.chunkIndex !== 0
+      || response.chunkCount !== 1) {
+      throw this.failBulkProtocol("historical external operation returned the wrong attestation envelope");
+    }
+    let receipt: RustIntegratedRuntimeHistoricalExternalReceiptV2;
+    try {
+      receipt = decodeRustIntegratedRuntimeHistoricalExternalReceiptV2(response.payload);
+    } catch (error) {
+      throw new RustIntegratedRuntimeServiceError(
+        "invalid-response",
+        "historical external operation returned an invalid BWHR attestation",
+        error,
+      );
+    }
+    const receiptOperationId = operation === "recovery" || operation === "reconciliation"
+      ? receipt.recoveryId
+      : receipt.stageId;
+    if (receipt.operation !== operation
+      || receiptOperationId !== operationId
+      || (createdAt !== null && receipt.createdAt !== createdAt)
+      || receipt.authorityProfile !== "typescript-historical-save-compatibility-v1"
+      || receipt.nativePlayer !== "off"
+      || receipt.nativeRichState !== "not-adopted"
+      || receipt.saveSetHash !== receipt.saveSetHash.toLowerCase()
+      || receipt.manifestHash !== receipt.manifestHash.toLowerCase()) {
+      throw this.failBulkProtocol("historical external attestation disagrees with its exact request or authority profile");
+    }
+    if ((operation === "reconciliation") !== (receipt.reconciliation !== null)) {
+      throw this.failBulkProtocol("historical external attestation has the wrong reconciliation detail shape");
+    }
+    return receipt as RustIntegratedRuntimeHistoricalExternalReceiptForOperationV2<TOperation>;
+  }
+
   private acceptBulkWorkerEpoch(response: RustIntegratedRuntimeBulkResponseV1) {
     if (response.clientEpoch !== this.clientEpoch || response.workerEpoch < 1 || response.workerEpoch !== this.workerEpoch) {
       this.staleResponses += 1;
@@ -1443,6 +1712,26 @@ export class RustIntegratedRuntimeServiceV1 {
       throw new RustIntegratedRuntimeServiceError(
         "not-authoritative",
         "native save hydration remains pending until every registered durable domain has a canonical Rust record",
+      );
+    }
+  }
+
+  private requireHistoricalExternalSaveCapabilityV2() {
+    this.requireNativeSaveCapability();
+    if (!this.verifiedCapabilities.has(HISTORICAL_EXTERNAL_SAVE_CAPABILITY_V2)) {
+      throw new RustIntegratedRuntimeServiceError(
+        "not-authoritative",
+        "historical external save custody is unavailable from this runtime artifact",
+      );
+    }
+  }
+
+  private requireHistoricalExternalReconciliationCapabilityV2() {
+    this.requireHistoricalExternalSaveCapabilityV2();
+    if (!this.verifiedCapabilities.has(HISTORICAL_EXTERNAL_RECONCILIATION_CAPABILITY_V2)) {
+      throw new RustIntegratedRuntimeServiceError(
+        "not-authoritative",
+        "historical fallback reconciliation is unavailable from this runtime artifact",
       );
     }
   }

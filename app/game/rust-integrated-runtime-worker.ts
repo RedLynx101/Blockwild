@@ -211,6 +211,10 @@ function rustIntegratedRuntimeBulkWorkBytesV1(
     case "runtime-bulk-hydrate-recovery-v1":
     case "runtime-bulk-initialize-native-save-v1":
     case "runtime-bulk-migrate-legacy-world-v1":
+    case "runtime-bulk-migrate-historical-external-v2":
+    case "runtime-bulk-finalize-historical-external-save-v2":
+    case "runtime-bulk-hydrate-historical-external-v2":
+    case "runtime-bulk-reconcile-historical-external-fallback-v2":
       return Math.max(attachmentBytes, RUST_PERSISTENCE_PLATFORM_RECOVERY_PAGE_BYTES_V1);
     case "runtime-bulk-persistence-status-v1":
       // The request is intentionally tiny, but producing BWT8 reconstructs
@@ -521,6 +525,10 @@ export class RustIntegratedRuntimeWorkerTransportV1 implements RustIntegratedRun
     this.bulkPeakQueuedBytes = Math.max(this.bulkPeakQueuedBytes, this.bulkQueuedBytes);
     this.bulkRequests += 1;
     if (request.type === "runtime-bulk-migrate-legacy-world-v1"
+      || request.type === "runtime-bulk-migrate-historical-external-v2"
+      || request.type === "runtime-bulk-finalize-historical-external-save-v2"
+      || request.type === "runtime-bulk-hydrate-historical-external-v2"
+      || request.type === "runtime-bulk-reconcile-historical-external-fallback-v2"
       || byteLength > RUST_INTEGRATED_RUNTIME_BULK_ROUTINE_BYTES_V1) this.bulkRecoveryScaleRequests += 1;
     else this.bulkRoutineRequests += 1;
     this.bulkCopiedInputBytes += encoded.copiedInputBytes;
