@@ -67,4 +67,14 @@ The TypeScript edition is the intended GitHub default, but its automatic Git dep
 
 ## Dependency updates
 
-Dependabot updates on each branch explicitly target that edition. The TypeScript branch owns npm and GitHub Actions updates only. The Rust branch owns npm, GitHub Actions, and Cargo updates. Cross-edition update PRs are separate even when versions coincide.
+GitHub reads `.github/dependabot.yml` from the repository's default branch. The shared scheduler file therefore carries five unique ecosystem/directory/target tuples: TypeScript npm and GitHub Actions at `/`, plus Rust npm and GitHub Actions at `/` and Cargo at `/engine`. Each block has an explicit edition target, and cross-edition update PRs remain separate even when versions coincide.
+
+These scheduled blocks control **version updates**. GitHub documents that when `target-branch` points to a non-default branch, the block's options do not apply to security updates because security updates always use the repository default branch. The Rust-targeted schedule must not be described as equivalent non-default-branch security-alert or security-update coverage. Dependabot alerts and security-update enablement remain repository/provider settings outside this source-only E4 change.
+
+Sources: [Dependabot configuration location](https://docs.github.com/en/code-security/concepts/supply-chain-security/about-the-dependabot-yml-file#where-to-store-the-dependabotyml-file) and [`target-branch` behavior](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#target-branch).
+
+## Scheduled workflow boundary
+
+Push and pull-request workflows remain branch-owned and target the edition named in their filters. GitHub scheduled workflows, however, run the latest commit on the default branch and only trigger when the workflow file exists there. Once TypeScript is the default, the scheduled CodeQL run covers that default TypeScript commit. The Rust branch's CodeQL workflow still runs for Rust pushes and pull requests, but its `schedule` declaration is not an independently active Rust scan. No cross-branch dispatcher or implied security-equivalence claim is introduced here.
+
+Source: [GitHub Actions scheduled workflows](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#onschedule).
