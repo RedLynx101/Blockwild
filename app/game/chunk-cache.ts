@@ -1,4 +1,5 @@
 import type { StructureMarker } from "./structures";
+import { TYPESCRIPT_TERRAIN_CACHE_DATABASE } from "./edition";
 
 export type CachedChunkData = Readonly<{
   cacheKey: string;
@@ -148,7 +149,7 @@ export class ChunkPersistentCache {
     if (!this.supported) return Promise.resolve(null);
     if (this.databasePromise) return this.databasePromise;
     this.databasePromise = new Promise((resolve) => {
-      const request = indexedDB.open("blockwild-terrain-cache-v2", 1);
+      const request = indexedDB.open(TYPESCRIPT_TERRAIN_CACHE_DATABASE, 1);
       request.onerror = () => resolve(null);
       request.onupgradeneeded = () => {
         const database = request.result;

@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   MAX_MOVEMENT_MESSAGE_BYTES,
   MOVEMENT_CHANNEL_LABEL,
+  MULTIPLAYER_PROTOCOL_NAME,
   MULTIPLAYER_PROTOCOL_VERSION,
   MultiplayerOperationCancelledError,
   MultiplayerProtocolError,
@@ -227,7 +228,7 @@ test("identity, invite, and versioned envelope codecs round-trip with bounds", (
   assert.equal(validatePeerIdentity({ ...HOST, color: "blue" }), false);
   const offer: ManualSignal = {
     version: MULTIPLAYER_PROTOCOL_VERSION,
-    protocol: "blockwild-webrtc",
+    protocol: MULTIPLAYER_PROTOCOL_NAME,
     kind: "offer",
     sessionId: "session_codec_01",
     token: "invite_codec_001",

@@ -10,6 +10,7 @@ class FailingWorker {
   constructor() { FailingWorker.instance = this; }
   postMessage() {}
   terminate() {}
+  ready() { this.onmessage?.({ data: { type: "ready", protocol: 1 } } as MessageEvent); }
   fail() { this.onerror?.({} as ErrorEvent); }
 }
 
@@ -53,8 +54,9 @@ test("a failed buffer worker clears pending work and degrades to the exact synch
   withFakeBrowserWorker(() => {
     const pipeline = new TerrainBufferPipeline();
     let failed = 0;
-    pipeline.submit([triangle(0)], () => assert.fail("failed worker must not complete"), () => { failed += 1; });
     assert.ok(FailingWorker.instance);
+    FailingWorker.instance.ready();
+    pipeline.submit([triangle(0)], () => assert.fail("failed worker must not complete"), () => { failed += 1; });
     FailingWorker.instance.fail();
     assert.equal(failed, 1);
     assert.equal(pipeline.diagnostics().pending, 0);

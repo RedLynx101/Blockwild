@@ -23,6 +23,7 @@ import {
   type AgentCommandEnvelope,
   type AgentObservationV1,
 } from "../app/game/agent-platform";
+import { VoxelEngine } from "../app/game/engine";
 
 function command(overrides: Partial<AgentCommandEnvelope> = {}): AgentCommandEnvelope {
   const issuedAt = Date.now();
@@ -40,6 +41,52 @@ function command(overrides: Partial<AgentCommandEnvelope> = {}): AgentCommandEnv
 }
 
 describe("agent platform contracts", () => {
+  test("local test-admin advancement progresses a paused synthetic world without unpausing it", () => {
+    let playerUpdates = 0;
+    let renderedFrames = 0;
+    const observation = { schema: 1, source: "local-test" };
+    const engine = Object.assign(Object.create(VoxelEngine.prototype), {
+      agentTestAdmin: true,
+      agentTestWorld: true,
+      multiplayer: null,
+      paused: true,
+      running: true,
+      titleMode: false,
+      updateBoats: () => undefined,
+      updatePlayer: () => { playerUpdates += 1; },
+      updateMobs: () => undefined,
+      updateProjectiles: () => undefined,
+      updateLiquids: () => undefined,
+      updateDynamicWeather: () => undefined,
+      updatePersistentMachines: () => undefined,
+      updateRangedWeapon: () => undefined,
+      updateFastTravelChannel: () => undefined,
+      updateMapDiscovery: () => undefined,
+      updateHearthroadsSimulation: () => undefined,
+      magicState: { mana: 0, maxMana: 0 },
+      skillState: { skills: { magic: { level: 1 } } },
+      updateGameplayCamera: () => undefined,
+      updateTarget: () => undefined,
+      renderer: { render: () => { renderedFrames += 1; } },
+      scene: {},
+      camera: {},
+      resetLookFrameBudget: () => undefined,
+      createAgentObservation: () => observation,
+    }) as VoxelEngine;
+
+    const advanced = engine.advanceLocalAgentTest(50);
+    assert.equal(advanced.ok, true);
+    assert.equal(advanced.ok && advanced.advancedMilliseconds, 50);
+    assert.equal(advanced.ok && advanced.observation, observation);
+    assert.ok(playerUpdates > 0, "paused test-admin advancement runs deterministic simulation steps");
+    assert.equal(renderedFrames, 1);
+    assert.equal(engine.paused, true, "test-admin advancement leaves the world paused");
+
+    const updatesAfterTestAdvance = playerUpdates;
+    engine.advanceSimulation(50);
+    assert.equal(playerUpdates, updatesAfterTestAdvance, "the public advancement hook remains blocked while paused");
+  });
+
   test("fixed agent resource profile remains render 4 and simulation 3", () => {
     assert.equal(AGENT_DEFAULT_RENDER_DISTANCE, 4);
     assert.equal(AGENT_DEFAULT_SIMULATION_DISTANCE, 3);

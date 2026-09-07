@@ -42,12 +42,12 @@ test("character profiles retain stable browser and character identities", () => 
   assert.equal(characterNetworkId(restored.selectedProfile), networkId);
 });
 
-test("the first migrated profile preserves a legacy multiplayer authority id", () => {
+test("generic pre-split identity is not imported into the TypeScript edition", () => {
   const storage = new MemoryStorage();
   storage.setItem("blockwild-multiplayer-player-id", "player_1234567890abcdef");
   const store = new CharacterProfileStore(storage, () => 100);
-  assert.equal(store.selectedProfile.browserId, "player_1234567890abcdef");
-  assert.equal(characterNetworkId(store.selectedProfile), "player_1234567890abcdef");
+  assert.notEqual(store.selectedProfile.browserId, "player_1234567890abcdef");
+  assert.equal(storage.getItem("blockwild-multiplayer-player-id"), "player_1234567890abcdef");
   const second = store.create({ name: "Second" });
   assert.ok(second);
   assert.notEqual(characterNetworkId(second!), "player_1234567890abcdef");

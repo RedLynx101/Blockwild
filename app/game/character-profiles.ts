@@ -1,10 +1,10 @@
 import type { FactionId, FactionRace, FactionRelationsState, NpcFactionId } from "./factions";
 import { SKILL_IDS, type SkillId, type SkillState } from "./skills";
+import { TYPESCRIPT_STORAGE_PREFIX } from "./edition";
 
 export const CHARACTER_PROFILE_SCHEMA = 1 as const;
-export const CHARACTER_PROFILE_STORAGE_KEY = "blockwild-character-profiles-v1";
-export const CHARACTER_BROWSER_ID_KEY = "blockwild-browser-player-id-v1";
-export const LEGACY_MULTIPLAYER_PLAYER_ID_KEY = "blockwild-multiplayer-player-id";
+export const CHARACTER_PROFILE_STORAGE_KEY = `${TYPESCRIPT_STORAGE_PREFIX}-character-profiles-v1`;
+export const CHARACTER_BROWSER_ID_KEY = `${TYPESCRIPT_STORAGE_PREFIX}-browser-player-id-v1`;
 export const CHARACTER_STARTING_SKILL_POINTS = 20;
 export const MAX_CHARACTER_PROFILES = 12;
 
@@ -251,11 +251,6 @@ export function readOrCreateCharacterBrowserId(storage: Storage | null) {
   try {
     const existing = storage?.getItem(CHARACTER_BROWSER_ID_KEY);
     if (existing) return safeId(existing, randomId("browser"));
-    const legacy = storage?.getItem(LEGACY_MULTIPLAYER_PLAYER_ID_KEY);
-    if (legacy && /^player_[a-z0-9_-]{12,56}$/iu.test(legacy)) {
-      storage?.setItem(CHARACTER_BROWSER_ID_KEY, legacy);
-      return legacy;
-    }
     const created = randomId("browser");
     storage?.setItem(CHARACTER_BROWSER_ID_KEY, created);
     return created;

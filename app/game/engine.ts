@@ -746,6 +746,7 @@ import {
 } from "./invite-rendezvous";
 import {
   DEFAULT_WORLD_OPTIONS,
+  LEGACY_WORLD_KEY,
   WorldStorage,
   generationOptionsFromWorldOptions,
   normalizeWorldOptions,
@@ -753,6 +754,11 @@ import {
   type WorldMetadata,
   type WorldOptions,
 } from "./world-storage";
+import {
+  TYPESCRIPT_AGENT_ID_KEY,
+  TYPESCRIPT_MULTIPLAYER_PLAYER_ID_KEY,
+  TYPESCRIPT_SETTINGS_KEY,
+} from "./edition";
 import {
   DEFAULT_SETTLEMENT_ORIGIN_SEARCH_RADIUS,
   normalizeSettlementOriginSearchRadius,
@@ -1086,8 +1092,8 @@ import {
 
 export { BLOCKS, CREATIVE_BLOCKS, CREATIVE_ITEMS, ITEMS, Item, RECIPES, BlockId, BIOME_NAMES, MOB_DEFS, MOB_ORDER, WorldStorage, DEFAULT_WORLD_OPTIONS, type WorldOptions, type WorldMetadata, type GameMode, type InventorySlot, type ItemCode, type Recipe, type EquipmentSlot, type MobKind, type SleepTarget, type PlayerVariant };
 
-export const SAVE_KEY = "blockwild-world-v2";
-export const SETTINGS_KEY = "blockwild-settings-v2";
+export const SAVE_KEY = LEGACY_WORLD_KEY;
+export const SETTINGS_KEY = TYPESCRIPT_SETTINGS_KEY;
 export const CLOVERBACK_MILK_COOLDOWN_SECONDS = 90;
 export const PLAYER_SAFE_FALL_BLOCKS = 4;
 export const CREATIVE_FLIGHT_TOGGLE_WINDOW_MS = 360;
@@ -6346,7 +6352,7 @@ export class VoxelEngine {
     if (!this.assertLocalAgentTestAdmin() || !this.agentTestWorld) return { ok: false as const, code: "test_admin_denied" };
     if (!this.paused) return { ok: false as const, code: "pause_test_world_first" };
     const bounded = Math.max(0, Math.min(10_000, Math.trunc(milliseconds)));
-    this.advanceSimulation(bounded);
+    this.advanceSimulation(bounded, true);
     return { ok: true as const, advancedMilliseconds: bounded, observation: this.createAgentObservation() };
   }
 
@@ -6614,7 +6620,7 @@ export class VoxelEngine {
       const parameters = typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search);
       const requestedName = (parameters.get("agentName") ?? name ?? "Field Drone").trim().slice(0, 24) || "Field Drone";
       const runnerVersion = (parameters.get("runnerVersion") ?? "codex-runner-1").trim().slice(0, 64) || "codex-runner-1";
-      const storageKey = "blockwild-agent-id";
+      const storageKey = TYPESCRIPT_AGENT_ID_KEY;
       let stableId = (parameters.get("agentId") ?? "").trim();
       if (!/^[A-Za-z0-9_.-]{8,160}$/u.test(stableId)) {
         try { stableId = window.localStorage.getItem(storageKey) ?? ""; } catch { stableId = ""; }
@@ -6661,7 +6667,7 @@ export class VoxelEngine {
         },
       );
     }
-    const storageKey = "blockwild-multiplayer-player-id";
+    const storageKey = TYPESCRIPT_MULTIPLAYER_PLAYER_ID_KEY;
     let stableId = "";
     try {
       const stored = window.localStorage.getItem(storageKey) ?? "";
@@ -32518,12 +32524,12 @@ export class VoxelEngine {
     });
   }
 
-  advanceSimulation(milliseconds: number) {
+  advanceSimulation(milliseconds: number, allowPaused = false) {
     const duration = clamp(Number(milliseconds) || 0, 0, 10_000) / 1000;
     const steps = Math.ceil(duration / PHYSICS_STEP);
     for (let index = 0; index < steps; index += 1) {
       const dt = Math.min(PHYSICS_STEP, duration - index * PHYSICS_STEP);
-      if (dt <= 0 || !this.running || this.paused || this.titleMode) break;
+      if (dt <= 0 || !this.running || (this.paused && !allowPaused) || this.titleMode) break;
       this.updateBoats(dt);
       this.updatePlayer(dt);
       this.updateMobs(dt);

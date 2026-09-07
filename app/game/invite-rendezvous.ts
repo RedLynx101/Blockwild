@@ -1,3 +1,5 @@
+import { TYPESCRIPT_RENDEZVOUS_APP_ID } from "./edition";
+
 type JsonRecord = Record<string, string | number | boolean | null>;
 
 export type RendezvousStatus = "opening" | "waiting" | "retrying" | "exchanging" | "connected" | "closed" | "error";
@@ -28,7 +30,7 @@ type InviteResponse = { inviteCode: string; hostName: string };
 type AnswerRequest = { answerCode: string };
 type AnswerResponse = { accepted: boolean };
 
-const APP_ID = "blockwild-multiplayer-v1";
+export const RENDEZVOUS_APP_ID = TYPESCRIPT_RENDEZVOUS_APP_ID;
 const INVITE_ACTION = "bwinvite";
 const ANSWER_ACTION = "bwanswer";
 const CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -72,7 +74,7 @@ export async function defaultRendezvousRoomFactory(role: RendezvousRole, code: s
   if (typeof window === "undefined") throw new Error("Invite-code rendezvous is only available in a browser.");
   const { joinRoom } = await import("trystero");
   return joinRoom({
-    appId: APP_ID,
+    appId: RENDEZVOUS_APP_ID,
     password: code,
     trickleIce: true,
     relayConfig: { urls: [...RENDEZVOUS_RELAY_URLS] },

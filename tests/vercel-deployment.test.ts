@@ -14,7 +14,7 @@ test("Vercel uses a native Next build without replacing the Sites build", () => 
   };
 
   assert.equal(packageJson.scripts.build, "bash scripts/build-verified.sh");
-  assert.equal(packageJson.scripts["build:vercel"], "npm run build:wiki && next build --webpack");
+  assert.equal(packageJson.scripts["build:vercel"], "node scripts/clean-next-build-cache.mjs && npm run build:wiki && next build --webpack");
   assert.equal(vercelConfig.buildCommand, "npm run build:vercel");
 });
 

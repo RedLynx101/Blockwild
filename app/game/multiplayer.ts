@@ -27,6 +27,7 @@ import {
   type AgentPeerKind,
   type AgentVoiceChunk,
 } from "./agent-platform";
+import { TYPESCRIPT_MULTIPLAYER_PROTOCOL } from "./edition";
 
 /**
  * Browser-only, host-authoritative WebRTC multiplayer transport for Blockwild.
@@ -43,7 +44,7 @@ import {
  */
 
 export const MULTIPLAYER_PROTOCOL_VERSION = 3 as const;
-export const MULTIPLAYER_PROTOCOL_NAME = "blockwild-webrtc" as const;
+export const MULTIPLAYER_PROTOCOL_NAME = TYPESCRIPT_MULTIPLAYER_PROTOCOL;
 export const RELIABLE_CHANNEL_LABEL = "blockwild.gameplay.v3" as const;
 export const MOVEMENT_CHANNEL_LABEL = "blockwild.movement.v3" as const;
 export const VOICE_CHANNEL_LABEL = "blockwild.voice.v1" as const;

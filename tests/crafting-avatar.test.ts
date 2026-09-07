@@ -554,6 +554,13 @@ test("Escape dismisses the layered Item Wiki before its base overlay", () => {
   );
 });
 
+test("new-world copy follows the current generator constant", () => {
+  const ui = readFileSync(new URL("../app/game/VoxelGame.tsx", import.meta.url), "utf8");
+  assert.match(ui, /GENERATOR \{GENERATOR_VERSION\}/u);
+  assert.match(ui, /Generator \{GENERATOR_VERSION\} groups cultures/u);
+  assert.doesNotMatch(ui, /GENERATOR 17|Generator 17 groups cultures/u);
+});
+
 test("inventory artwork stays semantic at real slot sizes and food hover copy is explicit", () => {
   assert.equal(itemIconKind(Item.Stick), "stick");
   assert.equal(itemIconKind(Item.RottenFlesh), "rotten-flesh");

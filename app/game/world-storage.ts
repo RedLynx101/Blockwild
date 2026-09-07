@@ -11,14 +11,15 @@ import {
   type WorldOriginPreference,
 } from "./settlement-index";
 import { LEGACY_GAME_VERSION, normalizeGameVersion } from "./version";
+import { TYPESCRIPT_STORAGE_PREFIX } from "./edition";
 
 export const WORLD_CATALOG_VERSION = 1;
 export const WORLD_EXPORT_VERSION = 1;
-export const WORLD_CATALOG_KEY = "blockwild-world-catalog-v1";
-export const WORLD_DATA_PREFIX = "blockwild-world-data-v1:";
-export const LEGACY_WORLD_KEY = "blockwild-world-v2";
+export const WORLD_CATALOG_KEY = `${TYPESCRIPT_STORAGE_PREFIX}-world-catalog-v1`;
+export const WORLD_DATA_PREFIX = `${TYPESCRIPT_STORAGE_PREFIX}-world-data-v1:`;
+export const LEGACY_WORLD_KEY = `${TYPESCRIPT_STORAGE_PREFIX}-world-v2`;
 export const WORLD_OWNERSHIP = "host-device" as const;
-export const WORLD_OWNERSHIP_NOTICE = "Worlds are stored only in this browser on this host device. Export a world to move or back it up.";
+export const WORLD_OWNERSHIP_NOTICE = "TypeScript Edition worlds are stored only in this browser on this host device. Export a world to move it, back it up, or transfer it explicitly.";
 
 const LEGACY_GENERATOR_MIN_Y = -32;
 const MAX_NAME_LENGTH = 64;

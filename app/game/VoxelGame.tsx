@@ -67,7 +67,9 @@ import {
 import { BlockPlayerModel, type PlayerEquipmentAppearance } from "./player-model";
 import { GAME_RELEASE_NAME, GAME_VERSION, GAME_VERSION_LABEL } from "./version";
 import { WHEAT_MILL_CYCLE_SECONDS } from "./wheat-mill";
-import { createBlockAtlas } from "./world";
+import { createBlockAtlas, GENERATOR_VERSION } from "./world";
+import { TYPESCRIPT_UI_PREFERENCES_KEY } from "./edition";
+import { collectPreviousEditionBackup, countPreviousEditionLocalStorageRecords } from "./previous-edition-backup";
 import {
   DEFAULT_WORLD_OPTIONS,
   WORLD_OWNERSHIP_NOTICE,
@@ -770,7 +772,7 @@ export const INITIAL_UI_PREFERENCES: Readonly<UiPreferences> = Object.freeze({
   showReferenceHints: true,
 });
 
-const UI_PREFERENCES_KEY = "blockwild-ui-preferences-v1";
+const UI_PREFERENCES_KEY = TYPESCRIPT_UI_PREFERENCES_KEY;
 const INITIAL_INPUT_CAPABILITIES: Readonly<InputCapabilities> = Object.freeze({
   coarsePrimary: false,
   hoverNone: false,
@@ -2019,6 +2021,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
   const [originPreviewPending, setOriginPreviewPending] = useState(false);
   const [originSearchRadius, setOriginSearchRadius] = useState(DEFAULT_SETTLEMENT_ORIGIN_SEARCH_RADIUS);
   const [worldNotice, setWorldNotice] = useState("");
+  const [previousEditionDataCount, setPreviousEditionDataCount] = useState(0);
   const [seed, setSeed] = useState("WILDERNESS");
   const [currentWorldSeed, setCurrentWorldSeed] = useState("WILDERNESS");
   const [mode, setMode] = useState<GameMode>("survival");
@@ -2289,20 +2292,19 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     const storage = new WorldStorage(browserStorage);
     const characterStore = new CharacterProfileStore(browserStorage);
     characterStoreRef.current = characterStore;
-    let selectedCharacter = characterStore.selectedProfile;
-    try {
-      const legacySex = browserStorage?.getItem("blockwild-player-variant");
-      if (legacySex === "female" && selectedCharacter.appearance.sex !== "female") {
-        selectedCharacter = characterStore.update(selectedCharacter.id, { appearance: { ...selectedCharacter.appearance, sex: "female" } }) ?? selectedCharacter;
-      }
-    } catch { /* The normalized character catalog remains authoritative. */ }
+    const selectedCharacter = characterStore.selectedProfile;
     worldStorageRef.current = storage;
     const initialWorlds = storage.listWorlds({ sortBy: "lastPlayedAt", direction: "desc" });
     const initialWorld = initialWorlds.find((world) => world.id === storage.activeWorldId) ?? initialWorlds[0];
+    let detectedPreviousEditionData = 0;
+    try {
+      if (browserStorage) detectedPreviousEditionData = countPreviousEditionLocalStorageRecords(browserStorage);
+    } catch { /* Detection is informational and never blocks the TypeScript edition. */ }
     window.queueMicrotask(() => {
       refreshWorldCatalog(storage);
       setCharacterCatalog(characterStore.catalog);
       setMultiplayerName(selectedCharacter.name);
+      setPreviousEditionDataCount(detectedPreviousEditionData);
       if (storage.issues.length) setWorldNotice(storage.issues.map((issue) => issue.message).join(" "));
       if (initialWorld) {
         setSelectedWorldId(initialWorld.id);
@@ -2972,6 +2974,29 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
     anchor.remove();
     window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
     setWorldNotice(`Exported ${world.name}. Keep the file somewhere outside this browser.`);
+  };
+
+  const exportPreviousEditionData = () => {
+    try {
+      const backup = collectPreviousEditionBackup(window.localStorage);
+      if (!backup.localStorage.length) {
+        setPreviousEditionDataCount(0);
+        setWorldNotice("No previous-edition browser records are available to export.");
+        return;
+      }
+      const blobUrl = URL.createObjectURL(new Blob([JSON.stringify(backup, null, 2)], { type: "application/json" }));
+      const anchor = document.createElement("a");
+      anchor.href = blobUrl;
+      anchor.download = "blockwild-previous-edition-backup-v1.json";
+      anchor.hidden = true;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(blobUrl), 0);
+      setWorldNotice(`Exported ${backup.localStorage.length} previous-edition browser record${backup.localStorage.length === 1 ? "" : "s"} without changing the source. Rust's internal persistence database is not included; use the Rust edition's world export for that data.`);
+    } catch {
+      setWorldNotice("Previous-edition browser data is still untouched, but this browser did not allow it to be exported.");
+    }
   };
 
   const importWorld = async (event: ChangeEvent<HTMLInputElement>) => {
@@ -4384,7 +4409,7 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
             <span className="game-version-badge"><b>{GAME_VERSION_LABEL}</b> {GAME_RELEASE_NAME}</span>
             <span className="title-screen-actions"><a href="/wiki">WIKI</a><button type="button" onClick={() => engineRef.current?.toggleFullscreen()} aria-label={hud.fullscreen ? "Exit fullscreen" : "Enter fullscreen"}>{hud.fullscreen ? "EXIT FULLSCREEN" : "FULLSCREEN"}</button></span>
           </div>
-          <div ref={titleContentRef} className={`title-content ${titleMenuView === "main" ? "" : "title-submenu-open"}`}>
+          <div ref={titleContentRef} className={`title-content ${titleMenuView === "main" ? (previousEditionDataCount > 0 ? "title-has-previous-data" : "") : "title-submenu-open"}`}>
             <div className="logo-wrap">
               <h1 id="game-title" className="block-logo">BLOCKWILD</h1>
               <p className="logo-subtitle">ENDLESS HORIZONS · {Object.keys(BIOME_NAMES).length} BIOMES · A VERY DEEP DOWN</p>
@@ -4396,12 +4421,17 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
                   <strong>Continue</strong><small>{selectedWorld?.name ?? "No local world selected"}</small>
                 </PixelButton>
                 <PixelButton className="title-menu-choice" onClick={beginNewWorld}><strong>Create New World</strong><small>Begin a fresh endless world</small></PixelButton>
-                <PixelButton className="title-menu-choice" onClick={() => setTitleMenuView("worlds")}><strong>Worlds</strong><small>{worlds.length} saved in this browser</small></PixelButton>
+                <PixelButton className="title-menu-choice" onClick={() => setTitleMenuView("worlds")}><strong>Worlds</strong><small>{worlds.length} TypeScript Edition {worlds.length === 1 ? "world" : "worlds"}</small></PixelButton>
                 <PixelButton className="title-menu-choice" onClick={() => setTitleMenuView("characters")}><strong>Characters</strong><small>{activeCharacterProfile.name}</small></PixelButton>
                 <PixelButton className="title-menu-choice title-join-button" onClick={() => openMultiplayer("title")}><strong>Multiplayer</strong><small>Join or host with an invite code</small></PixelButton>
                 <PixelButton className="title-menu-choice" onClick={() => setOverlay("help")}><strong>How to Play</strong></PixelButton>
                 <PixelButton className="title-menu-choice" onClick={() => openSettings("title")}><strong>Settings</strong></PixelButton>
               </nav>}
+              {titleMenuView === "main" && previousEditionDataCount > 0 && <aside className="previous-edition-notice" aria-label="Previous edition data">
+                <strong>PREVIOUS EDITION DATA FOUND</strong>
+                <span>The TypeScript Edition now keeps a separate world list and identity. Your previous browser data is untouched and was not imported automatically.</span>
+                <button type="button" onClick={() => { setTitleMenuView("worlds"); setWorldNotice(""); }}>Review &amp; export</button>
+              </aside>}
               {titleMenuView === "characters" && <section className="title-submenu title-character-submenu" aria-labelledby="title-characters-heading">
                 <header className="title-submenu-header">
                   <button type="button" className="title-back-button" onClick={() => setTitleMenuView("main")}><span aria-hidden="true">&larr;</span> Main Menu</button>
@@ -4460,6 +4490,11 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
                 </div>
                   {worldNotice && <p className="world-catalog-notice" role="status">{worldNotice}</p>}
                 </aside>
+                {previousEditionDataCount > 0 && <aside className="previous-edition-notice world-previous-edition-notice" aria-label="Previous edition data export">
+                  <strong>SEPARATE EDITION STORAGE</strong>
+                  <span>{previousEditionDataCount} previous-edition browser record{previousEditionDataCount === 1 ? " is" : "s are"} preserved outside this TypeScript world list. Export a raw backup explicitly; nothing will be imported, changed, or deleted.</span>
+                  <button type="button" onClick={exportPreviousEditionData}>Export previous-edition data</button>
+                </aside>}
                 <p className="browser-ownership-note">{WORLD_OWNERSHIP_NOTICE}</p>
               </section>}
             </div>
@@ -4474,10 +4509,10 @@ export default function VoxelGame({ agentMode = false }: Readonly<{ agentMode?: 
       {overlay === "new" && (
         <section className="menu-overlay" aria-labelledby="new-world-title">
           <div className="pixel-panel world-setup-panel expanded-setup-panel">
-            <span className="panel-eyebrow">THE WORLD BELOW · GENERATOR 17</span>
+            <span className="panel-eyebrow">THE WORLD BELOW · GENERATOR {GENERATOR_VERSION}</span>
             <h2 id="new-world-title">Create a New World</h2>
             <p className="setup-intro">Every seed grows coherent regions, oceans, rivers, mountain ranges, {Object.keys(BIOME_NAMES).length} surface biomes, connected cave networks, six underground ecologies, ruins, settlements, and a worldheart sixty-four blocks below zero.</p>
-            <p className="generator-profile-note"><strong>NEW WORLDS</strong><span>Generator 17 groups cultures into Hearthlands and quieter frontiers, links communities with tiered roads, and supports safe settlement origins. Existing worlds keep their original scattered-settlement pattern exactly as saved.</span></p>
+            <p className="generator-profile-note"><strong>NEW WORLDS</strong><span>Generator {GENERATOR_VERSION} groups cultures into Hearthlands and quieter frontiers, links communities with tiered roads, and supports safe settlement origins. Existing worlds keep their original scattered-settlement pattern exactly as saved.</span></p>
             <label className="field-label" htmlFor="world-name">World name</label>
             <input id="world-name" className="pixel-input world-name-input" value={worldName} maxLength={64} onChange={(event) => setWorldName(event.target.value)} />
             <label className="field-label" htmlFor="world-seed">World seed</label>
