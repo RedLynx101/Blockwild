@@ -6,6 +6,12 @@ import test from "node:test";
 const root = process.cwd();
 const read = (relativePath) => readFile(path.join(root, relativePath), "utf8");
 
+function dependabotTuples(source) {
+  return [...source.matchAll(
+    /package-ecosystem:\s*([^\s]+)[\s\S]*?\n\s+directory:\s*([^\s]+)[\s\S]*?\n\s+target-branch:\s*([^\s]+)/gu,
+  )].map((match) => `${match[1]}|${match[2]}|${match[3]}`).sort();
+}
+
 test("package and repository identify the unfinished Rust edition", async () => {
   const [packageSource, readme, agents, contributing, development, paused] = await Promise.all([
     read("package.json"),
@@ -33,6 +39,8 @@ test("package and repository identify the unfinished Rust edition", async () => 
     assert.match(source, /edition\/rust/);
   }
   assert.match(readme, /git switch edition\/rust/);
+  assert.match(readme, /ci\.yml\/badge\.svg\?branch=edition%2Frust/);
+  assert.match(readme, /codeql\.yml\/badge\.svg\?branch=edition%2Frust/);
   assert.match(readme, /9\/32/);
   assert.match(readme, /139\/143/);
   assert.match(readme, /github\.com\/RedLynx101\/blockwild\/tree\/edition\/typescript/);
@@ -52,6 +60,9 @@ test("maintenance and parity documents retain versioned compatibility boundaries
   assert.match(maintenance, /Routine merges .* prohibited/i);
   assert.match(maintenance, /deploymentEnabled/);
   assert.match(maintenance, /9\/32/);
+  assert.match(maintenance, /reads `\.github\/dependabot\.yml` from the repository's default branch/);
+  assert.match(maintenance, /security updates always use the repository default branch/);
+  assert.match(maintenance, /scheduled workflows.*run the latest commit on the default branch/i);
 
   assert.match(parity, /Parity specification version: \*\*1\*\*/);
   assert.match(parity, /`not-present`/);
@@ -92,8 +103,13 @@ test("automation targets the Rust edition and preserves its gates", async () => 
   assert.match(rustEngine, /tests\/acceptance\/\*\*/);
   assert.match(rustEngine, /npm\.cmd run test:rust-engine/);
 
-  assert.equal((dependabot.match(/target-branch: edition\/rust/g) ?? []).length, 3);
-  assert.match(dependabot, /package-ecosystem: cargo/);
+  assert.deepEqual(dependabotTuples(dependabot), [
+    "cargo|/engine|edition/rust",
+    "github-actions|/|edition/rust",
+    "github-actions|/|edition/typescript",
+    "npm|/|edition/rust",
+    "npm|/|edition/typescript",
+  ]);
 });
 
 test("automatic Vercel Git deployment is disabled", async () => {

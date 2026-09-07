@@ -14,8 +14,8 @@ This branch is the independently maintained **Rust/Wasm conversion edition**. It
 </p>
 
 <p align="center">
-  <a href="https://github.com/RedLynx101/blockwild/actions/workflows/ci.yml"><img src="https://github.com/RedLynx101/blockwild/actions/workflows/ci.yml/badge.svg" alt="Blockwild CI" /></a>
-  <a href="https://github.com/RedLynx101/blockwild/actions/workflows/codeql.yml"><img src="https://github.com/RedLynx101/blockwild/actions/workflows/codeql.yml/badge.svg" alt="CodeQL" /></a>
+  <a href="https://github.com/RedLynx101/blockwild/actions/workflows/ci.yml?query=branch%3Aedition%2Frust"><img src="https://github.com/RedLynx101/blockwild/actions/workflows/ci.yml/badge.svg?branch=edition%2Frust" alt="Rust edition CI" /></a>
+  <a href="https://github.com/RedLynx101/blockwild/actions/workflows/codeql.yml?query=branch%3Aedition%2Frust"><img src="https://github.com/RedLynx101/blockwild/actions/workflows/codeql.yml/badge.svg?branch=edition%2Frust" alt="Rust edition adapter CodeQL" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-d7a849" alt="MIT License" /></a>
   <a href="https://blockwild.app"><img src="https://img.shields.io/badge/play-blockwild.app-4f8767" alt="Play Blockwild" /></a>
 </p>
