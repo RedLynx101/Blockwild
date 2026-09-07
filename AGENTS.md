@@ -2,7 +2,7 @@
 
 ## Checkout and ownership
 
-- Use `C:\Users\NoahH\Desktop\CMU\Random\blockwild` on branch `main` unless the parent explicitly records a transition.
+- Use `C:\Users\NoahH\Desktop\CMU\Random\blockwild` on branch `edition/rust` unless the parent explicitly records a transition.
 - Workers use this same checkout and branch with explicit, non-overlapping file ownership. Do not create worker worktrees, nested clones, temporary repository copies, or branch switches.
 - The parent is the source integrator and owns Git refs, the index, staging, commits, merges, and final verification. Workers must not revert, clean, or overwrite other workers' changes.
 - Start bounded work from a fresh minimal-context brief with authoritative file references; do not use full-history forks or carry an accumulated context into unrelated work.
@@ -17,6 +17,8 @@
 
 ## Scope and handoff
 
-- The source-repair campaign remains paused. This policy does not grant release, deployment, publication, migration-acceptance, or authority-promotion permission.
+- This branch is the maintained Rust-conversion edition. It is explicitly unfinished; do not describe it as the default or production-ready edition without current acceptance evidence.
+- The source-repair campaign remains paused at 9/32 formal acceptance. Work on this edition does not resume that campaign unless a separate handoff explicitly says so.
+- This policy does not grant release, deployment, publication, migration-acceptance, or authority-promotion permission.
 - Handoffs state changed files, checks run, observed failures, and remaining uncertainty. Record actual cwd, branch, HEAD, and dirty/untracked state at integration boundaries.
 - Codex history/database cleanup is a separate proposal-only workstream.
