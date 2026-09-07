@@ -130,7 +130,7 @@ jobs:
       - name: Publish current migration gate report
         run: node scripts/audit-rust-migration.mjs --out work/hybrid-rust-migration/ci-audit.json
       - name: Upload migration gate report
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: blockwild-rust-migration-gates-rustc-${{ env.BLOCKWILD_RUST_TOOLCHAIN }}-${{ github.sha }}
           path: work/hybrid-rust-migration/ci-audit.json
