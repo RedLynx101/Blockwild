@@ -1,4 +1,14 @@
-# Blockwild
+# Blockwild — TypeScript edition
+
+This branch is the independently maintained **TypeScript/Three.js edition** and the intended GitHub default. Its accepted local baseline is `0a7e20165a81e3dacde946270d2525f7a790a54c`. Automatic Git deployment is disabled while the two-edition release transition remains staged.
+
+- **This edition:** [`edition/typescript`](https://github.com/RedLynx101/blockwild/tree/edition/typescript)
+- **Maintained, unfinished Rust edition:** [`edition/rust`](https://github.com/RedLynx101/blockwild/tree/edition/rust) — 9/32 formal migration criteria accepted; not a legacy archive or release-ready build
+- **Untouched historical TypeScript baseline:** [`baseline/typescript-pre-conversion-2026-08-11`](https://github.com/RedLynx101/blockwild/tree/baseline/typescript-pre-conversion-2026-08-11)
+- **Maintenance and CI contract:** [docs/EDITION_MAINTENANCE.md](docs/EDITION_MAINTENANCE.md)
+- **Behavioral parity matrix:** [docs/EDITION_PARITY.md](docs/EDITION_PARITY.md)
+
+TypeScript worlds, profiles, cache, rendezvous, and multiplayer identifiers use the `blockwild-typescript-*` namespace. Normal startup does not import or remove generic or Rust-edition data. The explicit raw previous-data download covers allowlisted localStorage strings only; it is not a whole Rust IndexedDB backup, and no automatic cross-edition import exists.
 
 <p align="center">
   <img src="docs/assets/screenshots/2026-08-01-field-archive/2026-08-01-title-screen.png" alt="Blockwild v1.12.0 title screen over a live streamed wilderness" width="920" />
@@ -99,6 +109,7 @@ Requirements:
 ```bash
 git clone https://github.com/RedLynx101/blockwild.git
 cd blockwild
+git switch edition/typescript
 npm ci
 npm run dev
 ```
@@ -178,13 +189,15 @@ Worlds and character profiles live in `localStorage` for the current browser and
 
 ## Deployment
 
-`main` is the release branch. GitHub is the source of truth for Vercel's [blockwild.app](https://blockwild.app) deployment. The same exact commit is built through Vinext for the Sites mirror. Release validation must identify the deployed Git SHA; a passing local build is not proof that either public target is current.
+`edition/typescript` is the intended GitHub default and future release source. In the staged two-edition transition, `vercel.json` disables automatic Git deployments; publishing remains a separately authorized exact-SHA operation. The same approved TypeScript commit must be built through Vinext for the Sites mirror. Release validation must identify the deployed Git SHA and visible live behavior; a local build or a source-config change is not proof that either public target is current.
 
 The application does not currently require D1, R2, or a server database. The empty Drizzle scaffold is reserved and should not acquire game persistence without an explicit ownership and migration design.
 
 ## Project documentation
 
 - [Engineering overview](docs/ENGINEERING_OVERVIEW.md) — a concise tour of the simulation, content, persistence, multiplayer, validation, and release architecture
+- [Edition maintenance contract](docs/EDITION_MAINTENANCE.md) — branch ownership, switching, CI routing, caches, artifacts, and deployment safeguards
+- [Edition parity matrix](docs/EDITION_PARITY.md) — versioned behavior, compatibility boundaries, evidence, and deliberate porting procedure
 - [Building Blockwild with Agentic Autoresearch](BLOCKWILD_AGENTIC_AUTORESEARCH_CASE_STUDY.md) — the human-directed agent workflow, telemetry loop, and optimization case study
 - [Performance comparison log](docs/PERFORMANCE_COMPARISON_LOG.md) — measured browser and deterministic benchmark history
 - [Living Bestiary release contract](docs/LIVING_BESTIARY_RELEASE.md)

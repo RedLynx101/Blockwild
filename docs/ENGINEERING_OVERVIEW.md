@@ -87,7 +87,7 @@ The repository has 128 test files and more than 1,000 automated checks across fo
 6. generated-content drift detection;
 7. CodeQL and pull-request dependency review.
 
-`main` is deployed to [blockwild.app](https://blockwild.app) through Vercel. The same Git SHA is independently built for the [Sites mirror](https://blockwild.noahhicks.chatgpt.site). Release reports identify the exact commit and verify both public targets rather than treating a successful local build as deployment proof.
+`edition/typescript` is the intended GitHub default and future release source. Automatic Vercel Git deployment is disabled during the staged two-edition transition. A separately authorized release must build one exact TypeScript SHA for [blockwild.app](https://blockwild.app) and the [Sites mirror](https://blockwild.noahhicks.chatgpt.site), then verify both public targets; a successful local build is not deployment proof.
 
 ## A fast reviewer route
 

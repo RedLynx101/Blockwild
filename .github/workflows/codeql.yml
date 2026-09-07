@@ -1,10 +1,10 @@
-name: CodeQL
+name: TypeScript edition CodeQL
 
 on:
   push:
-    branches: [main]
+    branches: [edition/typescript]
   pull_request:
-    branches: [main]
+    branches: [edition/typescript]
   schedule:
     - cron: "23 8 * * 1"
   workflow_dispatch:

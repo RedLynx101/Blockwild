@@ -4,6 +4,15 @@ Blockwild is an active game prototype with tightly connected simulation, save, m
 
 By contributing, you agree that your contribution may be distributed under the repository's [MIT License](LICENSE).
 
+## Choose an edition
+
+Target exactly one maintained branch:
+
+- `edition/typescript` owns the TypeScript simulation and Three.js renderer and is the intended GitHub default.
+- `edition/rust` owns the unfinished Rust/Wasm conversion and developing `wgpu` path. It remains at 9/32 formal acceptance and is not release-ready.
+
+After cloning, run `git switch edition/typescript` or `git switch edition/rust`, then read that branch's `AGENTS.md` and [edition maintenance contract](docs/EDITION_MAINTENANCE.md). Open the pull request against the same edition branch. Do not routinely merge one edition into the other; port shared behavior through [the versioned parity specification](docs/EDITION_PARITY.md) or a reviewed selective commit.
+
 ## Before opening a change
 
 1. Search existing issues, the [roadmap](ROADMAP.md), and the relevant design contract under `docs/`.
@@ -20,6 +29,8 @@ Run the smallest relevant checks while iterating, then run the release gates bef
 npm run lint
 npm test
 ```
+
+On this TypeScript branch, `npm test` contains no Rust/Cargo build. Run `npm run test:edition-maintenance` for branch identity, CI routing, and deployment-trigger safety changes.
 
 Focused suites are listed in the root README. Visual work must also be exercised in the running game at representative desktop and narrow/mobile sizes. Inspect the actual output; snapshots and type checks do not establish visual quality.
 
@@ -43,3 +54,5 @@ Temporary review files belong in ignored `output/`, `outputs/`, or `work/`. Comm
 ## Pull requests
 
 Explain the player-facing outcome, compatibility impact, performance risk, tests run, and any visual evidence. Call out deliberate tradeoffs. Do not describe a deployment, migration, or browser test as completed unless it actually ran against the exact submitted commit.
+
+Name the target edition and parity-spec ID when behavior is intended to exist in both editions. A passing check on one branch does not transfer `verified` status to the other.

@@ -36,7 +36,8 @@
     "test:settlement-heartlands": "node --import tsx --test tests/settlement-heartlands.test.ts",
     "test:visual-theme": "node --import tsx --test tests/visual-theme.test.ts tests/wheat-mill-content.test.ts",
     "test:brand-icons": "node --import tsx --test tests/brand-icons.test.ts",
-    "test:repository": "node --test tests/repository-public-readiness.test.mjs",
+    "test:repository": "node --test tests/repository-public-readiness.test.mjs tests/edition-maintenance.test.mjs",
+    "test:edition-maintenance": "node --test tests/edition-maintenance.test.mjs",
     "test:wiki": "node --import tsx --test tests/wiki-content.test.ts",
     "build:wiki": "node --import tsx scripts/build-wiki-content.ts",
     "cardforge:render-art": "node --import tsx scripts/render-cardforge-creature-art.ts",
@@ -96,5 +97,10 @@
     "wrangler": "4.92.0"
   },
   "type": "module",
-  "displayName": "Blockwild"
+  "displayName": "Blockwild TypeScript Edition",
+  "blockwildEdition": {
+    "id": "typescript",
+    "branch": "edition/typescript",
+    "runtime": "typescript-three"
+  }
 }

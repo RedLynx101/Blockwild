@@ -1,10 +1,10 @@
-name: Blockwild CI
+name: TypeScript edition CI
 
 on:
   push:
-    branches: [main]
+    branches: [edition/typescript]
   pull_request:
-    branches: [main]
+    branches: [edition/typescript]
   workflow_dispatch:
 
 permissions:
@@ -16,10 +16,27 @@ concurrency:
 
 env:
   CI: true
+  BLOCKWILD_EDITION: typescript
+  BLOCKWILD_NODE_VERSION: 22.13.1
 
 jobs:
+  edition-contract:
+    name: TypeScript edition contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+      - name: Use Node.js 22.13.1
+        uses: actions/setup-node@v7
+        with:
+          node-version: ${{ env.BLOCKWILD_NODE_VERSION }}
+      - name: Verify edition routing and maintenance contract
+        run: npm run test:edition-maintenance
+
   quality:
     name: Static analysis and generated content
+    needs: edition-contract
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -28,8 +45,14 @@ jobs:
       - name: Use Node.js 22.13.1
         uses: actions/setup-node@v7
         with:
-          node-version: 22.13.1
-          cache: npm
+          node-version: ${{ env.BLOCKWILD_NODE_VERSION }}
+      - name: Restore TypeScript npm cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.npm
+          key: blockwild-typescript-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            blockwild-typescript-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
       - name: Verify repository contract
@@ -47,6 +70,7 @@ jobs:
 
   full-suite:
     name: Full deterministic suite
+    needs: edition-contract
     runs-on: ubuntu-latest
     timeout-minutes: 40
     steps:
@@ -55,8 +79,14 @@ jobs:
       - name: Use Node.js 22.13.1
         uses: actions/setup-node@v7
         with:
-          node-version: 22.13.1
-          cache: npm
+          node-version: ${{ env.BLOCKWILD_NODE_VERSION }}
+      - name: Restore TypeScript npm cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.npm
+          key: blockwild-typescript-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            blockwild-typescript-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
       - name: Build and test
@@ -64,6 +94,7 @@ jobs:
 
   vercel-build:
     name: Vercel production build
+    needs: edition-contract
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -72,8 +103,14 @@ jobs:
       - name: Use Node.js 22.13.1
         uses: actions/setup-node@v7
         with:
-          node-version: 22.13.1
-          cache: npm
+          node-version: ${{ env.BLOCKWILD_NODE_VERSION }}
+      - name: Restore TypeScript npm cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.npm
+          key: blockwild-typescript-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            blockwild-typescript-npm-${{ runner.os }}-node-${{ env.BLOCKWILD_NODE_VERSION }}-
       - name: Install locked dependencies
         run: npm ci --no-audit --no-fund
       - name: Build production application
